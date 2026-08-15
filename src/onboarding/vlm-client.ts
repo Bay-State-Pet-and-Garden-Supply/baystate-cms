@@ -19,6 +19,27 @@ export interface VlmConfig {
  * Prefers the connection-addressed visionOcr workload route, falling back to legacy settings.
  */
 export function getVlmConfig(): VlmConfig | null {
+  // 1. Check explicit AI Compute visionOcr route first (if configured explicitly)
+  try {
+    const config = getFullAiRoutingConfig();
+    const route = config.workloads.visionOcr;
+    if (route && route.primary !== 'inherit') {
+      const conn = config.connections[route.primary.connectionId];
+      if (conn && conn.enabled) {
+        return {
+          baseUrl: conn.baseUrl,
+          model: route.primary.modelId || 'gemma-4-26b-a4b-qat',
+          enabled: true,
+          transport: conn.transport,
+          credential: conn.credential ?? undefined,
+        };
+      }
+    }
+  } catch {
+    // Database fallback
+  }
+
+  // 2. Legacy fallback: api_keys.ollama_vlm
   const row = getApiKey('ollama_vlm');
   if (row) {
     if (row.api_key !== 'enabled') {
@@ -32,25 +53,6 @@ export function getVlmConfig(): VlmConfig | null {
       enabled: true,
       transport: 'ollama-native',
     };
-  }
-
-  try {
-    const config = getFullAiRoutingConfig();
-    const route = config.workloads.visionOcr;
-    if (route && route.primary !== 'inherit') {
-      const conn = config.connections[route.primary.connectionId];
-      if (conn && conn.enabled && conn.id !== 'desktop-lmstudio') {
-        return {
-          baseUrl: conn.baseUrl,
-          model: route.primary.modelId || 'gemma-4-26b-a4b-qat',
-          enabled: true,
-          transport: conn.transport,
-          credential: conn.credential ?? undefined,
-        };
-      }
-    }
-  } catch {
-    // Fall back
   }
 
   return null;
@@ -120,6 +122,7 @@ export async function callVlm(
         method: 'POST',
         headers,
         body,
+        redirect: 'manual',
         signal: AbortSignal.timeout(120_000),
       });
     } catch (err: unknown) {
@@ -128,6 +131,10 @@ export async function callVlm(
         throw new Error('VLM request timed out after 120s', { cause: err });
       }
       throw err;
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`HTTP redirect (${response.status}) forbidden on VLM connection (Anti-SSRF).`);
     }
 
     if (!response.ok) {

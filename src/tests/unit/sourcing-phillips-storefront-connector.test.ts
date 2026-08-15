@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PhillipsStorefrontConnector, parsePhillipsStorefrontPdp, parsePhillipsSearchRows } from '../../onboarding/sourcing/connectors/phillips-storefront';
+import { PhillipsStorefrontConnector, isPhillipsSearchPage, parsePhillipsStorefrontPdp, parsePhillipsSearchRows } from '../../onboarding/sourcing/connectors/phillips-storefront';
 import type { SourcingLookupRequest } from '../../onboarding/sourcing/contracts';
 import type { ScraperFetchPage, ScraperFetchPageResult } from '../../onboarding/sourcing/html-scraper/contracts';
 
@@ -54,6 +54,20 @@ function makeRequest(upc: string, extra: Partial<SourcingLookupRequest> = {}): S
     ...extra,
   };
 }
+
+describe('PhillipsStorefrontConnector — no-results marker (live text, 2026-08-15)', () => {
+  test('isPhillipsSearchPage recognizes the text-only no-results page (no .no-results class)', () => {
+    expect(isPhillipsSearchPage(FIXTURES['not-found.html'])).toBe(true);
+    expect(parsePhillipsSearchRows(FIXTURES['not-found.html'])).toEqual([]);
+  });
+
+  test('a no-results search response routes to not_stocked instead of timing out', async () => {
+    const { fetchPage, calls } = makeFetcher();
+    const result = await new PhillipsStorefrontConnector({ fetchPage }).lookupByGtin(makeRequest('000000000000'));
+    expect(result).toEqual({ outcome: 'not_stocked', reason: expect.stringContaining('no exact match') });
+    expect(calls.map((c) => c.url).join(' ')).toContain('searchText=000000000000');
+  });
+});
 
 describe('PhillipsStorefrontConnector — found (exact UPC match, authenticated)', () => {
   test('returns a merchandising-depth record with exact identity and its own providerId', async () => {

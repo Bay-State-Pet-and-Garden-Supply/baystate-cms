@@ -24,6 +24,10 @@ import {
   type ChatMessage,
   type ChatCompletionOptions,
 } from './network-transport';
+import {
+  isConnectionCachedUnhealthy,
+  probeConnectionHealth,
+} from './connection-health-monitor';
 
 export interface DispatchExecutionResult {
   content: string;
@@ -88,6 +92,25 @@ export async function dispatchWorkloadChat(
   let misconfigurationWarning: string | undefined;
 
   try {
+    // Fast LAN reachability check: if primary is on LAN and cached unhealthy or probe fails, fail fast to fallback
+    if (primaryConn.trustZone === 'trusted_lan') {
+      if (isConnectionCachedUnhealthy(primaryConn.id)) {
+        throw new AiAvailabilityError(
+          `Primary LAN host "${primaryConn.label}" is cached unreachable/offline.`,
+          primaryConn.id,
+          primary.modelId,
+        );
+      }
+      const probe = await probeConnectionHealth(primaryConn, false);
+      if (probe.status === 'unreachable') {
+        throw new AiAvailabilityError(
+          `Primary LAN host "${primaryConn.label}" is unreachable (${probe.errorMessage || 'connect probe timeout'}).`,
+          primaryConn.id,
+          primary.modelId,
+        );
+      }
+    }
+
     const res = await executeOpenAiChat(primaryConn, primary.modelId, messages, options);
     return {
       ...res,

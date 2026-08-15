@@ -3110,12 +3110,22 @@ route.post('/onboarding/settings/ai/connections/test-ephemeral', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
+  let effectiveCredential = body.credential;
+  if (!effectiveCredential || effectiveCredential === '[REDACTED]' || effectiveCredential === '••••••••••••') {
+    if (body.id) {
+      const existing = getProviderConnection(body.id);
+      if (existing?.credential) {
+        effectiveCredential = existing.credential;
+      }
+    }
+  }
+
   const conn: ProviderConnection = {
     id: body.id || 'test-ephemeral',
     label: body.label || 'Test Connection',
     transport: body.transport || 'openai-compatible',
     baseUrl: body.baseUrl,
-    credential: body.credential ?? undefined,
+    credential: effectiveCredential ?? undefined,
     trustZone: body.trustZone || 'this_device',
     approvedHost: body.approvedHost,
     approvedPort: body.approvedPort,

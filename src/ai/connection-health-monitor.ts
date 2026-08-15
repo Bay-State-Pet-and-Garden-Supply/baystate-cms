@@ -55,6 +55,12 @@ function inferModelCapabilities(modelId: string): {
   return { supportsVision, supportsTools, supportsReasoning };
 }
 
+export function isConnectionCachedUnhealthy(connectionId: string): boolean {
+  const cached = HEALTH_CACHE.get(connectionId);
+  if (!cached || cached.expiresAt <= Date.now()) return false;
+  return cached.report.status === 'unreachable' || cached.report.status === 'misconfigured';
+}
+
 /**
  * Probes the /v1/models endpoint for an OpenAI-compatible connection.
  */
@@ -104,10 +110,24 @@ export async function probeConnectionHealth(
     const response = await fetch(url, {
       method: 'GET',
       headers,
+      redirect: 'manual',
       signal: controller.signal,
     });
     clearTimeout(timer);
     const latencyMs = Date.now() - startTime;
+
+    if (response.status >= 300 && response.status < 400) {
+      const report: ConnectionHealthReport = {
+        connectionId: conn.id,
+        status: 'misconfigured',
+        latencyMs,
+        models: [],
+        lastChecked: new Date().toISOString(),
+        errorMessage: `HTTP Redirect (${response.status}) forbidden on AI connection (Anti-SSRF).`,
+      };
+      HEALTH_CACHE.set(conn.id, { report, expiresAt: now + CACHE_TTL_MS });
+      return report;
+    }
 
     if (response.status === 401 || response.status === 403) {
       const report: ConnectionHealthReport = {

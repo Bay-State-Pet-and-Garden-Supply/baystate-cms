@@ -27,6 +27,8 @@
 
 import { getApiKey } from '../db/repositories/api-key-repo';
 import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
+import { dispatchWorkloadChat } from '../ai/inference-dispatcher';
+import { AiPolicyDeniedError } from '../ai/network-transport';
 import {
   getLlmTaskConfig,
   type LlmProvider,
@@ -395,18 +397,18 @@ export function getLlmConfigForTask(
 ): LlmConfig | null {
   const operation = options.protectedOperation ?? defaultProtectedOperationForTask(task);
 
-  if (operation !== null) {
+  // If this is an explicit run-bound call with a frozen policy snapshot:
+  if (options.modelPolicy !== undefined) {
     if (options.modelPolicy === null) {
       // Explicit disabled policy: deterministic fallback, no transport.
       return null;
     }
-    if (options.modelPolicy) {
+    if (operation !== null) {
       return resolveProtectedConfig(task, operation, options.modelPolicy, options.requiresImage === true);
     }
-    throw new ModelPolicyDeniedError('policy_absent', operation);
   }
 
-  // Non-protected tasks or calls without explicit modelPolicy: check AI Compute configuration first!
+  // Non-run live calls or tasks without explicit frozen modelPolicy: check AI Compute configuration first!
   try {
     const aiConfig = getFullAiRoutingConfig();
     let workloadKey: keyof typeof aiConfig.workloads = 'discovery';
@@ -414,7 +416,9 @@ export function getLlmConfigForTask(
       workloadKey = 'profileBuilder';
     } else if (task === 'product_curation' || task === 'category_classification') {
       workloadKey = 'curation';
-    } else if (task === 'brand_inference' || task === 'product_name_consolidation') {
+    } else if (task === 'store_manager_assistant' || task === 'product_field_refactor') {
+      workloadKey = 'storeManager';
+    } else if (task === 'brand_inference' || task === 'product_name_consolidation' || task === 'classification_evidence_extraction') {
       workloadKey = 'discovery';
     }
 
@@ -514,16 +518,23 @@ export interface ModelCallResult {
  * options.temperature wins over the task config's stored value.
  */
 function resolveTemperature(task: LlmTask, options: CallLlmForTaskOptions): number {
-  const taskConfig = getLlmTaskConfig(task);
-  return options.temperature !== undefined
-    ? options.temperature
-    : taskConfig?.temperature !== null && taskConfig?.temperature !== undefined
+  if (options.temperature !== undefined) return options.temperature;
+  try {
+    const taskConfig = getLlmTaskConfig(task);
+    return taskConfig?.temperature !== null && taskConfig?.temperature !== undefined
       ? taskConfig.temperature
       : 0.1;
+  } catch {
+    return 0.1;
+  }
 }
 
 function resolveReasoningEffort(task: LlmTask): string | null {
-  return getLlmTaskConfig(task)?.reasoningEffort ?? null;
+  try {
+    return getLlmTaskConfig(task)?.reasoningEffort ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -709,6 +720,7 @@ async function callLlmForTaskAudited(
           'Authorization': `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify(requestBody),
+        redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
@@ -724,6 +736,18 @@ async function callLlmForTaskAudited(
         costBasis: resolvedLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
       });
       throw err;
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      const reason = `HTTP redirect (${response.status}) forbidden on LLM connection (Anti-SSRF).`;
+      markTerminal({
+        status: MODEL_CALL_STATUS.policyDenied,
+        durationMs: Date.now() - startedAt,
+        errorMessage: reason,
+        estimatedCostUsd: resolvedLocality === 'local' ? 0 : null,
+        costBasis: resolvedLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
+      });
+      throw new Error(reason);
     }
 
     if (!response.ok) {
@@ -860,6 +884,44 @@ export async function callLlmForTask(
     return result?.content ?? null;
   }
 
+  // Non-run live calls (no modelPolicy): dispatch through InferenceDispatcher with configured fallbacks!
+  if (!options.modelPolicy) {
+    let workloadKey: 'discovery' | 'curation' | 'profileBuilder' | 'storeManager' = 'discovery';
+    if (task.startsWith('profile_')) {
+      workloadKey = 'profileBuilder';
+    } else if (task === 'product_curation' || task === 'category_classification') {
+      workloadKey = 'curation';
+    } else if (task === 'store_manager_assistant' || task === 'product_field_refactor') {
+      workloadKey = 'storeManager';
+    } else if (task === 'brand_inference' || task === 'product_name_consolidation' || task === 'classification_evidence_extraction') {
+      workloadKey = 'discovery';
+    }
+
+    const temperature = resolveTemperature(task, options);
+    const reasoningEffort = resolveReasoningEffort(task);
+
+    try {
+      const messages = [
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const, content: prompt },
+      ];
+      const result = await dispatchWorkloadChat(workloadKey, messages, {
+        temperature,
+        reasoningEffort: reasoningEffort ?? undefined,
+        requiresImage: options.requiresImage,
+      });
+      return result.content;
+    } catch (err: any) {
+      if (err instanceof AiPolicyDeniedError || err?.isPolicyDenial) {
+        throw err;
+      }
+      if (!options.allowFallback && PROFILE_TASKS_REQUIRE_EXPLICIT.has(task)) {
+        throw new MissingLlmTaskConfigError(task);
+      }
+      throw err;
+    }
+  }
+
   let config: LlmConfig | null;
   try {
     config = getLlmConfigForTask(task, {
@@ -885,8 +947,7 @@ export async function callLlmForTask(
 
   const protectedOp = options.protectedOperation ?? defaultProtectedOperationForTask(task);
 
-  // Standalone protected operation call without modelCall: perform protected transport
-  // WITHOUT inserting into ai_model_calls (preserving protected/general mutual exclusivity).
+  // Standalone protected operation call with modelPolicy but without modelCall:
   if (protectedOp) {
     await acquireLlmSlot(config.provider);
     try {
@@ -916,8 +977,13 @@ export async function callLlmForTask(
           'Authorization': `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify(requestBody),
+        redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
       });
+
+      if (response.status >= 300 && response.status < 400) {
+        throw new Error(`HTTP redirect (${response.status}) forbidden on LLM connection (Anti-SSRF).`);
+      }
 
       if (!response.ok) {
         const text = await response.text();
@@ -1099,49 +1165,11 @@ export async function callLlm(
   prompt: string,
   systemPrompt = 'You are a helpful product cataloging assistant.',
 ): Promise<string> {
-  const config = getLlmConfig();
-  if (!config) {
+  const res = await callLlmForTask('product_name_consolidation', prompt, systemPrompt, { allowFallback: true });
+  if (!res) {
     throw new Error('No LLM API keys configured in settings.');
   }
-
-  // Serialize Ollama calls to avoid flooding the local model with parallel requests
-  await acquireLlmSlot(config.provider);
-  try {
-    const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
-    const response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt },
-        ],
-        temperature: 0.1,
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`LLM API request failed (${config.provider}): ${response.status} - ${redactTransportText(text)}`);
-    }
-
-    const data = (await response.json()) as {
-      choices: Array<{ message: { content: string } }>;
-    };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error('LLM returned an empty response.');
-    }
-
-    return content.trim();
-  } finally {
-    releaseLlmSlot(config.provider);
-  }
+  return res;
 }
 
 /**

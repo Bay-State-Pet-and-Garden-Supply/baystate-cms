@@ -2,6 +2,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
 import { getLlmConfig, getLlmConfigForTask } from '../../onboarding/llm-client';
 import { getApiKey } from '../../db/repositories/api-key-repo';
+import { getFullAiRoutingConfig } from '../../db/repositories/provider-connection-repo';
 import { getProviderDefinition } from '../../ai/provider-registry';
 import { getModelProfile, listModelProfiles, type ModelProfile } from '../../ai/model-registry';
 import { getModelPricing, type CostBasis } from '../../ai/model-pricing';
@@ -15,9 +16,9 @@ export type ModelResolutionReason = 'explicit' | 'task_config' | 'global_default
  */
 export interface ResolvedAiSdkModel {
   modelInstance: LanguageModel;
-  /** Provider identifier (e.g. 'deepseek', 'openai', 'ollama'). */
+  /** Provider identifier (e.g. 'deepseek', 'openai', 'ollama', or custom connection ID). */
   provider: string;
-  /** Registered model identifier (e.g. 'deepseek-v4-flash'). */
+  /** Registered model identifier (e.g. 'deepseek-v4-flash', 'qwen3.8:27b'). */
   modelId: string;
   locality: 'local' | 'cloud';
   resolutionReason: ModelResolutionReason;
@@ -103,6 +104,29 @@ function createResolved(
 }
 
 function resolveExplicit(provider: string | undefined, modelName: string): ResolvedAiSdkModel {
+  // Check if provider matches an active connection in AI compute
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    if (provider && aiConfig.connections[provider]) {
+      const conn = aiConfig.connections[provider];
+      if (conn.enabled) {
+        const modelInstance = createOpenAI({
+          baseURL: conn.baseUrl,
+          apiKey: conn.credential || 'enabled',
+        }).chat(modelName);
+        return {
+          modelInstance,
+          provider: conn.id,
+          modelId: modelName,
+          locality: conn.trustZone === 'cloud' ? 'cloud' : 'local',
+          resolutionReason: 'explicit',
+        };
+      }
+    }
+  } catch {
+    // Fall back to registry
+  }
+
   const profile = getModelProfile(modelName);
   if (!profile) {
     throw new ModelUnavailableError(
@@ -138,8 +162,32 @@ function resolveExplicit(provider: string | undefined, modelName: string): Resol
 }
 
 function resolveDefault(): ResolvedAiSdkModel {
-  // Task-config resolution first (no generic fallback). If the task row is
-  // missing or its provider credential is unusable, this returns null.
+  // 1. Direct AI Compute storeManager workload route resolution
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    const route = aiConfig.workloads.storeManager;
+    const target = route.primary === 'inherit' ? aiConfig.defaults.catalogTarget : route.primary;
+    if (target && target.connectionId) {
+      const conn = aiConfig.connections[target.connectionId];
+      if (conn && conn.enabled) {
+        const modelInstance = createOpenAI({
+          baseURL: conn.baseUrl,
+          apiKey: conn.credential || 'enabled',
+        }).chat(target.modelId);
+        return {
+          modelInstance,
+          provider: conn.id,
+          modelId: target.modelId,
+          locality: conn.trustZone === 'cloud' ? 'cloud' : 'local',
+          resolutionReason: 'task_config',
+        };
+      }
+    }
+  } catch {
+    // Fall back to legacy task_configs / api_keys
+  }
+
+  // 2. Legacy task-config resolution fallback
   const taskConfig = getLlmConfigForTask('store_manager_assistant', { allowFallback: false });
   let config: { provider: string; model: string; baseUrl: string; apiKey: string } | null = null;
   let resolutionReason: ModelResolutionReason = 'task_config';

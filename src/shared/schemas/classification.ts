@@ -526,8 +526,8 @@ export const GuidanceConfigV2Schema = z.object({
 export type GuidanceConfigV2 = z.infer<typeof GuidanceConfigV2Schema>;
 
 export const DataSharingConfigV2Schema = z.object({
-  imagePolicy: z.enum(['local_only', 'cloud_allowed']),
-  textPolicy: z.enum(['local_only', 'cloud_allowed']),
+  imagePolicy: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']),
+  textPolicy: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']),
   sensitiveDataFiltering: z.literal(true),
   retentionDays: z.number().int().positive(),
 }).strict();

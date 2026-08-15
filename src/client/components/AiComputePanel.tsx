@@ -28,6 +28,98 @@ import type {
 import type { ConnectionHealthReport, DiscoveredModel } from '../../ai/connection-health-monitor';
 import { colors, fonts, rounded } from '../theme';
 
+/** Derive the operator-approved host/port pin from a base URL, mirroring the
+ *  server-side derivation in validateConnectionTrustZone (default port per
+ *  protocol, hostname lowercased). Returns {} when the URL does not parse. */
+function pinFromUrl(baseUrl: string): { host?: string; port?: number } {
+  try {
+    const url = new URL(baseUrl);
+    return {
+      host: url.hostname.toLowerCase(),
+      port: url.port ? parseInt(url.port, 10) : (url.protocol === 'https:' ? 443 : 80),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Sensible per-connection default model used when the UI dropdowns reset a
+ *  route's model on connection change. Prefers the first live-discovered
+ *  model, falling back to a curated default per provider (never a generic
+ *  model name that the provider does not serve). */
+function defaultModelForConnection(connId: string, healthMap: Record<string, ConnectionHealthReport>): string {
+  const discovered = healthMap[connId]?.models?.[0]?.id;
+  if (discovered) return discovered;
+  const curated: Record<string, string> = {
+    'deepseek-cloud': 'deepseek-v4-flash',
+    'openai-cloud': 'gpt-4o-mini',
+    'desktop-lmstudio': 'qwen3.8:27b',
+    'local-ollama': 'qwen2.5vl:latest',
+  };
+  return curated[connId] ?? '';
+}
+
+/**
+ * Model selector for a route target. Shows a dropdown of the connection's
+ * probe-discovered models when available (with a "Custom…" escape hatch for
+ * arbitrary model IDs), and falls back to a plain text field when the
+ * connection has never been probed or is offline so configuration still works.
+ */
+function ModelSelectField({
+  connId,
+  value,
+  onChange,
+  healthMap,
+  placeholder,
+  flexStyle,
+}: {
+  connId: string;
+  value: string;
+  onChange: (modelId: string) => void;
+  healthMap: Record<string, ConnectionHealthReport>;
+  placeholder?: string;
+  flexStyle: React.CSSProperties;
+}) {
+  const models = healthMap[connId]?.models ?? [];
+  if (models.length === 0) {
+    return (
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={flexStyle}
+      />
+    );
+  }
+  const known = new Set(models.map(m => m.id));
+  const isCustom = !known.has(value);
+  return (
+    <>
+      <select
+        value={isCustom ? '__custom__' : value}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (next !== '__custom__') onChange(next);
+        }}
+        style={flexStyle}
+      >
+        {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
+        <option value="__custom__">Custom…</option>
+      </select>
+      {isCustom && (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          style={flexStyle}
+        />
+      )}
+    </>
+  );
+}
+
 interface AiComputePanelProps {
   onChange?: () => void;
 }
@@ -96,10 +188,24 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
     setError('');
     try {
       const url = new URL(editingConnection.baseUrl);
+      const expectedHost = url.hostname.toLowerCase();
+      const expectedPort = url.port ? parseInt(url.port, 10) : (url.protocol === 'https:' ? 443 : 80);
+      const pinHost = (editingConnection.approvedHost ?? '').trim().toLowerCase();
+      if (pinHost && pinHost !== expectedHost) {
+        setError(`Save failed: the security pin host "${pinHost}" does not match the Base URL host "${expectedHost}". The pin re-derives from the Base URL — review the Security Pin fields and save again.`);
+        setSaving(false);
+        return;
+      }
+      if (editingConnection.approvedPort !== undefined && editingConnection.approvedPort !== null && editingConnection.approvedPort !== expectedPort) {
+        setError(`Save failed: the security pin port "${editingConnection.approvedPort}" does not match the Base URL port "${expectedPort}".`);
+        setSaving(false);
+        return;
+      }
+
       const connToSave: ProviderConnection = {
         ...editingConnection,
         approvedHost: editingConnection.approvedHost || url.hostname,
-        approvedPort: editingConnection.approvedPort || (url.port ? parseInt(url.port, 10) : undefined),
+        approvedPort: editingConnection.approvedPort ?? (url.port ? parseInt(url.port, 10) : undefined),
       };
 
       await upsertAiConnection(connToSave);
@@ -235,10 +341,10 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                 id: `connection-${Date.now().toString().slice(-4)}`,
                 label: 'Desktop LM Studio (Office PC)',
                 transport: 'openai-compatible',
-                baseUrl: 'http://192.168.1.50:1234/v1',
+                baseUrl: 'http://192.168.5.140:1234/v1',
                 credential: '',
                 trustZone: 'trusted_lan',
-                approvedHost: '192.168.1.50',
+                approvedHost: '192.168.5.140',
                 approvedPort: 1234,
                 enabled: true,
                 connectTimeoutMs: 2000,
@@ -312,7 +418,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                       )}
                     </div>
                     <div style={{ fontSize: '0.75rem', color: colors.mulchBrown, marginTop: '0.125rem', fontFamily: fonts.mono }}>
-                      {conn.baseUrl} {conn.approvedHost ? `(Pinned: ${conn.approvedHost})` : ''}
+                      {conn.baseUrl} {conn.approvedHost ? `(Pinned: ${conn.approvedHost}${conn.approvedPort ? `:${conn.approvedPort}` : ''})` : ''}
                     </div>
                     {health && (
                       <div style={{ fontSize: '0.75rem', color: isOnline ? colors.seedlingGreen : '#DC2626', marginTop: '0.25rem' }}>
@@ -493,14 +599,16 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                     >
                       {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                     </select>
-                    <input
-                      type="text"
+                    <ModelSelectField
+                      connId={config.defaults.catalogTarget.connectionId}
                       value={config.defaults.catalogTarget.modelId}
-                      onChange={(e) => handleDefaultsChange({
+                      healthMap={healthMap}
+                      onChange={(modelId) => handleDefaultsChange({
                         ...config.defaults,
-                        catalogTarget: { ...config.defaults.catalogTarget, modelId: e.target.value },
+                        catalogTarget: { ...config.defaults.catalogTarget, modelId },
                       })}
-                      style={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                      placeholder="Model ID"
+                      flexStyle={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
                     />
                   </div>
                 </div>
@@ -513,7 +621,9 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                         const connId = e.target.value;
                         handleDefaultsChange({
                           ...config.defaults,
-                          catalogFallback: connId ? { connectionId: connId, modelId: 'gpt-4o-mini' } : null,
+                          catalogFallback: connId
+                            ? { connectionId: connId, modelId: defaultModelForConnection(connId, healthMap) || 'gpt-4o-mini' }
+                            : null,
                         });
                       }}
                       style={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
@@ -522,17 +632,19 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                       {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                     </select>
                     {config.defaults.catalogFallback && (
-                      <input
-                        type="text"
+                      <ModelSelectField
+                        connId={config.defaults.catalogFallback.connectionId}
                         value={config.defaults.catalogFallback.modelId}
-                        onChange={(e) => handleDefaultsChange({
+                        healthMap={healthMap}
+                        onChange={(modelId) => handleDefaultsChange({
                           ...config.defaults,
                           catalogFallback: {
                             ...config.defaults.catalogFallback!,
-                            modelId: e.target.value,
+                            modelId,
                           },
                         })}
-                        style={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                        placeholder="Model ID"
+                        flexStyle={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
                       />
                     )}
                   </div>
@@ -585,7 +697,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                             if (val === 'inherit') {
                               handleWorkloadChange(w.id, 'primary', 'inherit');
                             } else {
-                              handleWorkloadChange(w.id, 'primary', { connectionId: val, modelId: 'qwen3.8:27b' });
+                              handleWorkloadChange(w.id, 'primary', { connectionId: val, modelId: defaultModelForConnection(val, healthMap) || 'qwen3.8:27b' });
                             }
                           }}
                           style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
@@ -594,15 +706,16 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                           {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                         </select>
                         {!isPrimaryInherit && (
-                          <input
-                            type="text"
+                          <ModelSelectField
+                            connId={(route.primary as ModelTarget).connectionId}
                             value={(route.primary as ModelTarget).modelId}
-                            onChange={(e) => handleWorkloadChange(w.id, 'primary', {
+                            healthMap={healthMap}
+                            onChange={(modelId) => handleWorkloadChange(w.id, 'primary', {
                               ...(route.primary as ModelTarget),
-                              modelId: e.target.value,
+                              modelId,
                             })}
                             placeholder="Model ID"
-                            style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                            flexStyle={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
                           />
                         )}
                       </div>
@@ -621,7 +734,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                             } else if (val === '') {
                               handleWorkloadChange(w.id, 'fallback', null);
                             } else {
-                              handleWorkloadChange(w.id, 'fallback', { connectionId: val, modelId: 'gpt-4o-mini' });
+                              handleWorkloadChange(w.id, 'fallback', { connectionId: val, modelId: defaultModelForConnection(val, healthMap) || 'gpt-4o-mini' });
                             }
                           }}
                           style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
@@ -631,15 +744,16 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                           {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                         </select>
                         {!isFallbackInherit && route.fallback && (
-                          <input
-                            type="text"
+                          <ModelSelectField
+                            connId={(route.fallback as ModelTarget).connectionId}
                             value={(route.fallback as ModelTarget).modelId}
-                            onChange={(e) => handleWorkloadChange(w.id, 'fallback', {
+                            healthMap={healthMap}
+                            onChange={(modelId) => handleWorkloadChange(w.id, 'fallback', {
                               ...(route.fallback as ModelTarget),
-                              modelId: e.target.value,
+                              modelId,
                             })}
                             placeholder="Fallback Model ID"
-                            style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                            flexStyle={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
                           />
                         )}
                       </div>
@@ -699,8 +813,17 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                     type="text"
                     required
                     value={editingConnection.baseUrl}
-                    onChange={(e) => setEditingConnection({ ...editingConnection, baseUrl: e.target.value })}
-                    placeholder="http://192.168.1.50:1234/v1"
+                    onChange={(e) => {
+                      const baseUrl = e.target.value;
+                      const pin = pinFromUrl(baseUrl);
+                      setEditingConnection(prev => prev ? {
+                        ...prev,
+                        baseUrl,
+                        ...(pin.host ? { approvedHost: pin.host } : {}),
+                        ...(pin.port !== undefined ? { approvedPort: pin.port } : {}),
+                      } : prev);
+                    }}
+                    placeholder="http://192.168.5.140:1234/v1"
                     style={{ width: '100%', padding: '0.5rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, fontFamily: fonts.mono, fontSize: '0.8125rem' }}
                   />
                 </div>
@@ -718,6 +841,31 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                     <option value="cloud">Cloud</option>
                   </select>
                 </div>
+              </div>
+
+              <div style={{ padding: '0.75rem', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: rounded.md }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: colors.ledgerCharcoal, marginBottom: '0.25rem' }}>
+                  Security Pin (Approved Host / Port)
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.75rem' }}>
+                  <input
+                    type="text"
+                    value={editingConnection.approvedHost ?? ''}
+                    onChange={(e) => setEditingConnection({ ...editingConnection, approvedHost: e.target.value })}
+                    placeholder="192.168.5.140"
+                    style={{ width: '100%', padding: '0.5rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, fontFamily: fonts.mono, fontSize: '0.8125rem' }}
+                  />
+                  <input
+                    type="number"
+                    value={editingConnection.approvedPort ?? ''}
+                    onChange={(e) => setEditingConnection({ ...editingConnection, approvedPort: e.target.value === '' ? undefined : Number(e.target.value) })}
+                    placeholder="1234"
+                    style={{ width: '100%', padding: '0.5rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, fontFamily: fonts.mono, fontSize: '0.8125rem' }}
+                  />
+                </div>
+                <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.6875rem', color: colors.mulchBrown }}>
+                  The server fails closed when the Base URL host/port differs from this pin (anti-SSRF guard). It re-derives from the Base URL automatically — edit deliberately only if you must override.
+                </p>
               </div>
 
               <div>

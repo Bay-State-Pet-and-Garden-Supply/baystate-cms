@@ -208,7 +208,13 @@ function dedupeRows(rows: PhillipsSearchRow[]): PhillipsSearchRow[] {
 
 /** Recognizable search page: product rows, no-results marker, or plp container. */
 export function isPhillipsSearchPage(html: string): boolean {
-  return parsePhillipsSearchRows(html).length > 0 || anyMatches(html, ['.no-results', '#plp-desktop-row', '.product-list']);
+  return (
+    parsePhillipsSearchRows(html).length > 0 ||
+    anyMatches(html, ['.no-results', '#plp-desktop-row', '.product-list']) ||
+    // No-match pages carry the message as plain text (observed live
+    // 2026-08-15: "Sorry, no results were found.").
+    /Sorry, no results were found/i.test(html)
+  );
 }
 
 /** Detail-table value by label (UPC / Item Number / Weight / Dimensions). */
@@ -423,6 +429,11 @@ export class PhillipsStorefrontConnector implements DistributorConnector {
           'a[href*="ccrz__ProductDetails"]',
           '#plp-desktop-row .ccrz__productListing',
           '.no-results',
+          // No-match queries render "Sorry, no results were found." as plain
+          // text (no .no-results element) after a slow XHR (~20 s observed
+          // live 2026-08-15) — without this marker the fetch burns its full
+          // timeout and reports source_error instead of not_stocked.
+          'text=Sorry, no results were found.',
         ],
       });
       if (!search.ok) {

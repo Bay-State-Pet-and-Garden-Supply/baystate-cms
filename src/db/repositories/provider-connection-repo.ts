@@ -259,17 +259,22 @@ export function deleteProviderConnection(id: string): boolean {
   db.transaction(() => {
     db.query('DELETE FROM provider_connections WHERE id = ?').run(id);
 
-    // Repair defaults if deleting the primary catalog connection
+    // Repair defaults if deleting the primary or fallback catalog connection
     const defaults = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current') as DbRoutingDefaults | undefined;
-    if (defaults && defaults.catalog_primary_connection_id === id) {
-      // Reassign to remaining connection or fallback
-      const remaining = db.query('SELECT id FROM provider_connections LIMIT 1').get() as { id: string } | undefined;
-      const newPrimary = remaining?.id ?? 'openai-cloud';
-      db.query('UPDATE ai_routing_defaults SET catalog_primary_connection_id = ? WHERE id = ?').run(newPrimary, 'current');
+    if (defaults) {
+      if (defaults.catalog_primary_connection_id === id) {
+        const remaining = db.query('SELECT id FROM provider_connections LIMIT 1').get() as { id: string } | undefined;
+        const newPrimaryId = remaining?.id ?? 'openai-cloud';
+        const newPrimaryModel = newPrimaryId === 'openai-cloud' ? 'gpt-4o-mini' : (newPrimaryId === 'deepseek-cloud' ? 'deepseek-chat' : 'qwen3.8:27b');
+        db.query('UPDATE ai_routing_defaults SET catalog_primary_connection_id = ?, catalog_primary_model_id = ? WHERE id = ?').run(newPrimaryId, newPrimaryModel, 'current');
+      }
+      if (defaults.catalog_fallback_connection_id === id) {
+        db.query('UPDATE ai_routing_defaults SET catalog_fallback_connection_id = NULL, catalog_fallback_model_id = NULL WHERE id = ?').run('current');
+      }
     }
 
     // Repair workload routes referencing deleted connection
-    db.query('UPDATE ai_workload_routes SET primary_connection_id = "inherit" WHERE primary_connection_id = ?').run(id);
+    db.query('UPDATE ai_workload_routes SET primary_connection_id = "inherit", primary_model_id = "" WHERE primary_connection_id = ?').run(id);
     db.query('UPDATE ai_workload_routes SET fallback_connection_id = NULL, fallback_model_id = NULL WHERE fallback_connection_id = ?').run(id);
   })();
 
@@ -430,9 +435,7 @@ export function getFullAiRoutingConfig(): AiRoutingConfig {
     terminalBehavior: 'defer',
   };
   const visionOcr = getWorkloadRoute('visionOcr') ?? {
-    primary: connections['desktop-lmstudio']
-      ? { connectionId: 'desktop-lmstudio', modelId: 'gemma-4-26b-a4b-qat' }
-      : { connectionId: 'local-ollama', modelId: 'qwen2.5vl:latest' },
+    primary: 'inherit',
     fallback: null,
     imageDataSharing: 'trusted_lan_allowed',
     terminalBehavior: 'heuristic',

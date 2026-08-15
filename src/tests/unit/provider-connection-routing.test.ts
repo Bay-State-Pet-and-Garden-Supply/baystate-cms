@@ -445,10 +445,160 @@ describe('Database Repository Integration & Redaction', () => {
       modelId: 'muse-glimmer',
     });
 
-    // Delete connection and verify routes are safely repaired rather than crashing
+    // Delete connection and verify routes AND defaults are safely repaired
     deleteProviderConnection('desktop-lmstudio');
     const repaired = getFullAiRoutingConfig();
     expect(repaired.connections['desktop-lmstudio']).toBeUndefined();
     expect(repaired.workloads.storeManager.primary).toBe('inherit');
+    expect(repaired.defaults.catalogTarget.connectionId).not.toBe('desktop-lmstudio');
+    expect(repaired.defaults.catalogTarget.modelId).toBeTruthy();
+  });
+});
+
+describe('End-to-End Production Routing, Failover & Authority Integration', () => {
+  beforeEach(() => {
+    initDb(':memory:');
+  });
+
+  afterEach(() => {
+    closeDb();
+    vi.restoreAllMocks();
+  });
+
+  it('routes production text call through InferenceDispatcher and falls over from desktop LAN to cloud fallback', async () => {
+    // 1. Setup SQLite with primary Desktop LM Studio and fallback OpenAI Cloud
+    upsertProviderConnection({
+      id: 'desktop-lmstudio',
+      label: 'Desktop LM Studio',
+      transport: 'openai-compatible',
+      baseUrl: 'http://192.168.1.50:1234/v1',
+      trustZone: 'trusted_lan',
+      approvedHost: '192.168.1.50',
+      approvedPort: 1234,
+      enabled: true,
+    });
+
+    upsertProviderConnection({
+      id: 'openai-cloud',
+      label: 'OpenAI Cloud',
+      transport: 'openai-compatible',
+      baseUrl: 'https://api.openai.com/v1',
+      credential: 'sk-test-openai-key',
+      trustZone: 'cloud',
+      approvedHost: 'api.openai.com',
+      approvedPort: 443,
+      enabled: true,
+    });
+
+    saveAiRoutingDefaults({
+      catalogTarget: { connectionId: 'desktop-lmstudio', modelId: 'qwen3.8:27b' },
+      catalogFallback: { connectionId: 'openai-cloud', modelId: 'gpt-4o-mini' },
+      textDataSharing: 'cloud_allowed',
+      imageDataSharing: 'trusted_lan_allowed',
+    });
+
+    // 2. Mock fetch: Desktop LAN is offline (ECONNREFUSED / fetch failure), OpenAI Cloud succeeds
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<{ url: string; auth?: string; model?: string }> = [];
+
+    globalThis.fetch = (async (url: any, init: any) => {
+      const urlStr = String(url);
+      const auth = init?.headers?.Authorization || init?.headers?.authorization;
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      fetchCalls.push({ url: urlStr, auth, model: body?.model });
+
+      if (urlStr.includes('192.168.1.50')) {
+        const err = new TypeError('Failed to fetch: Connection refused');
+        (err as any).code = 'ECONNREFUSED';
+        throw err;
+      }
+
+      if (urlStr.includes('api.openai.com')) {
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'Consolidated Product Title from Fallback' } }],
+            usage: { prompt_tokens: 15, completion_tokens: 8, total_tokens: 23 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+
+      return originalFetch(url, init);
+    }) as any;
+
+    try {
+      // 3. Execute dispatchWorkloadChat for discovery workload
+      const res = await dispatchWorkloadChat('discovery', [
+        { role: 'system', content: 'System' },
+        { role: 'user', content: 'Infer brand for Purina' },
+      ]);
+      expect(res.content).toBe('Consolidated Product Title from Fallback');
+      expect(res.wasFallback).toBe(true);
+      expect(res.executedTarget.connectionId).toBe('openai-cloud');
+
+      // Verify failover happened: primary was attempted, then fallback was executed
+      expect(fetchCalls.some(c => c.url.includes('192.168.1.50'))).toBe(true);
+      const fallbackCall = fetchCalls.find(c => c.url.includes('api.openai.com'));
+      expect(fallbackCall).toBeDefined();
+      expect(fallbackCall?.model).toBe('gpt-4o-mini');
+      expect(fallbackCall?.auth).toBe('Bearer sk-test-openai-key');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('Store Manager directly resolves custom LAN connection and model from AI Compute settings', async () => {
+    const { resolveAiSdkModel } = await import('../../server/services/ai-sdk-model-resolver');
+
+    upsertProviderConnection({
+      id: 'custom-lan-box',
+      label: 'Custom Office PC',
+      transport: 'openai-compatible',
+      baseUrl: 'http://192.168.1.75:1234/v1',
+      trustZone: 'trusted_lan',
+      approvedHost: '192.168.1.75',
+      approvedPort: 1234,
+      enabled: true,
+    });
+
+    upsertWorkloadRoute('storeManager', {
+      primary: { connectionId: 'custom-lan-box', modelId: 'muse-glimmer' },
+      fallback: 'inherit',
+      terminalBehavior: 'unavailable',
+    });
+
+    const resolved = resolveAiSdkModel();
+    expect(resolved.provider).toBe('custom-lan-box');
+    expect(resolved.modelId).toBe('muse-glimmer');
+    expect(resolved.locality).toBe('local');
+    expect(resolved.modelInstance).toBeDefined();
+  });
+
+  it('Vision / OCR resolves desktop-lmstudio connection and model from AI Compute visionOcr route', async () => {
+    const { getVlmConfig } = await import('../../onboarding/vlm-client');
+
+    upsertProviderConnection({
+      id: 'desktop-lmstudio',
+      label: 'Desktop LM Studio',
+      transport: 'openai-compatible',
+      baseUrl: 'http://192.168.1.50:1234/v1',
+      trustZone: 'trusted_lan',
+      approvedHost: '192.168.1.50',
+      approvedPort: 1234,
+      enabled: true,
+    });
+
+    upsertWorkloadRoute('visionOcr', {
+      primary: { connectionId: 'desktop-lmstudio', modelId: 'gemma-4-26b-a4b-qat' },
+      fallback: 'inherit',
+      terminalBehavior: 'fail_closed',
+    });
+
+    const vlmConfig = getVlmConfig();
+    expect(vlmConfig).not.toBeNull();
+    expect(vlmConfig?.baseUrl).toBe('http://192.168.1.50:1234/v1');
+    expect(vlmConfig?.model).toBe('gemma-4-26b-a4b-qat');
+    expect(vlmConfig?.enabled).toBe(true);
+    expect(vlmConfig?.transport).toBe('openai-compatible');
   });
 });

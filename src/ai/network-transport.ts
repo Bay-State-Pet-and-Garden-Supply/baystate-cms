@@ -139,6 +139,7 @@ export interface ChatCompletionOptions {
   maxTokens?: number;
   responseFormat?: { type: 'text' | 'json_object' | 'json_schema'; json_schema?: any };
   tools?: any[];
+  reasoningEffort?: string;
   signal?: AbortSignal;
 }
 
@@ -186,6 +187,7 @@ export async function executeOpenAiChat(
 
   if (options.temperature !== undefined) bodyPayload.temperature = options.temperature;
   if (options.maxTokens !== undefined) bodyPayload.max_tokens = options.maxTokens;
+  if (options.reasoningEffort !== undefined) bodyPayload.reasoning_effort = options.reasoningEffort;
   if (options.responseFormat) bodyPayload.response_format = options.responseFormat;
   if (options.tools && options.tools.length > 0) bodyPayload.tools = options.tools;
 
