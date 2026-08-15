@@ -4,7 +4,7 @@ import type {
   SourcingGenerationAttemptSummary,
   SourcingLookupRequest,
 } from './contracts';
-import { normalizeLookupIdentifier, parseSourcingLookupResult } from './contracts';
+import { normalizeLookupIdentifier, parseSourcingLookupResult, recordSizeViolation } from './contracts';
 import type { ConnectorRegistry } from './connector-registry';
 import { DefaultConnectorRegistry } from './connector-registry';
 import { resolveSecret } from './secret-resolver';
@@ -105,7 +105,8 @@ export class DefaultSourcingEngine implements SourcingEngine {
     // unregistered types, without touching secret material), then secret.
     const connector = this.registry.createConnector(
       connection.connectorType,
-      { ...connection.configuration, __distributorId: connection.distributorId },
+      connection.distributorId,
+      connection.configuration,
     );
     if (!connector) {
       // Durable outcome (ADR 0014): an unregistered connector type persists
@@ -114,12 +115,20 @@ export class DefaultSourcingEngine implements SourcingEngine {
       return { kind: 'skipped', connectionId: connection.id, reason: `connector_not_registered:${connection.connectorType}` };
     }
 
-    const secret = resolveSecret(connection.secretRef);
-    if (secret === null) {
-      // Durable outcome: a missing/redacted secret persists as a bounded
-      // source_error attempt (stable code, never the secret itself).
-      this.persistErrorAttempt(request, connection, identifier, 'secret_missing', 'connection secret is not configured');
-      return { kind: 'skipped', connectionId: connection.id, reason: 'secret_missing' };
+    // Amendment B (M2): a secret is resolved ONLY for connectors that require
+    // one. Public storefront scrapers (Bradley, Central Pet) run with
+    // `secret=null`; the unconditional secret_missing path no longer blocks
+    // them. Required connectors still fail closed on a missing/masked secret.
+    let secret: string | null = null;
+    if (connector.requiresSecret) {
+      const resolved = resolveSecret(connection.secretRef);
+      if (resolved === null) {
+        // Durable outcome: a missing/redacted secret persists as a bounded
+        // source_error attempt (stable code, never the secret itself).
+        this.persistErrorAttempt(request, connection, identifier, 'secret_missing', 'connection secret is not configured');
+        return { kind: 'skipped', connectionId: connection.id, reason: 'secret_missing' };
+      }
+      secret = resolved;
     }
 
     const lookupRequest: SourcingLookupRequest = {
@@ -165,7 +174,11 @@ export class DefaultSourcingEngine implements SourcingEngine {
         invalidReason = 'identifier_mismatch';
       }
     } else {
-      invalidReason = 'invalid_connector_result';
+      // Amendment B (M2): an OVERSIZED record is distinguished from a
+      // structurally malformed one — both fail closed, but oversized data
+      // gets the stable `record_too_large` code (never silently truncated).
+      const rawRecord = (result as { record?: unknown } | null)?.record;
+      invalidReason = rawRecord ? recordSizeViolation(rawRecord) ?? 'invalid_connector_result' : 'invalid_connector_result';
     }
 
     const outcome: EvidenceLookupOutcome = validated && !invalidReason ? validated.outcome : 'source_error';
@@ -192,12 +205,18 @@ export class DefaultSourcingEngine implements SourcingEngine {
         ? JSON.stringify({
             upc: identity.matchedIdentifier,
             gtin: identity.gtin ?? undefined,
-            distributorSku: identity.distributorUpc ?? undefined,
+            distributorSku: identity.distributorSku ?? identity.distributorUpc ?? undefined,
             manufacturerPartNumber: identity.manufacturerPartNumber ?? undefined,
             name: identity.name ?? undefined,
             brand: identity.brand ?? undefined,
             description: identity.description ?? undefined,
             weight: identity.weight ?? undefined,
+            features: identity.features,
+            category: identity.category ?? undefined,
+            dimensions: identity.dimensions ?? undefined,
+            casePack: identity.casePack ?? undefined,
+            unitOfMeasure: identity.unitOfMeasure ?? undefined,
+            ingredients: identity.ingredients ?? undefined,
             attributes: identity.attributes,
             images: identity.imageUrls,
           })

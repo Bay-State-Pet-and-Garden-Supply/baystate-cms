@@ -24,10 +24,11 @@ export interface OnboardingExtractionRow {
  *   backward compatibility): requires a NON-EMPTY source URL; any current
  *   extraction method is allowed.
  * - `distributor_record`: requires a NULL source URL, method
- *   `distributor_record_v1`, a current sourcing generation, non-empty
- *   sorted-unique accepted evidence attempt ids, and a canonical 64-hex
- *   evidence hash. Provenance is mandatory — a distributor-record
- *   extraction without it is a schema violation.
+ *   `distributor_record_v1` (Amendment A) or `distributor_record_v2`
+ *   (Amendment B), a current sourcing generation, non-empty sorted-unique
+ *   accepted evidence attempt ids, and a canonical 64-hex evidence hash.
+ *   Provenance is mandatory — a distributor-record extraction without it is
+ *   a schema violation.
  */
 export type InsertExtractionInput = { itemId: string; extractionDataJson: string; confidence: number; imagesJson?: string | null; rawStructuredDataJson?: string | null } & (
   | {
@@ -38,7 +39,7 @@ export type InsertExtractionInput = { itemId: string; extractionDataJson: string
   | {
       sourceType: 'distributor_record';
       sourceUrl: null | undefined;
-      extractionMethod: 'distributor_record_v1';
+      extractionMethod: 'distributor_record_v1' | 'distributor_record_v2';
       sourcingGenerationId: string;
       acceptedEvidenceAttemptIds: string[];
       evidenceHash: string;
@@ -154,8 +155,10 @@ function validateAndResolveExtractionInput(
     if (input.sourceUrl !== null && input.sourceUrl !== undefined) {
       throw new Error('distributor_record extraction requires a NULL source URL (never a fabricated URL)');
     }
-    if (input.extractionMethod !== 'distributor_record_v1') {
-      throw new Error(`distributor_record extraction requires extractionMethod 'distributor_record_v1' (got '${input.extractionMethod}')`);
+    if (input.extractionMethod !== 'distributor_record_v1' && input.extractionMethod !== 'distributor_record_v2') {
+      throw new Error(
+        `distributor_record extraction requires extractionMethod 'distributor_record_v1' or 'distributor_record_v2' (got '${input.extractionMethod}')`,
+      );
     }
     if (!input.sourcingGenerationId) {
       throw new Error('distributor_record extraction requires a sourcing generation id');
@@ -232,18 +235,23 @@ export function getLatestExtraction(itemId: string): OnboardingExtractionRow | u
  * Find the durable distributor-record extraction row for an item, if any.
  *
  * Find-by-immutable-identity-then-validate: looks up ANY extraction row with
- * method 'distributor_record_v1' (regardless of hash/source_type/generation)
- * and returns the latest (created_at DESC, rowid DESC). The materializer's
- * idempotent-retry guard uses this shape so every provenance column is
- * GENUINELY revalidated — if the row exists it must match the recomputed
- * decision in full, and any divergence fails closed rather than inserting a
- * second (possibly divergent) row.
+ * method 'distributor_record_v1' OR 'distributor_record_v2' (regardless of
+ * hash/source_type/generation) and returns the latest (created_at DESC,
+ * rowid DESC). The materializer's idempotent-retry guard uses this shape so
+ * every provenance column is GENUINELY revalidated — if the row exists it
+ * must match the recomputed decision in full, and any divergence fails
+ * closed rather than inserting a second (possibly divergent) row. A
+ * mis-shaped row carrying either method is also detected, so the materializer
+ * can never insert a second row to hide divergence.
  */
 export function findDistributorRecordExtraction(itemId: string): OnboardingExtractionRow | undefined {
   const db = getDb();
   const row = db.query(
     `SELECT * FROM onboarding_extractions
-     WHERE item_id = ? AND extraction_method = 'distributor_record_v1'
+     WHERE item_id = ? AND (
+       extraction_method IN ('distributor_record_v1', 'distributor_record_v2')
+       OR source_type = 'distributor_record'
+     )
      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   ).get(itemId) as OnboardingExtractionRow | undefined;
   return row;

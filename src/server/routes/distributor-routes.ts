@@ -17,6 +17,7 @@ import {
   type DistributorConnection,
 } from '../../shared/schemas/distributor';
 import { resolveSecret } from '../../onboarding/sourcing/secret-resolver';
+import { connectorRequiresSecret } from '../../onboarding/sourcing/connector-registry';
 
 const route = new Hono();
 
@@ -30,6 +31,12 @@ export interface DistributorConnectionView {
   enabled: boolean;
   /** Boolean only — secret_ref contents and resolved secrets are NEVER returned. */
   secretConfigured: boolean;
+  /**
+   * Amendment B (M2): whether this connector TYPE needs a secret at all.
+   * Public storefront scrapers (Bradley, Central Pet) report `false` — the
+   * UI shows “no secret required” instead of a misleading “secret missing”.
+   */
+  secretRequired: boolean;
   configuration: Record<string, unknown>;
   authorityPolicy: Record<string, unknown>;
   createdAt: string;
@@ -45,6 +52,7 @@ function toConnectionView(connection: DistributorConnection): DistributorConnect
     connectorType: connection.connectorType,
     enabled: connection.enabled,
     secretConfigured: resolveSecret(connection.secretRef) !== null,
+    secretRequired: connectorRequiresSecret(connection.connectorType, connection.distributorId),
     configuration: connection.configuration,
     authorityPolicy: connection.authorityPolicy,
     createdAt: connection.createdAt,

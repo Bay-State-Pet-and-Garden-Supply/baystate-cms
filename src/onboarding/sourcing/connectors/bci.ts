@@ -59,6 +59,7 @@ function parseClientCredentials(secret: string): { clientId: string; clientSecre
 export class BCIConnector implements DistributorConnector {
   readonly connectorType = 'api' as const;
   readonly providerId = 'bci';
+  readonly requiresSecret = true;
 
   private oauth: OAuthClient | null = null;
 
@@ -180,11 +181,18 @@ function foundResult(
     matchedIdentifier: identifier,
     distributorUpc: identifier,
     gtin: identifier,
+    distributorSku: typeof item.ID === 'string' ? item.ID : null,
     name,
     description: typeof item.Description === 'string' ? item.Description : null,
     brand,
     manufacturerPartNumber: null,
     weight,
+    features: [],
+    category: null,
+    dimensions: null,
+    casePack: null,
+    unitOfMeasure: null,
+    ingredients: null,
     attributes: {},
     imageUrls,
     sourceUrl: null,

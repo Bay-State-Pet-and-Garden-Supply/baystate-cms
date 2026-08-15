@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import {
+  buildDistributorRecordProjectionV1,
   buildDistributorRecordProjection,
   computeEvidenceHash,
   canonicalJson,
@@ -93,7 +94,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       weight: '12 lb',
       attributes: { size: '12 lb', flavor: 'chicken' },
     });
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
 
     expect(result.qualified).toBe(true);
     if (!result.qualified) return;
@@ -118,7 +119,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       attributes: { size: '12 lb' },
       images: ['https://distributor.example/img1.jpg'],
     });
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     expect(result.qualified).toBe(true);
     if (!result.qualified) return;
     const keys = Object.keys(result.projection);
@@ -134,7 +135,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
     const a1 = makeFound('a1', 'bci', { upc: ITEM_UPC, name: 'Dog Food 12 lb', brand: 'Nutro', weight: '12 lb' });
     const a2 = makeFound('a2', 'phillips', { upc: ITEM_UPC, name: 'Dog Food 12 lb', brand: 'Nutro', weight: '12 lb' });
     // Input order deliberately reversed from provider-sorted order.
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a2, a1],
       acceptedAttemptIds: ['a2', 'a1'],
@@ -151,7 +152,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
   test('found record plus another provider source_error still qualifies (error attempt not accepted)', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' });
     const err = makeError('err1', 'bci');
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1, err],
       acceptedAttemptIds: ['a1'],
@@ -163,7 +164,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('missing product name fails with missing_name', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, brand: 'Nutro' });
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     expect(result.qualified).toBe(false);
     if (result.qualified) return;
     expect(result.reasonCodes).toContain('missing_name');
@@ -171,7 +172,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('stale generation fails with stale_generation', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' }, { generation: 'gen-old' });
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     expect(result.qualified).toBe(false);
     if (result.qualified) return;
     expect(result.reasonCodes).toContain('stale_generation');
@@ -179,7 +180,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('malformed identity fails with incomplete_provenance', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' }, { malformed: true });
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     expect(result.qualified).toBe(false);
     if (result.qualified) return;
     expect(result.reasonCodes).toContain('incomplete_provenance');
@@ -192,7 +193,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       { upc: '999999999999', name: 'Other Product' },
       { lookupUpc: '999999999999' },
     );
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     expect(result.qualified).toBe(false);
     if (result.qualified) return;
     expect(result.reasonCodes).toContain('identifier_mismatch');
@@ -200,14 +201,14 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('identity with no record identifier fails with empty_identity', () => {
     const a1 = makeFound('a1', 'phillips', { name: 'Dog Food', brand: 'Nutro' });
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     expect(result.qualified).toBe(false);
     if (result.qualified) return;
     expect(result.reasonCodes).toContain('empty_identity');
   });
 
   test('no accepted evidence fails with no_accepted_evidence', () => {
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [], acceptedAttemptIds: [] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [], acceptedAttemptIds: [] });
     expect(result.qualified).toBe(false);
     if (result.qualified) return;
     expect(result.reasonCodes).toContain('no_accepted_evidence');
@@ -215,7 +216,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('unknown variant axis makes the record insufficient unless dismissed', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', attributes: { scent: 'peach' } });
-    const blocked = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const blocked = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     expect(blocked.qualified).toBe(false);
     if (blocked.qualified) return;
     expect(blocked.reasonCodes).toContain('unknown_variant_axis');
@@ -223,7 +224,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
     // Declared axis → known → qualifies, and the custom axis IS preserved
     // in the projection (Amendment A: declared axes are projected with
     // per-field provenance, never silently dropped).
-    const declared = buildDistributorRecordProjection({
+    const declared = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1],
       acceptedAttemptIds: ['a1'],
@@ -244,7 +245,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       name: 'Dog Food',
       attributes: { 'Scent Level': 'mild' },
     });
-    const viaRegistry = buildDistributorRecordProjection({
+    const viaRegistry = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [registryKey],
       acceptedAttemptIds: ['a3'],
@@ -263,7 +264,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       name: 'Dog Food',
       attributes: { 'Scent Level': 'strong' },
     });
-    const registryConflict = buildDistributorRecordProjection({
+    const registryConflict = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [registryKey, other],
       acceptedAttemptIds: ['a3', 'a4'],
@@ -275,7 +276,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
     // Declared-axis disagreement between providers is a HARD conflict.
     const a2 = makeFound('a2', 'bci', { upc: ITEM_UPC, name: 'Dog Food', attributes: { scent: 'cedar' } });
-    const disagree = buildDistributorRecordProjection({
+    const disagree = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1, a2],
       acceptedAttemptIds: ['a1', 'a2'],
@@ -286,7 +287,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
     expect(disagree.reasonCodes).toContain('open_hard_conflict');
 
     // Dismissed unknown axis → qualified (field removed from consideration).
-    const dismissed = buildDistributorRecordProjection({
+    const dismissed = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1],
       acceptedAttemptIds: ['a1'],
@@ -297,7 +298,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('a same-UPC attempt from another item can never qualify (cross_item_attempt)', () => {
     const foreign = makeFound('a9', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' }, { itemId: 'item-OTHER' });
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [foreign],
       acceptedAttemptIds: ['a9'],
@@ -309,7 +310,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('a requested accepted id that does not resolve fails closed (incomplete_provenance)', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' });
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1],
       acceptedAttemptIds: ['a1', 'a-missing'],
@@ -321,7 +322,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('an attempt without distributorConnectionId cannot qualify (incomplete_provenance)', () => {
     const noConn = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' }, { connectionId: null });
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [noConn],
       acceptedAttemptIds: ['a1'],
@@ -333,12 +334,12 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
 
   test('duplicate accepted attempt ids dedupe in provenance and the hash stays stable', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' });
-    const unique = buildDistributorRecordProjection({
+    const unique = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1],
       acceptedAttemptIds: ['a1'],
     });
-    const duplicated = buildDistributorRecordProjection({
+    const duplicated = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1],
       acceptedAttemptIds: ['a1', 'a1'],
@@ -352,7 +353,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
   test('connection provenance is retained (sorted-unique connectionIds + per-field connectionId)', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', weight: '10 lb' });
     const a2 = makeFound('a2', 'bci', { upc: ITEM_UPC, name: 'Dog Food', weight: '10 lb' }, { connectionId: 'conn-9' });
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1, a2],
       acceptedAttemptIds: ['a1', 'a2'],
@@ -371,7 +372,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
     // null: EvidenceAttempt.observedAt is string | undefined).
     const noObservedAt = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' });
     const stripped = { ...noObservedAt, observedAt: undefined };
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [stripped],
       acceptedAttemptIds: ['a1'],
@@ -397,14 +398,14 @@ describe('Distributor record projection — conflicts and operator resolutions',
   });
 
   test('identity-critical disagreement blocks with open_hard_conflict', () => {
-    const result = buildDistributorRecordProjection({ ...baseInput, attempts: [a1, a2], acceptedAttemptIds: ['a1', 'a2'] });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1, a2], acceptedAttemptIds: ['a1', 'a2'] });
     expect(result.qualified).toBe(false);
     if (result.qualified) return;
     expect(result.reasonCodes).toContain('open_hard_conflict');
   });
 
   test('custom_override resolves the disputed field', () => {
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1, a2],
       acceptedAttemptIds: ['a1', 'a2'],
@@ -420,7 +421,7 @@ describe('Distributor record projection — conflicts and operator resolutions',
   });
 
   test('candidate_selected adopts the named attempt candidate', () => {
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1, a2],
       acceptedAttemptIds: ['a1', 'a2'],
@@ -441,7 +442,7 @@ describe('Distributor record projection — conflicts and operator resolutions',
 
   test('dismiss removes the field; remaining evidence must still qualify', () => {
     // Dismissing name removes the only name → still fails (missing_name).
-    const result = buildDistributorRecordProjection({
+    const result = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1],
       acceptedAttemptIds: ['a1'],
@@ -458,12 +459,12 @@ describe('Distributor record projection — deterministic hashing', () => {
     const a1 = makeFound('a1', 'bci', { upc: ITEM_UPC, name: 'Dog Food 12 lb', brand: 'Nutro', weight: '12 lb' });
     const a2 = makeFound('a2', 'phillips', { upc: ITEM_UPC, name: 'Dog Food 12 lb', brand: 'Nutro', weight: '12 lb' });
 
-    const r1 = buildDistributorRecordProjection({
+    const r1 = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a1, a2],
       acceptedAttemptIds: ['a1', 'a2'],
     });
-    const r2 = buildDistributorRecordProjection({
+    const r2 = buildDistributorRecordProjectionV1({
       ...baseInput,
       attempts: [a2, a1],
       acceptedAttemptIds: ['a2', 'a1'],
@@ -485,13 +486,156 @@ describe('Distributor record projection — deterministic hashing', () => {
 
   test('computeEvidenceHash changes when identity fields change', () => {
     const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food' });
-    const r1 = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    const r1 = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
     const a2 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Cat Food' });
-    const r2 = buildDistributorRecordProjection({ ...baseInput, attempts: [a2], acceptedAttemptIds: ['a1'] });
+    const r2 = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a2], acceptedAttemptIds: ['a1'] });
     expect(r1.qualified).toBe(true);
     expect(r2.qualified).toBe(true);
     if (!r1.qualified || !r2.qualified) return;
     expect(r1.evidenceHash).not.toBe(r2.evidenceHash);
     expect(computeEvidenceHash(r1.projection)).toBe(r1.evidenceHash);
+  });
+});
+
+describe('Distributor record projection v2 (Amendment B) — merchandising depth', () => {
+  test('v2 includes merchandising fields, dedicated provenance, and the v2 version', () => {
+    const a1 = makeFound('a1', 'phillips', {
+      upc: ITEM_UPC,
+      name: 'Dog Food 12 lb',
+      description: 'Balanced recipe',
+      features: ['Chicken first', 'Grain free'],
+      category: 'Dog Food',
+      dimensions: '12x8x4 in',
+      casePack: '6',
+      unitOfMeasure: 'EA',
+      ingredients: 'Chicken, rice',
+      images: ['https://cdn.example.com/a.jpg'],
+    });
+    const r = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    expect(r.qualified).toBe(true);
+    if (!r.qualified) return;
+    expect(r.projection.version).toBe('distributor-record-projection-v2');
+    expect(r.projection.description).toBe('Balanced recipe');
+    expect(r.projection.features).toEqual(['Chicken first', 'Grain free']);
+    expect(r.projection.category).toBe('Dog Food');
+    expect(r.projection.dimensions).toBe('12x8x4 in');
+    expect(r.projection.casePack).toBe('6');
+    expect(r.projection.unitOfMeasure).toBe('EA');
+    expect(r.projection.ingredients).toBe('Chicken, rice');
+    expect(r.projection.imageUrls).toEqual(['https://cdn.example.com/a.jpg']);
+    expect(r.projection.merchandisingProvenance.description).toHaveLength(1);
+    expect(r.projection.merchandisingProvenance.description[0].attemptId).toBe('a1');
+    expect(r.projection.merchandisingProvenance.features[0].values).toEqual(['Chicken first', 'Grain free']);
+    // Price/inventory/arbitrary fields never enter the projection.
+    expect((r.projection as unknown as Record<string, unknown>).price).toBeUndefined();
+    expect((r.projection as unknown as Record<string, unknown>).inStock).toBeUndefined();
+  });
+
+  test('merchandising disagreement warns but qualifies; identity disagreement still blocks', () => {
+    const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', description: 'Copy A' });
+    const a2 = makeFound('a2', 'unfi', { upc: ITEM_UPC, name: 'Dog Food', description: 'Copy B' });
+    const r = buildDistributorRecordProjection({ ...baseInput, attempts: [a1, a2], acceptedAttemptIds: ['a1', 'a2'] });
+    expect(r.qualified).toBe(true);
+    if (!r.qualified) return;
+    expect(r.warnings).toContain('merchandising_disagreement:description');
+    // Deterministic lexical selection.
+    expect(r.projection.description).toBe('Copy A');
+
+    // Identity disagreement on the same inputs still blocks.
+    const a3 = makeFound('a3', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', weight: '10 lb' });
+    const a4 = makeFound('a4', 'unfi', { upc: ITEM_UPC, name: 'Dog Food', weight: '20 lb' });
+    const conflict = buildDistributorRecordProjection({ ...baseInput, attempts: [a3, a4], acceptedAttemptIds: ['a3', 'a4'] });
+    expect(conflict.qualified).toBe(false);
+    if (conflict.qualified) return;
+    expect(conflict.reasonCodes).toContain('open_hard_conflict');
+  });
+
+  test('features merge as a case-insensitive sorted-unique union preserving first-seen spelling', () => {
+    const a1 = makeFound('a1', 'phillips', {
+      upc: ITEM_UPC,
+      name: 'Dog Food',
+      features: ['Chicken First', 'Grain Free'],
+    });
+    const a2 = makeFound('a2', 'unfi', {
+      upc: ITEM_UPC,
+      name: 'Dog Food',
+      features: ['grain free', 'All Natural'],
+    });
+    const r = buildDistributorRecordProjection({ ...baseInput, attempts: [a1, a2], acceptedAttemptIds: ['a1', 'a2'] });
+    expect(r.qualified).toBe(true);
+    if (!r.qualified) return;
+    // 'Grain Free' (a1, first-seen spelling) wins over 'grain free' (a2);
+    // union is sorted by lowercase.
+    expect(r.projection.features).toEqual(['All Natural', 'Chicken First', 'Grain Free']);
+  });
+
+  test('imageUrls is a sorted-unique HTTPS-only union', () => {
+    const a1 = makeFound('a1', 'phillips', {
+      upc: ITEM_UPC,
+      name: 'Dog Food',
+      images: ['https://cdn.example.com/b.jpg', 'http://insecure.example.com/x.jpg', 'https://cdn.example.com/a.jpg'],
+    });
+    const a2 = makeFound('a2', 'unfi', {
+      upc: ITEM_UPC,
+      name: 'Dog Food',
+      images: ['https://cdn.example.com/b.jpg'],
+    });
+    const r = buildDistributorRecordProjection({ ...baseInput, attempts: [a1, a2], acceptedAttemptIds: ['a1', 'a2'] });
+    expect(r.qualified).toBe(true);
+    if (!r.qualified) return;
+    // http URL dropped; union sorted-unique.
+    expect(r.projection.imageUrls).toEqual(['https://cdn.example.com/a.jpg', 'https://cdn.example.com/b.jpg']);
+  });
+
+  test('numeric casePack seeds packCount when no direct packCount evidence exists', () => {
+    const a1 = makeFound('a1', 'phillips', {
+      upc: ITEM_UPC,
+      name: 'Dog Food',
+      casePack: '6',
+    });
+    const r = buildDistributorRecordProjection({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    expect(r.qualified).toBe(true);
+    if (!r.qualified) return;
+    expect(r.projection.packCount).toBe('6');
+
+    // Non-numeric casePack never seeds the identity axis.
+    const a2 = makeFound('a2', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', casePack: '6 EA' });
+    const r2 = buildDistributorRecordProjection({ ...baseInput, attempts: [a2], acceptedAttemptIds: ['a2'] });
+    expect(r2.qualified).toBe(true);
+    if (!r2.qualified) return;
+    expect(r2.projection.packCount).toBeNull();
+    expect(r2.projection.casePack).toBe('6 EA');
+  });
+
+  test('v2 hash drifts on merchandising change but not on input ordering', () => {
+    const a1 = makeFound('a1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', description: 'Copy A' });
+    const a2 = makeFound('a2', 'unfi', { upc: ITEM_UPC, name: 'Dog Food', description: 'Copy A' });
+    const r1 = buildDistributorRecordProjection({ ...baseInput, attempts: [a1, a2], acceptedAttemptIds: ['a1', 'a2'] });
+    const r2 = buildDistributorRecordProjection({ ...baseInput, attempts: [a2, a1], acceptedAttemptIds: ['a2', 'a1'] });
+    expect(r1.qualified).toBe(true);
+    expect(r2.qualified).toBe(true);
+    if (!r1.qualified || !r2.qualified) return;
+    expect(r1.evidenceHash).toBe(r2.evidenceHash);
+
+    const a3 = makeFound('a3', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', description: 'Copy B' });
+    const r3 = buildDistributorRecordProjection({ ...baseInput, attempts: [a3, a2], acceptedAttemptIds: ['a3', 'a2'] });
+    expect(r3.qualified).toBe(true);
+    if (!r3.qualified) return;
+    expect(r3.evidenceHash).not.toBe(r1.evidenceHash);
+  });
+
+  test('v1 builder remains byte-for-byte identity-only with the v1 version', () => {
+    const a1 = makeFound('a1', 'phillips', {
+      upc: ITEM_UPC,
+      name: 'Dog Food',
+      description: 'Copy A',
+      features: ['F'],
+    });
+    const r = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1], acceptedAttemptIds: ['a1'] });
+    expect(r.qualified).toBe(true);
+    if (!r.qualified) return;
+    expect(r.projection.version).toBe('distributor-record-projection-v1');
+    expect((r.projection as unknown as Record<string, unknown>).description).toBeUndefined();
+    expect((r.projection as unknown as Record<string, unknown>).features).toBeUndefined();
   });
 });

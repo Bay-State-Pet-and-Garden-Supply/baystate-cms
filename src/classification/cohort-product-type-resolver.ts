@@ -230,6 +230,43 @@ export function evidenceFromProjection(
     });
   }
 
+  // Amendment B merchandising mirror (M5b-1): a VERIFIED v2 distributor member
+  // (`extractionMethod === 'distributor_record_v2'`) emits the SAME explicit
+  // merchandising fields as the frozen evidence stage — description, each
+  // feature as bullet_point, distributor_category, dimensions, case_pack,
+  // unit_of_measure, ingredients — so freeze-time deterministic matching and
+  // run-time evidence extraction cannot diverge. V1 members stay identity-only;
+  // price/inventory/images/search-keywords/arbitrary fields never appear.
+  const isV2Distributor =
+    distributorSource &&
+    extV2 != null &&
+    (memberProjection as ExecutionEvidenceProjectionMemberV2).extractionMethod === 'distributor_record_v2';
+  if (isV2Distributor && extV2) {
+    const merchMetadata = {
+      ...(distributorMetadata ?? {}),
+      merchandisingProvenance: (extV2 as { merchandisingProvenance?: Record<string, unknown> }).merchandisingProvenance ?? {},
+    };
+    if (extV2.description && extV2.description.trim()) {
+      push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl: pageEvidenceUrl, sourceField: 'description', snippet: extV2.description.slice(0, 500), value: extV2.description, metadata: merchMetadata });
+    }
+    for (const bullet of extV2.bulletPoints ?? []) {
+      if (!bullet || !String(bullet).trim()) continue;
+      push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl: pageEvidenceUrl, sourceField: 'bullet_point', snippet: String(bullet).slice(0, 300), value: String(bullet), metadata: merchMetadata });
+    }
+    const merchScalars: Array<{ sourceField: string; value: string | null }> = [
+      { sourceField: 'distributor_category', value: (extV2 as { distributorCategory?: string | null }).distributorCategory ?? null },
+      { sourceField: 'dimensions', value: (extV2 as { dimensions?: string | null }).dimensions ?? null },
+      { sourceField: 'case_pack', value: (extV2 as { casePack?: string | null }).casePack ?? null },
+      { sourceField: 'unit_of_measure', value: (extV2 as { unitOfMeasure?: string | null }).unitOfMeasure ?? null },
+      { sourceField: 'ingredients', value: (extV2 as { ingredients?: string | null }).ingredients ?? null },
+    ];
+    for (const item of merchScalars) {
+      const trimmed = (item.value ?? '').trim();
+      if (!trimmed) continue;
+      push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl: pageEvidenceUrl, sourceField: item.sourceField, snippet: trimmed.slice(0, 300), value: trimmed, metadata: merchMetadata });
+    }
+  }
+
   if (!distributorSource) {
     if (ext.description && ext.description.trim()) {
       push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'description', snippet: ext.description.slice(0, 500), value: ext.description, metadata: { provenance: 'official_product_page' } });

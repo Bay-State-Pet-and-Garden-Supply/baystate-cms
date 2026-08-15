@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "providerId": "phillips_storefront",
+  "connectorType": "html_scraper",
+  "navigationOrigin": "https://shop.phillipspet.com",
+  "assetHosts": [
+    "shop.phillipspet.com",
+    "d56ygyjv466yj.cloudfront.net"
+  ],
+  "captureDate": "2026-08-15",
+  "baystateSourceRevision": "2a5c9a5f55644a50bee3f23e9d3f819eb10639f0",
+  "notes": "Auth-required captured from the live SFCC login page 2026-08-15; SFCC login form markup lives in the script-wrapped XC_SiteLogin template, preserved for fixture fidelity (raw id=\"emailField\"/\"send2Dsk\" markers). Synthetic fixtures model the SFCC plp/PDP dialect. Sanitized: analytics scripts/styles/form values removed, no credentials.",
+  "files": [
+    {
+      "file": "auth-required.html",
+      "scenario": "auth-required",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__CCSiteLogin",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "dd08bfa0db5be60cd01560ea558f92558c80fef9a8f3724196d992ce8534909c",
+      "containsCredentials": false,
+      "testIdentifier": "072705115310"
+    },
+    {
+      "file": "auth-required-alt.html",
+      "scenario": "auth-required-alt",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__ProductList?operation=quickSearch&searchText=072705115310 (unauthenticated shell)",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "2540afaf7feb63fe0a8015225e5cca160d7b454d363557d33bfba551022767fe",
+      "containsCredentials": false,
+      "testIdentifier": "072705115310"
+    },
+    {
+      "file": "found-search.html",
+      "scenario": "found-search",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__ProductList?operation=quickSearch&searchText=072705115310",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "da5db95a5719964577df55d059391690d8d40cb60517b11595adc7b0789d2d1d",
+      "containsCredentials": false,
+      "testIdentifier": "072705115310",
+      "expectedName": "Fromm Gold Large Breed Dog 30 lb",
+      "expectedBrand": "FROMM FAMILY FOODS LLC"
+    },
+    {
+      "file": "found-pdp.html",
+      "scenario": "found-pdp",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__ProductDetails?sku=FROMM-GOLD-30",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "1f634fefccc7a24066226ffecf0b7a1bbc62bef74139d5831ddcdbbc633ec0eb",
+      "containsCredentials": false,
+      "testIdentifier": "072705115310",
+      "expectedName": "Fromm Gold Large Breed Dog 30 lb",
+      "expectedBrand": "FROMM FAMILY FOODS LLC"
+    },
+    {
+      "file": "not-found.html",
+      "scenario": "not-found",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__ProductList?operation=quickSearch&searchText=000000000000",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "3fdb46cf054a062d1996e5f4774a31a097a4a04b417a3af033395a062e8c5e54",
+      "containsCredentials": false,
+      "testIdentifier": "000000000000"
+    },
+    {
+      "file": "wrong-variant-pdp.html",
+      "scenario": "wrong-variant-pdp",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__ProductDetails?sku=FROMM-GOLD-30B",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "6005c5cd73da02426291e986c6bf2d305b9535cc93c1451e7c3a0fee0c24ea7c",
+      "containsCredentials": false,
+      "testIdentifier": "072705115310",
+      "expectedName": "Fromm Gold Large Breed Dog 30 lb",
+      "expectedBrand": "FROMM FAMILY FOODS LLC"
+    },
+    {
+      "file": "auth-failed.html",
+      "scenario": "auth-failed",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__CCSiteLogin",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "988d3b5e4e43be0d0056e7493919d7b700868378ac21b598f1cb675e0ca6a518",
+      "containsCredentials": false
+    },
+    {
+      "file": "unexpected-markup.html",
+      "scenario": "unexpected-markup",
+      "sourceUrl": "https://shop.phillipspet.com/ccrz__ProductList?operation=quickSearch&searchText=072705115310",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "376c6f899ef27c3391ae3914da8f71c4a58e6b6e39dccedcb41b09bf83a65e66",
+      "containsCredentials": false,
+      "testIdentifier": "072705115310"
+    }
+  ]
+}

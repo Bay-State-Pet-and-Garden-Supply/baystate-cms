@@ -52,6 +52,60 @@ function distributorExtractionData(): ExtractionData {
   });
 }
 
+/**
+ * Amendment B (M5b-2): a VERIFIED v2 distributor materialization carrying
+ * merchandising-depth fields (description/features/category/dimensions/case/
+ * UOM/ingredients) + display-only image candidates with per-field
+ * merchandising provenance.
+ */
+function distributorExtractionDataV2(): ExtractionData {
+  return ExtractionDataSchema.parse({
+    title: 'Dog Food Chicken 10 lb',
+    brand: 'Acme Pet',
+    weight: '10 lb',
+    description: 'Chicken recipe kibble for adult dogs.',
+    bulletPoints: ['Chicken first', 'Grain free'],
+    distributorCategory: 'Dog Food',
+    dimensions: '18 x 12 x 6 in',
+    casePack: '6',
+    unitOfMeasure: 'EA',
+    ingredients: 'Chicken, brown rice',
+    distributorSku: 'DIST-SKU-1',
+    manufacturerPartNumber: 'MPN-001',
+    variantAttributes: { flavor: 'chicken', size: '10 lb' },
+    sourceType: 'distributor_record',
+    distributorProviderIds: ['phillips'],
+    distributorEvidenceAttemptIds: ['att-1'],
+    distributorImageCandidates: [
+      { url: 'https://cdn.phillips.example/img/dog-food-1.jpg', sourceAttemptIds: ['att-1'], sourceProviderIds: ['phillips'] },
+      { url: 'https://cdn.phillips.example/img/dog-food-2.jpg', sourceAttemptIds: ['att-1'], sourceProviderIds: ['phillips'] },
+    ],
+    distributorImageApprovals: [],
+    distributorRecordProvenance: {
+      sourcingGenerationId: 'gen-9',
+      evidenceHash: 'a'.repeat(64),
+      acceptedEvidenceAttemptIds: ['att-1'],
+      providerIds: ['phillips'],
+      catalogVersions: ['v2026.3'],
+      projectionVersion: 'distributor-record-projection-v2',
+      extractionMethod: 'distributor_record_v2',
+      merchandisingProvenance: {
+        description: [
+          { attemptId: 'att-1', providerId: 'phillips', catalogVersion: 'v2026.3', connectionId: 'conn-1', values: ['Chicken recipe kibble for adult dogs.'] },
+        ],
+        features: [
+          { attemptId: 'att-1', providerId: 'phillips', catalogVersion: 'v2026.3', connectionId: 'conn-1', values: ['Chicken first', 'Grain free'] },
+        ],
+      },
+    },
+    sourceUrl: null,
+    confidence: 0,
+    primaryImage: null,
+    additionalImages: [],
+    price: null,
+  });
+}
+
 function officialExtractionData(): ExtractionData {
   return ExtractionDataSchema.parse({
     title: 'Official Title',
@@ -218,6 +272,68 @@ describe('ExtractionStagePanel — distributor-record source (MD)', () => {
     expect(html).toContain('Review the provenance below and use the guarded fallback');
     expect(html).not.toContain('Materialized from a qualified distributor record');
     expect(html).toContain('gen-9');
+  });
+
+  it('renders merchandising-depth data for a VERIFIED v2 distributor materialization (M5b-2)', () => {
+    const html = renderPanel({
+      extractionData: distributorExtractionDataV2(),
+      sourceType: 'distributor_record',
+    });
+    expect(html).toContain('Distributor Record Data (merchandising-depth)');
+    // Explicit merchandising fields render as data.
+    expect(html).toContain('Chicken recipe kibble for adult dogs.');
+    expect(html).toContain('Chicken first');
+    expect(html).toContain('Grain free');
+    expect(html).toContain('Dog Food');
+    expect(html).toContain('18 x 12 x 6 in');
+    expect(html).toContain('EA');
+    expect(html).toContain('Chicken, brown rice');
+    // Per-field merchandising provenance renders.
+    expect(html).toContain('Merchandising provenance');
+    expect(html).toContain('phillips');
+    // Identity fields still render.
+    expect(html).toContain('Dog Food Chicken 10 lb');
+    expect(html).toContain('DIST-SKU-1');
+    // Price / commerce image fields NEVER render even when v2.
+    expect(html).not.toContain('>9.99<');
+    expect(html).not.toContain('primaryImage');
+  });
+
+  it('renders image candidate URLs as DISPLAY-ONLY text, never as <img> or commerce images (M5b-2)', () => {
+    const html = renderPanel({
+      extractionData: distributorExtractionDataV2(),
+      sourceType: 'distributor_record',
+    });
+    expect(html).toContain('Image candidates');
+    expect(html).toContain('DISPLAY ONLY, not approved for catalog use');
+    expect(html).toContain('https://cdn.phillips.example/img/dog-food-1.jpg');
+    expect(html).toContain('https://cdn.phillips.example/img/dog-food-2.jpg');
+    // The URL is rendered as TEXT — no <img> element may fetch it.
+    expect(html).not.toContain('<img');
+    // The candidate list is not commerce media (no primary/additional image).
+    expect(html).not.toContain('primaryImage');
+    expect(html).not.toContain('additionalImages');
+  });
+
+  it('keeps identity-only rendering for v1 / unverified distributor rows (no extractionMethod)', () => {
+    const html = renderPanel({
+      extractionData: distributorExtractionData(),
+      sourceType: 'distributor_record',
+    });
+    expect(html).toContain('Distributor Record Data (identity-only)');
+    // A v1/unverified payload carrying description copy still never renders.
+    const withCopy = ExtractionDataSchema.parse({
+      ...distributorExtractionData(),
+      description: 'Unverified copy',
+      bulletPoints: ['Bullet X'],
+      distributorCategory: 'Canine Cuisine',
+      distributorImageCandidates: [{ url: 'https://cdn.example/img/x.jpg', sourceAttemptIds: ['att-1'], sourceProviderIds: ['phillips'] }],
+    });
+    const html2 = renderPanel({ extractionData: withCopy, sourceType: 'distributor_record' });
+    expect(html2).not.toContain('Unverified copy');
+    expect(html2).not.toContain('Bullet X');
+    expect(html2).not.toContain('Canine Cuisine');
+    expect(html2).not.toContain('Image candidates');
   });
 
   it('keeps the official-page source UI unchanged (URL banner + edit control)', () => {

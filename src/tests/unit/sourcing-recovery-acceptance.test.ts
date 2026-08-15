@@ -79,9 +79,9 @@ function fixtureFetchImpl(url: string): Promise<Response> {
 }
 
 const fixtureRegistry: ConnectorRegistry = {
-  createConnector(_connectorType, configuration) {
-    const distributorId = String((configuration as { __distributorId?: unknown }).__distributorId ?? '').toLowerCase();
-    if (distributorId === 'bci' || distributorId === 'ordercloud') {
+  createConnector(_connectorType, distributorId) {
+    const did = String(distributorId ?? '').toLowerCase();
+    if (did === 'bci' || did === 'ordercloud') {
       return new BCIConnector({ fetchImpl: fixtureFetchImpl as unknown as typeof fetch });
     }
     return new PhillipsConnector({ fetchImpl: fixtureFetchImpl as unknown as typeof fetch });
@@ -411,8 +411,8 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     const conn6 = createConnection({ workspaceId, distributorId: 'phillips', connectorType: 'api', secretRef: 'FIXTURE_PHILLIPS_KEY'});
     updateConnection(conn6.id, conn6.workspaceId, { enabled: true });
     const timeoutRegistry: ConnectorRegistry = {
-      createConnector(_type, config) {
-        const did = (config as { __distributorId?: string }).__distributorId ?? '';
+      createConnector(_type, distributorId) {
+        const did = String(distributorId ?? '');
         if (did !== 'phillips') return null;
         return new PhillipsConnector({
           timeoutMs: 20,
@@ -451,8 +451,8 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
       }
     }
     const malformedRegistry: ConnectorRegistry = {
-      createConnector(_type, config) {
-        const did = (config as { __distributorId?: string }).__distributorId ?? '';
+      createConnector(_type, distributorId) {
+        const did = String(distributorId ?? '');
         if (did !== 'phillips') return null;
         return new PhillipsConnector({
           fetchImpl: (async () =>

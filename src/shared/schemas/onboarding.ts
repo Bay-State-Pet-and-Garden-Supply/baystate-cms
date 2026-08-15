@@ -221,13 +221,25 @@ export const ExtractionDataSchema = z.object({
   distributorSku: z.string().nullable().default(null),
   /** Manufacturer part number from the qualified distributor record (distributor_record sources only). */
   manufacturerPartNumber: z.string().nullable().default(null),
+  /**
+   * Amendment B (M5): explicit merchandising-depth fields from qualified
+   * distributor records. Noncanonical distributor category text — never a
+   * Category Page ID. Price/inventory stay absent by contract.
+   */
+  distributorCategory: z.string().nullable().optional().default(null),
+  casePack: z.string().nullable().optional().default(null),
+  unitOfMeasure: z.string().nullable().optional().default(null),
+  ingredients: z.string().nullable().optional().default(null),
   /** Whitelisted variant attributes from the qualified record: normalized axis → value. */
   variantAttributes: z.record(z.string(), z.string()).default(() => ({})),
   /**
-   * Dedicated distributor-record provenance (Amendment A): the sourcing
-   * generation, canonical evidence hash, sorted accepted attempt ids, sorted
-   * provider ids, and observed catalog versions that produced this
-   * materialization. Non-null exactly for `distributor_record` sources.
+   * Dedicated distributor-record provenance (Amendment A + Amendment B): the
+   * sourcing generation, canonical evidence hash, sorted accepted attempt
+   * ids, sorted provider ids, and observed catalog versions that produced
+   * this materialization. v2 (Amendment B) adds projectionVersion,
+   * extractionMethod, observation/connection identity, and full per-field +
+   * merchandising provenance. Non-null exactly for `distributor_record`
+   * sources.
    */
   distributorRecordProvenance: z
     .object({
@@ -236,6 +248,37 @@ export const ExtractionDataSchema = z.object({
       acceptedEvidenceAttemptIds: z.array(z.string()),
       providerIds: z.array(z.string()),
       catalogVersions: z.array(z.string()),
+      projectionVersion: z.string().optional(),
+      extractionMethod: z.string().optional(),
+      observedAt: z.array(z.string()).optional(),
+      connectionIds: z.array(z.string()).optional(),
+      fieldProvenance: z
+        .record(
+          z.string(),
+          z.array(
+            z.object({
+              attemptId: z.string(),
+              providerId: z.string(),
+              catalogVersion: z.string(),
+              connectionId: z.string(),
+            }),
+          ),
+        )
+        .optional(),
+      merchandisingProvenance: z
+        .record(
+          z.string(),
+          z.array(
+            z.object({
+              attemptId: z.string(),
+              providerId: z.string(),
+              catalogVersion: z.string(),
+              connectionId: z.string(),
+              values: z.array(z.string()),
+            }),
+          ),
+        )
+        .optional(),
     })
     .nullable()
     .default(null),

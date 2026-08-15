@@ -174,18 +174,15 @@ export function insertEvidenceAttempt(attempt: InsertEvidenceAttempt): EvidenceA
 
   // Milestone E: persist connector-declared variant axes when the column
   // exists (tolerant to pre-migration databases). The unique-index dedupe
-  // guard below still applies. The schema-level InsertEvidenceAttempt type
-  // does not yet carry the field (shared schema file outside this milestone's
-  // scope) — read it tolerantly via the EvidenceAttempt shape.
-  const insertWithAxes = attempt as InsertEvidenceAttempt & {
-    variantAxisDeclarations?: EvidenceAttempt['variantAxisDeclarations'];
-  };
+  // guard below still applies. `variantAxisDeclarations` is now a typed
+  // first-class field on `InsertEvidenceAttempt` (Amendment B, M2) — the
+  // former type-cast escape hatch is removed.
   const persistVariantAxes = evidenceHasVariantAxisColumn(db);
   const variantAxesJson =
     persistVariantAxes &&
-    insertWithAxes.variantAxisDeclarations &&
-    insertWithAxes.variantAxisDeclarations.length > 0
-      ? JSON.stringify(insertWithAxes.variantAxisDeclarations)
+    attempt.variantAxisDeclarations &&
+    attempt.variantAxisDeclarations.length > 0
+      ? JSON.stringify(attempt.variantAxisDeclarations)
       : null;
 
   db.query(

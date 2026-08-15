@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "providerId": "bradley",
+  "navigationOrigin": "https://www.bradleycaldwell.com",
+  "scenarios": {
+    "found": {
+      "fixtures": ["found-search.html", "found-pdp.html"],
+      "identifier": "018653299524",
+      "outcome": "found",
+      "matchedFields": [
+        "matchedIdentifier", "name", "brand", "distributorSku", "manufacturerPartNumber",
+        "weight", "size", "casePack", "packCount", "unitOfMeasure", "description",
+        "ingredients", "imageUrls", "sourceUrl"
+      ],
+      "record": {
+        "name": "E-Z HANG SCALE",
+        "brand": "KERBL",
+        "distributorSku": "001135",
+        "manufacturerPartNumber": "099917",
+        "weight": "3.1 lb",
+        "size": "UP TO 55 LB",
+        "casePack": "6",
+        "packCount": "6",
+        "unitOfMeasure": "EA",
+        "descriptionStartsWith": "For quick weight control, for economic forage control",
+        "ingredientsStartsWith": "nickel-plated",
+        "category": null,
+        "dimensions": null,
+        "features": []
+      },
+      "forbiddenAbsent": ["price", "inventory", "stock", "palletQuantity", "type", "country", "fobCode", "availability"]
+    },
+    "wrongVariant": {
+      "fixtures": ["wrong-variant-search.html", "wrong-variant-pdp.html"],
+      "identifier": "018653299520",
+      "outcome": "not_stocked:wrong_variant",
+      "note": "Real PDP (UPC 018653299524) differs from the synthetic lookup identifier; name/brand similarity must never rescue it."
+    },
+    "notFound": {
+      "fixtures": ["not-found.html"],
+      "identifier": "000000000000",
+      "outcome": "not_stocked:no_exact_match"
+    },
+    "unexpectedMarkup": {
+      "fixtures": ["unexpected-markup.html"],
+      "outcome": "source_error",
+      "code": "unexpected_markup"
+    }
+  }
+}

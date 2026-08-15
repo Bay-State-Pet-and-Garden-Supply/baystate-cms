@@ -2022,6 +2022,10 @@ describe('Default-On Sourcing schema migration (Amendment A)', () => {
     // Re-run the block: marker absent → executes; all other guards skip (the
     // item/extraction/evidence/classification shapes are already amended).
     db.exec("DELETE FROM app_meta WHERE key = 'default_on_sourcing_schema_version'");
+    // Also clear the Amendment B marker so the independent html_scraper block
+    // re-runs after this test downgrades the CHECK (otherwise the still-present
+    // marker would report drift against the pre-B shape).
+    db.exec("DELETE FROM app_meta WHERE key = 'distributor_html_scraper_schema_version'");
     expect(() => runMigrations()).not.toThrow();
 
     // Storage default is now fail-closed; the operator-controlled ENABLED row
@@ -2031,7 +2035,167 @@ describe('Default-On Sourcing schema migration (Amendment A)', () => {
     expect(enabledCol?.dflt_value).toBe('0');
     const connRow = db.query('SELECT enabled FROM distributor_connections WHERE id = ?').get('conn-on-1') as { enabled: number };
     expect(connRow.enabled).toBe(1);
+    // Amendment B: the rebuilt CHECK constraint accepts `html_scraper`.
+    const connDdl = db
+      .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'distributor_connections'")
+      .get() as { sql?: string } | undefined;
+    expect(connDdl?.sql).toContain("'html_scraper'");
     expect(db.query("SELECT value FROM app_meta WHERE key = 'default_on_sourcing_schema_version'").get()).toBeTruthy();
+  });
+
+  describe('Distributor html_scraper schema migration (Amendment B, independent marker)', () => {
+    /** Rebuild distributor_connections to the pre-Amendment-B storage shape:
+     *  old closed CHECK (no `html_scraper`) with the already-fixed fail-closed
+     *  enabled DEFAULT 0 — i.e. an installation that COMPLETED Amendment A. */
+    function downgradeConnectionsToPreB(): void {
+      db.exec('PRAGMA foreign_keys = OFF');
+      db.exec(`
+        CREATE TABLE distributor_connections_old (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id),
+          distributor_id TEXT NOT NULL REFERENCES distributors(id) ON DELETE CASCADE,
+          connector_type TEXT NOT NULL CHECK (connector_type IN ('api', 'ftp_catalog', 'csv', 'legacy_adapter')),
+          secret_ref TEXT,
+          configuration_json TEXT DEFAULT '{}',
+          authority_policy_json TEXT DEFAULT '{}',
+          enabled INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      db.exec('INSERT INTO distributor_connections_old SELECT * FROM distributor_connections');
+      db.exec('DROP TABLE distributor_connections;');
+      db.exec('ALTER TABLE distributor_connections_old RENAME TO distributor_connections;');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_workspace ON distributor_connections(workspace_id);');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_distributor ON distributor_connections(distributor_id);');
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+
+    function connDdl(): string | undefined {
+      return (db
+        .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'distributor_connections'")
+        .get() as { sql?: string } | undefined)?.sql;
+    }
+
+    function htmlScraperMarker(): { value: string } | undefined {
+      return db.query("SELECT value FROM app_meta WHERE key = 'distributor_html_scraper_schema_version'").get() as { value: string } | undefined;
+    }
+
+    it('KEY REGRESSION: a DB that already ran Amendment A still gains the html_scraper CHECK via the independent marker', () => {
+      // Simulate a completed Amendment A install: marker present, enabled
+      // default already 0 (so the Amendment A block would NOT rebuild), but
+      // the connector_type CHECK predates Amendment B.
+      downgradeConnectionsToPreB();
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('default_on_sourcing_schema_version', '1')");
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('distributor_v2_schema_version', '1')");
+      db.exec("DELETE FROM app_meta WHERE key = 'distributor_html_scraper_schema_version'");
+
+      expect(connDdl()).not.toContain('html_scraper');
+      expect(() => runMigrations()).not.toThrow();
+
+      expect(connDdl()).toContain("'html_scraper'");
+      const enabledCol = (db.query('PRAGMA table_info(distributor_connections)').all() as Array<{ name: string; dflt_value: string | null }>)
+        .find((c) => c.name === 'enabled');
+      expect(enabledCol?.dflt_value).toBe('0');
+      expect(htmlScraperMarker()?.value).toBe('1');
+
+      // Second run is a no-op: marker present, shape verified, no throw.
+      expect(() => runMigrations()).not.toThrow();
+      const rows = db.query("SELECT COUNT(*) as cnt FROM app_meta WHERE key = 'distributor_html_scraper_schema_version'").get() as { cnt: number };
+      expect(rows.cnt).toBe(1);
+    });
+
+    it('upgrade preserves rows, IDs, enabled values, secret refs, config JSON, and authority JSON', () => {
+      insertWorkspace({
+        id: 'conn-ws-b', name: 'Conn WS B', workspacePath: '/tmp/conn-ws-b', gitPath: '/tmp/conn-ws-b/.git',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+        bootstrapStatus: 'complete', baselineCommit: null,
+      });
+      db.exec("INSERT INTO distributors (id, name, status, created_at, updated_at) VALUES ('orgill', 'Orgill', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')");
+      db.query(
+        `INSERT INTO distributor_connections (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+         VALUES ('conn-b-1', 'conn-ws-b', 'orgill', 'api', 'ORGILL_KEY', '{"pageSize":25}', '{"skuAuthority":true}', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      ).run();
+
+      downgradeConnectionsToPreB();
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('default_on_sourcing_schema_version', '1')");
+      db.exec("DELETE FROM app_meta WHERE key = 'distributor_html_scraper_schema_version'");
+
+      expect(() => runMigrations()).not.toThrow();
+
+      const row = db.query(
+        'SELECT id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled FROM distributor_connections WHERE id = ?',
+      ).get('conn-b-1') as { id: string; connector_type: string; secret_ref: string; configuration_json: string; authority_policy_json: string; enabled: number };
+      expect(row).toBeTruthy();
+      expect(row.connector_type).toBe('api');
+      expect(row.secret_ref).toBe('ORGILL_KEY');
+      expect(row.configuration_json).toBe('{"pageSize":25}');
+      expect(row.authority_policy_json).toBe('{"skuAuthority":true}');
+      expect(row.enabled).toBe(1); // operator-controlled value preserved exactly
+      expect(connDdl()).toContain("'html_scraper'");
+    });
+
+    it('marker present but schema drifted throws (never silently repaired)', () => {
+      downgradeConnectionsToPreB();
+      // Marker says migrated, but the CHECK predates html_scraper → drift.
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('distributor_html_scraper_schema_version', '1')");
+      expect(() => runMigrations()).toThrow(/drift|html_scraper/);
+      expect(connDdl()).not.toContain('html_scraper');
+
+      // Restore a consistent state for later tests: drop the stray marker and
+      // let the migration rebuild the table.
+      db.exec("DELETE FROM app_meta WHERE key = 'distributor_html_scraper_schema_version'");
+      expect(() => runMigrations()).not.toThrow();
+      expect(connDdl()).toContain("'html_scraper'");
+    });
+
+    it('rebuild failure (FK violation) rolls back the table swap and leaves the marker absent', () => {
+      downgradeConnectionsToPreB();
+      db.exec("DELETE FROM app_meta WHERE key = 'distributor_html_scraper_schema_version'");
+      // Ghost connection row referencing a nonexistent workspace → the block's
+      // foreign_key_check throws inside the transaction and rolls back.
+      db.exec('PRAGMA foreign_keys = OFF');
+      db.query(
+        `INSERT INTO distributor_connections (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+         VALUES ('conn-ghost-b', 'ghost-ws-b', 'orgill', 'api', NULL, '{}', '{}', 0, '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z')`,
+      ).run();
+      db.exec('PRAGMA foreign_keys = ON');
+
+      expect(() => runMigrations()).toThrow(/foreign_key_check/);
+      // Rolled back: table keeps the pre-B CHECK, marker absent, ghost row still present.
+      expect(connDdl()).not.toContain('html_scraper');
+      expect(htmlScraperMarker()).toBeFalsy();
+      expect(db.query('SELECT id FROM distributor_connections WHERE id = ?').get('conn-ghost-b')).toBeTruthy();
+
+      // Removing the violation lets the block complete and write the marker.
+      db.query('DELETE FROM distributor_connections WHERE id = ?').run('conn-ghost-b');
+      expect(() => runMigrations()).not.toThrow();
+      expect(connDdl()).toContain("'html_scraper'");
+      expect(htmlScraperMarker()?.value).toBe('1');
+    });
+
+    it('fresh schema accepts html_scraper and rejects unknown connector types', () => {
+      insertWorkspace({
+        id: 'conn-ws-fresh', name: 'Conn WS Fresh', workspacePath: '/tmp/conn-ws-fresh', gitPath: '/tmp/conn-ws-fresh/.git',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+        bootstrapStatus: 'complete', baselineCommit: null,
+      });
+      db.exec("INSERT INTO distributors (id, name, status, created_at, updated_at) VALUES ('bradley', 'Bradley Caldwell', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')");
+      db.query(
+        `INSERT INTO distributor_connections (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+         VALUES ('conn-fresh-1', 'conn-ws-fresh', 'bradley', 'html_scraper', NULL, '{}', '{}', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      ).run();
+      expect(db.query('SELECT connector_type FROM distributor_connections WHERE id = ?').get('conn-fresh-1')).toBeTruthy();
+
+      db.exec('PRAGMA foreign_keys = OFF');
+      expect(() =>
+        db.query(
+          `INSERT INTO distributor_connections (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+           VALUES ('conn-bad-1', 'conn-ws-fresh', 'bradley', 'browser_scraper', NULL, '{}', '{}', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        ).run(),
+      ).toThrow(/CHECK/);
+      db.exec('PRAGMA foreign_keys = ON');
+    });
   });
 
   it('fresh and upgraded databases converge to the same final schema definitions', () => {

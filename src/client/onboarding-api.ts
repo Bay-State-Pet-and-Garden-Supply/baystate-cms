@@ -1147,9 +1147,11 @@ export interface DistributorConnectionView {
   id: string;
   distributorId: string;
   distributorName: string;
-  connectorType: 'api' | 'ftp_catalog' | 'csv' | 'legacy_adapter';
+  connectorType: 'api' | 'ftp_catalog' | 'csv' | 'html_scraper' | 'legacy_adapter';
   enabled: boolean;
   secretConfigured: boolean;
+  /** Amendment B (M2): false for public storefront scrapers — no secret needed. */
+  secretRequired: boolean;
   configuration: Record<string, unknown>;
   authorityPolicy: Record<string, unknown>;
   createdAt: string;

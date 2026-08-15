@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "providerId": "pet_food_experts",
+  "connectorType": "html_scraper",
+  "navigationOrigin": "https://orders.petfoodexperts.com",
+  "assetHosts": [
+    "orders.petfoodexperts.com",
+    "cdn.insitecloud.net"
+  ],
+  "captureDate": "2026-08-15",
+  "baystateSourceRevision": "2a5c9a5f55644a50bee3f23e9d3f819eb10639f0",
+  "notes": "Auth-required captured from the live rendered SignIn (React SPA) 2026-08-15; selectors #userName/#password/[data-test-selector=signIn_submit] verified live. Synthetic fixtures model the data-test-selector markup dialect; sanitized: scripts/styles/analytics/form values removed, no credentials.",
+  "files": [
+    {
+      "file": "auth-required.html",
+      "scenario": "auth-required",
+      "sourceUrl": "https://orders.petfoodexperts.com/SignIn (rendered)",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "4c1dc8ec48c563367d4e53d44c797529aa568f2651d4caf8298939fed5bbae42",
+      "containsCredentials": false,
+      "testIdentifier": "33011808",
+      "expectedName": "Wellness CORE Grain Free",
+      "expectedBrand": "Wellness"
+    },
+    {
+      "file": "found-search.html",
+      "scenario": "found-search",
+      "sourceUrl": "https://orders.petfoodexperts.com/Search?query=33011808",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "f0973013092a1b0f5c253a1ad7a7363781c71c420c557847c5f3ff1f96323995",
+      "containsCredentials": false,
+      "testIdentifier": "33011808",
+      "expectedName": "Wellness CORE Grain Free",
+      "expectedBrand": "Wellness"
+    },
+    {
+      "file": "found-pdp.html",
+      "scenario": "found-pdp",
+      "sourceUrl": "https://orders.petfoodexperts.com/product/wellness-core-grain-free",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "54f7be8ca761cb4ceda71ac0276db04e985c29aab39b82caf0d62221be0cf295",
+      "containsCredentials": false,
+      "testIdentifier": "33011808",
+      "expectedName": "Wellness CORE Grain Free",
+      "expectedBrand": "Wellness"
+    },
+    {
+      "file": "not-found.html",
+      "scenario": "not-found",
+      "sourceUrl": "https://orders.petfoodexperts.com/Search?query=000000000000",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "92bf659b19abc66e36646eef7e7d3c90514ce8087778ffd3643ba7a58411ffde",
+      "containsCredentials": false,
+      "testIdentifier": "000000000000"
+    },
+    {
+      "file": "wrong-variant-pdp.html",
+      "scenario": "wrong-variant-pdp",
+      "sourceUrl": "https://orders.petfoodexperts.com/product/wellness-core-9",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "3a3742c74dea8c0634193aa42eb4648c6aa38abcbac45139ed691b71698805b8",
+      "containsCredentials": false,
+      "testIdentifier": "33011808",
+      "expectedName": "Wellness CORE Grain Free",
+      "expectedBrand": "Wellness"
+    },
+    {
+      "file": "auth-failed.html",
+      "scenario": "auth-failed",
+      "sourceUrl": "https://orders.petfoodexperts.com/SignIn",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "1c1306d1ba1693682db199e90cb19a7b28e70e23ce2fa9f513d708b750b43efa",
+      "containsCredentials": false
+    },
+    {
+      "file": "unexpected-markup.html",
+      "scenario": "unexpected-markup",
+      "sourceUrl": "https://orders.petfoodexperts.com/Search?query=33011808",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "33f0eb17aa0a213f7d5704e8952eb42a8b1bfd0593e8f75d0f91fd0566317a1a",
+      "containsCredentials": false,
+      "testIdentifier": "33011808"
+    }
+  ]
+}

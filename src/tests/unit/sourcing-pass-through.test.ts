@@ -336,7 +336,7 @@ describe('Sourcing worker pass-through (ADR 0014 flag-gated leg)', () => {
 
     const rows = getDb().query('SELECT * FROM onboarding_extractions WHERE item_id = ?').all(item.id) as Array<Record<string, unknown>>;
     expect(rows.length).toBe(1);
-    expect(rows[0].extraction_method).toBe('distributor_record_v1');
+    expect(rows[0].extraction_method).toBe('distributor_record_v2');
     expect(rows[0].source_type).toBe('distributor_record');
     expect(rows[0].source_url).toBeNull();
     expect(rows[0].sourcing_generation_id).toBe(gen.id);

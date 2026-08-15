@@ -6,7 +6,10 @@ import { z } from 'zod';
  * Recovered from the multi-distributor "V2" work (stash@{1} / dc01ea6) and
  * adapted per ADR 0014:
  *
- * - `connectorType` is CLOSED to `api | ftp_catalog | csv | legacy_adapter`.
+ * - `connectorType` is CLOSED to `api | ftp_catalog | csv | html_scraper | legacy_adapter`
+ *   (`html_scraper` added by ADR 0014 Amendment B: Distributor Scraper
+ *   connectors that extract catalog data from web storefronts via
+ *   authenticated sessions).
  * - Raw credentials are forbidden anywhere in connection configuration
  *   (recursive, case-insensitive key AND value/URL rejection); only
  *   `secretRef` references a server-side secret.
@@ -141,7 +144,7 @@ export const DistributorConnectionConfigurationSchema = z
     assertNoCredentials(data, ctx);
   });
 
-export const DistributorConnectorTypeEnum = z.enum(['api', 'ftp_catalog', 'csv', 'legacy_adapter']);
+export const DistributorConnectorTypeEnum = z.enum(['api', 'ftp_catalog', 'csv', 'html_scraper', 'legacy_adapter']);
 export type DistributorConnectorType = z.infer<typeof DistributorConnectorTypeEnum>;
 
 /**

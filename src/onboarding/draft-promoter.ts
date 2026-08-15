@@ -26,7 +26,8 @@ import {
 } from '../db/repositories/onboarding-evidence-repo';
 import { findDistributorRecordExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { listResolvedConflictResolutions } from '../db/repositories/onboarding-conflict-repo';
-import { buildDistributorRecordProjection } from './sourcing/distributor-record-projection';
+import { buildDistributorRecordProjection, buildDistributorRecordProjectionV1 } from './sourcing/distributor-record-projection';
+import { reconstructDistributorExtractionPayload } from './sourcing/distributor-record-materializer';
 import { SourcingDecisionV2Schema } from '../shared/schemas/onboarding';
 import { getCohortRunById,
   listDependenciesForProposal,
@@ -369,13 +370,18 @@ function checkDistributorPromotionProvenance(
 
   // Recompute the canonical projection from the SAME inputs the decision was
   // made from (persisted operator resolutions included) and compare hashes.
+  // Amendment B (M5b-2) authority dispatch: the DEFAULT authority is the v2
+  // merchandising-depth projection; a decision whose hash matches only the
+  // pre-deployment v1 authority is verified with the v1 authority (historical
+  // v1 rows must stay promotable). Neither matching → evidence changed since
+  // review → fail closed.
   const attempts = getEvidenceAttemptsByItemAndGeneration(item.id, generation.id);
   const declaredVariantAxes = Array.from(
     new Set(
       attempts.flatMap((a) => (a.variantAxisDeclarations ?? []).map((d) => d.normalizedAxis)),
     ),
   );
-  const projection = buildDistributorRecordProjection({
+  const projectionInput = {
     itemId: item.id,
     itemUpc: item.upc,
     sourcingGenerationId: generation.id,
@@ -383,12 +389,44 @@ function checkDistributorPromotionProvenance(
     acceptedAttemptIds: parsedDecision.acceptedEvidenceAttemptIds,
     declaredVariantAxes,
     resolutions: listResolvedConflictResolutions(item.id),
-  });
-  if (!projection.qualified || projection.evidenceHash !== parsedDecision.evidenceHash) {
+  };
+  const projectionV2 = buildDistributorRecordProjection(projectionInput);
+  let expectedMethod: string | null = null;
+  let expectedPayload: Record<string, unknown> | null = null;
+  if (projectionV2.qualified && projectionV2.evidenceHash === parsedDecision.evidenceHash) {
+    expectedMethod = 'distributor_record_v2';
+    expectedPayload = reconstructDistributorExtractionPayload(projectionV2.projection, parsedDecision.evidenceHash);
+  } else {
+    const projectionV1 = buildDistributorRecordProjectionV1(projectionInput);
+    if (projectionV1.qualified && projectionV1.evidenceHash === parsedDecision.evidenceHash) {
+      expectedMethod = 'distributor_record_v1';
+      expectedPayload = reconstructDistributorExtractionPayload(projectionV1.projection, parsedDecision.evidenceHash);
+    }
+  }
+  if (expectedMethod === null || expectedPayload === null) {
     return { ok: false, reason: 'Distributor promotion blocked: evidence hash mismatch (evidence changed since review)' };
   }
   if (extraction.evidence_hash !== parsedDecision.evidenceHash) {
     return { ok: false, reason: 'Distributor promotion blocked: extraction hash mismatch (materialization tampered)' };
+  }
+  // The durable extraction row must carry the EXACT method the decision's
+  // authority implies — a v2 decision materialized as v1 (or vice versa) is a
+  // tampered/foreign row and can never draft.
+  if (extraction.extraction_method !== expectedMethod) {
+    return { ok: false, reason: 'Distributor promotion blocked: extraction method mismatch (materialization tampered)' };
+  }
+  // Deep-compare the RECONSTRUCTED canonical payload with BOTH the durable
+  // row's extraction JSON and the item's live extraction payload. The
+  // materializer writes both identically and distributor payload edits are
+  // blocked at the API, so any divergence is a post-materialization tamper
+  // (description, image candidate, provenance, or arbitrary field) and blocks
+  // drafting fail-closed.
+  const expectedPayloadJson = JSON.stringify(expectedPayload);
+  if (JSON.stringify(parseStoredExtractionData(extraction.extraction_data_json)) !== expectedPayloadJson) {
+    return { ok: false, reason: 'Distributor promotion blocked: materialization payload diverged (row tampered)' };
+  }
+  if (item.extractionData == null || JSON.stringify(item.extractionData) !== expectedPayloadJson) {
+    return { ok: false, reason: 'Distributor promotion blocked: materialization payload diverged (item payload tampered)' };
   }
 
   return { ok: true };
@@ -410,6 +448,17 @@ function parseJsonStringArray(raw: string | null): string[] {
     return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
   } catch {
     return [];
+  }
+}
+
+/** Parse stored extraction JSON back for comparison; malformed → {}. */
+function parseStoredExtractionData(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
   }
 }
 
@@ -513,10 +562,13 @@ export async function promoteItems(
     // may reach the downloader. PI-6 commerceApproved assets are the ONLY
     // distributor image path (none exist at promotion time today).
     //
-    // Hard boundary (Milestone E review): a distributor-source item NEVER
-    // passes image args to the downloader — even if its payload somehow
-    // acquired a URL — because the distributor payload is identity-only and
-    // images may not enter commerce without PI-6 approval.
+    // Hard boundary (Milestone E + Amendment B): a distributor-source item
+    // NEVER passes image args to the downloader — even if its payload somehow
+    // acquired a URL — because distributor image candidates (v1: none by
+    // contract; v2: `distributorImageCandidates`, display-only) may not enter
+    // commerce without PI-6 approval. The deep-compare gate in
+    // checkDistributorPromotionProvenance additionally rejects any payload
+    // whose image fields diverged from the reconstructed canonical payload.
     const isDistributorSource = item.sourceType === 'distributor_record';
 
     try {
@@ -563,13 +615,39 @@ export async function promoteItems(
 
       // Determine if product already exists
       const existingApproved = readProductFile(workspacePath, item.upc);
+
+      // Amendment B (M5b-2): distributor-source drafts never receive
+      // extraction-sourced price or unverified v1 copy (see the deep-compare
+      // gate and the draft-description/price guards below).
+      const isDistributorSource = item.sourceType === 'distributor_record';
       
       const now = new Date().toISOString();
       
       const finalTitle = item.curationData?.curatedTitle || extractionData.title || item.name;
 
-      // Construct core product details with price fallback and cleanup
-      const rawPrice = item.price || extractionData.price || null;
+      // Amendment B (M5b-2): verified v2 merchandising authority for the
+      // draft description. The provenance gate above has already deep-compared
+      // the item payload + durable row with the reconstructed canonical v1/v2
+      // payload, so a verified distributor description here is authentic.
+      // Preference: reviewed Curation description, then the verified
+      // extraction description (official-page, or verified v2 distributor);
+      // v1 / unverified distributor copy stays null (ADR 0014 — never v1
+      // merchandising authority).
+      const verifiedV2Distributor =
+        isDistributorSource &&
+        (extractionData as { distributorRecordProvenance?: { extractionMethod?: string | null } | null } | null)
+          ?.distributorRecordProvenance?.extractionMethod === 'distributor_record_v2';
+      const draftDescription =
+        item.curationData?.curatedDescription ||
+        (isDistributorSource && !verifiedV2Distributor ? null : extractionData.description) ||
+        null;
+
+      // Construct core product details with price fallback and cleanup.
+      // Price comes ONLY from spreadsheet/manual authority for distributor
+      // sources — extraction price (null by contract, present only in a
+      // tampered payload that the deep-compare gate already rejects) can
+      // never reach a distributor draft.
+      const rawPrice = item.price || (isDistributorSource ? null : extractionData.price) || null;
       const cleanPrice = rawPrice ? rawPrice.replace(/[$\s,]/g, '') : null;
 
       const processed = processedImagesMap.get(item.id);
@@ -580,7 +658,7 @@ export async function promoteItems(
         name: finalTitle,
         price: cleanPrice,
         salePrice: null,
-        description: extractionData.description || null,
+        description: draftDescription,
         inventory: {
           quantityOnHand: item.quantity !== null ? item.quantity : null,
           lowStockThreshold: null,

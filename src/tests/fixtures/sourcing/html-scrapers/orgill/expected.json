@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "providerId": "orgill",
+  "navigationOrigin": "https://www.orgill.com",
+  "scenarios": {
+    "found": {
+      "fixtures": ["found-search.html", "found-pdp.html"],
+      "identifier": "755625321923",
+      "outcome": "found",
+      "matchedFields": [
+        "matchedIdentifier", "name", "brand", "distributorSku", "manufacturerPartNumber",
+        "weight", "dimensions", "casePack", "packCount", "unitOfMeasure", "description",
+        "features", "category", "imageUrls", "sourceUrl"
+      ],
+      "record": {
+        "name": "Landscapers Select 34609 PCL-P Shovel, 16 ga, Hardwood Handle, 45 in L Handle",
+        "brand": "LANDSCAPERS SELECT",
+        "distributorSku": "204711",
+        "manufacturerPartNumber": "34609",
+        "weight": "20 lb",
+        "dimensions": "45 in L",
+        "casePack": "4",
+        "packCount": "4",
+        "unitOfMeasure": "EA",
+        "descriptionStartsWith": "Professional-grade shovel",
+        "category": "Lawn & Garden",
+        "features": ["16 gauge steel blade", "Hardwood handle"],
+        "imageUrlPrefix": "https://www.orgill.com/images/products/"
+      },
+      "forbiddenAbsent": ["price", "inventory", "stock", "material", "npkRatio", "palletQuantity", "availability"]
+    },
+    "wrongVariant": {
+      "fixtures": ["found-search.html", "wrong-variant-pdp.html"],
+      "identifier": "755625321924",
+      "outcome": "not_stocked:wrong_variant",
+      "note": "PDP carries UPC 755625321924 but the lookup identifier is 755625321923; identical name/brand must never rescue it."
+    },
+    "notFound": {
+      "fixtures": ["not-found.html"],
+      "identifier": "000000000000",
+      "outcome": "not_stocked:no_exact_match"
+    },
+    "authRequired": {
+      "fixtures": ["auth-required.html"],
+      "identifier": "755625321923",
+      "outcome": "source_error:auth_required"
+    },
+    "authRequiredAlt": {
+      "fixtures": ["auth-required-alt.html"],
+      "identifier": "755625321923",
+      "outcome": "source_error:auth_required"
+    },
+    "unexpectedMarkup": {
+      "fixtures": ["unexpected-markup.html"],
+      "outcome": "source_error",
+      "code": "unexpected_markup"
+    }
+  }
+}

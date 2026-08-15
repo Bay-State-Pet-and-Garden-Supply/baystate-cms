@@ -18,7 +18,7 @@ import {
   getPreferredDistributorOrder,
   deleteBrandAdvisoryProfile,
 } from '../../db/repositories/distributor-repo';
-import { DistributorConnectionSchema, InsertDistributorConnectionSchema } from '../../shared/schemas/distributor';
+import { DistributorConnectionSchema, InsertDistributorConnectionSchema, DistributorConnectorTypeEnum } from '../../shared/schemas/distributor';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import {
@@ -114,6 +114,41 @@ describe('Multi-Distributor V2 Entity & Repository Tests', () => {
       updatedAt: new Date().toISOString(),
     });
     expect(invalidConfig.success).toBe(false);
+  });
+
+  test('html_scraper connections create disabled with empty fixed-code configuration; raw credentials still rejected', () => {
+    const dist = createDistributor({ id: 'bradley', name: 'Bradley Caldwell', status: 'active' });
+    const conn = createConnection({
+      workspaceId: 'w1',
+      distributorId: dist.id,
+      connectorType: 'html_scraper',
+      secretRef: null, // public storefront: no secret required (M2 resolves this)
+      configuration: {},
+    });
+
+    expect(conn.connectorType).toBe('html_scraper');
+    expect(conn.enabled).toBe(false); // Amendment A: create is always disabled
+    expect(conn.secretRef).toBeNull();
+
+    // Amendment B: the closed schema accepts html_scraper but never
+    // selectors/login URLs/origins/credentials in configuration.
+    expect(DistributorConnectorTypeEnum.safeParse('html_scraper').success).toBe(true);
+    expect(() =>
+      createConnection({
+        workspaceId: 'w1',
+        distributorId: dist.id,
+        connectorType: 'html_scraper',
+        configuration: { password: 'raw-secret-password-123' },
+      }),
+    ).toThrow(/credential|forbidden/i);
+    expect(() =>
+      createConnection({
+        workspaceId: 'w1',
+        distributorId: dist.id,
+        connectorType: 'html_scraper',
+        configuration: { authorization: 'Bearer raw-token-abc' },
+      }),
+    ).toThrow(/credential|forbidden/i);
   });
 
   test('createConnection rejects credential-bearing values and unknown connector types', () => {

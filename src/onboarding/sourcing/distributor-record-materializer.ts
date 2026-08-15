@@ -16,8 +16,12 @@ import {
 } from '../../db/repositories/onboarding-extraction-repo';
 import {
   buildDistributorRecordProjection,
+  buildDistributorRecordProjectionV1,
+  PROJECTION_VERSION,
+  PROJECTION_VERSION_V2,
   type SourcingProjectionReasonCode,
   type DistributorRecordProjection,
+  type DistributorRecordProjectionV2,
 } from './distributor-record-projection';
 import { normalizeGtin } from './contracts';
 import { SourcingDecisionV2Schema } from '../../shared/schemas/onboarding';
@@ -64,6 +68,10 @@ export const DISTRIBUTOR_MATERIALIZATION_ERROR_CODES = {
   invalid_attempt: 'invalid_attempt',
   open_conflict: 'open_conflict',
   hash_mismatch: 'hash_mismatch',
+  /** Amendment B (M5): a pre-deployment v1 decision cannot silently become a v2 materialization. */
+  projection_version_mismatch: 'projection_version_mismatch',
+  /** Amendment B (M5): an existing extraction row carries an unknown/absent method. */
+  unknown_extraction_method: 'unknown_extraction_method',
   already_completed: 'already_completed',
   stored_payload_diverged: 'stored_payload_diverged',
 } as const;
@@ -91,18 +99,18 @@ function sameSet(a: string[], b: string[]): boolean {
 }
 
 /**
- * Build the identity-only ExtractionData (Milestone D field map): title,
- * noncanonical brand, weight, exact identifiers (distributor SKU / MPN),
- * whitelisted variant attributes, and the dedicated distributor-record
- * provenance object. Description/bullets/price/images stay empty; URL stays
- * null; confidence is non-authoritative (0); OCR fields are null/disabled.
- *
- * PURE and DETERMINISTIC: given the same projection + decision hash, this
- * always returns the same payload. The fresh-insert path and the idempotent
- * re-validation path both use it, so a stored payload can be trusted only
- * when it deep-equals a freshly recomputed one.
+ * Amendment B (M5): recognized distributor-record extraction methods.
  */
-function buildDistributorExtractionData(
+export const DISTRIBUTOR_RECORD_EXTRACTION_METHODS = ['distributor_record_v1', 'distributor_record_v2'] as const;
+export type DistributorRecordExtractionMethod = (typeof DISTRIBUTOR_RECORD_EXTRACTION_METHODS)[number];
+
+/**
+ * Build the identity-only ExtractionData v1 (Milestone D field map).
+ * PURE and DETERMINISTIC — byte-for-byte the pre-Amendment-B payload (used
+ * to verify existing v1 rows). Exported for the v1 idempotent-verification
+ * path and tests.
+ */
+export function buildDistributorExtractionDataV1(
   p: DistributorRecordProjection,
   evidenceHash: string,
 ): Record<string, unknown> {
@@ -152,6 +160,111 @@ function buildDistributorExtractionData(
     ocrOutcome: null,
     customFields: {},
   };
+}
+
+/**
+ * Build the merchandising-depth ExtractionData v2 (Amendment B, M5). Adds
+ * description, features (bulletPoints), explicit noncanonical category,
+ * dimensions, case pack, unit of measure, ingredients, and display-only
+ * image candidates with attempt/provider provenance. Price, commerce
+ * images, approvals, OCR, URL, and arbitrary fields stay absent/null.
+ * PURE and DETERMINISTIC: the fresh-insert path and the idempotent
+ * re-validation path both use it, so a stored payload can be trusted only
+ * when it deep-equals a freshly recomputed one.
+ */
+function buildDistributorExtractionDataV2(
+  p: DistributorRecordProjectionV2,
+  evidenceHash: string,
+): Record<string, unknown> {  const imageEntries = p.merchandisingProvenance['imageUrls'] ?? [];
+  const distributorImageCandidates = p.imageUrls.map((url) => {
+    const contributing = imageEntries.filter((e) => e.values.includes(url));
+    return {
+      url,
+      sourceAttemptIds: Array.from(new Set(contributing.map((e) => e.attemptId))).sort(),
+      // Schema-correct key (DistributorImageCandidateSchema): every candidate
+      // carries both source attempt IDs and source provider IDs.
+      sourceProviderIds: Array.from(new Set(contributing.map((e) => e.providerId))).sort(),
+    };
+  });
+  return {
+    title: p.name,
+    brand: p.brand,
+    description: p.description,
+    bulletPoints: p.features,
+    primaryImage: null,
+    additionalImages: [],
+    price: null,
+    weight: p.weight,
+    dimensions: p.dimensions,
+    seoFileName: null,
+    searchKeywords: null,
+    sourceType: 'distributor_record',
+    distributorProviderId: p.provenance.providerIds[0] ?? null,
+    distributorEvidenceAttemptIds: p.provenance.acceptedAttemptIds,
+    distributorProviderIds: p.provenance.providerIds,
+    distributorSku: p.distributorSku,
+    manufacturerPartNumber: p.manufacturerPartNumber,
+    distributorCategory: p.category,
+    casePack: p.casePack,
+    unitOfMeasure: p.unitOfMeasure,
+    ingredients: p.ingredients,
+    distributorImageCandidates,
+    distributorImageApprovals: [],
+    variantAttributes: {
+      ...(p.size !== null ? { size: p.size } : {}),
+      ...(p.count !== null ? { count: p.count } : {}),
+      ...(p.packCount !== null ? { packCount: p.packCount } : {}),
+      ...(p.flavor !== null ? { flavor: p.flavor } : {}),
+      ...(p.formula !== null ? { formula: p.formula } : {}),
+      ...p.customVariantAxes,
+    },
+    distributorRecordProvenance: {
+      sourcingGenerationId: p.provenance.sourcingGenerationId,
+      evidenceHash,
+      projectionVersion: p.version,
+      extractionMethod: 'distributor_record_v2',
+      acceptedEvidenceAttemptIds: p.provenance.acceptedAttemptIds,
+      providerIds: p.provenance.providerIds,
+      catalogVersions: p.provenance.catalogVersions,
+      observedAt: p.provenance.observedAt,
+      connectionIds: p.provenance.connectionIds,
+      fieldProvenance: p.provenance.fieldProvenance,
+      merchandisingProvenance: p.merchandisingProvenance,
+    },
+    sourceUrl: null,
+    confidence: 0,
+    fieldProvenance: Object.fromEntries(
+      Object.entries(p.provenance.fieldProvenance).map(([field, entries]) => [
+        field,
+        entries[0]?.providerId ?? null,
+      ]),
+    ),
+    packagingTitle: null,
+    packagingOcrData: null,
+    ocrOutcome: null,
+    customFields: {},
+  };
+}
+
+/**
+ * Reconstruct the canonical distributor-record extraction payload for a
+ * qualified projection + decision evidence hash (Amendment B, M5b-2).
+ * Dispatches on the projection version: v2 merchandising-depth or v1
+ * identity-only. Returns null for an unrecognized projection version so
+ * promotion/readiness callers fail closed — a payload is never reconstructed
+ * for an authority this module does not own.
+ */
+export function reconstructDistributorExtractionPayload(
+  projection: DistributorRecordProjection | DistributorRecordProjectionV2,
+  evidenceHash: string,
+): Record<string, unknown> | null {
+  if (projection.version === PROJECTION_VERSION_V2) {
+    return buildDistributorExtractionDataV2(projection as DistributorRecordProjectionV2, evidenceHash);
+  }
+  if (projection.version === PROJECTION_VERSION) {
+    return buildDistributorExtractionDataV1(projection as DistributorRecordProjection, evidenceHash);
+  }
+  return null;
 }
 
 /**
@@ -293,7 +406,7 @@ export function materializeDistributorRecordExtraction(
         attempts.flatMap((a) => (a.variantAxisDeclarations ?? []).map((d) => d.normalizedAxis)),
       ),
     );
-    const projection = buildDistributorRecordProjection({
+    const projectionInput = {
       itemId,
       itemUpc: item.upc,
       sourcingGenerationId: generation.id,
@@ -301,21 +414,26 @@ export function materializeDistributorRecordExtraction(
       acceptedAttemptIds: decision.acceptedEvidenceAttemptIds,
       declaredVariantAxes,
       resolutions: listResolvedConflictResolutions(itemId),
-    });
-    if (!projection.qualified) {
+    };
+
+    // Amendment B (M5) authority dispatch: the DEFAULT authority is the v2
+    // merchandising-depth projection. A decision whose hash was computed by
+    // the pre-deployment v1 authority must NEVER silently become a v2
+    // materialization (projection_version_mismatch — an explicit new
+    // sourcing generation is required). Qualification logic is shared, so
+    // both authorities qualify on exactly the same inputs; only the hash
+    // (version + merchandising fields) differs.
+    const projectionV2 = buildDistributorRecordProjection(projectionInput);
+    if (!projectionV2.qualified) {
       return {
         ok: false as const,
         code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.hash_mismatch,
-        reasonCodes: projection.reasonCodes,
+        reasonCodes: projectionV2.reasonCodes,
       };
     }
-    if (projection.evidenceHash !== decision.evidenceHash) {
-      return {
-        ok: false as const,
-        code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.hash_mismatch,
-        reasonCodes: [],
-      };
-    }
+    const v2HashMatches = projectionV2.evidenceHash === decision.evidenceHash;
+    const projectionV1 = buildDistributorRecordProjectionV1(projectionInput);
+    const v1HashMatches = projectionV1.qualified && projectionV1.evidenceHash === decision.evidenceHash;
 
     // Idempotent retry: if ANY durable distributor-record extraction row
     // exists for this item, it must EXACTLY match the recomputed/decision
@@ -333,9 +451,28 @@ export function materializeDistributorRecordExtraction(
       // pure). A diverged payload means the row was altered outside the
       // materializer (e.g. a generic item-edit route) and must NEVER be
       // restored — fail closed with no restore, no completion, no partial
-      // write.
+      // write. Dispatch by the EXISTING row's method: v2 rows re-verify with
+      // the v2 authority, v1 rows with the v1 authority; an unknown/missing
+      // method fails closed (unknown_extraction_method).
       const storedData = parseStoredExtractionData(existing.extraction_data_json);
-      const expectedData = buildDistributorExtractionData(projection.projection, decision.evidenceHash);
+      let expectedData: Record<string, unknown>;
+      if (existing.extraction_method === 'distributor_record_v2') {
+        if (!v2HashMatches) {
+          return { ok: false as const, code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.hash_mismatch, reasonCodes: [] };
+        }
+        expectedData = buildDistributorExtractionDataV2(projectionV2.projection, decision.evidenceHash);
+      } else if (existing.extraction_method === 'distributor_record_v1') {
+        if (!projectionV1.qualified || !v1HashMatches) {
+          return { ok: false as const, code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.hash_mismatch, reasonCodes: [] };
+        }
+        expectedData = buildDistributorExtractionDataV1(projectionV1.projection, decision.evidenceHash);
+      } else {
+        return {
+          ok: false as const,
+          code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.unknown_extraction_method,
+          reasonCodes: [],
+        };
+      }
       // The durable ROW's provenance columns are part of the shared
       // row/item/decision/projection invariant and must ALSO equal the
       // recomputed/decision values: source type, null URL, exact current
@@ -370,9 +507,29 @@ export function materializeDistributorRecordExtraction(
       };
     }
 
-    // Materialize the identity-only ExtractionData from the canonical
-    // projection (same deterministic builder used by the idempotent path).
-    const extractionData = buildDistributorExtractionData(projection.projection, decision.evidenceHash);
+    // Fresh materialization: ONLY v2 decisions materialize. A pre-deployment
+    // pending decision that matches only the v1 authority fails closed with
+    // projection_version_mismatch (an explicit new sourcing generation is
+    // required — merchandising is never silently added to a v1 decision).
+    if (!v2HashMatches) {
+      if (v1HashMatches) {
+        return {
+          ok: false as const,
+          code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.projection_version_mismatch,
+          reasonCodes: [],
+        };
+      }
+      return {
+        ok: false as const,
+        code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.hash_mismatch,
+        reasonCodes: [],
+      };
+    }
+
+    // Materialize the merchandising-depth ExtractionData v2 from the
+    // canonical projection (same deterministic builder used by the
+    // idempotent path).
+    const extractionData = buildDistributorExtractionDataV2(projectionV2.projection, decision.evidenceHash);
     const extractionDataJson = JSON.stringify(extractionData);
     const now = new Date().toISOString();
 
@@ -381,12 +538,12 @@ export function materializeDistributorRecordExtraction(
       sourceType: 'distributor_record',
       sourceUrl: null,
       extractionDataJson,
-      extractionMethod: 'distributor_record_v1',
+      extractionMethod: 'distributor_record_v2',
       confidence: 0,
       imagesJson: null,
-      rawStructuredDataJson: JSON.stringify(extractionData.fieldProvenance),
+      rawStructuredDataJson: JSON.stringify(extractionData.distributorRecordProvenance),
       sourcingGenerationId: generation.id,
-      acceptedEvidenceAttemptIds: projection.projection.provenance.acceptedAttemptIds,
+      acceptedEvidenceAttemptIds: projectionV2.projection.provenance.acceptedAttemptIds,
       evidenceHash: decision.evidenceHash,
     });
 

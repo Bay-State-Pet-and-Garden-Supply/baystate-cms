@@ -1932,8 +1932,15 @@ describe('Milestone E — promotion image boundary (BLOCKER #1 closure)', () => 
 });
 
 describe('Milestone E — distributor promotion provenance gate (computePromotionGate)', () => {
-  /** Build a fully qualified distributor item at promotion/pending with a durable materialized extraction row. */
-  function seedQualifiedDistributorItem(): { item: { id: string; upc: string }; decision: SourcingDecisionV2 } {
+  /**
+   * Build a fully qualified distributor item at promotion/pending with a
+   * durable materialized extraction row. Optional `merchandising` evidence
+   * (description/features/category keys in the identity JSON) makes the v2
+   * materialization merchandising-depth (Amendment B).
+   */
+  function seedQualifiedDistributorItem(options: {
+    merchandising?: { description?: string; features?: string[]; category?: string };
+  } = {}): { item: { id: string; upc: string }; decision: SourcingDecisionV2 } {
     const sku = '200000000002';
     const batch = createBatch({ workspaceId: wsId, name: 'ME Distributor Gate', fileName: 'me-dist.xlsx', totalItems: 1 });
     const [item] = insertItems(
@@ -1948,6 +1955,15 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     const dist = createDistributor({ id: distId, name: 'Phillips', status: 'active' });
     void dist;
     const conn = createConnection({ workspaceId: wsId, distributorId: distId, connectorType: 'api' });
+    const identityJson = {
+      upc: sku,
+      name: 'Dist Product 5lb',
+      brand: 'Dist Brand',
+      weight: '5 lb',
+      ...(options.merchandising?.description ? { description: options.merchandising.description } : {}),
+      ...(options.merchandising?.features ? { features: options.merchandising.features } : {}),
+      ...(options.merchandising?.category ? { category: options.merchandising.category } : {}),
+    };
     const attempt = insertEvidenceAttempt({
       itemId: item.id,
       providerId: 'phillips',
@@ -1957,7 +1973,7 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
       confidence: 0.9,
       evidenceUrl: null,
       matchedFields: ['upc', 'name'],
-      identityJson: JSON.stringify({ upc: sku, name: 'Dist Product 5lb', brand: 'Dist Brand', weight: '5 lb' }),
+      identityJson: JSON.stringify(identityJson),
       warningsJson: null,
       errorCode: null,
       errorMessage: null,
@@ -1994,30 +2010,15 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     };
     const routed = completeSourcingWithDecision(item.id, decision, 'extraction');
     if (!routed.ok) throw new Error(`routing failed: ${routed.reason}`);
-    // Claim + materialize (the durable distributor extraction row + payload).
+    // Claim + materialize (the durable distributor extraction row + item
+    // payload — the canonical v2 payload the deep-compare gate re-verifies).
     updateItemStageStatus(item.id, 'in_progress');
     const materialized = materializeDistributorRecordExtraction(item.id, wsId);
     if (!materialized.ok) throw new Error(`materialization failed: ${materialized.code}`);
     // Advance to promotion/pending with curation data + gate-ready proposals.
-    const extractionData = ExtractionDataSchema.parse({
-      title: 'Dist Product',
-      brand: 'Dist Brand',
-      description: null,
-      bulletPoints: [],
-      primaryImage: null,
-      additionalImages: [],
-      price: null,
-      weight: '5 lb',
-      dimensions: null,
-      seoFileName: null,
-      searchKeywords: null,
-      packagingTitle: null,
-      packagingOcrData: null,
-      customFields: {},
-      sourceUrl: null,
-      confidence: 0,
-      fieldProvenance: {},
-    });
+    // The materialized v2 payload is KEPT as-is (Amendment B M5b-2): the
+    // deep-compare gate requires the item payload to equal the reconstructed
+    // canonical payload, so an overwrite here would count as a tamper.
     const curationData = {
       curatedTitle: 'Dist Product',
       titleSource: 'web',
@@ -2034,10 +2035,10 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
       [now, now],
     );
     db.run(
-      `UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion',
+      `UPDATE onboarding_items SET curation_data_json = ?, stage = 'promotion',
           stage_status = 'pending', status = 'ready'
        WHERE id = ?`,
-      [JSON.stringify(extractionData), JSON.stringify(curationData), item.id],
+      [JSON.stringify(curationData), item.id],
     );
     seedAcceptedCategoryProposal(db, sku, 'Toys', `run-${sku}-${randomUUID().slice(0, 4)}`);
     return { item: { id: item.id, upc: sku }, decision };
@@ -2105,31 +2106,160 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     expect(promoteRes.failures[0].error).toContain('accepted-evidence mismatch');
   });
 
-  it('a distributor payload containing raw image URLs NEVER reaches the downloader (Milestone E review)', async () => {
+  it('a distributor payload containing raw image URLs is BLOCKED at the gate by the M5b-2 deep-compare (item payload tamper)', async () => {
     const { item } = seedQualifiedDistributorItem();
-    // Simulate a tampered/acquired payload with raw distributor URLs: the
-    // provenance gate still passes (the durable row is untampered), but the
-    // downloader boundary must pass ZERO image args for distributor sources —
-    // the URL never becomes a processed image, so the draft builder still
-    // reports the mandatory-primary-image failure (no media, no fetch).
+    // Simulate a tampered/acquired item payload with raw distributor URLs:
+    // the deep-compare gate now rejects ANY divergence from the
+    // reconstructed canonical payload — image tampering blocks drafting
+    // before the downloader is ever consulted (stronger than the Milestone E
+    // downloader-only boundary).
     const row = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(item.id) as { extraction_data_json: string };
     const payload = JSON.parse(row.extraction_data_json);
     payload.primaryImage = 'https://evidence.example/primary.jpg';
     payload.additionalImages = ['https://evidence.example/alt1.jpg', 'https://evidence.example/alt2.jpg'];
     getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(payload), item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    // Unique run/proposal ids (the deterministic seed collides across the
-    // gate-failing siblings which run earlier and never reach the proposal
-    // check — this test passes the gate and needs a fresh accepted proposal).
-    seedAcceptedCategoryProposal(getDb(), item.upc, 'Dog Food', `run-img-${randomUUID().slice(0, 6)}`);
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
-    // The draft builder fails on the missing primary IMAGE (the raw URL was
-    // never downloaded/processed) — and there is NO download failure and no
-    // media anywhere in any change-set item.
-    expect(promoteRes.failures[0].error).toContain('Primary Image');
+    expect(promoteRes.failures[0].error).toContain('Distributor promotion blocked');
+    expect(promoteRes.failures[0].error).toContain('item payload tampered');
+    // No URL ever reaches a draft/change-set row.
     expect(promoteRes.failures[0].error).not.toContain('https://evidence.example');
+  });
+
+  it('a VERIFIED v2 distributor materialization with merchandising data passes the gate and its raw image candidates NEVER reach the downloader (M5b-2)', async () => {
+    const { item } = seedQualifiedDistributorItem({
+      merchandising: { description: 'Verified v2 description copy.', features: ['Feature A'], category: 'Dog Food' },
+    });
+    // The v2 payload carries distributorImageCandidates by contract (the
+    // evidence has no image URLs here, so assert the gate + draft boundary
+    // on the materialized payload: no primaryImage, no download, no fetch).
+    const row = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(item.id) as { extraction_data_json: string };
+    const payload = JSON.parse(row.extraction_data_json) as Record<string, any>;
+    expect(payload.distributorRecordProvenance.extractionMethod).toBe('distributor_record_v2');
+    expect(payload.description).toBe('Verified v2 description copy.');
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    seedAcceptedCategoryProposal(getDb(), item.upc, 'Dog Food', `run-v2-${randomUUID().slice(0, 6)}`);
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    // The provenance + deep-compare gate PASSES; only the mandatory primary
+    // image blocks the draft (distributor images never download — PI-6).
+    expect(promoteRes.failures[0].error).not.toContain('Distributor promotion blocked');
+    expect(promoteRes.failures[0].error).toContain('Primary Image');
+  });
+
+  it('a post-materialization DESCRIPTION tamper on the durable row blocks promotion (M5b-2 deep-compare)', async () => {
+    const { item } = seedQualifiedDistributorItem({
+      merchandising: { description: 'Original verified v2 description.' },
+    });
+    // Tamper the DURABLE row's extraction JSON description (the canonical
+    // reconstructed payload still says the original).
+    const row = getDb().query('SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ?').get(item.id) as { extraction_data_json: string };
+    const payload = JSON.parse(row.extraction_data_json) as Record<string, any>;
+    payload.description = 'Post-materialization tampered description.';
+    getDb().query('UPDATE onboarding_extractions SET extraction_data_json = ? WHERE item_id = ?').run(JSON.stringify(payload), item.id);
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('Distributor promotion blocked');
+    expect(promoteRes.failures[0].error).toContain('row tampered');
+  });
+
+  it('a post-materialization DESCRIPTION tamper on the item payload blocks promotion (M5b-2 deep-compare)', async () => {
+    const { item } = seedQualifiedDistributorItem({
+      merchandising: { description: 'Original verified v2 description.' },
+    });
+    // Tamper the ITEM payload description while the durable row stays intact.
+    const row = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(item.id) as { extraction_data_json: string };
+    const payload = JSON.parse(row.extraction_data_json) as Record<string, any>;
+    payload.description = 'Item-payload tampered description.';
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(payload), item.id);
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('Distributor promotion blocked');
+    expect(promoteRes.failures[0].error).toContain('item payload tampered');
+  });
+
+  it('a v2 materialization with a PRICE tamper never drafts (deep-compare; price stays spreadsheet-only)', async () => {
+    const { item } = seedQualifiedDistributorItem();
+    const row = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(item.id) as { extraction_data_json: string };
+    const payload = JSON.parse(row.extraction_data_json) as Record<string, any>;
+    payload.price = '9.99';
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(payload), item.id);
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('item payload tampered');
+  });
+
+  it('a reviewed Curation description wins over the extraction description in the drafted product (M5b-2 preference)', async () => {
+    // Official-source item that CAN draft (relative-path image, no network):
+    // the same draftDescription expression drives the preference for every
+    // source. curatedDescription from Review must beat the extraction copy.
+    const batch = createBatch({ workspaceId: wsId, name: 'M5b-2 desc pref', fileName: 'desc-pref.xlsx', totalItems: 1 });
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'Pref Product',
+      brand: 'Pref Brand',
+      description: 'Extraction description copy.',
+      bulletPoints: [],
+      primaryImage: 'products/599999999999/images/primary.jpg',
+      additionalImages: [],
+      price: '7.99',
+      weight: '2 lb',
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      sourceUrl: 'https://example.test/pref',
+      confidence: 0.9,
+      fieldProvenance: {},
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+    });
+    const [item] = insertItems(batch.id, [{ upc: '599999999999', name: 'Pref Product', price: '7.99', rowNumber: 1 }]);
+    const curationData = {
+      curatedTitle: 'Pref Product',
+      titleSource: 'web',
+      suggestedPages: ['Toys'],
+      suggestedProductType: null,
+      curatedDescription: 'Reviewed curation copy.',
+      curatedDescriptionSourceAttemptIds: ['att-1'],
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'manual',
+    };
+    const db = getDb();
+    db.query(
+      "UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?",
+    ).run(JSON.stringify(extractionData), JSON.stringify(curationData), item.id);
+    // Create the existing product file with brand + accepted page proposal.
+    const productFileDir = path.join(tempWorkspaceDir, 'products');
+    mkdirSync(productFileDir, { recursive: true });
+    const existingProduct = {
+      schemaVersion: 1,
+      id: 'test-id-pref',
+      sku: '599999999999',
+      status: 'draft',
+      core: { name: 'Pref Product', price: '7.99', salePrice: null, description: 'Extraction description copy.', inventory: { quantityOnHand: null, lowStockThreshold: null, outOfStockLimit: null }, availability: null, weight: '2 lb', taxable: true, media: { primary: 'products/555555555555/images/primary.jpg', additional: [] }, seo: { fileName: null, searchKeywords: null, googleProductCategory: null } },
+      customFields: { ProductField16: 'Pref Brand' },
+      shopsite: { productId: null, productGuid: null, xmlVersion: '15.0', lastPulledAt: null, lastRemoteHash: null, lastSyncedAt: null, source: { dbname: 'products', uniqueName: 'SKU' }, preserved: { unknownElements: {}, advancedBlocks: {}, rawAttributes: {} } },
+      metadata: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), archivedAt: null },
+    };
+    writeFileSync(path.join(productFileDir, '599999999999.json'), JSON.stringify(existingProduct));
+    seedAcceptedCategoryProposal(db, '599999999999', 'Toys');
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(promoteRes.count).toBe(1);
+    // The drafted product uses the REVIEWED Curation description, not the
+    // extraction copy.
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
+    expect(csItems.length).toBe(1);
+    const drafted = JSON.parse(csItems[0].draftJson) as { core: { description: string } };
+    expect(drafted.core.description).toBe('Reviewed curation copy.');
   });
 });
 });

@@ -82,3 +82,39 @@ All other base-ADR clauses — including the `bundle_to_curation` prohibition, e
 - The capability is default-on only for **new** post-amendment imports; the legacy stranded cohort and all pre-amendment state are untouched and remain operator-controlled.
 - No live provider call, live DB migration, catalog/ShopSite write, staging, or commit occurs during implementation; tests use temporary/in-memory databases.
 - Remaining deferred: Phase 2 SFTP adapters (Orgill/PFX), PI-6 image rights integration, commerce price/inventory authority, and structured-record fallback beyond the v1 identity allowlist.
+
+---
+
+# Amendment B — Distributor Scraper Connectors and Merchandising-Depth Materialization
+
+**Status**: ratified (product-owner grill session of 2026-08-15; implementation follows `docs/plans/distributor-scrapers-migration-plan.md`).
+
+**Product-owner directive (paraphrased)**: *"Re-implement the distributor scrapers lost with the BayStateApp migration. Uploaded products must go through an initial scan through our distributors first. If we find the product on our distributors we skip discovery and extraction — the initial distributor scan provides enough data for curation."*
+
+This amendment supersedes the following clauses of the base ADR and Amendment A:
+
+- **Amendment A clause 8 (v1 identity-field allowlist)** → distributor-record materialization becomes **merchandising-depth**: identity fields plus description, features/bullets, category, dimensions, case pack, unit of measure, ingredients, and image URLs (display-only). **Price, inventory, and arbitrary provider fields remain excluded**; the source URL stays null (real product-page URLs live only on immutable `EvidenceAttempt.evidenceUrl`).
+- **"Phase 2 SFTP adapters (Orgill/PFX)" deferral** → superseded as the primary transport for Orgill and Pet Food Experts by `html_scraper` connectors. The `ftp_catalog`/`csv` connector types remain available for future catalog-based distributors.
+- **"Central Pet EDI 832 is excluded"** → Central Pet is now served by the centralpet.com `html_scraper` connector; the EDI 832 feed itself remains out of scope.
+
+Amendment A clauses 1–7, 9–11, 13–17 and the base ADR's `bundle_to_curation` prohibition, evidence immutability/generation scoping, `secret_ref`-only credential handling, UPC/GTIN-first exact matching, hard-conflict manual resolution, review-mandatory, and image display-only rules remain in force. Amendment A clause 12 (images stay display-only until PI-6 verification) is **reaffirmed unchanged**.
+
+**Normative amendments**:
+
+1. **New closed connector type `html_scraper`.** The closed set becomes `api | ftp_catalog | csv | html_scraper | legacy_adapter`. Ships as a versioned, backup-verified, PRAGMA-guarded, idempotent migration (table CHECK constraint), plus shared Zod schema, client API types, and registry mapping. `legacy_adapter` remains reserved for historical connection rows and is never a production path. The registry keys on `(connectorType, distributorId)`.
+2. **Five production connectors.** `orgill`, `pet_food_experts`, `phillips_storefront`, `bradley`, `central_pet` — TypeScript ports of the BayState Python adapters (`apps/scraper/scrapers/approved_sources/adapters/`), implementing the existing `DistributorConnector.lookupByGtin` contract. The existing Phillips (Endless Aisles REST) and BCI (OrderCloud REST) `api` connectors stay registered; two connector flavors per distributor may coexist and both are queried within a bounded generation. `providerId` disambiguates provenance (`phillips` vs `phillips_storefront`, `bci` vs `bradley`).
+3. **Crawlee engine map.** Connectors are built on Crawlee. `PlaywrightCrawler` handles login and JS-rendered flows (orgill ASP.NET postback, phillips SFCC, PFX, central_pet); `CheerioCrawler` handles static extraction with authenticated session cookies (orgill, phillips_storefront, PFX, bradley; bradley keeps a browser fallback). No proxies in v1; proxy configuration may be added per-connector later without contract change.
+4. **Authenticated sessions (memory-only).** Crawlee `SessionPool` holds cookies in worker memory only — `persistCookiesPerSession: false`, never persisted to disk, per the security mandate. Per-distributor `LoginAutomationConfig` constants (username/password/submit selectors, success/failure indicators) recovered from BayState. Credentials are structured JSON (`{"username","password"}`) in the existing `api_keys` secret value, resolved via `secret_ref`; a login failure triggers exactly one re-login, then a durable `source_error` with a stable auth code. All logging redacted.
+5. **Selectors are code.** Recovered selectors (current Python adapters + the deleted legacy YAML archive, recoverable from BayState git history) become typed constants with ordered fallback chains inside each connector file. No runtime selector configuration surface; selector changes are reviewed code changes.
+6. **Merchandising-depth materialization.** The deterministic materializer persists: identity fields (exact UPC/GTIN, distributor SKU, MPN, name, noncanonical brand, weight, whitelisted variant axes) **plus** description, features, category, dimensions, case pack, unit of measure, ingredients, and image URLs. Price, inventory, and arbitrary provider fields stay null/absent. Materialization remains fetch-free, profile-free, deterministic, generation-scoped, and provenance-attached; `extraction_method` bumps to a v2 marker.
+7. **Conflict scope unchanged.** Hard conflicts remain identity-scoped (upc/gtin/MPN/weight/size/count/packCount/brand + connector-declared variant axes). Merchandising fields merge with per-field provenance and **never** trigger or block conflicts; the qualification authority and route table are unchanged.
+8. **Bounded sessions.** Every connector honors the engine-composed deadline and caller `AbortSignal`; per-connector origin allowlists, response-size caps, `retryOnBlocked`, and rate limiting apply. No credential, cookie, or raw response crosses the connector boundary or is persisted; errors carry stable non-secret codes.
+9. **Staged tiered rollout.** All five connections land **disabled**. Enablement order: tier 1 public storefronts (`bradley`, `central_pet`) → tier 2 auth-gated (`orgill`, `pet_food_experts`, `phillips_storefront`). Each tier passes the Amendment A rollout gates (fixtures, ≥100 labeled observations, zero false `found`, zero credential leaks, source-error rate and p95 budgets) through observe → manual → automatic per `docs/runbooks/sourcing-engine-rollout.md`.
+10. **Testing.** Unit tests run offline on fixture HTML snapshots (captured from live sites, provenance-stamped) with the recovered test SKUs (orgill 755625321923, bradley 001135, central_pet 38777520, phillips 072705115310, PFX 33011808) and the old adapters' extracted-field expectations as ground truth. An env-gated live smoke script (port of `run_adapter_test.py`) verifies real sessions on demand; credentials never enter CI.
+
+**Consequences**:
+
+- BayState is the migration source of record: the live Python adapters provide the field logic, the deleted `legacy-scraper-archive` YAML configs (git `5619f6a4^`) provide selector fallbacks and auth workflow references.
+- **Amazon is out of scope.** It is a retailer/marketplace rather than a distributor; sourcing remains distributor-scoped. The old `amazon.py` adapter is not ported.
+- Amendment A clause 8's identity-only materialization is retired for `distributor_record` extractions; all other Amendment A invariants (routing, qualification floor, conflicts, image gating, rollout gates) are unchanged.
+- Remaining deferred (unchanged): commerce price/inventory authority, PI-6 image rights integration (distributor images remain display-only), proxies, and SFTP/EDI catalog ingestion for any future distributor.

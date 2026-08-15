@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "providerId": "orgill",
+  "connectorType": "html_scraper",
+  "navigationOrigin": "https://www.orgill.com",
+  "assetHosts": [
+    "www.orgill.com",
+    "orgill.com"
+  ],
+  "captureDate": "2026-08-15",
+  "baystateSourceRevision": "2a5c9a5f55644a50bee3f23e9d3f819eb10639f0",
+  "notes": "auth-required.html and auth-required-alt.html are MANUAL captures from the live site, sanitized locally (scripts/styles/event handlers/analytics removed; form values emptied; only selector-relevant DOM kept). All other files are SYNTHETIC_CAPTURED_SHAPE fixtures shaped per the recovered BayState adapter selectors (orgill.py + legacy YAML) — labeled clearly; live shape verification happens in the M6 live smoke.",
+  "files": [
+    {
+      "file": "auth-required.html",
+      "scenario": "auth-required",
+      "sourceUrl": "https://www.orgill.com/index.aspx?tab=8",
+      "testIdentifier": null,
+      "expectedName": null,
+      "expectedBrand": null,
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "fdc8057a01fa7c0899b8d488681090ca45902a493971c6a3f07325ce0f705183",
+      "containsCredentials": false,
+      "redactions": "removed <script>/<style>/<link>/<noscript>/<meta>, on* event handlers, analytics; emptied input values"
+    },
+    {
+      "file": "auth-required-alt.html",
+      "scenario": "auth-required-alt",
+      "sourceUrl": "https://www.orgill.com/SearchResultN.aspx?ddlhQ=755625321923",
+      "testIdentifier": null,
+      "expectedName": null,
+      "expectedBrand": null,
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "da07db684e5c664408e691149ed7ac1957035d059383b34fb0e70bc71412ad7e",
+      "containsCredentials": false,
+      "redactions": "removed scripts/styles/analytics; kept __VIEWSTATE hidden input placeholder + lblHomeError + login link"
+    },
+    {
+      "file": "found-search.html",
+      "scenario": "found-search",
+      "sourceUrl": "https://www.orgill.com/SearchResultN.aspx?ddlhQ=755625321923",
+      "testIdentifier": "755625321923",
+      "expectedName": "Landscapers Select 34609 PCL-P Shovel, 16 ga, Hardwood Handle, 45 in L Handle",
+      "expectedBrand": "LANDSCAPERS SELECT",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "92e88547eb9a7e2629acf6a4de200b43cda25d791c64c40f790af62cb4857840",
+      "containsCredentials": false
+    },
+    {
+      "file": "found-pdp.html",
+      "scenario": "found-pdp",
+      "sourceUrl": "https://www.orgill.com/ProductDetail.aspx?itemNumber=204711",
+      "testIdentifier": "755625321923",
+      "expectedName": "Landscapers Select 34609 PCL-P Shovel, 16 ga, Hardwood Handle, 45 in L Handle",
+      "expectedBrand": "LANDSCAPERS SELECT",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "2aada58867f5c67451f7c5c5ddb690cb0d50a0aa3a579a2eb3103c192e944af9",
+      "containsCredentials": false
+    },
+    {
+      "file": "not-found.html",
+      "scenario": "not-found",
+      "sourceUrl": "https://www.orgill.com/SearchResultN.aspx?ddlhQ=000000000000",
+      "testIdentifier": "000000000000",
+      "expectedName": null,
+      "expectedBrand": null,
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "5ce689904e563be883df974b4fa06942c4cf06def23c4a92add501b14093df99",
+      "containsCredentials": false
+    },
+    {
+      "file": "wrong-variant-pdp.html",
+      "scenario": "wrong-variant-pdp",
+      "sourceUrl": "https://www.orgill.com/ProductDetail.aspx?itemNumber=204711",
+      "testIdentifier": "755625321924",
+      "expectedName": "Landscapers Select 34609 PCL-P Shovel, 16 ga, Hardwood Handle, 45 in L Handle",
+      "expectedBrand": "LANDSCAPERS SELECT",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "9132187cd1ac804db4b4ab0a23be00d50f32fde8312779aac8914d545ecaa9fa",
+      "containsCredentials": false,
+      "note": "Identical name/brand to the found product; only the UPC differs — proves advisory fields never rescue an exact-match failure."
+    },
+    {
+      "file": "unexpected-markup.html",
+      "scenario": "unexpected-markup",
+      "sourceUrl": null,
+      "testIdentifier": null,
+      "expectedName": null,
+      "expectedBrand": null,
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "f7e6bd18422b65e83aed7a884808635302278cbf8572c49affe412203f5dcb6a",
+      "containsCredentials": false
+    },
+    {
+      "file": "auth-failed.html",
+      "scenario": "auth-failed",
+      "sourceUrl": "https://www.orgill.com/index.aspx?tab=8",
+      "testIdentifier": null,
+      "expectedName": null,
+      "expectedBrand": null,
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "94147ed4527706a62ce3aeb4e510f4052172abbdf92bc65678d67470d34c6b9e",
+      "containsCredentials": false
+    }
+  ]
+}

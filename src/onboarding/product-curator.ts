@@ -183,6 +183,31 @@ export async function curateItemWithPipeline(
   // payload carried them.
   const distributorSource = item.sourceType === 'distributor_record';
 
+  // Amendment B (M5b-2): VERIFIED v2 merchandising authority. Distributor
+  // copy unlocks ONLY for a verified `distributor_record_v2` materialization:
+  //  - live path: the payload's provenance declares distributor_record_v2 AND
+  //    its evidence hash equals the item's persisted sourcing decision (a
+  //    tampered/replaced payload never unlocks copy);
+  //  - prepared-cohort path: the FROZEN member projection's extractionMethod
+  //    is authoritative (validated at freeze) — live values are never
+  //    consulted for the executed member.
+  // V1 / unverified / tampered materializations keep the fail-closed
+  // suppression below (identity-only).
+  const liveDistributorProvenance = (ext as {
+    distributorRecordProvenance?: { extractionMethod?: string | null; evidenceHash?: string | null } | null;
+  } | null)?.distributorRecordProvenance ?? null;
+  const memberExtractionMethod = cohortMode
+    ? ((preparedCohort?.memberProjection as { extractionMethod?: string | null } | null)?.extractionMethod ?? null)
+    : null;
+  const decisionEvidenceHash = (item.sourcingDecision as { evidenceHash?: string | null } | null)?.evidenceHash ?? null;
+  const verifiedV2Distributor =
+    distributorSource &&
+    (memberExtractionMethod === 'distributor_record_v2' ||
+      (liveDistributorProvenance?.extractionMethod === 'distributor_record_v2' &&
+        typeof liveDistributorProvenance.evidenceHash === 'string' &&
+        liveDistributorProvenance.evidenceHash.length > 0 &&
+        liveDistributorProvenance.evidenceHash === decisionEvidenceHash));
+
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
 
   let configSnapshotRef: {
@@ -279,9 +304,13 @@ export async function curateItemWithPipeline(
       focusedFileHashes,
       catalogEvidenceHash,
       sourceProductHash: '',
-      // Milestone E: distributor copy never feeds classification inputs —
-      // search keywords derive from page copy (identity-only for distributor).
-      searchKeywords: distributorSource ? null : ext.searchKeywords ? String(ext.searchKeywords) : null,
+      // Amendment B (M5b-2): a VERIFIED v2 distributor materialization may
+      // contribute its materialized description to keyword synthesis; v1 /
+      // unverified / tampered distributor copy never does (identity-only).
+      searchKeywords:
+        distributorSource && !verifiedV2Distributor
+          ? null
+          : ext.searchKeywords ? String(ext.searchKeywords) : null,
       productPageNames: [],
       pages: toPageSnapshotState(pageSnapshot),
       pageImportId: pageSnapshot.pageImportId,
@@ -819,19 +848,46 @@ export async function curateItemWithPipeline(
     // page-assignment stages. Consolidating here creates the final
     // curatedDescription and source-attempt provenance for draft copy —
     // it does not feed back into classification.
-    const curatedDescription: string | null = null;
-    const curatedDescriptionSourceAttemptIds: string[] = [];
 
-    // ADR 0014: distributor copy is NOT v1 merchandising authority. The
-    // non-cohort distributor description consolidation is REMOVED fail-closed
-    // (curatedDescription stays null here; descriptions come from web/OCR
-    // extraction). A future ADR may reinstate it with frozen provenance.
+    // Amendment B (M5b-2): a VERIFIED v2 distributor materialization sets
+    // curatedDescription deterministically from the materialized description
+    // with the source attempt IDs from the merchandising provenance. V1 /
+    // unverified / tampered distributor copy stays null (ADR 0014: distributor
+    // copy is not v1 merchandising authority). The model-backed
+    // distributor-copy consolidator stays disabled — the deterministic
+    // projection v2 merge is the only authority.
+    const merchandisingProvenance = (ext as {
+      merchandisingProvenance?: Record<string, Array<{ attemptId: string; providerId: string; values?: string[] }>>;
+    }).merchandisingProvenance
+      ?? (ext as {
+        distributorRecordProvenance?: {
+          merchandisingProvenance?: Record<string, Array<{ attemptId: string; providerId: string; values?: string[] }>>;
+        } | null;
+      }).distributorRecordProvenance?.merchandisingProvenance
+      ?? {};
+    const selectedDescription =
+      verifiedV2Distributor && typeof ext.description === 'string' && ext.description.trim().length > 0
+        ? ext.description
+        : null;
+    const curatedDescription: string | null = selectedDescription;
+    const curatedDescriptionSourceAttemptIds: string[] =
+      selectedDescription !== null
+        ? Array.from(
+            new Set(
+              (merchandisingProvenance['description'] ?? [])
+                .filter((e) => (e.values ?? []).includes(selectedDescription))
+                .map((e) => e.attemptId),
+            ),
+          ).sort()
+        : [];
 
     const searchKeywords = synthesizeSearchKeywords({
       title: curatedTitle,
       brand: ext.brand ?? item.brandHint,
-      // Milestone E: distributor copy never contributes to keywords.
-      description: distributorSource ? null : ext.description,
+      // Amendment B (M5b-2): a verified v2 distributor materialization's
+      // materialized description contributes to keyword synthesis; v1 /
+      // unverified / tampered distributor copy never does.
+      description: distributorSource && !verifiedV2Distributor ? null : ext.description,
       suggestedPages,
       suggestedProductType,
       species: speciesLabels,

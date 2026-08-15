@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "providerId": "phillips_storefront",
+  "navigationOrigin": "https://shop.phillipspet.com",
+  "scenarios": {
+    "found": {
+      "fixtures": ["found-search.html", "found-pdp.html"],
+      "identifier": "072705115310",
+      "outcome": "found",
+      "matchedFields": ["matchedIdentifier", "name", "brand", "distributorSku", "weight", "dimensions", "description", "features", "category", "imageUrls", "sourceUrl"],
+      "record": {
+        "name": "Fromm Gold Large Breed Dog 30 lb",
+        "brand": "FROMM FAMILY FOODS LLC",
+        "distributorSku": "FROMM-GOLD-30",
+        "weight": "30 lb",
+        "dimensions": "24 x 16 x 6 in",
+        "descriptionStartsWith": "Fromm Gold Large Breed Adult"
+      },
+      "forbiddenAbsent": ["price", "inventory", "stock", "palletQuantity", "availability"]
+    },
+    "wrongVariant": {
+      "fixtures": ["wrong-variant-pdp.html"],
+      "identifier": "072705115310",
+      "outcome": "not_stocked:wrong_variant",
+      "note": "PDP carries UPC 072705115311; name/brand similarity must never rescue it."
+    },
+    "notFound": {
+      "fixtures": ["not-found.html"],
+      "identifier": "000000000000",
+      "outcome": "not_stocked:no_exact_match"
+    },
+    "authRequired": {
+      "fixtures": ["auth-required.html", "auth-required-alt.html"],
+      "outcome": "auth_required",
+      "note": "Real SFCC login page + unauthenticated quickSearch shell; login form markup is script-wrapped (raw-string markers preserved)."
+    },
+    "authFailed": {
+      "fixtures": ["auth-failed.html"],
+      "outcome": "auth_failed",
+      "note": "cc-error-message indicator present."
+    },
+    "unexpectedMarkup": {
+      "fixtures": ["unexpected-markup.html"],
+      "outcome": "source_error",
+      "code": "unexpected_markup"
+    }
+  }
+}

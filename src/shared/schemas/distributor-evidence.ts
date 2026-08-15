@@ -12,6 +12,13 @@ export const ProductIdentityEvidenceSchema = z.object({
   brand: z.string().optional(),
   description: z.string().optional(),
   weight: z.string().optional(),
+  /** Amendment B (M2): explicit bounded merchandising fields. */
+  features: z.array(z.string().max(2000)).max(50).optional(),
+  category: z.string().max(2000).optional(),
+  dimensions: z.string().max(2000).optional(),
+  casePack: z.string().max(2000).optional(),
+  unitOfMeasure: z.string().max(2000).optional(),
+  ingredients: z.string().max(2000).optional(),
   attributes: z.record(z.string(), z.string()).optional(),
   images: z.array(z.string()).optional(),
   /**
@@ -149,4 +156,10 @@ export interface InsertEvidenceAttempt {
   sourcingGenerationId?: string | null;
   /** Amendment A: connector observation duration ms (≥0) for measured gates. */
   durationMs?: number;
+  /**
+   * Amendment A: connector-declared raw-field → normalized-axis declarations
+   * observed during this attempt (typed first-class; no type-cast escape
+   * hatch in the repository). Bounded, unique by normalized axis.
+   */
+  variantAxisDeclarations?: EvidenceAttempt['variantAxisDeclarations'];
 }

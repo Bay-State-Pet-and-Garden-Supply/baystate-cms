@@ -61,11 +61,18 @@ describe('Sourcing contracts — connector result validation fails closed (ADR 0
       matchedIdentifier: '012345678905',
       distributorUpc: '012345678905',
       gtin: null,
+      distributorSku: null,
       name: 'Dog Food 12 lb',
       description: null,
       brand: 'Nutro',
       manufacturerPartNumber: 'MPN-1',
       weight: '12 lb',
+      features: [],
+      category: null,
+      dimensions: null,
+      casePack: null,
+      unitOfMeasure: null,
+      ingredients: null,
       attributes: { size: '12 lb' },
       imageUrls: [],
       sourceUrl: null,
@@ -121,9 +128,9 @@ describe('Sourcing contracts — connector result validation fails closed (ADR 0
 });
 
 describe('Sourcing contracts — closed connector set', () => {
-  test('SOURCING_CONNECTOR_TYPES is exactly the ADR 0014 closed set', () => {
+  test('SOURCING_CONNECTOR_TYPES is exactly the ADR 0014 + Amendment B closed set', () => {
     expect([...SOURCING_CONNECTOR_TYPES].sort()).toEqual(
-      ['api', 'csv', 'ftp_catalog', 'legacy_adapter'].sort(),
+      ['api', 'csv', 'ftp_catalog', 'html_scraper', 'legacy_adapter'].sort(),
     );
   });
 
@@ -131,15 +138,19 @@ describe('Sourcing contracts — closed connector set', () => {
     expect(isSourcingConnectorType('api')).toBe(true);
     expect(isSourcingConnectorType('ftp_catalog')).toBe(true);
     expect(isSourcingConnectorType('csv')).toBe(true);
+    expect(isSourcingConnectorType('html_scraper')).toBe(true);
     expect(isSourcingConnectorType('legacy_adapter')).toBe(true);
     expect(isSourcingConnectorType('edi_832')).toBe(false);
+    expect(isSourcingConnectorType('browser_scraper')).toBe(false);
     expect(isSourcingConnectorType('anything')).toBe(false);
   });
 
   test('DistributorConnectorTypeEnum is closed in the shared schema too', () => {
     expect(DistributorConnectorTypeEnum.safeParse('api').success).toBe(true);
+    expect(DistributorConnectorTypeEnum.safeParse('html_scraper').success).toBe(true);
     expect(DistributorConnectorTypeEnum.safeParse('legacy_adapter').success).toBe(true);
     expect(DistributorConnectorTypeEnum.safeParse('central_edi').success).toBe(false);
+    expect(DistributorConnectorTypeEnum.safeParse('browser_scraper').success).toBe(false);
   });
 });
 

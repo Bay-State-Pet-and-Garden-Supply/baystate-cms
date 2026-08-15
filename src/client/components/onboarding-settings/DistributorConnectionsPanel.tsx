@@ -62,7 +62,16 @@ const styles: Record<string, React.CSSProperties> = {
   hint: { fontSize: 12, color: '#6c757d', marginTop: 4 },
 };
 
-const CONNECTOR_TYPES = ['api', 'ftp_catalog', 'csv', 'legacy_adapter'] as const;
+const CONNECTOR_TYPES = ['api', 'ftp_catalog', 'csv', 'html_scraper', 'legacy_adapter'] as const;
+
+/**
+ * Amendment B: Distributor Scraper (`html_scraper`) connections use
+ * code-fixed storefront URLs, origins, selectors, login flows, and proxy
+ * policy — there is no runtime override surface. When selected, the create
+ * form hides the generic base-URL override and shows this explanation.
+ */
+const HTML_SCRAPER_FIXED_CONFIG_NOTE =
+  'Distributor Scrapers use code-fixed storefront URL, origins, selectors, login flow, and proxy policy — no base-URL override is offered.';
 
 interface Props {
   /** Engine capability flag from /onboarding/capabilities. */
@@ -287,6 +296,11 @@ export function DistributorConnectionsPanel({
                 ))}
               </select>
             </div>
+            {connectorType === 'html_scraper' && (
+              <div style={styles.row}>
+                <span style={{ fontSize: 12, color: '#6c757d' }}>{HTML_SCRAPER_FIXED_CONFIG_NOTE}</span>
+              </div>
+            )}
             <div style={styles.row}>
               <span style={styles.label}>Secret ref</span>
               <input
@@ -296,15 +310,17 @@ export function DistributorConnectionsPanel({
                 onChange={(e) => setSecretRef(e.target.value)}
               />
             </div>
-            <div style={styles.row}>
-              <span style={styles.label}>Base URL (optional)</span>
-              <input
-                style={styles.input}
-                placeholder="https://api.provider.com/v1"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-              />
-            </div>
+            {connectorType !== 'html_scraper' && (
+              <div style={styles.row}>
+                <span style={styles.label}>Base URL (optional)</span>
+                <input
+                  style={styles.input}
+                  placeholder="https://api.provider.com/v1"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                />
+              </div>
+            )}
             <div style={styles.row}>
               <span style={styles.label}>Config JSON</span>
               <textarea
@@ -357,11 +373,17 @@ export function DistributorConnectionsPanel({
               <span
                 style={{
                   ...styles.badge,
-                  background: conn.secretConfigured ? '#d1e7dd' : '#f8d7da',
-                  color: conn.secretConfigured ? '#0f5132' : '#721c24',
+                  background: conn.secretRequired
+                    ? conn.secretConfigured ? '#d1e7dd' : '#f8d7da'
+                    : '#e9ecef',
+                  color: conn.secretRequired
+                    ? conn.secretConfigured ? '#0f5132' : '#721c24'
+                    : '#495057',
                 }}
               >
-                {conn.secretConfigured ? 'secret configured' : 'secret missing'}
+                {conn.secretRequired
+                  ? conn.secretConfigured ? 'secret configured' : 'secret missing'
+                  : 'no secret required'}
               </span>
             </div>
             <div style={styles.hint}>

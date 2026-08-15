@@ -1252,13 +1252,15 @@ export class OnboardingWorker {
   }
 
   /**
-   * Deterministic distributor-record extraction (Amendment A, Milestone D).
+   * Deterministic distributor-record extraction (Amendment A Milestone D;
+   * Amendment B merchandising depth).
    *
    * Branched BEFORE the URL/profile checks in `processExtraction`: a
    * `distributor_record` source item has no official page to scrape. The
    * materializer rechecks every authority inside one transaction and writes
-   * the identity-only extraction atomically (row + item payload + completed
-   * status). Integrity failures surface a stable error code and leave the
+   * the extraction atomically (row + item payload + completed status) — v1
+   * identity-only or v2 merchandising-depth per the decision/projection
+   * version. Integrity failures surface a stable error code and leave the
    * item `extraction/failed` — never retried as an official-page extraction
    * and never blindly retried (unchanged evidence cannot heal them).
    */

@@ -16,6 +16,8 @@ import type {
   ExecutionEvidenceProjectionMemberV1,
   ExecutionEvidenceProjectionMemberV2,
 } from '../../shared/schemas/cohorts';
+import { ExecutionEvidenceProjectionMemberV2Schema } from '../../shared/schemas/cohorts';
+import { hashCanonicalJson } from '../../shared/stable-id';
 
 /**
  * PR6 C2 (issue #30): the canonical title input hash — PURE, over the frozen
@@ -799,5 +801,83 @@ describe('Milestone E — source-kind/provenance drift (title input identity)', 
       ]),
     });
     expect(computeCohortTitleInputHash(v2Official)).toBe(computeCohortTitleInputHash(v1));
+  });
+});
+
+describe('Amendment B merchandising fields and the title hash (M5b-1)', () => {
+  it('T-hash is STABLE across merchandising-field changes (documented title-authority-only design)', () => {
+    // The T-hash deliberately excludes description/bulletPoints (cohort-title-
+    // hash.ts module doc: "NO non-title projection fields: description,
+    // bulletPoints ..."). A v2 merchandising change must NOT invalidate an
+    // approved curated title.
+    const base = makeParams();
+    const changedDesc = clone(base);
+    changedDesc.projection.members[0].extraction.description = 'Different merchandising description';
+    changedDesc.projection.members[0].extraction.bulletPoints = ['A', 'B', 'C'];
+    expect(hash(changedDesc)).toBe(hash(base));
+  });
+
+  it('the frozen V2 member schema parses pre-merchandising v2 bytes with safe defaults (historical snapshot parsing stable)', () => {
+    const v2Member = {
+      ...makeMember(),
+      version: 'execution-evidence-v2',
+      itemSourceType: 'distributor_record',
+      extractionSourceType: 'distributor_record',
+      extractionMethod: 'distributor_record_v2',
+      sourcingGenerationId: 'gen-1',
+      acceptedEvidenceAttemptIds: ['a1'],
+      acceptedProviderIds: ['phillips'],
+      distributorEvidenceHash: 'a'.repeat(64),
+      extraction: {
+        ...makeMember().extraction,
+        distributorSku: 'DSKU-1',
+        manufacturerPartNumber: 'MPN-1',
+        variantAttributes: {},
+        // NO merchandising fields — a pre-M5b-1 v2 snapshot
+      },
+    };
+    const parsed = ExecutionEvidenceProjectionMemberV2Schema.parse(v2Member);
+    expect(parsed.extraction.distributorCategory).toBeNull();
+    expect(parsed.extraction.dimensions).toBeNull();
+    expect(parsed.extraction.casePack).toBeNull();
+    expect(parsed.extraction.unitOfMeasure).toBeNull();
+    expect(parsed.extraction.ingredients).toBeNull();
+    expect(parsed.extraction.merchandisingProvenance).toEqual({});
+  });
+
+  it('the cohort content-addressed member hash CHANGES when a v2 merchandising field changes', () => {
+    // The member evidence hash (computeExtractionHash) covers the full
+    // extractionData — including the Amendment B merchandising fields — so a
+    // merchandising change produces a NEW cohort snapshot (no stale reuse).
+    const baseMember = {
+      ...makeMember(),
+      version: 'execution-evidence-v2',
+      itemSourceType: 'distributor_record',
+      extractionSourceType: 'distributor_record',
+      extractionMethod: 'distributor_record_v2',
+      sourcingGenerationId: 'gen-1',
+      acceptedEvidenceAttemptIds: ['a1'],
+      acceptedProviderIds: ['phillips'],
+      distributorEvidenceHash: 'a'.repeat(64),
+      extraction: {
+        ...makeMember().extraction,
+        distributorSku: 'DSKU-1',
+        manufacturerPartNumber: 'MPN-1',
+        variantAttributes: {},
+        distributorCategory: 'Dog Supplies',
+        dimensions: '12 x 8 x 4 in',
+        casePack: '6',
+        unitOfMeasure: 'EA',
+        ingredients: 'Chicken, rice',
+        merchandisingProvenance: {},
+      },
+    };
+    const withMerch = ExecutionEvidenceProjectionMemberV2Schema.parse(baseMember);
+    const changed = ExecutionEvidenceProjectionMemberV2Schema.parse({
+      ...baseMember,
+      extraction: { ...baseMember.extraction, distributorCategory: 'Cat Supplies' },
+    });
+    expect(hashCanonicalJson(changed)).not.toBe(hashCanonicalJson(withMerch));
+    expect(hashCanonicalJson(changed)).not.toBe(hashCanonicalJson(baseMember.extraction));
   });
 });

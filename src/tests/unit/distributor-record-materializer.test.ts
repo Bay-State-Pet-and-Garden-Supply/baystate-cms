@@ -23,7 +23,14 @@ import {
 } from '../../db/repositories/onboarding-conflict-repo';
 import { createDistributor, createConnection } from '../../db/repositories/distributor-repo';
 import { SOURCING_ENTRY_POLICY_VERSION } from '../../onboarding/sourcing/entry-policy';
-import { buildDistributorRecordProjection } from '../../onboarding/sourcing/distributor-record-projection';
+import {
+  buildDistributorRecordProjection,
+  buildDistributorRecordProjectionV1,
+  type DistributorRecordProjection,
+} from '../../onboarding/sourcing/distributor-record-projection';
+import {
+  buildDistributorExtractionDataV1,
+} from '../../onboarding/sourcing/distributor-record-materializer';
 import {
   materializeDistributorRecordExtraction,
   DISTRIBUTOR_MATERIALIZATION_ERROR_CODES,
@@ -169,8 +176,21 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     expect(item?.stage).toBe('extraction');
   }
 
-  test('single provider qualifies and materializes the identity-only extraction', () => {
-    const att = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs', distributorSku: 'SKU-1', manufacturerPartNumber: 'MPN-1' });
+  test('single provider qualifies and materializes the merchandising-depth v2 extraction', () => {
+    const att = makeFoundAttempt('phillips', {
+      brand: 'Brand A',
+      weight: '10 lbs',
+      distributorSku: 'SKU-1',
+      manufacturerPartNumber: 'MPN-1',
+      description: 'High-quality pet kibble',
+      features: ['Chicken first', 'Grain free'],
+      category: 'Dog Food',
+      dimensions: '12x8x4 in',
+      casePack: '6',
+      unitOfMeasure: 'EA',
+      ingredients: 'Chicken, rice, vitamins',
+      images: ['https://cdn.example.com/kibble-a.jpg', 'https://cdn.example.com/kibble-b.jpg'],
+    });
     const decision = routeQualified([att]);
     claimForExtraction();
 
@@ -180,7 +200,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
 
     const rows = getDb().query('SELECT * FROM onboarding_extractions WHERE item_id = ?').all(itemId) as Array<Record<string, unknown>>;
     expect(rows.length).toBe(1);
-    expect(rows[0].extraction_method).toBe('distributor_record_v1');
+    expect(rows[0].extraction_method).toBe('distributor_record_v2');
     expect(rows[0].source_type).toBe('distributor_record');
     expect(rows[0].source_url).toBeNull();
     expect(rows[0].sourcing_generation_id).toBe(generationId);
@@ -198,12 +218,34 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     expect(data?.weight).toBe('10 lbs');
     expect(data?.distributorSku).toBe('SKU-1');
     expect(data?.manufacturerPartNumber).toBe('MPN-1');
+    // Amendment B (M5): merchandising-depth materialization.
+    expect(data?.description).toBe('High-quality pet kibble');
+    expect(data?.bulletPoints).toEqual(['Chicken first', 'Grain free']);
+    expect(data?.distributorCategory).toBe('Dog Food');
+    expect(data?.dimensions).toBe('12x8x4 in');
+    expect(data?.casePack).toBe('6');
+    expect(data?.unitOfMeasure).toBe('EA');
+    expect(data?.ingredients).toBe('Chicken, rice, vitamins');
+    // Display-only image candidates with attempt/provider provenance.
+    expect(data?.distributorImageCandidates).toHaveLength(2);
+    expect((data?.distributorImageCandidates as Array<Record<string, unknown>>)[0].sourceAttemptIds).toEqual([att.id]);
+    expect((data?.distributorImageCandidates as Array<Record<string, unknown>>)[0].sourceProviderIds).toEqual(['phillips']);
+    // Forbidden commerce fields stay absent.
+    expect(data?.price).toBeNull();
+    expect(data?.primaryImage).toBeNull();
+    expect(data?.additionalImages).toEqual([]);
+    expect(data?.distributorImageApprovals).toEqual([]);
+    expect(data?.sourceUrl).toBeNull();
+    // Provenance v2 carries projection version + method + full per-field provenance.
+    const prov = data?.distributorRecordProvenance as Record<string, unknown>;
+    expect(prov?.projectionVersion).toBe('distributor-record-projection-v2');
+    expect(prov?.extractionMethod).toBe('distributor_record_v2');
+    expect((prov?.fieldProvenance as Record<string, unknown>).description).toBeDefined();
+    expect((prov?.merchandisingProvenance as Record<string, unknown>).features).toBeDefined();
     expect(data?.sourceType).toBe('distributor_record');
     expect(data?.sourceUrl).toBeNull();
     expect(data?.confidence).toBe(0);
-    // Excluded fields stay empty/null (identity-only).
-    expect(data?.description).toBeNull();
-    expect(data?.bulletPoints).toEqual([]);
+    // Excluded fields stay empty/null (v2 merchandising-depth contract).
     expect(data?.price).toBeNull();
     expect(data?.primaryImage).toBeNull();
     expect(data?.additionalImages).toEqual([]);
@@ -337,7 +379,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     // through the immutability guard).
     const row = getDb()
       .query(
-        "SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ? AND extraction_method = 'distributor_record_v1'",
+        "SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ? AND extraction_method = 'distributor_record_v2'",
       )
       .get(itemId) as { extraction_data_json: string };
     const tampered = JSON.parse(row.extraction_data_json) as Record<string, unknown>;
@@ -370,7 +412,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
 
     const row = getDb()
       .query(
-        "SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ? AND extraction_method = 'distributor_record_v1'",
+        "SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ? AND extraction_method = 'distributor_record_v2'",
       )
       .get(itemId) as { extraction_data_json: string };
     const tampered = JSON.parse(row.extraction_data_json) as {
@@ -402,7 +444,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     // the extraction_data_json payload stays untouched.
     getDb()
       .query(
-        "UPDATE onboarding_extractions SET accepted_evidence_attempt_ids_json = ? WHERE item_id = ? AND extraction_method = 'distributor_record_v1'",
+        "UPDATE onboarding_extractions SET accepted_evidence_attempt_ids_json = ? WHERE item_id = ? AND extraction_method = 'distributor_record_v2'",
       )
       .run(JSON.stringify(['foreign-attempt']), itemId);
 
@@ -433,7 +475,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
           (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json,
            raw_structured_data_json, source_type, sourcing_generation_id, accepted_evidence_attempt_ids_json,
            evidence_hash, created_at)
-         VALUES (?, ?, NULL, '{}', 'distributor_record_v1', 0, NULL, NULL, 'official_page', ?, ?, ?, ?)`,
+         VALUES (?, ?, NULL, '{}', 'distributor_record_v2', 0, NULL, NULL, 'official_page', ?, ?, ?, ?)`,
       )
       .run(
         'ext-official-twin',
@@ -468,7 +510,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     // Tamper ONLY the durable row source_url (payload intact).
     getDb()
       .query(
-        "UPDATE onboarding_extractions SET source_url = ? WHERE item_id = ? AND extraction_method = 'distributor_record_v1'",
+        "UPDATE onboarding_extractions SET source_url = ? WHERE item_id = ? AND extraction_method = 'distributor_record_v2'",
       )
       .run('https://tampered.example/product', itemId);
 
@@ -556,7 +598,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     expect(reversed.evidenceHash).toBe(decision.evidenceHash);
   });
 
-  test('arbitrary/inventory fields in provider identity never materialize (identity-only)', () => {
+  test('reviewed merchandising description materializes; arbitrary/inventory fields stay excluded', () => {
     const att = makeFoundAttempt('phillips', {
       brand: 'Brand A',
       weight: '10 lbs',
@@ -573,7 +615,9 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     if (!result.ok) return;
 
     const data = findItemById(itemId)?.extractionData as Record<string, unknown>;
-    expect(data?.description).toBeNull();
+    // Amendment B (M5): the reviewed description field now materializes.
+    expect(data?.description).toBe('provider marketing copy');
+    // Price/inventory/arbitrary fields remain excluded by contract.
     expect(data?.price).toBeNull();
     expect(data?.bulletPoints).toEqual([]);
     expect(data?.customFields).toEqual({});
@@ -898,4 +942,174 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
       expect(source).not.toContain(needle);
     }
   });
+describe('Distributor-record materializer v1/v2 authority dispatch (Amendment B, M5)', () => {
+  test('a pre-deployment v1 decision fails closed with projection_version_mismatch (no silent upgrade)', () => {
+    const att = makeFoundAttempt('phillips', { brand: 'Brand A', description: 'Copy' });
+    const ids = [att.id];
+    recordAcceptances(itemId, ids, 'system', 'test');
+    // Route with the V1 authority explicitly (pre-deployment decision).
+    const v1Projection = buildDistributorRecordProjectionV1({
+      itemId,
+      itemUpc: UPC,
+      sourcingGenerationId: generationId,
+      attempts: [att],
+      acceptedAttemptIds: ids,
+    });
+    expect(v1Projection.qualified).toBe(true);
+    if (!v1Projection.qualified) return;
+    const decision: SourcingDecisionV2 = {
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: v1Projection.acceptedAttemptIds,
+      providerIds: v1Projection.providerIds,
+      sourcingGenerationId: generationId,
+      conflicts: [],
+      warnings: [],
+      decidedAt: new Date().toISOString(),
+      evidenceHash: v1Projection.evidenceHash,
+      sourceType: 'distributor_record',
+      target: 'extraction',
+    };
+    const res = completeSourcingWithDecision(itemId, decision, 'extraction');
+    if (!res.ok) throw new Error(`routing failed: ${res.reason}`);
+    claimForExtraction();
+
+    const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe('projection_version_mismatch');
+    // No row, no completion, no payload.
+    const rows = getDb().query('SELECT * FROM onboarding_extractions WHERE item_id = ?').all(itemId) as unknown[];
+    expect(rows.length).toBe(0);
+    expect(findItemById(itemId)?.extractionData).toBeNull();
+    expect(findItemById(itemId)?.stageStatus).toBe('in_progress');
+  });
+
+  test('a v1 extraction row remains idempotently verifiable under the v1 authority', () => {
+    const att = makeFoundAttempt('phillips', { brand: 'Brand A', description: 'Copy' });
+    const ids = [att.id];
+    recordAcceptances(itemId, ids, 'system', 'test');
+    const v1Projection = buildDistributorRecordProjectionV1({
+      itemId,
+      itemUpc: UPC,
+      sourcingGenerationId: generationId,
+      attempts: [att],
+      acceptedAttemptIds: ids,
+    });
+    expect(v1Projection.qualified).toBe(true);
+    if (!v1Projection.qualified) return;
+    const decision: SourcingDecisionV2 = {
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: v1Projection.acceptedAttemptIds,
+      providerIds: v1Projection.providerIds,
+      sourcingGenerationId: generationId,
+      conflicts: [],
+      warnings: [],
+      decidedAt: new Date().toISOString(),
+      evidenceHash: v1Projection.evidenceHash,
+      sourceType: 'distributor_record',
+      target: 'extraction',
+    };
+    const res = completeSourcingWithDecision(itemId, decision, 'extraction');
+    if (!res.ok) throw new Error(`routing failed: ${res.reason}`);
+
+    // Seed the durable v1 row exactly as a pre-deployment materialization would.
+    const v1Data = buildDistributorExtractionDataV1(v1Projection.projection, decision.evidenceHash);
+    getDb()
+      .query(
+        `INSERT INTO onboarding_extractions
+          (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json,
+           raw_structured_data_json, source_type, sourcing_generation_id, accepted_evidence_attempt_ids_json,
+           evidence_hash, created_at)
+         VALUES (?, ?, NULL, ?, 'distributor_record_v1', 0, NULL, ?, 'distributor_record', ?, ?, ?, ?)`,
+      )
+      .run(
+        'ext-v1',
+        itemId,
+        JSON.stringify(v1Data),
+        JSON.stringify(v1Data.fieldProvenance),
+        generationId,
+        JSON.stringify(v1Projection.projection.provenance.acceptedAttemptIds),
+        decision.evidenceHash,
+        new Date().toISOString(),
+      );
+    claimForExtraction();
+
+    const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.idempotent).toBe(true);
+    expect(result.extractionId).toBe('ext-v1');
+    // The v1 payload stays identity-only (no merchandising was added).
+    expect((result.extractionData as Record<string, unknown>).description).toBeNull();
+    const rows = getDb().query('SELECT * FROM onboarding_extractions WHERE item_id = ?').all(itemId) as unknown[];
+    expect(rows.length).toBe(1);
+  });
+
+  test('an extraction row with an unknown method fails closed with unknown_extraction_method', () => {
+    const att = makeFoundAttempt('phillips', { brand: 'Brand A' });
+    const decision = routeQualified([att]);
+    claimForExtraction();
+    getDb()
+      .query(
+        `INSERT INTO onboarding_extractions
+          (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json,
+           raw_structured_data_json, source_type, sourcing_generation_id, accepted_evidence_attempt_ids_json,
+           evidence_hash, created_at)
+         VALUES (?, ?, NULL, '{}', 'mystery_method', 0, NULL, NULL, 'distributor_record', ?, ?, ?, ?)`,
+      )
+      .run(
+        'ext-mystery',
+        itemId,
+        generationId,
+        JSON.stringify(decision.acceptedEvidenceAttemptIds),
+        decision.evidenceHash,
+        new Date().toISOString(),
+      );
+    const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe('unknown_extraction_method');
+    const rows = getDb().query('SELECT * FROM onboarding_extractions WHERE item_id = ?').all(itemId) as unknown[];
+    expect(rows.length).toBe(1);
+    expect(findItemById(itemId)?.stageStatus).toBe('in_progress');
+  });
+
+  test('multi-provider merchandising disagreement materializes with deterministic union and warning', () => {
+    const att1 = makeFoundAttempt('phillips', {
+      brand: 'Brand A',
+      description: 'Copy A',
+      features: ['Chicken first'],
+      images: ['https://cdn.example.com/a.jpg'],
+    });
+    const att2 = makeFoundAttempt('unfi', {
+      brand: 'Brand A',
+      description: 'Copy B',
+      features: ['grain free'],
+      images: ['https://cdn.example.com/b.jpg'],
+    });
+    const decision = routeQualified([att1, att2]);
+    claimForExtraction();
+
+    const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = findItemById(itemId)?.extractionData as Record<string, unknown>;
+    // Deterministic lexical selection on disagreement (warning only).
+    expect(data?.description).toBe('Copy A');
+    // Feature union merged deterministically.
+    expect(data?.bulletPoints).toEqual(['Chicken first', 'grain free']);
+    // Image candidates from both providers with per-provider provenance.
+    const candidates = data?.distributorImageCandidates as Array<Record<string, unknown>>;
+    expect(candidates).toHaveLength(2);
+    const prov = data?.distributorRecordProvenance as Record<string, unknown>;
+    expect(prov?.merchandisingProvenance as Record<string, unknown>).toBeDefined();
+    // The extraction completed despite merchandising disagreement.
+    expect(findItemById(itemId)?.stageStatus).toBe('completed');
+  });
+});
+
 });

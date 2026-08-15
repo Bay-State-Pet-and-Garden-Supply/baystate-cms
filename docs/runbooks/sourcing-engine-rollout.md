@@ -46,12 +46,17 @@ and non-secret (they expose no credentials or connection details).
   including the 148 legacy rows) are NEVER claimed or observed and stay on the
   audited **Continue to Official Site Discovery** path.
 - **Lookup.** The worker runs the provider-neutral engine against every
-  **enabled** connection in the workspace (Phase 1: Phillips REST
-  `x-api-key`, BCI/OrderCloud OAuth2; Phase 2: Orgill/PFX SFTP — not yet
-  approved). Lookups are **exact normalized UPC/GTIN first**; brand hints and
-  brand profiles are advisory only. All enabled connections are queried per
-  generation — the worker never stops at the first found record. The item is
-  bounded to a 60-second budget and per-attempt `duration_ms` is persisted.
+  **enabled** connection in the workspace. **`api` connectors** (Phillips REST
+  `x-api-key`, BCI/OrderCloud OAuth2) plus the five **`html_scraper`
+  Distributor Scraper connectors** (ADR 0014 Amendment B): `bradley` and
+  `central_pet` (public storefronts), `orgill`, `pet_food_experts`, and
+  `phillips_storefront` (authenticated storefronts). The deferred Phase 2
+  SFTP plans (Orgill/PFX) and Central Pet EDI feed are **superseded** as
+  primary transports. Lookups are **exact normalized UPC/GTIN first**; brand
+  hints and brand profiles are advisory only. All enabled connections are
+  queried per generation — the worker never stops at the first found record.
+  The item is bounded to a 60-second budget and per-attempt `duration_ms` is
+  persisted.
 - **Evidence.** Attempts are immutable and generation-scoped
   (`sourcing_generations`); a retry **supersedes** the generation and starts a
   fresh one. Superseded evidence stays visible as history and can never
@@ -99,7 +104,7 @@ schema, API, or UI can create or act on a Sourcing → Curation route.
 Manual/observe do not apply to marker-v0 rows: legacy items expose only
 **Continue to Official Site Discovery** (no Retry, no Use-distributor-record).
 
-### Distributor-record Extraction (identity-only materializer)
+### Distributor-record Extraction (merchandising-depth materializer, Amendment B)
 
 When a qualified record routes to Extraction, the item's source type becomes
 `distributor_record` with `source_url = NULL` (never a fake URL), and the
@@ -108,13 +113,26 @@ transaction that rechecks workspace ownership, stage, the strict V2 decision,
 current non-superseded generation, relational acceptance equality, full
 attempt schema validity, connection ownership, open conflicts, and a
 recomputed canonical projection hash equal to the decision hash. The
-materialized `ExtractionData` carries ONLY identity fields: title, noncanonical
-brand, weight, distributor SKU, manufacturer part number, and whitelisted
-variant attributes — with a dedicated `distributorRecordProvenance`
-(generation, evidence hash, sorted accepted attempt/provider ids, catalog
-versions). Description, bullets, price, images, and OCR fields stay empty;
+materialized `ExtractionData` (method `distributor_record_v2`) carries the
+**merchandising-depth** field set (Amendment B): identity fields (title,
+noncanonical brand, weight, distributor SKU, manufacturer part number,
+whitelisted variant attributes) **plus** description, features (bullets),
+category, dimensions, case pack, unit of measure, ingredients, and
+display-only `distributorImageCandidates` (each carrying source attempt AND
+provider IDs) — with a dedicated `distributorRecordProvenance` (generation,
+evidence hash, sorted accepted attempt/provider ids, catalog versions,
+projection version, per-field merchandising provenance). Price, inventory,
+commerce images (`primaryImage`/`additionalImages`/`images_json`), OCR
+fields, and arbitrary provider fields stay absent; the URL stays null;
 confidence is zero and non-authoritative. NO fetch, extractor profile, DOM
 scrape, OCR, VLM, LLM, or image processing ever runs in the distributor branch.
+
+Legacy `distributor_record_v1` rows remain readable and verifiable with the
+frozen v1 authority — they are NEVER rewritten or silently upgraded. New
+decisions materialize v2 only when the decision hash matches the v2
+projection; a pre-deployment v1 pending decision fails closed with
+`projection_version_mismatch` and requires an explicit new sourcing
+generation.
 
 Integrity failures fail closed with a stable reason and mark the item
 `extraction/failed` with zero partial writes; they are never blindly retried
@@ -156,7 +174,9 @@ source types, nullable URLs, the sourcing generation, sorted accepted
 attempt/provider ids, and the distributor evidence hash; historical
 `execution-evidence-v1` snapshots stay parse-only and normalize to official
 provenance (never rewritten). Classification records distributor identity with
-source `distributor_record`, a null classification URL, identity-only fields,
+source `distributor_record`, a null classification URL, merchandising-depth
+fields (identity + description/features/category/dimensions/case pack/UOM/
+ingredients) for verified v2 members with per-field provenance,
 and per-field provenance — never labeled `official_product_page`, and never
 elevating description/bullets/images/claims/composition. Mandatory Review
 remains in the path, and promotion revalidates extraction provenance
@@ -179,15 +199,20 @@ remains in the path, and promotion revalidates extraction provenance
    counts/digests, source identity, and no WAL/SHM sidecar on the backup.
    Abort on any failure or source drift.
 3. **Migrate while pinned OFF.** Start only the sanctioned migration path;
-   verify `default_on_sourcing_schema_version` and
-   `sourcing_variant_axes_schema_version` markers, columns, row counts,
-   `foreign_key_check`, the policy-0 legacy count, and the disabled
+   verify `default_on_sourcing_schema_version`,
+   `sourcing_variant_axes_schema_version`, AND the Amendment B
+   `distributor_html_scraper_schema_version` markers, the exact
+   `distributor_connections` connector CHECK (now
+   `api | ftp_catalog | csv | html_scraper | legacy_adapter`), columns, row
+   counts, `foreign_key_check`, the policy-0 legacy count, and the disabled
    capability. Roll back from the verified backup rather than editing rows if
    migration fails.
-4. **Configure disabled connections.** Create provider connections disabled,
-   provision secret references server-side, run offline fixture/security
-   tests, then perform the documented controlled health check. Enabling is a
-   separate operator action.
+4. **Configure disabled connections.** Create the five `html_scraper`
+   provider rows disabled (bradley, central_pet, orgill, pet_food_experts,
+   phillips_storefront — see the inventory below), provision secret
+   references server-side, run offline fixture/security tests, then perform
+   the documented controlled health check. Enabling is a separate operator
+   action and creation itself enforces `enabled=false`.
 5. **Observe one workspace/provider.** Set the flag true and mode `observe`;
    existing/new items continue through official Discovery. Collect at least
    100 labeled observations per connector (≥30 found; ≥20 negative/wrong-
@@ -307,3 +332,50 @@ WHERE i.source_type = 'distributor_record'
 - No historical-item backfill, live-DB repair, or automatic reprocessing of
   the 148 rows; no rewrite of persisted V1 cohort snapshots or historical
   `bundle_to_curation` decisions.
+
+### Distributor Scraper connector inventory (Amendment B)
+
+Five `html_scraper` connectors (selectors, login URLs, and origin allowlists
+are FIXED code constants — nothing is stored in `configuration_json`):
+
+| distributorId | providerId | requiresSecret | Tier | Search template (UPC/GTIN lookup) |
+|---|---|---|---|---|
+| `bradley` | `bradley` | no | 1 (public) | `https://www.bradleycaldwell.com/search?term={identifier}` |
+| `central_pet` | `central_pet` | no | 1 (public) | `https://www.centralpet.com/Search?criteria={identifier}` |
+| `orgill` | `orgill` | yes | 2 (auth) | `https://www.orgill.com/SearchResultN.aspx?ddlhQ={identifier}` |
+| `pet_food_experts` | `pet_food_experts` | yes | 2 (auth) | `https://orders.petfoodexperts.com/Search?query={identifier}` |
+| `phillips_storefront` | `phillips_storefront` | yes | 2 (auth) | SFCC `quickSearch` on `shop.phillipspet.com` |
+
+The existing `api` connectors remain registered: `phillips` (Endless Aisles
+REST) and `bci` (OrderCloud REST). When both a REST and a scraper flavor are
+enabled for one distributor (`phillips`+`phillips_storefront`,
+`bci`+`bradley`), BOTH are queried in the generation and their evidence keeps
+distinct `providerId`s.
+
+**Secret format (auth'd scrapers).** The `api_keys` value behind each opaque
+`secretRef` is strict JSON with exactly two nonblank string fields:
+
+```json
+{ "username": "<operator-username>", "password": "<operator-password>" }
+```
+
+The value is resolved server-side only, never returned by any endpoint,
+never logged, and never persisted outside `api_keys`. Malformed/blank/masked
+values fail closed as `secret_missing`/`credential_invalid` before any fetch.
+Public scrapers (`bradley`, `central_pet`) require NO secret and show
+"no secret required" in the UI.
+
+**Rollout TEST identifiers (offline fixtures + live smoke):**
+
+| Provider | Lookup identifier | Notes |
+|---|---|---|
+| bradley | `018653299524` | Real PDP-verified UPC. `001135` is the BCI item number and is NEVER an engine lookup identifier (6 digits fail `normalizeGtin`); it exercises parser/search fixtures only. |
+| central_pet | `035585775210` | PDP-verified UPC; `38777520` is the Central Pet Product # (search regression only). |
+| orgill | `755625321923` | Landscapers Select PCL-P shovel. |
+| pet_food_experts | `33011808` | Wellness CORE Grain Free. |
+| phillips_storefront | `072705115310` | Fromm Gold Large Breed Dog 30 lb. |
+
+Live smoke requires the gate `BAYSTATE_CMS_SOURCING_LIVE_SMOKE=1` (refuses in
+CI and without the gate); it calls connectors directly and writes no CMS DB
+rows. Each auth'd provider needs a successful live login/search/PDP smoke and
+an intentional no-secret/malformed-secret dry check before enablement.

@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "providerId": "central_pet",
+  "connectorType": "html_scraper",
+  "navigationOrigin": "https://www.centralpet.com",
+  "assetHosts": [
+    "www.centralpet.com",
+    "centralpet.com",
+    "images.salsify.com",
+    "d2gqd42fylojmw.cloudfront.net"
+  ],
+  "captureDate": "2026-08-15",
+  "baystateSourceRevision": "2a5c9a5f55644a50bee3f23e9d3f819eb10639f0",
+  "notes": "Rendered Angular storefront captured with Playwright (project browser). Sanitized locally: all <script>/<style>/<link>/<iframe>/<svg>/<form>/<noscript>/<template>/<meta> and on* handlers removed; no cookies, headers, browser storage, or account data stored. The product family KONG Air Dog Squeaker (Product #s 38777517..38777521) has UPCs 035585775173..035585775210 — the site search does not reliably surface the exact-UPC variant, so the found-search fixture is a clearly-labeled synthetic adjustment (see below).",
+  "files": [
+    {
+      "file": "found-search.html",
+      "scenario": "found-search",
+      "sourceUrl": "https://www.centralpet.com/Search?criteria=035585775210",
+      "testIdentifier": "035585775210",
+      "expectedName": "KONG Air Dog Squeaker Tennis Ball Dog Toy",
+      "expectedBrand": "KONG",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "eee85e4b9b34a98bdccb78fb24a3d8ac6cf6e3f5c83dcfafe58e995f4af1d7bd",
+      "containsCredentials": false,
+      "adjustment": "Real UPC-search results page with the exact-variant product link (option=PDCM38777521, PDP UPC 035585775210 — captured and verified) prepended as the first candidate. The live site surfaced only options 38777518/38777520 for this search string; the variant's PDP and UPC were verified by direct capture."
+    },
+    {
+      "file": "found-pdp.html",
+      "scenario": "found-pdp",
+      "sourceUrl": "https://www.centralpet.com/Product/200013170-KONG-Air-Dog-Squeaker-Tennis-Ball-Dog-Toy?option=PDCM38777521",
+      "testIdentifier": "035585775210",
+      "expectedName": "KONG Air Dog Squeaker Tennis Ball Dog Toy",
+      "expectedBrand": "KONG",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "92cb54b4366ae52723ccf5e270b7bf14e30a9b0a2fda1a0c80a884437ceb96eb",
+      "containsCredentials": false
+    },
+    {
+      "file": "wrong-variant-search.html",
+      "scenario": "wrong-variant",
+      "sourceUrl": "https://www.centralpet.com/Search?criteria=035585775210",
+      "testIdentifier": "035585775210",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "7d2724e909285509e8d6a250f6ec74d38c452468e22f89b37e0bbf9d13602a3a",
+      "containsCredentials": false
+    },
+    {
+      "file": "wrong-variant-pdp.html",
+      "scenario": "wrong-variant-pdp",
+      "sourceUrl": "https://www.centralpet.com/Product/200013170-KONG-Air-Dog-Squeaker-Tennis-Ball-Dog-Toy?option=PDCM38777520",
+      "testIdentifier": "035585775210",
+      "expectedName": "KONG Air Dog Squeaker Tennis Ball Dog Toy",
+      "expectedBrand": "KONG",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "32e204789b90dc7a19bca812d243b84452903e874239e14af17d58f2cd31027a",
+      "containsCredentials": false,
+      "adjustment": "Sibling variant of the same product family whose UPC (035585775203) differs from the search identifier — used to prove wrong-variant fail-closed."
+    },
+    {
+      "file": "other-product-pdp.html",
+      "scenario": "wrong-variant-other",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "55ee6b853f9c7c9708564b81b1a074195841ea60e6770c1ca5a130ebd6abedeb",
+      "containsCredentials": false,
+      "adjustment": "Minimal synthetic PDP for non-focal search candidates (JW Pet / KONG Sport / KONG Extreme) with a clearly-fake UPC 012345678901; exercises the bounded candidate iteration without any claim of real-world data."
+    },
+    {
+      "file": "not-found.html",
+      "scenario": "not-found",
+      "sourceUrl": "https://www.centralpet.com/Search?criteria=000000000000",
+      "testIdentifier": "000000000000",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "3eda20b8bda1db43423ea8ecd20a5797c1bb9c4551b893b5f699921c84446861",
+      "containsCredentials": false
+    },
+    {
+      "file": "unexpected-markup.html",
+      "scenario": "unexpected-markup",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "15c9e0559132a686389cce87150542f97ace8d22cdfb2d585c3a07153e932e14",
+      "containsCredentials": false,
+      "adjustment": "Minimal app-shell skeleton used to prove fail-closed unexpected-markup offline."
+    }
+  ]
+}

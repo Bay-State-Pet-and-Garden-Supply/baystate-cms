@@ -70,6 +70,7 @@ import { freezeCohortForExecution } from '../../onboarding/cohort-curator';
 import { parseExecutionEvidenceProjection } from '../../shared/schemas/cohorts';
 import { hashCanonicalJson } from '../../shared/stable-id';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
+import { curateItemWithPipeline } from '../../onboarding/product-curator';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import { overrideCohortCurationFlags, resetCohortCurationFlagsOverride } from '../../classification/flags';
 import { promoteItems } from '../../onboarding/draft-promoter';
@@ -101,9 +102,9 @@ function fixtureFetchImpl(url: string): Promise<Response> {
 }
 
 const fixtureRegistry: ConnectorRegistry = {
-  createConnector(_connectorType, configuration) {
-    const distributorId = String((configuration as { __distributorId?: unknown }).__distributorId ?? '').toLowerCase();
-    if (distributorId === 'bci' || distributorId === 'ordercloud') {
+  createConnector(_connectorType, distributorId) {
+    const did = String(distributorId ?? '').toLowerCase();
+    if (did === 'bci' || did === 'ordercloud') {
       return new BCIConnector({ fetchImpl: fixtureFetchImpl as unknown as typeof fetch });
     }
     return new PhillipsConnector({ fetchImpl: fixtureFetchImpl as unknown as typeof fetch });
@@ -455,7 +456,7 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     expect(done?.extractionData?.sourceType).toBe('distributor_record');
 
     const row = getDb().query('SELECT * FROM onboarding_extractions WHERE item_id = ?').get(item.id) as Record<string, unknown>;
-    expect(row.extraction_method).toBe('distributor_record_v1');
+    expect(row.extraction_method).toBe('distributor_record_v2');
     expect(row.source_type).toBe('distributor_record');
     expect(row.source_url).toBeNull();
     expect(row.sourcing_generation_id).toBe(gen.id);
@@ -967,6 +968,79 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     const promote2 = await promoteItems(workspaceId, wsPath, batch.id, [item.id]);
     expect(promote2.failures.length).toBeGreaterThan(0);
     expect(promote2.count).toBe(0);
+  });
+
+  // 16b. (M5b-2) Curation consumes VERIFIED v2 merchandising copy.
+  test('16b. verified v2 distributor materialization feeds curatedDescription + keyword synthesis; tampered stays blocked', async () => {
+    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
+    saveClassificationConfig(wsPath, V1_CONFIG);
+    syncConfigToCache(workspaceId, loadClassificationConfig(wsPath));
+
+    const { item } = makeItem('012345678906', 'Curate V2');
+    const gen = startSourcingGeneration(item.id, 'automatic_policy');
+    const att = seedQualified(item.id, item.upc, gen.id, 'phillips', {
+      description: 'Verified v2 merchandising description.',
+      features: ['Feature Alpha', 'Feature Beta'],
+      category: 'Dog Food',
+    });
+    const projection = buildDistributorRecordProjection({
+      itemId: item.id,
+      itemUpc: item.upc,
+      sourcingGenerationId: gen.id,
+      attempts: getCurrentGenerationAttempts(item.id),
+      acceptedAttemptIds: [att.id],
+    });
+    if (!projection.qualified) throw new Error('fixture must qualify');
+    const decision = {
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: [att.id],
+      providerIds: ['phillips'],
+      sourcingGenerationId: gen.id,
+      evidenceHash: projection.evidenceHash,
+      sourceType: 'distributor_record',
+      target: 'extraction',
+      conflicts: [],
+      warnings: [],
+      decidedAt: new Date().toISOString(),
+    };
+    expect(completeSourcingWithDecision(item.id, decision as never, 'extraction').ok).toBe(true);
+    recordAcceptances(item.id, [att.id], 'system', 'qualified distributor record (curate v2)');
+    updateItemStageStatus(item.id, 'in_progress');
+    const mat = materializeDistributorRecordExtraction(item.id, workspaceId);
+    expect(mat.ok).toBe(true);
+
+    // The verified v2 payload carries the merchandising copy + provenance.
+    const hydrated = findItemById(item.id)!;
+    const payload = hydrated.extractionData as Record<string, any>;
+    expect(payload.distributorRecordProvenance.extractionMethod).toBe('distributor_record_v2');
+    expect(payload.description).toBe('Verified v2 merchandising description.');
+
+    // Run the deterministic curation pipeline directly (legacy per-SKU path,
+    // v1 config): the curator consumes verified v2 copy for keywords + the
+    // reviewed description, with the source attempt provenance.
+    const curationData = await curateItemWithPipeline(hydrated, wsPath, workspaceId);
+    expect(curationData.curatedDescription).toBe('Verified v2 merchandising description.');
+    expect(curationData.curatedDescriptionSourceAttemptIds).toEqual([att.id]);
+    // Keyword synthesis tokenizes the verified description into keywords
+    // (lowercased, punctuation-stripped) — description-derived terms appear.
+    expect(curationData.searchKeywords).toContain('Verified');
+    expect(curationData.searchKeywords).toContain('merchandising');
+
+    // Negative (tamper): break the item-payload provenance evidence hash so
+    // it no longer matches the persisted sourcing decision → the copy must
+    // stay suppressed (v1 fail-closed), even though the materialization is
+    // otherwise intact.
+    const tamperedPayload = JSON.parse(JSON.stringify(hydrated.extractionData)) as Record<string, any>;
+    tamperedPayload.distributorRecordProvenance.evidenceHash = '0'.repeat(64);
+    getDb().run('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?', [
+      JSON.stringify(tamperedPayload),
+      item.id,
+    ]);
+    const tamperedItem = findItemById(item.id)!;
+    const tamperedCuration = await curateItemWithPipeline(tamperedItem, wsPath, workspaceId);
+    expect(tamperedCuration.curatedDescription).toBeNull();
   });
 
   // 17. Kill switch behavior.

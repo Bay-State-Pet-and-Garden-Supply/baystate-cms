@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "providerId": "central_pet",
+  "navigationOrigin": "https://www.centralpet.com",
+  "scenarios": {
+    "found": {
+      "fixtures": ["found-search.html", "found-pdp.html"],
+      "identifier": "035585775210",
+      "outcome": "found",
+      "matchedFields": [
+        "matchedIdentifier", "name", "brand", "distributorSku", "manufacturerPartNumber",
+        "weight", "casePack", "packCount", "description", "category", "imageUrls", "sourceUrl"
+      ],
+      "record": {
+        "name": "KONG Air Dog Squeaker Tennis Ball Dog Toy",
+        "brand": "KONG",
+        "distributorSku": "38777521",
+        "manufacturerPartNumber": "AST2B",
+        "weight": "0.0700 lb",
+        "casePack": "48",
+        "packCount": "48",
+        "category": "Squeaker Toys",
+        "descriptionStartsWith": "Special nonabrasive tennis ball fabric will not wear down a dog's teeth",
+        "dimensions": null,
+        "ingredients": null,
+        "unitOfMeasure": null
+      },
+      "forbiddenAbsent": ["price", "inventory", "stock", "palletQuantity", "sellPack", "availability"]
+    },
+    "wrongVariant": {
+      "fixtures": ["wrong-variant-search.html", "wrong-variant-pdp.html", "other-product-pdp.html"],
+      "identifier": "035585775210",
+      "outcome": "not_stocked:wrong_variant",
+      "note": "Real UPC-search results page whose candidates (JW/KONG Sport/KONG Air siblings) all carry UPCs different from the identifier; the sibling variant fixture (035585775203) and synthetic other-product fixtures (012345678901) prove bounded iteration + fail-closed."
+    },
+    "notFound": {
+      "fixtures": ["not-found.html"],
+      "identifier": "000000000000",
+      "outcome": "not_stocked:no_exact_match"
+    },
+    "unexpectedMarkup": {
+      "fixtures": ["unexpected-markup.html"],
+      "outcome": "source_error",
+      "code": "unexpected_markup"
+    }
+  }
+}

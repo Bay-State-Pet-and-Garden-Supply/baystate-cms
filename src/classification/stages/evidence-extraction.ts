@@ -95,6 +95,39 @@ function executeFrozenEvidenceExtraction(
       if (!value) continue;
       push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: key, snippet: value.slice(0, 300), value, metadata: distributorMetadata });
     }
+    // Amendment B merchandising fields (M5b-1): a VERIFIED v2 distributor
+    // member (`distributor_record_v2`) contributes the explicit merchandising
+    // fields with the same distributor provenance — description, each feature
+    // as bullet_point, distributor_category, dimensions, case_pack,
+    // unit_of_measure, ingredients. V1 members stay identity-only. Price,
+    // inventory, images, search keywords, claims inferred from copy, and
+    // arbitrary fields are NEVER emitted; the classification URL stays null;
+    // nothing is labeled `official_product_page`.
+    if (frozen.extractionMethod === 'distributor_record_v2') {
+      const merchMetadata = {
+        ...distributorMetadata,
+        merchandisingProvenance: (ext as { merchandisingProvenance?: Record<string, unknown> }).merchandisingProvenance ?? {},
+      };
+      if (ext.description && ext.description.trim()) {
+        push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: 'description', snippet: ext.description.slice(0, 500), value: ext.description, metadata: merchMetadata });
+      }
+      for (const bullet of ext.bulletPoints ?? []) {
+        if (!bullet || !String(bullet).trim()) continue;
+        push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: 'bullet_point', snippet: String(bullet).slice(0, 300), value: String(bullet), metadata: merchMetadata });
+      }
+      const merchScalars: Array<{ sourceField: string; value: string }> = [
+        { sourceField: 'distributor_category', value: (ext as { distributorCategory?: string | null }).distributorCategory ?? '' },
+        { sourceField: 'dimensions', value: (ext as { dimensions?: string | null }).dimensions ?? '' },
+        { sourceField: 'case_pack', value: (ext as { casePack?: string | null }).casePack ?? '' },
+        { sourceField: 'unit_of_measure', value: (ext as { unitOfMeasure?: string | null }).unitOfMeasure ?? '' },
+        { sourceField: 'ingredients', value: (ext as { ingredients?: string | null }).ingredients ?? '' },
+      ];
+      for (const item of merchScalars) {
+        const trimmed = item.value.trim();
+        if (!trimmed) continue;
+        push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: item.sourceField, snippet: trimmed.slice(0, 300), value: trimmed, metadata: merchMetadata });
+      }
+    }
   } else {
   const pageSource: ClassificationEvidence['source'] = 'official_product_page';
   if (ext.title && ext.title.trim()) {
@@ -303,6 +336,47 @@ export const evidenceExtractionStage: StageDefinition = {
       pushDistributor('manufacturer_part_number', extData.manufacturerPartNumber ?? null);
       for (const [key, rawVal] of Object.entries(extData.variantAttributes ?? {})) {
         pushDistributor(key, rawVal);
+      }
+      // Amendment B merchandising fields (M5b-1): a verified v2
+      // materialization (`distributorRecordProvenance.extractionMethod ===
+      // 'distributor_record_v2'`) emits the explicit merchandising fields with
+      // distributor provenance. V1 stays identity-only; price/inventory/
+      // images/search-keywords/arbitrary copy are never emitted.
+      const provMethod =
+        (distributorProvenance as { extractionMethod?: string | null } | null)?.extractionMethod ?? null;
+      if (provMethod === 'distributor_record_v2') {
+        const merchMetadata = {
+          ...distributorMetadata,
+          merchandisingProvenance:
+            (distributorProvenance as { merchandisingProvenance?: Record<string, unknown> } | null)?.merchandisingProvenance ?? {},
+        };
+        const pushMerch = (sourceField: string, value: unknown): void => {
+          if (value == null || String(value).trim().length === 0) return;
+          evidence.push({
+            id: crypto.randomUUID(),
+            runId: context.runId,
+            stageName: 'evidence_extraction',
+            productSku: input.sku,
+            attributeId: null,
+            source: 'distributor_record' as const,
+            reliability: 'medium',
+            sourceUrl: null,
+            sourceField,
+            snippet: String(value).slice(0, 300),
+            value,
+            metadata: merchMetadata,
+            capturedAt: now(),
+          } as ClassificationEvidence);
+        };
+        pushMerch('description', extData.description ?? null);
+        for (const bullet of Array.isArray(extData.bulletPoints) ? extData.bulletPoints : []) {
+          pushMerch('bullet_point', bullet);
+        }
+        pushMerch('distributor_category', extData.distributorCategory ?? null);
+        pushMerch('dimensions', extData.dimensions ?? null);
+        pushMerch('case_pack', extData.casePack ?? null);
+        pushMerch('unit_of_measure', extData.unitOfMeasure ?? null);
+        pushMerch('ingredients', extData.ingredients ?? null);
       }
       return { status: 'succeeded', output: { evidence, proposals: [], abstained: false } };
     }

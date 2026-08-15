@@ -5,6 +5,7 @@ import { createStoreManagerEventWorker } from './services/store-manager-event-wo
 import { getStoreManagerFlags } from '../store-manager/flags';
 import { pruneStoreManagerRetention } from '../db/store-manager-operations-migration';
 import { findWorkspace } from '../db/repositories/workspace-repo';
+import { closeAllHtmlScraperSessions } from '../onboarding/sourcing/html-scraper/session-runner';
 
 const PORT = parseInt(process.env.PORT ?? '3030', 10);
 const HOST = process.env.HOST ?? '127.0.0.1';
@@ -33,10 +34,13 @@ const eventWorkerStarted = (() => {
   return true;
 })();
 
-const shutdown = () => {
+const shutdown = async () => {
   storeManagerScheduler.stop();
   storeManagerEventWorker.stop();
   if (retentionTimer) clearInterval(retentionTimer);
+  // Amendment B (M2): release all in-memory Distributor Scraper sessions
+  // (cookies/credentials are never persisted; browsers are closed).
+  await closeAllHtmlScraperSessions().catch(() => {});
   process.exit(0);
 };
 process.on('SIGINT', shutdown);

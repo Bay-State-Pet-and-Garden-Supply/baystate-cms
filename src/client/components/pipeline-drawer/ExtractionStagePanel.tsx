@@ -45,6 +45,10 @@ export function ExtractionStagePanel({
 }: ExtractionStagePanelProps) {
   const isDistributor = sourceType === 'distributor_record';
   const distributorProvenance = extractionData?.distributorRecordProvenance ?? null;
+  // Amendment B (M5b-2): VERIFIED v2 materializations (extractionMethod
+  // distributor_record_v2) render merchandising-depth data. V1 / unverified
+  // rows keep the identity-only surface.
+  const verifiedV2Distributor = isDistributor && distributorProvenance?.extractionMethod === 'distributor_record_v2';
   const distributorProviderIds = extractionData?.distributorProviderIds ?? [];
   const distributorAttemptIds = extractionData?.distributorEvidenceAttemptIds ?? [];
   const notYetMaterialized = isDistributor && !extractionData;
@@ -224,7 +228,7 @@ export function ExtractionStagePanel({
       {extractionData ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 16, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
           <h3 style={{ fontSize: 13, fontWeight: 700, margin: 0, color: '#1e293b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            {isDistributor ? '📦 Distributor Record Data (identity-only)' : '📋 Raw Scraped Spec Data'}
+            {isDistributor ? (verifiedV2Distributor ? '📦 Distributor Record Data (merchandising-depth)' : '📦 Distributor Record Data (identity-only)') : '📋 Raw Scraped Spec Data'}
           </h3>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <tbody>
@@ -267,6 +271,56 @@ export function ExtractionStagePanel({
                     <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{String(value)}</td>
                   </tr>
                 ))}
+              {isDistributor && verifiedV2Distributor && extractionData.description && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Description</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9', wordBreak: 'break-word', lineHeight: 1.4 }}>
+                    {extractionData.description.slice(0, 500)}{extractionData.description.length > 500 ? '…' : ''}
+                  </td>
+                </tr>
+              )}
+              {isDistributor && verifiedV2Distributor && extractionData.bulletPoints && extractionData.bulletPoints.length > 0 && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Features</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>
+                    <ul style={{ margin: 0, paddingLeft: 18 }}>
+                      {extractionData.bulletPoints.map((b, i) => (
+                        <li key={i} style={{ margin: '2px 0' }}>{b}</li>
+                      ))}
+                    </ul>
+                  </td>
+                </tr>
+              )}
+              {isDistributor && verifiedV2Distributor && extractionData.distributorCategory && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Category</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.distributorCategory}</td>
+                </tr>
+              )}
+              {isDistributor && verifiedV2Distributor && extractionData.dimensions && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Dimensions</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.dimensions}</td>
+                </tr>
+              )}
+              {isDistributor && verifiedV2Distributor && extractionData.casePack && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Case pack</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.casePack}</td>
+                </tr>
+              )}
+              {isDistributor && verifiedV2Distributor && extractionData.unitOfMeasure && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Unit of measure</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.unitOfMeasure}</td>
+                </tr>
+              )}
+              {isDistributor && verifiedV2Distributor && extractionData.ingredients && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Ingredients</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.ingredients}</td>
+                </tr>
+              )}
               {!isDistributor && extractionData.description && (
                 <tr>
                   <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Description</td>
@@ -288,6 +342,42 @@ export function ExtractionStagePanel({
             </tbody>
           </table>
 
+          {isDistributor &&
+            verifiedV2Distributor &&
+            extractionData.distributorImageCandidates &&
+            extractionData.distributorImageCandidates.length > 0 && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: '10px 14px',
+                background: '#fffbeb',
+                border: '1px solid #fde68a',
+                borderRadius: 8,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+              }}
+            >
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#92400e' }}>
+                🖼 Image candidates — DISPLAY ONLY, not approved for catalog use
+              </span>
+              <span style={{ fontSize: 12, color: '#78350f' }}>
+                These distributor URLs are never downloaded, OCR'd, or published without PI-6 rights
+                verification. Shown as text only.
+              </span>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {extractionData.distributorImageCandidates.map((cand, i) => (
+                  <li key={i} style={{ fontSize: 12, color: '#78350f', wordBreak: 'break-all', margin: '2px 0' }}>
+                    {cand.url}
+                    {cand.sourceAttemptIds.length > 0 && (
+                      <span style={{ color: '#b45309' }}> (attempts: {cand.sourceAttemptIds.join(', ')})</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {extractionData.fieldProvenance && Object.keys(extractionData.fieldProvenance).length > 0 && (
             <details style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
               <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#475569' }}>Field provenance (which source each field came from)</summary>
@@ -295,6 +385,26 @@ export function ExtractionStagePanel({
                 {Object.entries(extractionData.fieldProvenance).map(([field, source]) => (
                   <span key={field} style={{ background: '#f1f5f9', padding: '3px 8px', borderRadius: 4, color: '#475569', fontSize: 11, fontWeight: 500 }}>
                     {field}: <strong>{String(source)}</strong>
+                  </span>
+                ))}
+              </div>
+            </details>
+          )}
+          {isDistributor && verifiedV2Distributor && distributorProvenance?.merchandisingProvenance && (
+            <details style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#475569' }}>
+                Merchandising provenance (which attempt supplied each merchandising field)
+              </summary>
+              <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {Object.entries(distributorProvenance.merchandisingProvenance).map(([field, entries]) => (
+                  <span key={field} style={{ background: '#fef3c7', padding: '3px 8px', borderRadius: 4, color: '#92400e', fontSize: 11, fontWeight: 500 }}>
+                    {field}:{' '}
+                    <strong>
+                      {(entries ?? [])
+                        .map((e) => e.providerId)
+                        .filter((v, i, arr) => arr.indexOf(v) === i)
+                        .join(', ')}
+                    </strong>
                   </span>
                 ))}
               </div>

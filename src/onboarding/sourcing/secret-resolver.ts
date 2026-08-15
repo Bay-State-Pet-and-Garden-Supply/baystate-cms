@@ -1,4 +1,9 @@
 import { getApiKey } from '../../db/repositories/api-key-repo';
+import { parseHtmlScraperCredentials as parseCredentials } from './html-scraper/credentials';
+export type { HtmlScraperCredentials, HtmlScraperSecretParse } from './html-scraper/credentials';
+
+/** Re-export the strict parser from its pure module (server path). */
+export const parseHtmlScraperCredentials = parseCredentials;
 
 /**
  * Secret resolution for distributor connections (ADR 0014).

@@ -33,6 +33,9 @@ import {
 
 export const PROJECTION_VERSION = 'distributor-record-projection-v1';
 
+/** Amendment B (M5): the v2 merchandising-depth projection version. */
+export const PROJECTION_VERSION_V2 = 'distributor-record-projection-v2';
+
 export const SOURCING_PROJECTION_REASON_CODES = [
   'no_accepted_evidence',
   'incomplete_provenance',
@@ -83,6 +86,42 @@ export interface DistributorRecordProjectionInput {
   resolutions?: ProjectionResolutionInput[];
 }
 
+/**
+ * Amendment B (M5): one merchandising provenance entry — the values ONE
+ * accepted attempt supplied for ONE merchandising field, with the attempt's
+ * provider/catalog/connection identity.
+ */
+export interface MerchandisingProvenanceEntry {
+  attemptId: string;
+  providerId: string;
+  catalogVersion: string;
+  connectionId: string;
+  /** Bounded values that THIS attempt supplied for the field (sorted). */
+  values: string[];
+}
+
+/**
+ * Amendment B (M5): the v2 merchandising-depth projection. Extends the v1
+ * identity authority with explicit bounded merchandising fields and their
+ * dedicated per-field provenance. The v2 evidence hash covers all selected
+ * and merged fields PLUS all provenance (order-insensitive canonical JSON).
+ */
+export interface DistributorRecordProjectionV2 extends Omit<DistributorRecordProjection, 'version'> {
+  version: typeof PROJECTION_VERSION_V2;
+  description: string | null;
+  /** Case-insensitive sorted-unique union, deterministic display spelling. */
+  features: string[];
+  category: string | null;
+  dimensions: string | null;
+  casePack: string | null;
+  unitOfMeasure: string | null;
+  ingredients: string | null;
+  /** Sorted-unique HTTPS image candidate URLs (display-only). */
+  imageUrls: string[];
+  /** Per-field merchandising provenance grouped by attempt. */
+  merchandisingProvenance: Record<string, MerchandisingProvenanceEntry[]>;
+}
+
 export interface DistributorRecordProjection {
   version: typeof PROJECTION_VERSION;
   upc: string;
@@ -119,6 +158,15 @@ export interface DistributorRecordProjection {
   };
 }
 
+/** Shared failure branch for both result unions (structurally identical). */
+export interface SourcingProjectionFailure {
+  qualified: false;
+  reasonCodes: SourcingProjectionReasonCode[];
+  acceptedAttemptIds: string[];
+  providerIds: string[];
+  warnings: string[];
+}
+
 export type SourcingProjectionResult =
   | {
       qualified: true;
@@ -128,13 +176,19 @@ export type SourcingProjectionResult =
       providerIds: string[];
       warnings: string[];
     }
+  | SourcingProjectionFailure;
+
+/** Amendment B (M5): the v2 default-authority result shape. */
+export type SourcingProjectionResultV2 =
   | {
-      qualified: false;
-      reasonCodes: SourcingProjectionReasonCode[];
+      qualified: true;
+      projection: DistributorRecordProjectionV2;
+      evidenceHash: string;
       acceptedAttemptIds: string[];
       providerIds: string[];
       warnings: string[];
-    };
+    }
+  | SourcingProjectionFailure;
 
 // ─── Canonical JSON (deterministic hashing) ────────────────────────────────────
 
@@ -161,11 +215,17 @@ export function canonicalJson(value: unknown): string {
  * itself). The decision, extraction row, extraction payload, and frozen
  * cohort projection must all carry the SAME value.
  */
-export function computeEvidenceHash(projection: DistributorRecordProjection): string {
+export function computeEvidenceHash(projection: DistributorRecordProjection | DistributorRecordProjectionV2): string {
   return createHash('sha256').update(canonicalJson(projection)).digest('hex');
 }
 
 // ─── Projection build ──────────────────────────────────────────────────────────
+
+/**
+ * Amendment B (M5): merchandising scalar fields the v2 projection may carry.
+ * Never identity-critical: disagreements warn, never block qualification.
+ */
+const MERCHANDISING_SCALAR_FIELDS = ['description', 'category', 'dimensions', 'casePack', 'unitOfMeasure', 'ingredients'] as const;
 
 /** Identity fields the projection v1 may carry (identity-only allowlist). */
 const PROJECTION_FIELDS = [
@@ -188,7 +248,7 @@ const EMPTY_RESULT = {
   warnings: [] as string[],
 };
 
-function fail(reasonCodes: SourcingProjectionReasonCode[], warnings: string[]): SourcingProjectionResult {
+function fail(reasonCodes: SourcingProjectionReasonCode[], warnings: string[]): SourcingProjectionFailure {
   return { qualified: false, reasonCodes, ...EMPTY_RESULT, warnings };
 }
 
@@ -227,11 +287,19 @@ function identityFieldValue(
 }
 
 /**
- * Build the deterministic projection. Returns `qualified: true` with the
- * projection and evidence hash, or `qualified: false` with stable reason
- * codes. Never throws; never writes; never reads env/DB.
+ * Build the deterministic projection (shared v1/v2 core). `merchandising:
+ * true` produces the Amendment B v2 authority (identity + merchandising
+ * fields + dedicated provenance); `false` reproduces the v1 identity-only
+ * authority BYTE-FOR-BYTE (same fields, same version, same hash) for
+ * historical verification. Returns `qualified: true` with the projection and
+ * evidence hash, or `qualified: false` with stable reason codes. Never
+ * throws; never writes; never reads env/DB.
  */
-export function buildDistributorRecordProjection(input: DistributorRecordProjectionInput): SourcingProjectionResult {
+function buildProjectionCore(
+  input: DistributorRecordProjectionInput,
+  merchandising: boolean,
+): SourcingProjectionResultV2 {
+  const version = merchandising ? PROJECTION_VERSION_V2 : PROJECTION_VERSION;
   const warnings: string[] = [];
   const reasons = new Set<SourcingProjectionReasonCode>();
 
@@ -452,6 +520,111 @@ export function buildDistributorRecordProjection(input: DistributorRecordProject
     }
   }
 
+  // ── Amendment B (M5): merchandising-depth collection (v2 only) ───────────
+  // Explicit bounded fields; NEVER identity-critical. Disagreements on
+  // merchandising scalars become bounded warnings, never conflict rows or
+  // qualification reasons. Missing merchandising fields never block
+  // qualification. `casePack` may seed the built-in identity `packCount`
+  // (numeric only) — disagreement on THAT identity axis stays hard.
+  const merchandisingProvenance: Record<string, MerchandisingProvenanceEntry[]> = {};
+  if (merchandising) {
+    const pushMerchEntry = (field: string, attempt: EvidenceAttempt, values: string[]) => {
+      const sorted = [...new Set(values)].sort();
+      const list = merchandisingProvenance[field] ?? [];
+      if (!list.some((e) => e.attemptId === attempt.id && e.providerId === attempt.providerId)) {
+        list.push({
+          attemptId: attempt.id,
+          providerId: attempt.providerId,
+          catalogVersion: attempt.catalogVersion ?? '',
+          connectionId: attempt.distributorConnectionId ?? '',
+          values: sorted,
+        });
+        merchandisingProvenance[field] = list;
+      }
+    };
+    const addProv = (field: string, attempt: EvidenceAttempt) => {
+      const prov = fieldProvenance.get(field) ?? [];
+      const entry = {
+        attemptId: attempt.id,
+        providerId: attempt.providerId,
+        catalogVersion: attempt.catalogVersion ?? '',
+        connectionId: attempt.distributorConnectionId ?? '',
+      };
+      if (!prov.some((p) => p.attemptId === entry.attemptId && p.providerId === entry.providerId)) {
+        prov.push(entry);
+        fieldProvenance.set(field, prov);
+      }
+    };
+    for (const field of MERCHANDISING_SCALAR_FIELDS) {
+      for (const { attempt, identity } of parsedIdentities) {
+        const value = identityFieldValue(identity, field);
+        if (value === null) continue;
+        if (!fieldValues.has(field)) fieldValues.set(field, []);
+        const list = fieldValues.get(field)!;
+        if (!list.includes(value)) list.push(value);
+        pushMerchEntry(field, attempt, [value]);
+        addProv(field, attempt);
+      }
+    }
+    // features: case-insensitive sorted-unique union, first-seen display
+    // spelling preserved (attempt order is provider-sorted → deterministic).
+    const featureOrder: string[] = [];
+    for (const { attempt, identity } of parsedIdentities) {
+      const feats = (identity.features ?? []).map((f) => (typeof f === 'string' ? f.trim() : '')).filter((f) => f.length > 0);
+      if (feats.length > 0) pushMerchEntry('features', attempt, feats);
+      for (const f of feats) {
+        if (!featureOrder.some((existing) => existing.toLowerCase() === f.toLowerCase())) featureOrder.push(f);
+      }
+    }
+    if (featureOrder.length > 0) {
+      fieldValues.set(
+        'features',
+        [...featureOrder].sort((a, b) => {
+          const la = a.toLowerCase();
+          const lb = b.toLowerCase();
+          return la < lb ? -1 : la > lb ? 1 : a < b ? -1 : a > b ? 1 : 0;
+        }),
+      );
+    }
+    // imageUrls: HTTPS-only sorted-unique union (display-only candidates).
+    for (const { attempt, identity } of parsedIdentities) {
+      const urls = (identity.images ?? [])
+        .map((u) => (typeof u === 'string' ? u.trim() : ''))
+        .filter((u) => /^https:\/\//i.test(u));
+      if (urls.length > 0) {
+        pushMerchEntry('imageUrls', attempt, urls);
+        for (const u of urls) {
+          if (!fieldValues.has('imageUrls')) fieldValues.set('imageUrls', []);
+          const list = fieldValues.get('imageUrls')!;
+          if (!list.includes(u)) list.push(u);
+          addProv('imageUrls', attempt);
+        }
+      }
+    }
+    const imageUrls = (fieldValues.get('imageUrls') ?? []).sort();
+    if (imageUrls.length > 0) {
+      fieldValues.set('imageUrls', imageUrls);
+    }
+    // Numeric casePack seeds the built-in identity packCount when no direct
+    // packCount evidence exists (identity disagreement stays hard).
+    if (!fieldValues.has('packCount')) {
+      const numericCasePacks = (fieldValues.get('casePack') ?? []).filter((v) => /^\d+$/.test(v.trim()));
+      if (numericCasePacks.length > 0) {
+        fieldValues.set('packCount', [...new Set(numericCasePacks)]);
+        const cpProv = fieldProvenance.get('casePack');
+        if (cpProv) fieldProvenance.set('packCount', [...cpProv]);
+      }
+    }
+    // Merchandising scalar disagreement → bounded warning only.
+    for (const field of MERCHANDISING_SCALAR_FIELDS) {
+      const values = (fieldValues.get(field) ?? []).filter((v) => v.trim().length > 0);
+      if (values.length > 1) {
+        const distinct = new Set(values.map((v) => v.toLowerCase()));
+        if (distinct.size > 1) warnings.push(`merchandising_disagreement:${field}`);
+      }
+    }
+  }
+
   // Hard-conflict check on identity-critical fields (post-resolution).
   for (const field of allFields) {
     const values = fieldValues.get(field) ?? [];
@@ -505,6 +678,67 @@ export function buildDistributorRecordProjection(input: DistributorRecordProject
 
   const contributing = parsedIdentities.map((p) => p.attempt);
 
+  // Amendment B (M5): v2 projection — identity + merchandising + dedicated
+  // provenance. The evidence hash covers every selected/merged field and all
+  // provenance; canonical JSON is key-sorted, so input order cannot change it.
+  if (merchandising) {
+    const pickMerch = (field: string): string | null => {
+      const values = (fieldValues.get(field) ?? []).filter((v) => v.trim().length > 0);
+      if (values.length === 0) return null;
+      return [...values].sort()[0];
+    };
+    const sortedMerchProvenance: Record<string, MerchandisingProvenanceEntry[]> = {};
+    for (const field of Object.keys(merchandisingProvenance).sort()) {
+      sortedMerchProvenance[field] = (merchandisingProvenance[field] ?? []).sort((a, b) =>
+        a.attemptId < b.attemptId ? -1 : a.attemptId > b.attemptId ? 1 : 0,
+      );
+    }
+    const projectionV2: DistributorRecordProjectionV2 = {
+      version: PROJECTION_VERSION_V2,
+      upc: itemIdentifier,
+      gtin: pick('gtin'),
+      distributorSku: pick('distributorSku'),
+      manufacturerPartNumber: pick('manufacturerPartNumber'),
+      name: names.sort()[0],
+      brand: pick('brand'),
+      weight: pick('weight'),
+      size: pick('size'),
+      count: pick('count'),
+      packCount: pick('packCount'),
+      flavor: pick('flavor'),
+      formula: pick('formula'),
+      customVariantAxes: customAxes,
+      description: pickMerch('description'),
+      features: fieldValues.get('features') ?? [],
+      category: pickMerch('category'),
+      dimensions: pickMerch('dimensions'),
+      casePack: pickMerch('casePack'),
+      unitOfMeasure: pickMerch('unitOfMeasure'),
+      ingredients: pickMerch('ingredients'),
+      imageUrls: fieldValues.get('imageUrls') ?? [],
+      merchandisingProvenance: sortedMerchProvenance,
+      provenance: {
+        providerIds: Array.from(new Set(contributing.map((a) => a.providerId))).sort(),
+        acceptedAttemptIds: Array.from(new Set(input.acceptedAttemptIds)).sort(),
+        sourcingGenerationId: input.sourcingGenerationId,
+        catalogVersions: Array.from(new Set(contributing.map((a) => a.catalogVersion ?? ''))).filter((v) => v).sort(),
+        observedAt: Array.from(new Set(contributing.map((a) => a.observedAt ?? ''))).filter((v) => v).sort(),
+        connectionIds: Array.from(new Set(contributing.map((a) => a.distributorConnectionId ?? '')))
+          .filter((v) => v)
+          .sort(),
+        fieldProvenance: sortedFieldProvenance,
+      },
+    };
+    return {
+      qualified: true,
+      projection: projectionV2,
+      evidenceHash: computeEvidenceHash(projectionV2),
+      acceptedAttemptIds: projectionV2.provenance.acceptedAttemptIds,
+      providerIds: projectionV2.provenance.providerIds,
+      warnings,
+    };
+  }
+
   const projection: DistributorRecordProjection = {
     version: PROJECTION_VERSION,
     upc: itemIdentifier,
@@ -542,5 +776,26 @@ export function buildDistributorRecordProjection(input: DistributorRecordProject
     acceptedAttemptIds: projection.provenance.acceptedAttemptIds,
     providerIds: projection.provenance.providerIds,
     warnings,
-  };
+  } as unknown as SourcingProjectionResultV2;
+}
+
+/**
+ * Amendment A v1 projection authority — identity-only, byte-for-byte
+ * unchanged. Use ONLY for verifying existing v1 extraction rows at
+ * promotion/readiness. New decisions use `buildDistributorRecordProjection`
+ * (v2, Amendment B).
+ */
+export function buildDistributorRecordProjectionV1(input: DistributorRecordProjectionInput): SourcingProjectionResult {
+  // merchandising=false produces exactly the v1 identity-only projection
+  // (version v1, identical fields/hash); the cast is structural-only.
+  return buildProjectionCore(input, false) as SourcingProjectionResult;
+}
+
+/**
+ * Amendment B (M5) DEFAULT authority: v2 merchandising-depth projection for
+ * every newly computed decision (reconciliation, manual/automatic routing,
+ * final conflict resolution, materialization).
+ */
+export function buildDistributorRecordProjection(input: DistributorRecordProjectionInput): SourcingProjectionResultV2 {
+  return buildProjectionCore(input, true);
 }

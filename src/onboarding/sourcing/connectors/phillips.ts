@@ -46,6 +46,7 @@ const DEFAULT_BASE_URL = 'https://api.endlessaisles.io/v1';
 export class PhillipsConnector implements DistributorConnector {
   readonly connectorType = 'api' as const;
   readonly providerId = 'phillips';
+  readonly requiresSecret = true;
 
   constructor(private readonly config: PhillipsConnectorConfig = {}) {}
 
@@ -176,11 +177,18 @@ function foundResult(
     matchedIdentifier: identifier,
     distributorUpc: normalizeGtin(chosen.upc),
     gtin: normalizeGtin(chosen.gtin),
+    distributorSku: null,
     name,
     description: typeof chosen.description === 'string' ? chosen.description : null,
     brand,
     manufacturerPartNumber: null,
     weight,
+    features: [],
+    category: null,
+    dimensions: null,
+    casePack: null,
+    unitOfMeasure: null,
+    ingredients: null,
     attributes: {},
     imageUrls,
     sourceUrl: null,

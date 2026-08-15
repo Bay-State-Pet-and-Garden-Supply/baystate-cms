@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "providerId": "bradley",
+  "connectorType": "html_scraper",
+  "navigationOrigin": "https://www.bradleycaldwell.com",
+  "assetHosts": [
+    "cdn11.bigcommerce.com",
+    "cdn.bigcommerce.com",
+    "bigcommerce.com",
+    "www.bradleycaldwell.com",
+    "bradleycaldwell.com"
+  ],
+  "captureDate": "2026-08-15",
+  "baystateSourceRevision": "2a5c9a5f55644a50bee3f23e9d3f819eb10639f0",
+  "notes": "Captured from the live BigCommerce-headless storefront with the project browser/UA. Sanitized locally: all <script>/<style>/<link>/<iframe>/<svg>/<form>/<noscript>/<template>/<meta> and on* handlers removed; no cookies, headers, browser storage, or personal/account data stored.",
+  "files": [
+    {
+      "file": "found-search.html",
+      "scenario": "found-search",
+      "sourceUrl": "https://www.bradleycaldwell.com/search?term=018653299524",
+      "testIdentifier": "018653299524",
+      "expectedName": "E-Z HANG SCALE",
+      "expectedBrand": "KERBL",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "98a364ade8f686146b4be54b7ed3badb2d365b53b953f87e4860397dcc3f2dfa",
+      "containsCredentials": false
+    },
+    {
+      "file": "found-pdp.html",
+      "scenario": "found-pdp",
+      "sourceUrl": "https://www.bradleycaldwell.com/e-z-hang-scale-silver-up-to-55-lb-001135",
+      "testIdentifier": "018653299524",
+      "expectedName": "E-Z HANG SCALE",
+      "expectedBrand": "KERBL",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "8b28553d5ee07a5c1999714bf7a4c8080d7072b8a3b8e2532fe8ce4414bd91c7",
+      "containsCredentials": false
+    },
+    {
+      "file": "wrong-variant-search.html",
+      "scenario": "wrong-variant",
+      "sourceUrl": "https://www.bradleycaldwell.com/search?term=018653299524",
+      "testIdentifier": "018653299520",
+      "expectedName": "E-Z HANG SCALE",
+      "expectedBrand": "KERBL",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "98a364ade8f686146b4be54b7ed3badb2d365b53b953f87e4860397dcc3f2dfa",
+      "containsCredentials": false,
+      "adjustment": "Real search-results page reused with a synthetic (never-issued) 12-digit identifier 018653299520 to exercise the variant-mismatch path: the page's real candidate card and PDP selectors are untouched; the fixture PDP carries UPC 018653299524, which differs from the synthetic identifier, so the connector must return not_stocked:wrong_variant."
+    },
+    {
+      "file": "wrong-variant-pdp.html",
+      "scenario": "wrong-variant-pdp",
+      "sourceUrl": "https://www.bradleycaldwell.com/e-z-hang-scale-silver-up-to-55-lb-001135",
+      "testIdentifier": "018653299520",
+      "expectedName": "E-Z HANG SCALE",
+      "expectedBrand": "KERBL",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "8b28553d5ee07a5c1999714bf7a4c8080d7072b8a3b8e2532fe8ce4414bd91c7",
+      "containsCredentials": false
+    },
+    {
+      "file": "not-found.html",
+      "scenario": "not-found",
+      "sourceUrl": "https://www.bradleycaldwell.com/search?term=000000000000",
+      "testIdentifier": "000000000000",
+      "captureMethod": "manual_sanitized_dom",
+      "sha256": "dc7d0427245ec280f211e8eda4e5bb8a0f3f019f35643e6ca761f109996836da",
+      "containsCredentials": false
+    },
+    {
+      "file": "unexpected-markup.html",
+      "scenario": "unexpected-markup",
+      "captureMethod": "synthetic_captured_shape",
+      "sha256": "15c9e0559132a686389cce87150542f97ace8d22cdfb2d585c3a07153e932e14",
+      "containsCredentials": false,
+      "adjustment": "Minimal app-shell skeleton used to prove the one-browser-fallback and fail-closed unexpected-markup paths offline."
+    }
+  ]
+}

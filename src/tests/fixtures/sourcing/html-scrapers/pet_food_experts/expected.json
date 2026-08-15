@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "providerId": "pet_food_experts",
+  "navigationOrigin": "https://orders.petfoodexperts.com",
+  "scenarios": {
+    "found": {
+      "fixtures": ["found-search.html", "found-pdp.html"],
+      "identifier": "33011808",
+      "outcome": "found",
+      "matchedFields": ["matchedIdentifier", "name", "brand", "distributorSku", "weight", "unitOfMeasure", "description", "features", "ingredients", "category", "imageUrls", "sourceUrl"],
+      "record": {
+        "name": "Wellness CORE Grain Free",
+        "brand": "Wellness",
+        "distributorSku": "PFX-0087",
+        "weight": "5 lb",
+        "unitOfMeasure": "EA",
+        "descriptionStartsWith": "Complete and balanced grain-free",
+        "ingredientsStartsWith": "Deboned chicken",
+        "categoryStartsWith": "Dog Food"
+      },
+      "forbiddenAbsent": ["price", "inventory", "stock", "palletQuantity", "addToCart", "availability"]
+    },
+    "wrongVariant": {
+      "fixtures": ["wrong-variant-pdp.html"],
+      "identifier": "33011808",
+      "outcome": "not_stocked:wrong_variant",
+      "note": "PDP carries UPC 012345678901; name/brand similarity must never rescue it."
+    },
+    "notFound": {
+      "fixtures": ["not-found.html"],
+      "identifier": "000000000000",
+      "outcome": "not_stocked:no_exact_match"
+    },
+    "authRequired": {
+      "fixtures": ["auth-required.html"],
+      "outcome": "auth_required",
+      "note": "Real rendered SignIn with #userName/#password/signIn_submit."
+    },
+    "authFailed": {
+      "fixtures": ["auth-failed.html"],
+      "outcome": "auth_failed",
+      "note": "signIn_error indicator present."
+    },
+    "unexpectedMarkup": {
+      "fixtures": ["unexpected-markup.html"],
+      "outcome": "source_error",
+      "code": "unexpected_markup"
+    }
+  }
+}

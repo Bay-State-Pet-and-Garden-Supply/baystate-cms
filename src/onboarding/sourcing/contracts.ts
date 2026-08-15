@@ -25,11 +25,13 @@ import { z } from 'zod';
 // ─── Connector type ───────────────────────────────────────────────────────────
 
 /**
- * Closed set of connector implementations. `legacy_adapter` exists only for
- * migration compatibility with historical connection rows; an unknown
- * connector fails as `source_error`, never silently falls back.
+ * Closed set of connector implementations. `html_scraper` (ADR 0014
+ * Amendment B) covers Distributor Scraper connectors that extract catalog
+ * data from web storefronts via authenticated sessions; `legacy_adapter`
+ * exists only for migration compatibility with historical connection rows.
+ * An unknown connector fails as `source_error`, never silently falls back.
  */
-export const SOURCING_CONNECTOR_TYPES = ['api', 'ftp_catalog', 'csv', 'legacy_adapter'] as const;
+export const SOURCING_CONNECTOR_TYPES = ['api', 'ftp_catalog', 'csv', 'html_scraper', 'legacy_adapter'] as const;
 export type SourcingConnectorType = (typeof SOURCING_CONNECTOR_TYPES)[number];
 
 export function isSourcingConnectorType(value: unknown): value is SourcingConnectorType {
@@ -121,17 +123,31 @@ export interface SourcingConnectionRef {
  * Image URLs are display-only evidence for v1 (PI-6 rights verification is
  * required before any catalog use) and MUST NOT be copied into
  * extraction/classification/draft/promotion payloads.
+ *
+ * Amendment B (M2): merchandising fields (description, features, category,
+ * dimensions, casePack, unitOfMeasure, ingredients, distributorSku) are
+ * explicit, bounded fields — never smuggled into `attributes` (an unknown
+ * attribute key is a variant axis and would poison conflict semantics).
  */
 export interface DistributorCatalogRecord {
   /** Exact normalized identifier that matched (UPC/GTIN digits only). */
   matchedIdentifier: string;
   distributorUpc: string | null;
   gtin: string | null;
+  /** Distributor-side SKU/item number (Amendment B). Never a lookup authority. */
+  distributorSku: string | null;
   name: string | null;
   description: string | null;
   brand: string | null;
   manufacturerPartNumber: string | null;
   weight: string | null;
+  /** Amendment B merchandising fields (bounded, explicit). */
+  features: string[];
+  category: string | null;
+  dimensions: string | null;
+  casePack: string | null;
+  unitOfMeasure: string | null;
+  ingredients: string | null;
   /** Variant dimensions: size/count/pack count/flavor/formula etc. */
   attributes: Record<string, string>;
   imageUrls: string[];
@@ -143,6 +159,23 @@ export interface DistributorCatalogRecord {
   /** Optional expiry for snapshot-backed records; null = no expiry known. */
   expiresAt: string | null;
 }
+
+/**
+ * Bounded record caps (Amendment B, M2): an oversized record fails closed as
+ * `record_too_large` and is NEVER silently truncated into authoritative
+ * evidence. Single source of truth for both the zod boundary schema and the
+ * engine's pre-persistence size check.
+ */
+export const SOURCING_RECORD_LIMITS = {
+  /** Max characters for a single bounded string field. */
+  string: 2000,
+  /** Max entries in list fields (features, imageUrls). */
+  list: 50,
+  /** Max entries in `attributes`. */
+  attributes: 64,
+  /** Max characters per attribute key/value. */
+  attributeValue: 500,
+} as const;
 
 // ─── Lookup outcome ───────────────────────────────────────────────────────────
 
@@ -183,22 +216,84 @@ const NormalizedIdentifierSchema = z
     message: 'matchedIdentifier must be an exact normalized 8-14 digit identifier',
   });
 
+const BoundedNullableString = z.string().max(SOURCING_RECORD_LIMITS.string).nullable();
+
+const HttpsUrlSchema = z
+  .string()
+  .url()
+  .refine((v) => v.startsWith('https://'), { message: 'record URLs must be HTTPS' });
+
+const ValidTimestamp = z
+  .string()
+  .refine((v) => !Number.isNaN(Date.parse(v)), { message: 'must be a valid ISO timestamp' });
+
 export const DistributorCatalogRecordSchema: z.ZodType<DistributorCatalogRecord> = z.object({
   matchedIdentifier: NormalizedIdentifierSchema,
-  distributorUpc: z.string().nullable(),
-  gtin: z.string().nullable(),
-  name: z.string().nullable(),
-  description: z.string().nullable(),
-  brand: z.string().nullable(),
-  manufacturerPartNumber: z.string().nullable(),
-  weight: z.string().nullable(),
-  attributes: z.record(z.string(), z.string()),
-  imageUrls: z.array(z.string()),
-  sourceUrl: z.string().nullable(),
-  catalogVersion: z.string().nullable(),
-  observedAt: z.string(),
-  expiresAt: z.string().nullable(),
+  distributorUpc: BoundedNullableString,
+  gtin: BoundedNullableString,
+  distributorSku: BoundedNullableString,
+  name: BoundedNullableString,
+  description: BoundedNullableString,
+  brand: BoundedNullableString,
+  manufacturerPartNumber: BoundedNullableString,
+  weight: BoundedNullableString,
+  features: z.array(z.string().max(SOURCING_RECORD_LIMITS.string)).max(SOURCING_RECORD_LIMITS.list),
+  category: BoundedNullableString,
+  dimensions: BoundedNullableString,
+  casePack: BoundedNullableString,
+  unitOfMeasure: BoundedNullableString,
+  ingredients: BoundedNullableString,
+  attributes: z
+    .record(z.string().max(SOURCING_RECORD_LIMITS.attributeValue), z.string().max(SOURCING_RECORD_LIMITS.attributeValue))
+    .refine((o) => Object.keys(o).length <= SOURCING_RECORD_LIMITS.attributes, {
+      message: `attributes exceeds ${SOURCING_RECORD_LIMITS.attributes} entries`,
+    }),
+  imageUrls: z.array(HttpsUrlSchema).max(SOURCING_RECORD_LIMITS.list),
+  sourceUrl: HttpsUrlSchema.nullable(),
+  catalogVersion: BoundedNullableString,
+  observedAt: ValidTimestamp,
+  expiresAt: ValidTimestamp.nullable(),
 });
+
+/**
+ * Pre-persistence size check (Amendment B, M2): distinguishes an OVERSIZED
+ * record (bounded code `record_too_large`) from a structurally malformed one
+ * (`invalid_connector_result`). Returns `record_too_large` when any bounded
+ * field exceeds its cap; null when sizes are within bounds. PURE — never
+ * mutates, never throws.
+ */
+export function recordSizeViolation(record: unknown): 'record_too_large' | null {
+  if (typeof record !== 'object' || record === null) return null;
+  const r = record as Record<string, unknown>;
+  const boundedStrings = [
+    'distributorUpc', 'gtin', 'distributorSku', 'name', 'description', 'brand',
+    'manufacturerPartNumber', 'weight', 'category', 'dimensions', 'casePack',
+    'unitOfMeasure', 'ingredients', 'catalogVersion',
+  ];
+  for (const key of boundedStrings) {
+    const v = r[key];
+    if (typeof v === 'string' && v.length > SOURCING_RECORD_LIMITS.string) return 'record_too_large';
+  }
+  for (const key of ['features', 'imageUrls']) {
+    const v = r[key];
+    if (Array.isArray(v)) {
+      if (v.length > SOURCING_RECORD_LIMITS.list) return 'record_too_large';
+      for (const entry of v) {
+        if (typeof entry === 'string' && entry.length > SOURCING_RECORD_LIMITS.string) return 'record_too_large';
+      }
+    }
+  }
+  const attrs = r.attributes;
+  if (typeof attrs === 'object' && attrs !== null) {
+    const entries = Object.entries(attrs as Record<string, unknown>);
+    if (entries.length > SOURCING_RECORD_LIMITS.attributes) return 'record_too_large';
+    for (const [k, v] of entries) {
+      if (k.length > SOURCING_RECORD_LIMITS.attributeValue) return 'record_too_large';
+      if (typeof v === 'string' && v.length > SOURCING_RECORD_LIMITS.attributeValue) return 'record_too_large';
+    }
+  }
+  return null;
+}
 
 export const SourcingLookupResultSchema: z.ZodType<SourcingLookupResult> = z.discriminatedUnion(
   'outcome',
@@ -242,6 +337,14 @@ export interface DistributorConnector {
   readonly connectorType: SourcingConnectorType;
   /** Human/provider identifier for evidence provenance. */
   readonly providerId: string;
+  /**
+   * Amendment B (M2): whether this connector needs resolved credential
+   * material to run. The engine resolves a secret ONLY for connectors that
+   * require one — public storefront scrapers (Bradley, Central Pet) run with
+   * `secret=null` and are never blocked by the unconditional `secret_missing`
+   * path. Fail-closed default for a connector that omits it is `true`.
+   */
+  readonly requiresSecret: boolean;
   /**
    * Perform an exact normalized identifier lookup.
    *

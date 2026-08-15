@@ -43,6 +43,7 @@ function conn(overrides: Partial<DistributorConnectionView> = {}): DistributorCo
     connectorType: 'api',
     enabled: false,
     secretConfigured: true,
+    secretRequired: true,
     configuration: {},
     authorityPolicy: {},
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -202,6 +203,93 @@ describe('DistributorConnectionsPanel enable flow (jsdom)', () => {
     });
     expect(updateDistributorConnection).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('Confirm enable');
+
+    await act(async () => {
+      root.unmount();
+      container.remove();
+    });
+  });
+});
+
+describe('DistributorConnectionsPanel html_scraper form (Amendment B)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getDistributorConnections).mockResolvedValue({ connections: [] });
+    vi.mocked(getDistributors).mockResolvedValue({ distributors: [] });
+    vi.mocked(getBrandProfiles).mockResolvedValue({ profiles: [] });
+  });
+
+  it('offers html_scraper as a connector type in the create form', () => {
+    const html = renderToStaticMarkup(<DistributorConnectionsPanel engineEnabled={true} initiallyOpen />);
+    expect(html).toContain('html_scraper');
+    // The generic base-URL override is present for the default 'api' type.
+    expect(html).toContain('Base URL (optional)');
+  });
+
+  it('selecting html_scraper hides the base-URL override and explains the fixed code config', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<DistributorConnectionsPanel engineEnabled={true} initiallyOpen />);
+    });
+
+    expect(container.textContent).toContain('Base URL (optional)');
+
+    const select = container.querySelector('select') as HTMLSelectElement;
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+      nativeSetter.call(select, 'html_scraper');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(container.textContent).not.toContain('Base URL (optional)');
+    expect(container.textContent).toContain('code-fixed storefront URL');
+
+    await act(async () => {
+      root.unmount();
+      container.remove();
+    });
+  });
+
+  it('creating an html_scraper connection sends no enabled flag and no base URL', async () => {
+    const { createDistributorConnection } = await import('../../client/onboarding-api');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<DistributorConnectionsPanel engineEnabled={true} initiallyOpen />);
+    });
+
+    // Select html_scraper and fill the distributor id.
+    const select = container.querySelector('select') as HTMLSelectElement;
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+      nativeSetter.call(select, 'html_scraper');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const distributorInput = Array.from(container.querySelectorAll('input'))
+      .find((i) => i.getAttribute('list') === 'distributor-options') as HTMLInputElement;
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      nativeSetter.call(distributorInput, 'bradley');
+      distributorInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const createBtn = Array.from(container.querySelectorAll('button'))
+      .find((b) => b.textContent?.trim() === 'Create connection');
+    expect(createBtn).toBeTruthy();
+    await act(async () => {
+      createBtn!.click();
+    });
+
+    expect(createDistributorConnection).toHaveBeenCalledWith({
+      distributorId: 'bradley',
+      connectorType: 'html_scraper',
+      secretRef: null,
+      configuration: {},
+      authorityPolicy: undefined,
+    });
 
     await act(async () => {
       root.unmount();

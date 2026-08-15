@@ -303,6 +303,41 @@ export function buildExecutionEvidenceProjection(
 }
 
 /**
+ * Bounded extraction of the materializer's per-field merchandising provenance
+ * (Amendment B). The v2 materializer writes
+ * `distributorRecordProvenance.merchandisingProvenance` as a record of
+ * field → [{ attemptId, providerId, catalogVersion, connectionId, values }].
+ * Returns the frozen object only when it is a plain record of arrays of
+ * bounded objects; anything else (missing, malformed, oversized) freezes as
+ * {} — provenance is never invented at freeze time.
+ */
+function extractMerchandisingProvenance(ext: Record<string, any>): Record<string, Array<Record<string, unknown>>> | null {
+  const prov =
+    (ext as { distributorRecordProvenance?: { merchandisingProvenance?: unknown } | null })
+      .distributorRecordProvenance?.merchandisingProvenance ?? null;
+  if (prov == null || typeof prov !== 'object' || Array.isArray(prov)) return null;
+  const result: Record<string, Array<Record<string, unknown>>> = {};
+  for (const [field, entries] of Object.entries(prov)) {
+    if (!Array.isArray(entries) || entries.length > 50) return null;
+    const bounded: Array<Record<string, unknown>> = [];
+    for (const entry of entries) {
+      if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) return null;
+      const e = entry as Record<string, unknown>;
+      const values = Array.isArray(e.values) ? e.values.filter((v): v is string => typeof v === 'string' && v.length <= 500).slice(0, 50) : [];
+      bounded.push({
+        attemptId: typeof e.attemptId === 'string' ? e.attemptId.slice(0, 200) : '',
+        providerId: typeof e.providerId === 'string' ? e.providerId.slice(0, 200) : '',
+        catalogVersion: typeof e.catalogVersion === 'string' ? e.catalogVersion.slice(0, 200) : '',
+        connectionId: typeof e.connectionId === 'string' ? e.connectionId.slice(0, 200) : '',
+        values,
+      });
+    }
+    result[field.slice(0, 100)] = bounded;
+  }
+  return result;
+}
+
+/**
  * Build ONE member's `execution-evidence-v1` entry from its live item — the
  * per-member core of `buildExecutionEvidenceProjection` (same fail-closed
  * extraction-completeness + PI-import-integrity gates). The freeze's per-member
@@ -397,6 +432,15 @@ function buildExecutionEvidenceProjectionMember(
       distributorSku: ext.distributorSku ?? null,
       manufacturerPartNumber: ext.manufacturerPartNumber ?? null,
       variantAttributes: ext.variantAttributes ?? {},
+      // Amendment B merchandising fields (M5b-1): frozen explicitly so
+      // Curation/classification can consume verified v2 data without reading
+      // live values. Defaults keep pre-merchandising v2 snapshots parseable.
+      distributorCategory: ext.distributorCategory ?? null,
+      dimensions: ext.dimensions ?? null,
+      casePack: ext.casePack ?? null,
+      unitOfMeasure: ext.unitOfMeasure ?? null,
+      ingredients: ext.ingredients ?? null,
+      merchandisingProvenance: extractMerchandisingProvenance(ext) ?? {},
       ocr: {
         outcome: ext.ocrOutcome ?? null,
         packagingOcrData: ext.packagingOcrData ?? null,
@@ -1838,6 +1882,16 @@ function frozenExtractionData(
     distributorSku: frozen.distributorSku ?? null,
     manufacturerPartNumber: frozen.manufacturerPartNumber ?? null,
     variantAttributes: { ...frozen.variantAttributes },
+    // Amendment B merchandising fields (M5b-1): reconstructed from the frozen
+    // projection so Curation reads verified v2 values deterministically —
+    // never live values, never rewritten snapshots. Price/inventory/commerce
+    // images stay absent by construction.
+    distributorCategory: frozen.distributorCategory ?? null,
+    dimensions: frozen.dimensions ?? null,
+    casePack: frozen.casePack ?? null,
+    unitOfMeasure: frozen.unitOfMeasure ?? null,
+    ingredients: frozen.ingredients ?? null,
+    merchandisingProvenance: { ...(frozen.merchandisingProvenance ?? {}) },
     packagingOcrData: frozen.ocr.packagingOcrData ?? null,
     ocrOutcome: frozen.ocr.outcome ?? null,
     ocrInputHash: frozen.ocr.ocrInputHash,

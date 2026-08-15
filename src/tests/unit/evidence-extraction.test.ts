@@ -302,4 +302,128 @@ describe('Evidence Extraction — distributor_record source (Amendment A)', () =
     expect(evidence.find(e => e.sourceField === 'distributor_sku')!.value).toBe('LIVE-SKU');
     expect(evidence.find(e => e.sourceField === 'flavor')!.value).toBe('Beef');
   });
+
+  it('frozen V2 distributor member emits merchandising fields with distributor provenance (Amendment B)', async () => {
+    const { evidenceExtractionStage } = await import('../../classification/stages/evidence-extraction');
+    const member = makeDistributorMember();
+    member.extractionMethod = 'distributor_record_v2';
+    member.extraction.description = 'Reviewed distributor description';
+    member.extraction.bulletPoints = ['Feature one', 'Feature two'];
+    member.extraction.distributorCategory = 'Dog Supplies';
+    member.extraction.dimensions = '12 x 8 x 4 in';
+    member.extraction.casePack = '6';
+    member.extraction.unitOfMeasure = 'EA';
+    member.extraction.ingredients = 'Chicken, rice';
+    member.extraction.merchandisingProvenance = {
+      description: [{ attemptId: 'a2', providerId: 'phillips', catalogVersion: 'v1', connectionId: 'c1', values: ['Reviewed distributor description'] }],
+      'case-pack': [{ attemptId: 'a2', providerId: 'phillips', catalogVersion: 'v1', connectionId: 'c1', values: ['6'] }],
+    };
+    const result = await evidenceExtractionStage.execute(
+      { sku: '300000000001', onboardingItemId: 'item-dist-1', evidence: [], acceptedProposals: [], allProposals: [] },
+      {
+        workspacePath,
+        workspaceId,
+        runId: 'run-dist-2',
+        configSnapshotRef: { id: 'cfg', hash: 'h'.repeat(64), sourceCommit: null, createdAt: new Date().toISOString() },
+        snapshot: undefined,
+        cohortFrozenEvidence: member as never,
+      } as never,
+    );
+    expect(result.status).toBe('succeeded');
+    const evidence = (result as { status: 'succeeded'; output: { evidence: Array<Record<string, any>> } }).output.evidence;
+    const merchFields = ['description', 'bullet_point', 'distributor_category', 'dimensions', 'case_pack', 'unit_of_measure', 'ingredients'];
+    for (const field of merchFields) {
+      const entries = evidence.filter(e => e.sourceField === field && e.source === 'distributor_record');
+      expect(entries.length, `missing merchandising field ${field}`).toBeGreaterThan(0);
+      for (const entry of entries) {
+        expect(entry.sourceUrl).toBeNull();
+        expect(entry.metadata.provenance).toBe('distributor_record');
+      }
+    }
+    expect(evidence.find(e => e.sourceField === 'description')!.value).toBe('Reviewed distributor description');
+    expect(evidence.filter(e => e.sourceField === 'bullet_point').map(e => e.value)).toEqual(['Feature one', 'Feature two']);
+    expect(evidence.find(e => e.sourceField === 'distributor_category')!.value).toBe('Dog Supplies');
+    expect(evidence.find(e => e.sourceField === 'ingredients')!.value).toBe('Chicken, rice');
+    // per-field merchandising provenance rides the metadata
+    const descEntry = evidence.find(e => e.sourceField === 'description')!;
+    expect(descEntry.metadata.merchandisingProvenance).toEqual({
+      description: [{ attemptId: 'a2', providerId: 'phillips', catalogVersion: 'v1', connectionId: 'c1', values: ['Reviewed distributor description'] }],
+      'case-pack': [{ attemptId: 'a2', providerId: 'phillips', catalogVersion: 'v1', connectionId: 'c1', values: ['6'] }],
+    });
+    // Never official, never images/price/inventory/claims/search keywords.
+    expect(evidence.some(e => e.source === 'official_product_page')).toBe(false);
+    expect(evidence.some(e => e.sourceField === 'search_keywords')).toBe(false);
+    expect(evidence.some(e => e.sourceField === 'primaryImage')).toBe(false);
+    expect(evidence.some(e => String(e.value).includes('img.example.com'))).toBe(false);
+    expect(evidence.some(e => e.sourceField === 'price')).toBe(false);
+    expect(evidence.some(e => e.sourceField === 'inventory')).toBe(false);
+  });
+
+  it('live V2 distributor item emits merchandising fields (Amendment B)', async () => {
+    const { evidenceExtractionStage } = await import('../../classification/stages/evidence-extraction');
+    const { createBatch } = await import('../../db/repositories/onboarding-batch-repo');
+    const { insertItems, updateItemExtractionData, listItemsByBatch } = await import('../../db/repositories/onboarding-item-repo');
+    const { getDb } = await import('../../db/connection');
+    const batchId = createBatch({ workspaceId, name: 'Dist Batch V2', fileName: 'dist-v2.xlsx', totalItems: 1 }).id;
+    const [item] = insertItems(batchId, [
+      { upc: '300000000003', name: 'V2 Live Item', brandHint: 'B2', rowNumber: 1 },
+    ]);
+    getDb().query('UPDATE onboarding_items SET source_type = ? WHERE id = ?').run('distributor_record', item.id);
+    updateItemExtractionData(item.id, JSON.stringify({
+      title: 'V2 Live Item',
+      brand: 'B2',
+      weight: '10 lb',
+      distributorSku: 'V2-SKU',
+      manufacturerPartNumber: 'V2-MPN',
+      variantAttributes: { flavor: 'Lamb' },
+      description: 'V2 live merchandising description',
+      bulletPoints: ['Live feature'],
+      distributorCategory: 'Cat Supplies',
+      dimensions: '10 x 6 x 3 in',
+      casePack: '12',
+      unitOfMeasure: 'CT',
+      ingredients: 'Lamb, oats',
+      price: null,
+      primaryImage: null,
+      additionalImages: [],
+      sourceType: 'distributor_record',
+      sourceUrl: null,
+      distributorRecordProvenance: {
+        sourcingGenerationId: 'gen-live-v2',
+        evidenceHash: DIST_HASH,
+        extractionMethod: 'distributor_record_v2',
+        acceptedEvidenceAttemptIds: ['a1'],
+        providerIds: ['phillips'],
+        catalogVersions: ['v1'],
+        merchandisingProvenance: {
+          description: [{ attemptId: 'a1', providerId: 'phillips', catalogVersion: 'v1', connectionId: 'c1', values: ['V2 live merchandising description'] }],
+        },
+      },
+    }));
+    const loaded = listItemsByBatch(batchId)[0];
+    const result = await evidenceExtractionStage.execute(
+      { sku: loaded.upc, onboardingItemId: loaded.id, evidence: [], acceptedProposals: [], allProposals: [] },
+      {
+        workspacePath,
+        workspaceId,
+        runId: 'run-live-v2',
+        configSnapshotRef: { id: 'cfg', hash: 'h'.repeat(64), sourceCommit: null, createdAt: new Date().toISOString() },
+      } as never,
+    );
+    expect(result.status).toBe('succeeded');
+    const evidence = (result as { status: 'succeeded'; output: { evidence: Array<Record<string, any>> } }).output.evidence;
+    expect(evidence.find(e => e.sourceField === 'description')!.value).toBe('V2 live merchandising description');
+    expect(evidence.filter(e => e.sourceField === 'bullet_point').map(e => e.value)).toEqual(['Live feature']);
+    expect(evidence.find(e => e.sourceField === 'distributor_category')!.value).toBe('Cat Supplies');
+    expect(evidence.find(e => e.sourceField === 'case_pack')!.value).toBe('12');
+    expect(evidence.find(e => e.sourceField === 'unit_of_measure')!.value).toBe('CT');
+    expect(evidence.find(e => e.sourceField === 'ingredients')!.value).toBe('Lamb, oats');
+    const descEntry = evidence.find(e => e.sourceField === 'description')!;
+    expect(descEntry.sourceUrl).toBeNull();
+    expect(descEntry.metadata.provenance).toBe('distributor_record');
+    expect(descEntry.metadata.merchandisingProvenance.description[0].providerId).toBe('phillips');
+    expect(evidence.some(e => e.source === 'official_product_page')).toBe(false);
+    expect(evidence.some(e => e.sourceField === 'price')).toBe(false);
+    expect(evidence.some(e => e.sourceField === 'primaryImage')).toBe(false);
+  });
 });

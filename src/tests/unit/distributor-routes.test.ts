@@ -91,6 +91,8 @@ describe('Distributor settings routes (ADR 0014)', () => {
     expect(post1.status).toBe(201);
     const body1 = await post1.json();
     expect(body1.connection.secretConfigured).toBe(false);
+    // Amendment B (M2): api connectors require a secret.
+    expect(body1.connection.secretRequired).toBe(true);
     expect(body1.connection.distributorName).toBe('phillips');
     expect(body1.connection.configuration).toEqual({ baseUrl: 'https://api.endlessaisles.io/v1' });
     // Amendment A: creation is ALWAYS disabled — enablement is a separate
@@ -120,8 +122,57 @@ describe('Distributor settings routes (ADR 0014)', () => {
     } finally {
       delete process.env.TEST_DISTRIBUTOR_KEY;
     }
+  });
 
-    // A client-supplied workspaceId is IGNORED (active workspace wins).
+  test('public html_scraper connections report secretRequired=false and are never presented as secretly missing', async () => {
+    const post = await distributorRoutes.request('/onboarding/settings/connections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        distributorId: 'bradley',
+        connectorType: 'html_scraper',
+        secretRef: null,
+      }),
+    });
+    expect(post.status).toBe(201);
+    const body = await post.json();
+    // Public storefront scraper: no secret required, creation still disabled.
+    expect(body.connection.secretRequired).toBe(false);
+    expect(body.connection.secretConfigured).toBe(false);
+    expect(body.connection.enabled).toBe(false);
+    expect(body.connection.connectorType).toBe('html_scraper');
+  });
+
+  test('all five html_scraper scraper rows create DISABLED with truthful secret status (public vs auth) and masked refs', async () => {
+    const PUBLIC = ['bradley', 'central_pet'];
+    const AUTH = ['orgill', 'pet_food_experts', 'phillips_storefront'];
+    for (const distributorId of [...PUBLIC, ...AUTH]) {
+      const post = await distributorRoutes.request('/onboarding/settings/connections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          distributorId,
+          connectorType: 'html_scraper',
+          secretRef: AUTH.includes(distributorId) ? `ops_${distributorId}_ref` : null,
+        }),
+      });
+      expect(post.status).toBe(201);
+      const body = await post.json();
+      expect(body.connection.enabled).toBe(false);
+      expect(body.connection.connectorType).toBe('html_scraper');
+      expect(body.connection.secretRequired).toBe(AUTH.includes(distributorId));
+      expect(body.connection.secretConfigured).toBe(false);
+      // The view never leaks the resolved credential value or the raw ref name.
+      const raw = JSON.stringify(body);
+      expect(raw).not.toContain('ops_orgill_ref');
+      expect(raw).not.toContain('password');
+    }
+    const rows = getDb().query('SELECT distributor_id, enabled FROM distributor_connections WHERE connector_type = ? AND workspace_id = ?').all('html_scraper', WS_ID) as Array<{ distributor_id: string; enabled: number }>;
+    expect(rows.map((r) => r.distributor_id).sort()).toEqual([...AUTH, ...PUBLIC].sort());
+    expect(rows.every((r) => r.enabled === 0)).toBe(true);
+  });
+
+  test('A client-supplied workspaceId is IGNORED (active workspace wins)', async () => {
     const post3 = await distributorRoutes.request('/onboarding/settings/connections', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

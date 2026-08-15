@@ -617,19 +617,56 @@ describe('curation cohort service (issue #30, PR2)', () => {
     return { itemId: item.id, batchId, generation };
   }
 
-  function insertDistributorExtraction(itemId: string, overrides: Partial<{ hash: string; generation: string; acceptedIds: string[] }> = {}): void {
+  function insertDistributorExtraction(itemId: string, overrides: Partial<{ hash: string; generation: string; acceptedIds: string[]; method: 'distributor_record_v1' | 'distributor_record_v2' }> = {}): void {
     insertExtraction({
       itemId,
       sourceType: 'distributor_record',
       sourceUrl: null,
       extractionDataJson: JSON.stringify(makeDistributorExtractionData()),
-      extractionMethod: 'distributor_record_v1',
+      extractionMethod: overrides.method ?? 'distributor_record_v1',
       confidence: 0,
       sourcingGenerationId: overrides.generation ?? DIST_GEN,
       acceptedEvidenceAttemptIds: overrides.acceptedIds ?? ['a1'],
       evidenceHash: overrides.hash ?? DIST_HASH,
     });
   }
+
+  it('readies a distributor-source item with an Amendment B v2 merchandising binding (extractionMethod distributor_record_v2)', () => {
+    const { itemId, generation } = makeDistributorItem();
+    insertDistributorExtraction(itemId, { generation, method: 'distributor_record_v2' });
+    const item = listItemsByBatch(getActiveItemBatchId(itemId)).find(i => i.id === itemId)!;
+    const readiness = evaluateItemReadiness(item);
+    expect(readiness.sourceFinalized).toBe(true);
+    expect(readiness.sourceProvenanceConsistent).toBe(true);
+    expect(readiness.ready).toBe(true);
+    expect(readiness.state).toBe('ready');
+  });
+
+  it('blocks distributor readiness on an UNKNOWN extraction method (fail closed — neither v1 nor v2)', () => {
+    const { itemId, generation } = makeDistributorItem();
+    // The repository rejects unknown methods at write time (that IS the
+    // fail-closed gate); insert the mis-methoded row via raw SQL to prove the
+    // readiness authority ALSO refuses it (defense in depth).
+    getDb().query(
+      `INSERT INTO onboarding_extractions
+         (id, item_id, source_url, extraction_data_json, extraction_method, confidence, source_type, sourcing_generation_id, accepted_evidence_attempt_ids_json, evidence_hash, created_at)
+       VALUES (?, ?, NULL, ?, 'distributor_record_v9', 0, 'distributor_record', ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      itemId,
+      JSON.stringify(makeDistributorExtractionData()),
+      generation,
+      JSON.stringify(['a1']),
+      DIST_HASH,
+      new Date().toISOString(),
+    );
+    const item = listItemsByBatch(getActiveItemBatchId(itemId)).find(i => i.id === itemId)!;
+    const readiness = evaluateItemReadiness(item);
+    expect(readiness.sourceFinalized).toBe(false);
+    expect(readiness.sourceProvenanceConsistent).toBe(false);
+    expect(readiness.ready).toBe(false);
+    expect(readiness.state).toBe('blocked');
+  });
 
   it('readies a distributor-source item only with a fully consistent null-URL binding', () => {
     const { itemId, generation } = makeDistributorItem();

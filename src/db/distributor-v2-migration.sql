@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS distributor_connections (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspace(id),
   distributor_id TEXT NOT NULL REFERENCES distributors(id) ON DELETE CASCADE,
-  connector_type TEXT NOT NULL CHECK (connector_type IN ('api', 'ftp_catalog', 'csv', 'legacy_adapter')),
+  connector_type TEXT NOT NULL CHECK (connector_type IN ('api', 'ftp_catalog', 'csv', 'html_scraper', 'legacy_adapter')),
   secret_ref TEXT,
   configuration_json TEXT DEFAULT '{}',
   authority_policy_json TEXT DEFAULT '{}',
