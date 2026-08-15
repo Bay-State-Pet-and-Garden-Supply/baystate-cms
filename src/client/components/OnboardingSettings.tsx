@@ -12,6 +12,7 @@ import {
   updateAttributeProfile,
   updateClassificationAttribute,
   getClassificationReadiness,
+  getOnboardingCapabilities,
 
   type ApiKeyDisplay,
   type CurationTargetsResponse,
@@ -26,8 +27,9 @@ import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
 import { ViewHeader } from './common/ViewHeader';
 import { colors } from '../theme';
+import { DistributorConnectionsPanel } from './onboarding-settings/DistributorConnectionsPanel';
 
-type OnboardingSettingsTab = 'general' | 'llm' | 'curation' | 'profiles';
+type OnboardingSettingsTab = 'general' | 'llm' | 'curation' | 'profiles' | 'distributors';
 
 interface OnboardingSettingsProps {
   onBack: () => void;
@@ -95,6 +97,13 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
 
   const [localDomain, setLocalDomain] = useState('');
   const [settingsTab, setSettingsTab] = useState<OnboardingSettingsTab>(initialTab ?? 'general');
+  const [sourcingEngineEnabled, setSourcingEngineEnabled] = useState(false);
+
+  useEffect(() => {
+    getOnboardingCapabilities()
+      .then((caps) => setSourcingEngineEnabled(caps.sourcing.engineEnabled))
+      .catch(() => setSourcingEngineEnabled(false));
+  }, []);
 
   // ─── Model fetchers ─────────────────────────────────────────────────────
 
@@ -546,6 +555,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           { id: 'llm', label: 'LLM Providers' },
           { id: 'curation', label: 'Curation' },
           { id: 'profiles', label: 'Extractor Profiles' },
+          { id: 'distributors', label: 'Distributors' },
         ].map(tab => (
           <button
             key={tab.id}
@@ -1341,6 +1351,18 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
             </div>
           </div>
         )}
+      </div>
+      </div>
+
+      <div style={{ display: settingsTab === 'distributors' ? 'block' : 'none' }}>
+      <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 24 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 600, margin: '0 0 8px', color: '#111827' }}>
+          Distributors
+        </h2>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 20px' }}>
+          Distributor connections and advisory brand profiles for the Sourcing stage (ADR 0014).
+        </p>
+        <DistributorConnectionsPanel engineEnabled={sourcingEngineEnabled} />
       </div>
       </div>
 

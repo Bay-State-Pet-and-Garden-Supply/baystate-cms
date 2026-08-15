@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { getLocalRuntimeStatus } from '../../ai/local-runtime-coordinator';
 import { streamSSE } from 'hono/streaming';
 import fs from 'node:fs';
@@ -20,28 +20,49 @@ import {
   insertItems,
   listItemsByBatch,
   findItemById,
-  updateItemSourceUrl,
   setDiscoverySourceUrl,
   listItemsByBatchStaged,
   advanceItemsToNextStage,
   updateItemStageStatus,
   completeReviewStage,
   completePromotionStage,
-  resetItemsToPending,
+  resetItemsForRetry,
+  fallbackSourcingItemsToDiscovery,
+  fallbackSourcingItemToDiscovery,
   resetItemsToStage,
   sendItemsToPreviousStage,
   skipItems,
   getWeeklyReportItems,
-  updateSourcingDecision,
-  updateItemExtractionData,
+  revertToOfficialDiscovery,
 } from '../../db/repositories/onboarding-item-repo';
-import type { PipelineStage, SourcingDecision } from '../../shared/schemas/onboarding';
-import { ResolveSourcingRequestSchema } from '../../shared/schemas/onboarding';
+import type { PipelineStage } from '../../shared/schemas/onboarding';
+import { ResolveSourcingRequestSchema, FallbackSourcingItemsRequestSchema } from '../../shared/schemas/onboarding';
+import { getSourcingFlags } from '../../onboarding/flags';
+import {
+  deriveSourcingEntryStage,
+  SOURCING_ENTRY_POLICY_VERSION,
+} from '../../onboarding/sourcing/entry-policy';
 import {
   getEvidenceAttemptsForItem,
-  getEvidenceAttemptsByIdsForItem,
+  listGenerationsForItem,
+  getCurrentSourcingGeneration,
+  getEvidenceAttemptsByItemAndGeneration,
 } from '../../db/repositories/onboarding-evidence-repo';
+import { getCurrentGenerationAcceptedAttemptIds } from '../../db/repositories/onboarding-acceptance-repo';
+import { buildDistributorRecordProjection } from '../../onboarding/sourcing/distributor-record-projection';
+import {
+  listConflictsForItem,
+  resolveConflict,
+  getConflictById,
+  listResolvedConflictResolutions,
+} from '../../db/repositories/onboarding-conflict-repo';
+import { completeSourcingViaProjection } from '../../db/repositories/onboarding-item-repo';
 import { convertToLbs } from '../../shared/weight-converter';
+import {
+  ProductIdentityEvidenceSchema,
+  type EvidenceAttempt,
+} from '../../shared/schemas/distributor-evidence';
+import { ResolveConflictRequestSchema } from '../../shared/schemas/distributor';
 import {
   listSourcesByItem,
   selectSource
@@ -71,7 +92,6 @@ import {
 } from '../../db/repositories/extractor-profile-repo';
 import {
   listLlmTaskConfigs,
-  getLlmTaskConfig,
   upsertLlmTaskConfig,
   deleteLlmTaskConfig,
   LLM_TASKS,
@@ -87,10 +107,8 @@ import {
   findProfileGenerationRevisionById,
   listRevisionsByGeneration,
   updateRevisionSelectors,
-  updateProfileGenerationRevisionStatus,
 } from '../../db/repositories/profile-generation-revision-repo';
 import {
-  listFieldDecisionsByDomain,
   findProfileFieldDecisionById,
 } from '../../db/repositories/profile-generation-field-decision-repo';
 import {
@@ -101,7 +119,6 @@ import {
   approveRevisionFields,
   rejectRevisionFields,
   rollbackProfileFieldBy,
-  listAllActiveProfiles,
   listFieldDecisionsForGeneration,
   listValidationResultsForRevision,
 } from '../../onboarding/profile-governance-service';
@@ -110,17 +127,15 @@ import {
 } from '../../onboarding/profile-promoter';
 import {
   LlmTaskConfigUpsertSchema,
-  ApprovedSelectorFieldsSchema,
   ApproveRevisionFieldsRequestSchema,
   RejectRevisionFieldsRequestSchema,
   RollbackFieldRequestSchema,
   ReviseFromFeedbackRequestSchema,
   ValidateRevisionRequestSchema,
-  SELECTOR_FIELDS,
   type LlmTask,
-  type SelectorField,
-  type StructuredFeedback,
   type ProfileBlockedItem,
+  DistributorEvidenceAttemptViewSchema,
+  type DistributorEvidenceAttemptView,
 } from '../../shared/schemas/onboarding';
 import {
   SnapshotRequestSchema,
@@ -163,7 +178,6 @@ import {
   getLiveDecisionsByRun,
   getProposalsByRun,
   getValidatedOnboardingRun,
-  recordDecision,
 } from '../../db/repositories/classification-run-repo';
 import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
@@ -178,7 +192,83 @@ import {
   CohortRerunStageConflictError,
 } from '../../db/repositories/classification-cohort-run-repo';
 
+/**
+ * Workspace ownership guard for an onboarding item: the item must belong to
+ * a batch owned by the ACTIVE workspace. Returns an error response or null.
+ * (Cross-workspace resources are 404 — never readable, never mutated.)
+ */
+function itemWorkspaceError(c: Context, item: { batchId: string }): Response | null {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batch = findBatchById(item.batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+  return null;
+}
+
 const route = new Hono();
+
+/**
+ * Project a raw evidence attempt row into the typed
+ * `DistributorEvidenceAttemptView` (ADR 0014): identityJson is parsed
+ * server-side with ProductIdentityEvidenceSchema — raw DB JSON is never the
+ * frontend type, and malformed JSON fails closed to null.
+ */
+function projectEvidenceAttempt(
+  attempt: EvidenceAttempt,
+  acceptedIds: string[],
+): DistributorEvidenceAttemptView {
+  let identity: Record<string, unknown> | null = null;
+  if (attempt.identityJson) {
+    try {
+      const raw = JSON.parse(attempt.identityJson);
+      const parsed = ProductIdentityEvidenceSchema.safeParse(raw);
+      if (parsed.success) {
+        identity = { ...parsed.data };
+      }
+    } catch {
+      // Malformed identityJson — fail closed to null.
+    }
+  }
+
+  let warnings: string[] = [];
+  if (attempt.warningsJson) {
+    try {
+      const parsed = JSON.parse(attempt.warningsJson);
+      if (Array.isArray(parsed)) warnings = parsed;
+    } catch {
+      // Ignore malformed warnings.
+    }
+  }
+
+  return DistributorEvidenceAttemptViewSchema.parse({
+    id: attempt.id,
+    providerId: attempt.providerId,
+    distributorConnectionId: attempt.distributorConnectionId ?? null,
+    catalogSnapshotId: attempt.catalogSnapshotId ?? null,
+    lookupUpc: attempt.lookupUpc,
+    outcome: attempt.outcome,
+    confidence: attempt.confidence,
+    evidenceUrl: attempt.evidenceUrl,
+    productName: identity?.name ?? null,
+    brand: identity?.brand ?? null,
+    description: identity?.description ?? null,
+    imageUrls: identity?.images ?? [],
+    warnings,
+    errorCode: attempt.errorCode ?? null,
+    errorMessage: attempt.errorMessage,
+    catalogVersion: attempt.catalogVersion ?? null,
+    observedAt: attempt.observedAt ?? null,
+    expiresAt: attempt.expiresAt ?? null,
+    sourcingGenerationId: attempt.sourcingGenerationId ?? null,
+    createdAt: attempt.createdAt,
+    isAccepted: acceptedIds.includes(attempt.id),
+    identity,
+  });
+}
 
 // Global map to hold the worker instance for the current workspace
 let activeWorker: OnboardingWorker | null = null;
@@ -213,7 +303,7 @@ function autoAcceptPendingProposalsForRun(runId: string): void {
           [decisionId, p.id, randomUUID(), now],
         );
         db.run(`UPDATE classification_proposals SET status = 'accepted' WHERE id = ?`, [p.id]);
-      } catch (e) {
+      } catch {
         db.run(`UPDATE classification_proposals SET status = 'accepted' WHERE id = ?`, [p.id]);
       }
     } else {
@@ -354,6 +444,11 @@ route.post('/onboarding/batches', async (c) => {
       })();
     }
 
+    // Entry stage: single-sourced from the effective sourcing capability
+    // (ADR 0014 Amendment A). Effective-enabled → Sourcing; otherwise items
+    // enter Discovery so no import can strand at sourcing/pending.
+    const entryStage = deriveSourcingEntryStage(getSourcingFlags());
+
     const batch = createBatch({
       workspaceId: workspace.id,
       name,
@@ -362,7 +457,10 @@ route.post('/onboarding/batches', async (c) => {
       columnMappingJson: JSON.stringify(mapping),
     });
 
-    insertItems(batch.id, finalItems);
+    // Production imports carry the current sourcing entry-policy version (1),
+    // regardless of the derived entry stage; an omitted version stays 0
+    // (fail closed) for legacy/fixture callers only.
+    insertItems(batch.id, finalItems, entryStage, SOURCING_ENTRY_POLICY_VERSION);
 
     return c.json({ batch, validationErrors: errors });
   } catch (err) {
@@ -409,7 +507,7 @@ route.get('/onboarding/weekly-report', async (c) => {
   // report. The report is read-only and workspace-scoped; when no workspace
   // is active the quality section is null with a warning (never a fabricated
   // zero). The existing uploaded/promoted item behavior is untouched.
-  let qualitySummary: ReturnType<typeof deriveQualityDisplay> | null = null;
+  let qualitySummary: ReturnType<typeof deriveQualityDisplay> | null;
   const ws = getCurrentWorkspace();
   if (ws) {
     try {
@@ -490,7 +588,6 @@ route.get('/onboarding/batches/:id/items', async (c) => {
  * Bulk assign a brand and domain to multiple items in a batch.
  */
 route.post('/onboarding/batches/:id/bulk-brand', async (c) => {
-  const batchId = c.req.param('id');
   const { itemIds, brandHint, brandDomain } = await c.req.json();
   const db = getDb();
 
@@ -690,14 +787,21 @@ route.post('/onboarding/items/advance', async (c) => {
 
   // Trigger worker to pick up newly pending items
   const worker = getWorker(workspace.id, workspace.workspacePath);
-  worker.poll();
+  try {
+    worker.poll();
+  } catch (pollErr) {
+    // Background poll failure must never fail the endpoint that triggered it.
+    console.error('[OnboardingRoutes] Background worker poll failed (non-blocking):', pollErr);
+  }
 
   return c.json({ ...result, refused });
 });
 
 /**
  * POST /api/onboarding/items/reset
- * Resets selected items to pending in their current stage (retry).
+ * Capability-aware retry reset. While the Sourcing engine is disabled,
+ * Sourcing items are moved to Discovery via the audited fallback instead of
+ * resetting in place (which would strand them at sourcing/pending).
  * Body: { itemIds: string[] }
  */
 route.post('/onboarding/items/reset', async (c) => {
@@ -706,17 +810,155 @@ route.post('/onboarding/items/reset', async (c) => {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
 
-  const { itemIds } = await c.req.json();
+  let body: { itemIds?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const itemIds = body.itemIds;
   if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
     return c.json({ error: 'itemIds array is required' }, 400);
   }
 
-  resetItemsToPending(itemIds);
+  // Workspace isolation (fail closed): foreign items are never reset.
+  const owned: string[] = [];
+  const skippedForeign: Array<{ id: string; reason: string }> = [];
+  for (const id of itemIds) {
+    const item = typeof id === 'string' ? findItemById(id) : undefined;
+    if (!item) {
+      skippedForeign.push({ id: String(id), reason: 'not_found' });
+      continue;
+    }
+    const ownershipError = itemWorkspaceError(c, item);
+    if (ownershipError) {
+      skippedForeign.push({ id: id as string, reason: 'not_in_active_workspace' });
+      continue;
+    }
+    owned.push(id as string);
+  }
 
+  const result = resetItemsForRetry(owned, { sourcingEngineEnabled: sourcingRoutingActive() });
+
+  // Foreign/missing ids are reported, never silently dropped.
+  const skipped = [...result.skipped, ...skippedForeign];
+
+  // Trigger worker to pick up newly pending items (only after transitions).
   const worker = getWorker(workspace.id, workspace.workspacePath);
-  worker.poll();
+  try {
+    worker.poll();
+  } catch (pollErr) {
+    // Background poll failure must never fail the endpoint that triggered it.
+    console.error('[OnboardingRoutes] Background worker poll failed (non-blocking):', pollErr);
+  }
 
-  return c.json({ success: true });
+  return c.json({ success: true, moved: result.moved, reset: result.reset, skipped });
+});
+
+/**
+ * Effective routing capability (Amendment A, MC): the Sourcing engine must
+ * be effectively enabled AND in a routing mode (manual/automatic). OFF,
+ * invalid, and observe modes never route/claim — existing marker-v1 rows
+ * must not be reset in place (that would strand them); the audited
+ * fallback path is used instead.
+ */
+function sourcingRoutingActive(): boolean {
+  const flags = getSourcingFlags();
+  return flags.effectiveEnabled && flags.mode !== 'observe' && flags.mode !== null;
+}
+
+/**
+ * GET /api/onboarding/capabilities
+ * Reports the effective onboarding capabilities (Amendment A): the Sourcing
+ * engine switch, rollout mode, non-secret configuration reason, and the
+ * durable entry-policy version. The board uses this to decide which actions
+ * may be surfaced; the server remains the authoritative gate. Never exposes
+ * secret references or connection details.
+ */
+route.get('/onboarding/capabilities', (c) => {
+  const flags = getSourcingFlags();
+  return c.json({
+    sourcing: {
+      engineEnabled: flags.effectiveEnabled,
+      mode: flags.mode,
+      configurationReason: flags.reason,
+      entryPolicyVersion: SOURCING_ENTRY_POLICY_VERSION,
+    },
+  });
+});
+
+/**
+ * POST /api/onboarding/items/fallback-sourcing-to-discovery
+ * Bulk repair for stranded sourcing/pending items: moves every eligible item
+ * to Discovery inside one transaction with an audited fallback_to_discovery
+ * operator-override decision. Only items in batches owned by the active
+ * workspace are eligible; ineligible/missing IDs are reported, never silently
+ * dropped.
+ * Body: { itemIds: string[] }
+ */
+route.post('/onboarding/items/fallback-sourcing-to-discovery', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const parseResult = FallbackSourcingItemsRequestSchema.safeParse(await c.req.json());
+  if (!parseResult.success) {
+    return c.json({ error: 'Invalid fallback sourcing payload', details: parseResult.error.format() }, 400);
+  }
+
+  const { itemIds } = parseResult.data;
+
+  // Workspace ownership: every requested item must belong to a batch owned by
+  // the active workspace. Wholly unknown/foreign input fails closed; mixed
+  // input returns a truthful partial result.
+  const batchIdByItemId = new Map<string, string>();
+  let knownCount = 0;
+  for (const id of itemIds) {
+    const item = findItemById(id);
+    if (!item) continue;
+    knownCount++;
+    batchIdByItemId.set(id, item.batchId);
+  }
+  if (knownCount === 0) {
+    return c.json({ error: 'No onboarding items found for the requested ids' }, 404);
+  }
+
+  const owned = new Set(
+    [...new Set(batchIdByItemId.values())]
+      .map((batchId) => findBatchById(batchId))
+      .filter((b): b is NonNullable<typeof b> => b !== undefined && b.workspaceId === workspace.id)
+      .map((b) => b.id),
+  );
+
+  const ownedIds: string[] = [];
+  const skipped: Array<{ id: string; reason: string }> = [];
+  for (const id of itemIds) {
+    const batchId = batchIdByItemId.get(id);
+    if (!batchId) {
+      skipped.push({ id, reason: 'not_found' });
+    } else if (!owned.has(batchId)) {
+      skipped.push({ id, reason: 'not_owned' });
+    } else {
+      ownedIds.push(id);
+    }
+  }
+
+  const result = fallbackSourcingItemsToDiscovery(ownedIds);
+
+  // Trigger worker to pick up newly pending Discovery items.
+  const worker = getWorker(workspace.id, workspace.workspacePath);
+  try {
+    worker.poll();
+  } catch (pollErr) {
+    // Background poll failure must never fail the endpoint that triggered it.
+    console.error('[OnboardingRoutes] Background worker poll failed (non-blocking):', pollErr);
+  }
+
+  return c.json({
+    moved: result.moved,
+    skipped: [...skipped, ...result.skipped],
+  });
 });
 
 /**
@@ -917,7 +1159,6 @@ route.post('/onboarding/batches/:id/promote', async (c) => {
     console.error('[OnboardingRoutes] Promotion failed:', err);
 
     // Mark items as failed
-    const db = getDb();
     for (const id of itemIds) {
       completePromotionStage(id, false, err instanceof Error ? err.message : String(err));
     }
@@ -997,17 +1238,30 @@ route.get('/onboarding/items/:id', async (c) => {
   if (!item) {
     return c.json({ error: 'Item not found' }, 404);
   }
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
 
   const sources = listSourcesByItem(itemId);
   const extraction = getLatestExtraction(itemId);
 
+  // MD round-7 (defect 1a): a preserved extraction row stays audit-only after
+  // a source change. Only the row whose source_type matches the ITEM's
+  // CURRENT source type may surface as the active extraction — an official
+  // fallback (distributor_record → official_page) must never resurrect the
+  // old distributor payload for an official pending/failed extraction, and a
+  // distributor item must never display an official row.
+  const activeExtraction =
+    extraction && (extraction.source_type ?? 'official_page') === item.sourceType
+      ? extraction
+      : undefined;
+
   // Prefer user-edited extraction data saved directly on the item record
   // (onboarding_items.extraction_data_json), falling back to the latest
-  // extraction run record (onboarding_extractions). This ensures edits
-  // like removing an image from extraction results are persisted when
+  // matching extraction run record (onboarding_extractions). This ensures
+  // edits like removing an image from extraction results are persisted when
   // the user re-opens the item.
   const extractionData = item.extractionData
-    ?? (extraction ? JSON.parse(extraction.extraction_data_json) : null);
+    ?? (activeExtraction ? JSON.parse(activeExtraction.extraction_data_json) : null);
 
   // PR9 C3 (issue #30, DECISION-C): an ACTIVE-cohort member's semantic
   // validation findings surface INSTEAD of the legacy
@@ -1046,15 +1300,79 @@ route.get('/onboarding/items/:id', async (c) => {
       }
     : item;
 
-  const evidenceAttempts = getEvidenceAttemptsForItem(itemId);
+  const acceptedEvidenceAttemptIds = item.sourcingDecision?.acceptedEvidenceAttemptIds ?? [];
+  const evidenceAttempts = getEvidenceAttemptsForItem(itemId)
+    .map((attempt) => projectEvidenceAttempt(attempt, acceptedEvidenceAttemptIds));
+
+  // Amendment A (MC): server-derived distributor-record qualification view
+  // for the manual-mode drawer. Computed with the SAME deterministic
+  // authority as automatic routing (buildDistributorRecordProjection over
+  // the current generation's attempts + relational acceptances). null when
+  // the item is not at the sourcing stage and is not a distributor-source
+  // extraction item, or has no current generation. Distributor-source
+  // extraction items (pending/failed, payload not yet materialized) keep
+  // the view so the extraction drawer can render provider/attempt/hash/
+  // generation provenance (MD round-6 defect 7).
+  const sourcingQualificationView = (() => {
+    const isSourcingStage = item.stage === 'sourcing';
+    const isDistributorExtractionPendingOrFailed =
+      item.sourceType === 'distributor_record' &&
+      item.stage === 'extraction' &&
+      (item.stageStatus === 'pending' || item.stageStatus === 'failed');
+    if (!isSourcingStage && !isDistributorExtractionPendingOrFailed) return null;
+    const generation = getCurrentSourcingGeneration(itemId);
+    if (!generation) return null;
+    const attempts = getEvidenceAttemptsByItemAndGeneration(itemId, generation.id);
+    const acceptedIds = getCurrentGenerationAcceptedAttemptIds(itemId);
+    // A current generation ALWAYS yields a view (certification 84c918d9):
+    // empty attempts/acceptances produce an UNQUALIFIED view with reason
+    // codes (e.g. no_accepted_evidence) so the manual drawer can render
+    // "Not qualified" + Continue. Never fabricate evidence.
+    const projection = buildDistributorRecordProjection({
+      itemId,
+      itemUpc: item.upc,
+      sourcingGenerationId: generation.id,
+      attempts,
+      acceptedAttemptIds: acceptedIds,
+      // MD round-7 (defect 2): apply the SAME persisted operator resolutions
+      // the routing/materialization authority uses (candidate/custom/dismiss)
+      // so the drawer view agrees with the persisted decision hash. Without
+      // them a custom-override record would render unqualified with no
+      // authoritative hash.
+      resolutions: listResolvedConflictResolutions(itemId),
+    });
+    if (projection.qualified) {
+      return {
+        qualified: true,
+        reasonCodes: [] as string[],
+        acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
+        providerIds: projection.providerIds,
+        evidenceHash: projection.evidenceHash,
+        sourcingGenerationId: generation.id,
+        warnings: projection.warnings,
+      };
+    }
+    return {
+      qualified: false,
+      reasonCodes: projection.reasonCodes,
+      acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
+      providerIds: projection.providerIds,
+      evidenceHash: null,
+      sourcingGenerationId: generation.id,
+      warnings: projection.warnings,
+    };
+  })();
 
   return c.json({
     item: hydratedItem,
     sources,
     extraction: extractionData,
     evidenceAttempts,
+    generations: listGenerationsForItem(itemId),
+    conflicts: listConflictsForItem(itemId),
     consistencyWarnings,
     semanticValidation: semanticSurface.mode === 'active' ? semanticSurface.semanticValidation : undefined,
+    sourcingQualificationView,
   });
 });
 
@@ -1070,6 +1388,39 @@ route.put('/onboarding/items/:id', async (c) => {
   const item = findItemById(itemId);
   if (!item) {
     return c.json({ error: 'Item not found' }, 404);
+  }
+
+  // Distributor-source extraction data is DERIVED and immutable: it must
+  // equal what the canonical projection dictates (the materializer re-
+  // validates this on every idempotent retry). Editing the payload or
+  // assigning a URL here would let a tampered payload be restored later or
+  // invent a source URL. Use Continue-with-Official-Site-Discovery to change
+  // the source instead.
+  if (item.sourceType === 'distributor_record' && (body.extraction_data !== undefined || body.source_url !== undefined)) {
+    return c.json(
+      {
+        error:
+          'Distributor extraction data is derived and immutable; use Continue-with-Official-Site-Discovery to change the source.',
+      },
+      400,
+    );
+  }
+
+  // MD round-7 (defect 1b): ROW-level immutability. A PRESERVED
+  // distributor_record extraction row is audit-only even after an official
+  // fallback (item.sourceType is now official_page, so the guard above no
+  // longer applies). The generic edit must never mutate it.
+  if (body.extraction_data !== undefined) {
+    const latestExtraction = getLatestExtraction(itemId);
+    if (latestExtraction && (latestExtraction.source_type ?? 'official_page') === 'distributor_record') {
+      return c.json(
+        {
+          error:
+            'Preserved distributor extraction data is derived and immutable; use Continue-with-Official-Site-Discovery to change the source.',
+        },
+        400,
+      );
+    }
   }
 
   db.transaction(() => {
@@ -1236,6 +1587,30 @@ route.post('/onboarding/items/:id/retry', async (c) => {
   if (!item) {
     return c.json({ error: 'Item not found' }, 404);
   }
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
+
+  // Sourcing items route through the capability-aware reset seam: while the
+  // engine capability is DISABLED, retry performs the audited
+  // fallback_to_discovery transition (never stranding at sourcing/pending);
+  // when ENABLED, retry resets the item in place and supersedes the evidence
+  // generation for a clean re-run (ADR 0014).
+  if (item.stage === 'sourcing') {
+    const result = resetItemsForRetry([itemId], {
+      sourcingEngineEnabled: sourcingRoutingActive(),
+    });
+    if (result.moved.length === 0 && result.reset.length === 0) {
+      return c.json({ error: `Cannot retry sourcing item: ${result.skipped[0]?.reason ?? 'transition_failed'}` }, 400);
+    }
+    const worker = getWorker(workspace.id, workspace.workspacePath);
+    try {
+    worker.poll();
+  } catch (pollErr) {
+    // Background poll failure must never fail the endpoint that triggered it.
+    console.error('[OnboardingRoutes] Background worker poll failed (non-blocking):', pollErr);
+  }
+    return c.json({ success: true });
+  }
 
   const db = getDb();
   db.query('UPDATE onboarding_items SET stage_status = ?, status = ?, retry_count = 0, error_message = NULL WHERE id = ?').run(
@@ -1246,7 +1621,12 @@ route.post('/onboarding/items/:id/retry', async (c) => {
 
   // Trigger worker polling
   const worker = getWorker(workspace.id, workspace.workspacePath);
-  worker.poll();
+  try {
+    worker.poll();
+  } catch (pollErr) {
+    // Background poll failure must never fail the endpoint that triggered it.
+    console.error('[OnboardingRoutes] Background worker poll failed (non-blocking):', pollErr);
+  }
 
   return c.json({ success: true });
 });
@@ -1291,6 +1671,23 @@ route.post('/onboarding/items/:id/set-url', async (c) => {
     return c.json({ error: 'Invalid URL format' }, 400);
   }
 
+  // Distributor-source items have no product page: their source URL is
+  // derived-null by the deterministic materializer. Assigning a URL here
+  // would contradict the no-fake-URL rule (ADR 0014 / Amendment A).
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Item not found' }, 404);
+  }
+  if (item.sourceType === 'distributor_record') {
+    return c.json(
+      {
+        error:
+          'Distributor-source items cannot set a URL; use Continue-with-Official-Site-Discovery to change the source.',
+      },
+      400,
+    );
+  }
+
   setDiscoverySourceUrl(itemId, url);
   return c.json({ success: true });
 });
@@ -1307,11 +1704,34 @@ route.post('/onboarding/items/:id/skip', (c) => {
 
 /**
  * POST /api/onboarding/items/:id/resolve-sourcing
- * Resolves sourcing conflicts by either choosing an evidence attempt bundle or falling back to Discovery.
+ * Resolves a Sourcing item through one of two strict operator actions:
+ *
+ * - `use_distributor_record` (Amendment A, MC item 7): the server recomputes
+ *   the canonical projection for the item's current generation and, when
+ *   qualified, routes to Extraction via `distributor_record_to_extraction`.
+ *   Any client-supplied ids/hash/providers are IGNORED (the schema is
+ *   closed). Kill-switched (engine effectively off) → 403; marker-v0 legacy
+ *   items → 400 (their cohort is Continue-to-Discovery only).
+ * - `fallback_to_discovery`: audited operator override; the server derives
+ *   the evidence-vs-no-evidence audit route (`evidence_to_discovery` when
+ *   accepted evidence exists, else `fallback_to_discovery`).
+ *
+ * `bundle_to_curation` and direct Sourcing → Curation routing remain
+ * PROHIBITED and have zero database effects.
  */
 route.post('/onboarding/items/:id/resolve-sourcing', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
   const itemId = c.req.param('id');
-  const body = await c.req.json();
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
 
   const parseResult = ResolveSourcingRequestSchema.safeParse(body);
   if (!parseResult.success) {
@@ -1322,68 +1742,213 @@ route.post('/onboarding/items/:id/resolve-sourcing', async (c) => {
   if (!item) {
     return c.json({ error: 'Onboarding item not found' }, 404);
   }
+  if (item.stage !== 'sourcing') {
+    return c.json({ error: `Item is not in the sourcing stage (${item.stage}/${item.stageStatus})` }, 400);
+  }
 
-  const data = parseResult.data;
-  const now = new Date().toISOString();
+  // Workspace ownership: the item must belong to a batch owned by the active
+  // workspace (404 cross-workspace, never a mutation).
+  const batch = findBatchById(item.batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
 
-  if (data.action === 'use_selected_bundle') {
-    const decision: SourcingDecision = {
-      route: 'bundle_to_curation',
-      origin: 'operator_override',
-      acceptedEvidenceAttemptIds: data.selectedAttemptIds,
-      providerIds: [],
-      conflicts: [],
-      warnings: [],
-      decidedAt: now,
-    };
-
-    // Extract distributor image URLs from accepted evidence attempts
-    if (data.selectedAttemptIds && data.selectedAttemptIds.length > 0) {
-      const attempts = getEvidenceAttemptsByIdsForItem(itemId, item.upc, data.selectedAttemptIds)
-        .filter(att => att.itemId === itemId || att.lookupUpc === item.upc);
-      const images: string[] = [];
-      for (const att of attempts) {
-        if (att.identityJson) {
-          try {
-            const ident = JSON.parse(att.identityJson);
-            if (Array.isArray(ident.images)) {
-              for (const img of ident.images) {
-                if (typeof img === 'string' && img.trim() && !images.includes(img.trim())) {
-                  images.push(img.trim());
-                }
-              }
-            }
-          } catch (e) {}
-        }
-      }
-      if (images.length > 0) {
-        const existingExt = item.extractionData || {};
-        const updatedExt = {
-          ...existingExt,
-          primaryImage: images[0],
-          additionalImages: images.slice(1),
-          images,
-          distributorEvidenceAttemptIds: data.selectedAttemptIds,
-        };
-        updateItemExtractionData(itemId, JSON.stringify(updatedExt));
-      }
+  if (parseResult.data.action === 'use_distributor_record') {
+    // Kill switch + mode gate: effective capability OFF (disabled, malformed,
+    // invalid mode) OR observe mode → fail closed before anything else.
+    if (!sourcingRoutingActive()) {
+      return c.json({ error: 'Sourcing engine is disabled' }, 403);
+    }
+    // Legacy marker-v0 cohort: Continue-to-Discovery only (MC item 9).
+    if (item.sourcingEntryPolicyVersion !== SOURCING_ENTRY_POLICY_VERSION) {
+      return c.json(
+        { error: 'Legacy sourcing items use Continue-to-Discovery; distributor routing is unavailable' },
+        400,
+      );
+    }
+    // Strict manual action: only meaningful from the needs_input holding
+    // state (manual-mode evaluation / conflict resolution).
+    if (item.stageStatus !== 'needs_input') {
+      return c.json({ error: `use_distributor_record requires sourcing/needs_input, got ${item.stageStatus}` }, 400);
     }
 
-    updateSourcingDecision(itemId, decision, 'curation');
-  } else if (data.action === 'fallback_to_discovery') {
-    const decision: SourcingDecision = {
-      route: 'fallback_to_discovery',
-      origin: 'operator_override',
-      acceptedEvidenceAttemptIds: [],
-      providerIds: [],
-      conflicts: [],
-      warnings: [],
-      decidedAt: now,
-    };
-    updateSourcingDecision(itemId, decision, 'discovery');
+    const resolutions = listResolvedConflictResolutions(itemId);
+    const result = completeSourcingViaProjection(itemId, resolutions, { strictQualification: true });
+    if (!result.ok) {
+      return c.json(
+        {
+          error: `Cannot use distributor record: ${result.reason ?? 'transition_failed'}`,
+          reason: result.reason ?? null,
+          reasonCodes: result.reasonCodes ?? [],
+        },
+        400,
+      );
+    }
+    return c.json({
+      success: true,
+      route: result.route,
+      qualified: result.qualified,
+      evidenceHash: result.evidenceHash ?? null,
+      item: findItemById(itemId),
+    });
+  }
+
+  const result = fallbackSourcingItemToDiscovery(itemId);
+  if (!result.moved) {
+    return c.json({ error: `Cannot resolve sourcing item: ${result.reason ?? 'transition_failed'}` }, 400);
   }
 
   return c.json({ success: true, item: findItemById(itemId) });
+});
+
+/**
+ * POST /api/onboarding/items/:id/continue-with-official-discovery
+ * Amendment A (MD item 8): operator "Continue with Official Site Discovery"
+ * for a DISTRIBUTOR-SOURCE item at Extraction (pending/failed, or completed
+ * before Curation). One guarded transaction:
+ *
+ * - source_type → official_page (source_url stays NULL);
+ * - the active item extraction payload is cleared;
+ * - stage → discovery/pending;
+ * - the operator override is recorded.
+ *
+ * Sourcing generations, evidence attempts, conflicts, acceptances, and prior
+ * extraction audit rows are preserved. Later-stage items must first use the
+ * existing reviewed send-back flow — no post-Review history rewrite exists.
+ */
+route.post('/onboarding/items/:id/continue-with-official-discovery', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const itemId = c.req.param('id');
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
+
+  // Guard: only distributor-source items may revert (official items are not
+  // distributor-materialized; they already have their own discovery path).
+  if (item.sourceType !== 'distributor_record') {
+    return c.json({ error: 'Item is not a distributor-source item' }, 400);
+  }
+  // Stage guard: extraction pending/failed, or completed before Curation.
+  // Anything later must use the reviewed send-back flow.
+  if (item.stage !== 'extraction' || !['pending', 'failed', 'completed'].includes(item.stageStatus)) {
+    return c.json(
+      {
+        error: `Continue-with-official-discovery requires extraction pending/failed/completed-before-curation, got ${item.stage}/${item.stageStatus}. Items that advanced past Curation must use the reviewed send-back flow instead.`,
+      },
+      400,
+    );
+  }
+
+  const result = revertToOfficialDiscovery(itemId, workspace.id);
+  if (!result.ok) {
+    return c.json(
+      { error: `Cannot continue with official discovery: ${result.reason ?? 'transition_failed'}` },
+      400,
+    );
+  }
+  return c.json({ success: true, item: findItemById(itemId) });
+});
+
+/**
+ * GET /api/onboarding/items/:id/conflicts
+ * Durable evidence conflicts for a Sourcing item (ADR 0014). Read-only and
+ * always available — evidence review stays visible while the engine is OFF.
+ */
+route.get('/onboarding/items/:id/conflicts', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const itemId = c.req.param('id');
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+
+  // Workspace ownership: the item must belong to a batch owned by the active
+  // workspace (404 cross-workspace).
+  const batch = findBatchById(item.batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+
+  return c.json({ conflicts: listConflictsForItem(itemId) });
+});
+
+/**
+ * POST /api/onboarding/items/:id/conflicts/:conflictId/resolve
+ * Resolve one durable evidence conflict (ADR 0014). Capability-gated: fails
+ * closed (403) while the Sourcing engine is disabled. Guards in order:
+ * ownership (404), item stage must be sourcing (400), payload validates
+ * (400), and the conflict must belong to THIS item (404). Resolving the LAST
+ * open hard conflict completes Sourcing via the guarded transition to
+ * discovery/pending with an `evidence_to_discovery` operator-override
+ * decision — it never routes to Curation.
+ */
+route.post('/onboarding/items/:id/conflicts/:conflictId/resolve', async (c) => {
+  if (!sourcingRoutingActive()) {
+    return c.json({ error: 'Sourcing engine is disabled' }, 403);
+  }
+
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const itemId = c.req.param('id');
+  const conflictId = c.req.param('conflictId');
+
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+
+  // Workspace ownership (404 cross-workspace, never a mutation).
+  const batch = findBatchById(item.batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+
+  if (item.stage !== 'sourcing') {
+    return c.json({ error: `Item is not in the sourcing stage (${item.stage}/${item.stageStatus})` }, 400);
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const parseResult = ResolveConflictRequestSchema.safeParse(body);
+  if (!parseResult.success) {
+    return c.json({ error: 'Invalid resolve-conflict payload', details: parseResult.error.format() }, 400);
+  }
+
+  const conflict = getConflictById(conflictId);
+  if (!conflict || conflict.itemId !== itemId) {
+    return c.json({ error: 'Evidence conflict not found' }, 404);
+  }
+
+  try {
+    resolveConflict(conflictId, parseResult.data, 'operator');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Conflict resolution failed';
+    return c.json({ error: message }, 400);
+  }
+
+  return c.json({
+    success: true,
+    item: findItemById(itemId),
+    conflicts: listConflictsForItem(itemId),
+  });
 });
 
 // ─── DEPRECATED BATCH LIFECYCLE ROUTES ─────────────────────────────────────────
@@ -2387,7 +2952,7 @@ route.put('/onboarding/settings/llm-task-configs/:task', async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();
-  } catch (err) {
+  } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
   const parsed = LlmTaskConfigUpsertSchema.safeParse(body);
@@ -2506,7 +3071,7 @@ route.post('/onboarding/settings/profile-generations/:id/revisions', async (c) =
   let body: unknown;
   try {
     body = await c.req.json();
-  } catch (err) {
+  } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
   const parsed = ReviseFromFeedbackRequestSchema.safeParse(body);
@@ -2565,9 +3130,9 @@ Return ONLY a valid JSON object with exactly these keys:
       if (llmResult) {
         // Strip code fences and parse.
         let cleaned = llmResult.trim();
-        const fenceMatch = cleaned.match(/^\`\`\`(?:json|JSON)?\s*\n?/);
+        const fenceMatch = cleaned.match(/^```(?:json|JSON)?\s*\n?/);
         if (fenceMatch) cleaned = cleaned.slice(fenceMatch[0].length);
-        if (cleaned.endsWith('\`\`\`')) cleaned = cleaned.slice(0, -3).trim();
+        if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3).trim();
 
         const parsedSelectors = JSON.parse(cleaned);
         if (parsedSelectors && typeof parsedSelectors === 'object' && !Array.isArray(parsedSelectors)) {
@@ -2610,7 +3175,7 @@ route.post(
     if (!revision) {
       return c.json({ error: 'Revision not found' }, 404);
     }
-    let body: unknown = {};
+    let body: unknown;
     try {
       body = await c.req.json();
     } catch {
@@ -2647,7 +3212,7 @@ route.post(
     let body: unknown;
     try {
       body = await c.req.json();
-    } catch (err) {
+    } catch {
       return c.json({ error: 'Invalid JSON body' }, 400);
     }
     const raw = body as { mode?: string } | null;
@@ -2695,7 +3260,7 @@ route.post('/onboarding/settings/profile-field-decisions/:decisionId/rollback', 
   if (!decision) {
     return c.json({ error: 'Decision not found' }, 404);
   }
-  let body: unknown = {};
+  let body: unknown;
   try {
     body = await c.req.json();
   } catch {
@@ -2730,7 +3295,6 @@ route.get('/onboarding/settings/profile-retry-preview/:domain', (c) => {
   const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
 
   const batches = listBatches(workspace.id).filter(b => b.status === 'active');
-  const db = getDb();
 
   // Profile-related error patterns to match against error_message
   const profileErrorPatterns = [

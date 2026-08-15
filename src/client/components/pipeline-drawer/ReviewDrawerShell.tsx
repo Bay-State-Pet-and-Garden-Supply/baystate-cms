@@ -35,6 +35,8 @@ interface ReviewDrawerShellProps {
     findings: Array<{ code: string; message: string; memberSku: string | null }>;
   } | null;
   handleResetSingle?: () => void;
+  /** When true, the generic Reset button is suppressed (used for Sourcing while the engine is disabled). */
+  suppressReset?: boolean;
   saveStatus: 'idle' | 'saving' | 'saved' | 'error';
   saveError: string | null;
   hasRetryableSaveFailure?: boolean;
@@ -58,6 +60,7 @@ export function ReviewDrawerShell({
   consistencyWarnings = [],
   semanticValidation = null,
   handleResetSingle,
+  suppressReset = false,
   saveStatus,
   saveError,
   hasRetryableSaveFailure,
@@ -452,7 +455,7 @@ export function ReviewDrawerShell({
                     <strong style={{ display: 'block', marginBottom: 2 }}>{statusTitle}</strong>
                     <span style={{ opacity: 0.9 }}>{statusDesc}</span>
                   </div>
-                  {handleResetSingle && (stageStatus === 'failed' || stageStatus === 'completed' || stageStatus === 'skipped') && (
+                  {handleResetSingle && !suppressReset && (stageStatus === 'failed' || stageStatus === 'completed' || stageStatus === 'skipped') && (
                     <button
                       type="button"
                       onClick={handleResetSingle}

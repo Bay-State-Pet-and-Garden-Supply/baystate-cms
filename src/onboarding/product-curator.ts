@@ -4,7 +4,6 @@ import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../classificat
 import { assertClassificationReady } from '../classification/readiness';
 import { coordinateCohortItemsOnce, formatDeterministicTitle } from './cohort-name-coordinator';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
-import { getEvidenceAttemptsByIdsForItem } from '../db/repositories/onboarding-evidence-repo';
 import { getDb } from '../db/connection';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../classification/config-loader';
 import { createConfigSnapshot, syncConfigToCache, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
@@ -28,7 +27,6 @@ import {
   categoryPageProposalsStage,
   productDraftProjectionStage,
 } from '../classification';
-import { consolidateDistributorCopy } from './distributor-copy-consolidator';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { redactTransportText, type ModelPolicyView } from '../classification/model-policy-gateway';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
@@ -173,37 +171,17 @@ export async function curateItemWithPipeline(
   }
   const ext = item.extractionData || ({} as any);
 
-  const acceptedAttemptIds = item.sourcingDecision?.acceptedEvidenceAttemptIds || item.acceptedEvidenceAttemptIds || [];
-  if (!cohortMode && acceptedAttemptIds.length > 0 && !ext.primaryImage) {
-    try {
-      const attempts = getEvidenceAttemptsByIdsForItem(item.id, item.upc, acceptedAttemptIds)
-        .filter(att => att.itemId === item.id || att.lookupUpc === item.upc);
-      const images: string[] = [];
-      for (const att of attempts) {
-        if (att.identityJson) {
-          try {
-            const ident = JSON.parse(att.identityJson);
-            if (Array.isArray(ident.images)) {
-              for (const img of ident.images) {
-                if (typeof img === 'string' && img.trim() && !images.includes(img.trim())) {
-                  images.push(img.trim());
-                }
-              }
-            }
-          } catch {
-            /* identityJson may be malformed — image backfill is best-effort */
-          }
-        }
-      }
-      if (images.length > 0) {
-        ext.primaryImage = images[0];
-        ext.additionalImages = images.slice(1);
-        ext.images = images;
-      }
-    } catch {
-      /* evidence-attempt backfill must never block curation */
-    }
-  }
+  // ADR 0014 / PI-6: distributor images are DISPLAY-ONLY. The non-cohort
+  // distributor image backfill (previously copied identityJson.images into
+  // primaryImage/additionalImages/images) is REMOVED fail-closed — images
+  // may not enter extraction/classification/draft/promotion payloads until
+  // a rights-and-identity verification pass is separately approved.
+
+  // Milestone E: distributor-record extraction data is IDENTITY-ONLY. Copy
+  // fields (description, search keywords, custom fields) never feed
+  // classification inputs for distributor-source items — even if a malformed
+  // payload carried them.
+  const distributorSource = item.sourceType === 'distributor_record';
 
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
 
@@ -301,7 +279,9 @@ export async function curateItemWithPipeline(
       focusedFileHashes,
       catalogEvidenceHash,
       sourceProductHash: '',
-      searchKeywords: ext.searchKeywords ? String(ext.searchKeywords) : null,
+      // Milestone E: distributor copy never feeds classification inputs —
+      // search keywords derive from page copy (identity-only for distributor).
+      searchKeywords: distributorSource ? null : ext.searchKeywords ? String(ext.searchKeywords) : null,
       productPageNames: [],
       pages: toPageSnapshotState(pageSnapshot),
       pageImportId: pageSnapshot.pageImportId,
@@ -421,12 +401,13 @@ export async function curateItemWithPipeline(
         try {
           const db = getDb();
           const batchRows = db.query(
-            `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
+            `SELECT id, upc, name, brand_hint, source_type, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
           ).all(item.id) as Array<{
             id: string;
             upc: string;
             name: string;
             brand_hint: string | null;
+            source_type: string | null;
             extraction_data_json: string | null;
           }>;
 
@@ -441,7 +422,9 @@ export async function curateItemWithPipeline(
             departmentHint: null,
             sourceUrl: null,
             expectedName: null,
-            sourceType: 'official_page',
+            // Milestone E: hydrate the REAL source type (distributor_record
+            // items are identity-only for product-line grouping).
+            sourceType: (r.source_type ?? 'official_page') as 'official_page' | 'distributor_record',
             acceptedEvidenceAttemptId: null,
             acceptedEvidenceAttemptIds: [],
             sourcingDecision: null,
@@ -606,8 +589,12 @@ export async function curateItemWithPipeline(
       // Absent in legacy mode — zero behavior change.
       assertHeld: preparedCohort?.assertOwnershipHeld,
       // Prepared-cohort mode: the evidence stage consumes the frozen member
-      // projection instead of reading onboarding_items (amendment 4).
-      cohortFrozenEvidence: cohortMode ? preparedCohort!.memberProjection : undefined,
+      // projection instead of reading onboarding_items (amendment 4). Current
+      // freezes always write V2; historical V1 members normalize via the
+      // shared adapter before reaching the pipeline (never passed raw).
+      cohortFrozenEvidence: cohortMode
+        ? (preparedCohort!.memberProjection as import('../shared/schemas/cohorts').ExecutionEvidenceProjectionMemberV2)
+        : undefined,
       // PR4 C4b: cohort-level Execution Product Type resolved at freeze.
       // METADATA ONLY — no gate logic reads it in PR4 (review authority stays
       // on the member's own reviewed proposals). Present only in
@@ -832,44 +819,19 @@ export async function curateItemWithPipeline(
     // page-assignment stages. Consolidating here creates the final
     // curatedDescription and source-attempt provenance for draft copy —
     // it does not feed back into classification.
-    let curatedDescription: string | null = null;
-    let curatedDescriptionSourceAttemptIds: string[] = [];
+    const curatedDescription: string | null = null;
+    const curatedDescriptionSourceAttemptIds: string[] = [];
 
-    const distAttemptIds: string[] = Array.isArray(ext.distributorEvidenceAttemptIds)
-      ? ext.distributorEvidenceAttemptIds
-      : [];
-
-    // PR3 hardening (Commit B / R2): cohort mode DISABLES the live distributor
-    // consolidation (image backfill and distributor-copy reads) — frozen
-    // evidence carries what was consolidated pre-freeze, and the live
-    // onboarding_evidence_attempts rows may have mutated after the freeze.
-    // (Freezing attempt rows into the projection is deferred — the projection
-    // stays execution-evidence-v1.)
-    if (!cohortMode && distAttemptIds.length > 0) {
-      try {
-        const distAttempts = getEvidenceAttemptsByIdsForItem(
-          item.id,
-          item.upc,
-          distAttemptIds,
-        );
-        const consolidation = await consolidateDistributorCopy(
-          distAttempts,
-          item.name,
-          item.brandHint,
-          runModelPolicyView,
-        );
-        curatedDescription = consolidation.curatedDescription;
-        curatedDescriptionSourceAttemptIds = consolidation.sourceAttemptIds;
-      } catch (err: any) {
-        console.warn(`[ProductCurator] Distributor copy consolidation failed: ${redactTransportText(err.message)}`);
-        // Fall through — curatedDescription stays null
-      }
-    }
+    // ADR 0014: distributor copy is NOT v1 merchandising authority. The
+    // non-cohort distributor description consolidation is REMOVED fail-closed
+    // (curatedDescription stays null here; descriptions come from web/OCR
+    // extraction). A future ADR may reinstate it with frozen provenance.
 
     const searchKeywords = synthesizeSearchKeywords({
       title: curatedTitle,
       brand: ext.brand ?? item.brandHint,
-      description: ext.description,
+      // Milestone E: distributor copy never contributes to keywords.
+      description: distributorSource ? null : ext.description,
       suggestedPages,
       suggestedProductType,
       species: speciesLabels,

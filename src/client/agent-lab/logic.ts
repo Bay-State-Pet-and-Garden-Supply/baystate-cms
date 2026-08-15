@@ -476,6 +476,12 @@ export interface MetricsResult {
   totalCostUsd: number;
   avgCostUsd: number;
   withCost: number;
+  deterministicCount: number;
+  deterministicRate: number;
+  escalatedCount: number;
+  escalationRate: number;
+  profileHitCount: number;
+  profileHitRate: number;
 }
 
 export function computeMetrics(
@@ -493,13 +499,26 @@ export function computeMetrics(
   let durationCount = 0;
   let totalCost = 0;
   let withCost = 0;
+  let deterministicCount = 0;
+  let escalatedCount = 0;
+  let profileHitCount = 0;
 
   for (const run of runs) {
+    const proj = projections.get(run.id);
+    const hasProfileEvidence = proj?.evidence?.some((e) => e.extractionMethod === 'profile_selector') ?? false;
+    if (hasProfileEvidence) profileHitCount++;
+
+    const isDeterministic = (run.actualCost === 0 || run.actualCost === null) && (proj?.toolCalls?.length === 0 || run.piVersion?.startsWith('preflight'));
+    if (run.status === 'completed' && isDeterministic) {
+      deterministicCount++;
+    } else if (run.status === 'completed' || (proj?.toolCalls && proj.toolCalls.length > 0)) {
+      escalatedCount++;
+    }
+
     switch (run.status) {
       case 'completed':
         completed++;
         {
-          const proj = projections.get(run.id);
           if (proj?.result) {
             completedWithResult++;
             if (proj.result.disposition === 'abstained') abstained++;
@@ -549,6 +568,12 @@ export function computeMetrics(
     totalCostUsd: totalCost,
     avgCostUsd: withCost > 0 ? totalCost / withCost : 0,
     withCost,
+    deterministicCount,
+    deterministicRate: runCount > 0 ? deterministicCount / runCount : 0,
+    escalatedCount,
+    escalationRate: runCount > 0 ? escalatedCount / runCount : 0,
+    profileHitCount,
+    profileHitRate: runCount > 0 ? profileHitCount / runCount : 0,
   };
 }
 

@@ -10,6 +10,7 @@ import {
 import type { CohortMemberInput, PerMemberProductTypeResult } from '../../classification/cohort-product-type-resolver';
 import type {
   ExecutionEvidenceProjectionMemberV1,
+  ExecutionEvidenceProjectionMemberV2,
   ExecutionEvidenceProjectionV1,
 } from '../../shared/schemas/cohorts';
 import type { RuntimeClassificationSnapshot } from '../../classification/runtime-snapshot';
@@ -878,5 +879,91 @@ describe('validateCohortFamilyInvariants', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].invariant).toBe('brand');
     expect(findings[0].values).toEqual(['unresolved:acme', 'unresolved:blue buffalo']);
+  });
+});
+
+describe('Milestone E — distributor_record evidence (source labeling + identity-only)', () => {
+  /** A V2 member with distributor provenance (the exact V2 shape cohorts.ts adds). */
+  function distributorMember(): ExecutionEvidenceProjectionMemberV2 {
+    const base = makeMemberProjection();
+    return {
+      ...base,
+      version: 'execution-evidence-v2',
+      itemSourceType: 'distributor_record',
+      extractionSourceType: 'distributor_record',
+      extractionMethod: 'distributor_record_v1',
+      sourcingGenerationId: 'gen-1',
+      acceptedEvidenceAttemptIds: ['att-1'],
+      acceptedProviderIds: ['phillips'],
+      distributorEvidenceHash: 'a'.repeat(64),
+      extraction: {
+        ...base.extraction,
+        distributorSku: 'DSKU-1',
+        manufacturerPartNumber: 'MPN-1',
+        variantAttributes: { flavor: 'chicken' },
+      },
+    } as ExecutionEvidenceProjectionMemberV2;
+  }
+
+  it('labels distributor evidence as distributor_record with a null URL and provenance metadata', () => {
+    const evidence = evidenceFromProjection(distributorMember());
+    const page = evidence.filter((e) => e.source === 'distributor_record');
+    expect(page.length).toBeGreaterThan(0);
+    for (const entry of page) {
+      expect(entry.source).toBe('distributor_record');
+      expect(entry.sourceUrl).toBeNull();
+      // provenance metadata: sorted attempt/provider ids + generation + hash
+      expect(entry.metadata).toMatchObject({
+        provenance: 'distributor_record',
+        providerIds: ['phillips'],
+        acceptedEvidenceAttemptIds: ['att-1'],
+        sourcingGenerationId: 'gen-1',
+        evidenceHash: 'a'.repeat(64),
+      });
+    }
+  });
+
+  it('never labels distributor evidence official_product_page', () => {
+    const evidence = evidenceFromProjection(distributorMember());
+    const official = evidence.filter((e) => e.source === 'official_product_page');
+    expect(official).toHaveLength(0);
+  });
+
+  it('emits ONLY identity fields for distributor evidence (no description/bullets/searchKeywords/customFields)', () => {
+    const evidence = evidenceFromProjection(distributorMember());
+    const page = evidence.filter((e) => e.source === 'distributor_record');
+    const fields = page.map((e) => e.sourceField);
+    // identity-only: name/brand/weight present
+    expect(fields).toContain('name');
+    expect(fields).toContain('brand');
+    expect(fields).toContain('weight');
+    // Milestone E review: distributor identity evidence ALSO carries the
+    // frozen distributor SKU, MPN, and whitelisted variant attributes.
+    expect(fields).toContain('distributor_sku');
+    expect(fields).toContain('manufacturer_part_number');
+    expect(fields).toContain('flavor');
+    expect(page.some((e) => e.sourceField === 'distributor_sku' && e.value === 'DSKU-1')).toBe(true);
+    expect(page.some((e) => e.sourceField === 'manufacturer_part_number' && e.value === 'MPN-1')).toBe(true);
+    expect(page.some((e) => e.sourceField === 'flavor' && e.value === 'chicken')).toBe(true);
+    // per-field provenance rides the metadata
+    expect(page[0].metadata).toMatchObject({ fieldProvenance: expect.any(Object) });
+    // copy fields never appear
+    expect(fields).not.toContain('description');
+    expect(fields).not.toContain('bullet_point');
+    expect(fields).not.toContain('search_keywords');
+    expect(fields).not.toContain('Flavor'); // customFields are excluded
+    // no image fields
+    const all = evidence.filter((e) => String(e.value).includes('img.example.com'));
+    expect(all).toHaveLength(0);
+  });
+
+  it('official-page members keep the full copy mapping and official label', () => {
+    const evidence = evidenceFromProjection(makeMemberProjection());
+    const official = evidence.filter((e) => e.source === 'official_product_page');
+    const fields = official.map((e) => e.sourceField);
+    expect(fields).toContain('description');
+    expect(fields).toContain('bullet_point');
+    expect(fields).toContain('search_keywords');
+    expect(official.some((e) => e.sourceUrl === 'https://brand.example.com/p1')).toBe(true);
   });
 });

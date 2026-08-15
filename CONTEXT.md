@@ -595,13 +595,17 @@ The action of moving one or more items from their current Pipeline Stage to the 
 _Avoid_: Batch promotion, phase transition, auto-advance
 
 **Stage Names**:
-The five declared Pipeline Stages: **Discovery**, **Extraction**, **Curation**, **Review**, and **Promotion**, in that order.
+The six declared Pipeline Stages: **Sourcing**, **Discovery**, **Extraction**, **Curation**, **Review**, and **Promotion**, in that order.
+
+**Sourcing**:
+The first pipeline stage that evaluates distributor evidence against each imported product (ADR 0014 + Amendment A). The capability is **DEFAULT ON** (`BAYSTATE_CMS_SOURCING_ENABLED` absent = enabled, mode `automatic`; explicit `false|0|no` is the global kill switch; empty/whitespace/malformed values fail closed disabled; `BAYSTATE_CMS_SOURCING_MODE` selects `observe|manual|automatic`). Imports derive their entry stage from the effective capability (`manual`/`automatic` → **Sourcing**, otherwise **Discovery**) and write `sourcing_entry_policy_version = 1`; pre-Amendment rows (version 0, incl. the 148 legacy rows) are never claimed, observed, or backfilled and stay on the audited **Continue to Official Site Discovery** path. When active, the worker runs the provider-neutral engine (`src/onboarding/sourcing/`) — enabled distributor connections (Phillips/BCI Phase 1 REST; Orgill/PFX SFTP deferred), each invoked with an exact normalized UPC/GTIN lookup (brand is advisory only, never a filter and never implies `not_stocked`). Evidence attempts are immutable and generation-scoped (`sourcing_generations`); a retry supersedes the generation. The reconciler compares identity-critical fields (upc/gtin/MPN/weight/size/count/packCount/brand, plus variant axes incl. flavor/formula and connector-declared axes): a deterministic projection authority decides qualification; hard identity disagreements persist as durable conflicts (`sourcing/needs_input`) resolvable only via the operator workflow (use candidate / custom value / dismiss); no evidence or provider errors degrade to audited fallback routes. **A qualified distributor record SKIPS Discovery**: the route `distributor_record_to_extraction` moves the item to `extraction/pending` with `source_type='distributor_record'` and a null URL (never a fake official URL). Modes: `observe` writes only generations+attempts (zero decisions/acceptances/conflicts/extractions); `manual` holds non-conflict outcomes at `needs_input` with a server-derived qualification view and two operator actions (**Use distributor record** / **Continue to Official Site Discovery**); `automatic` applies the full route table (hard conflicts always manual). `bundle_to_curation` is prohibited and unactionable everywhere; no Sourcing → Curation routing exists. Distributor images are display-only until PI-6 rights verification. See `docs/runbooks/sourcing-engine-rollout.md` for the rollout/rollback sequence and read-only observation queries.
+_Avoid_: Branding stage, distributor-to-curation routing, fake source URLs
 
 **Discovery**:
 The pipeline stage that finds the official product page URL on brand sites via web search.
 
 **Extraction**:
-The pipeline stage that scrapes raw product details (titles, descriptions, images, prices) from confirmed URLs.
+The pipeline stage that scrapes raw product details (titles, descriptions, images, prices) from confirmed URLs. **Source-dispatched (Amendment A):** official-page items keep the URL/profile/page-scrape path; `distributor_record` items bypass scraping entirely and are materialized identity-only (title, noncanonical brand, weight, SKU, MPN, whitelisted variants) with a null URL, zero fetch/profile/OCR/model/image calls, and a dedicated `distributorRecordProvenance` (generation, evidence hash, sorted accepted attempt/provider ids). See `docs/runbooks/sourcing-engine-rollout.md`.
 
 **Domain Extractor Profile**:
 A reviewed extraction contract for one product-page structure on a domain that identifies the structures trusted during Extraction.
@@ -691,7 +695,7 @@ _Avoid_: Table view, item list, batch detail view
 ## Relationships
 
 - The **Pipeline Board** renders four automated stage columns (**Discovery**, **Extraction**, **Curation**) and two manual columns (**Review**, **Promotion**).
-- **Extraction** requires a healthy **Domain Extractor Profile** for the source URL's domain.
+- **Extraction** requires a healthy **Domain Extractor Profile** for the source URL's domain — for **official_page** sources. **Distributor-record sources are profile-free**: `distributor_record_to_extraction` items materialize identity-only structured data (null URL) and never require a profile or URL.
 - A domain may have multiple **Domain Extractor Profiles** when its product pages use different structures.
 - Each **Domain Extractor Profile** has one **Profile Scope**.
 - A **Profile Scope** includes both an operator-visible URL pattern and a **Page Structure Signal**.

@@ -21,6 +21,8 @@ interface ManagerInboxProps {
   /** Live notifications from the SSE hook (used for the unread badge + inline list). */
   notifications?: StoreManagerNotification[];
   eventStatus?: EventStreamStatus;
+  variant?: 'modal' | 'inline';
+  onAskManager?: (prompt: string) => void;
 }
 
 const SEVERITY_STYLE: Record<StoreManagerSeverity, { color: string; background: string; label: string }> = {
@@ -36,7 +38,7 @@ const SEVERITY_STYLE: Record<StoreManagerSeverity, { color: string; background: 
  * ack/resolve only — nothing here stages, publishes, repairs, or alters
  * onboarding state, and nothing executes automatically on click.
  */
-export function ManagerInbox({ open, onClose, notifications = [], eventStatus = 'closed' }: ManagerInboxProps) {
+export function ManagerInbox({ open, onClose, notifications = [], eventStatus = 'closed', variant = 'inline', onAskManager }: ManagerInboxProps) {
   const [items, setItems] = useState<StoreManagerInboxItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,9 +63,19 @@ export function ManagerInbox({ open, onClose, notifications = [], eventStatus = 
   }, [open]);
 
   useEffect(() => {
-    if (!open) return;
     void load();
-  }, [open, load]);
+  }, [load]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -101,40 +113,43 @@ export function ManagerInbox({ open, onClose, notifications = [], eventStatus = 
 
   const unread = notifications.filter((n) => n.readAt === null).length;
 
-  return (
+  const isInline = variant === 'inline';
+
+  const cardContent = (
     <div
-      role="dialog"
+      role={isInline ? 'region' : 'dialog'}
+      aria-modal={isInline ? undefined : true}
       aria-label="Manager Inbox"
+      onClick={(e) => e.stopPropagation()}
       style={{
-        position: 'absolute',
-        right: 24,
-        top: 64,
-        zIndex: 50,
-        width: 480,
-        maxHeight: '76vh',
+        width: '100%',
+        maxWidth: isInline ? 900 : 540,
+        maxHeight: isInline ? undefined : '85vh',
         overflowY: 'auto',
-        padding: 16,
+        padding: 24,
         background: colors.whiteSurface,
         border: `1px solid ${colors.cardBorder}`,
-        borderRadius: rounded.md,
-        boxShadow: '0 12px 32px rgba(0,0,0,0.16)',
+        borderRadius: rounded.lg,
+        boxShadow: isInline ? '0 1px 3px rgba(33,20,20,0.04)' : '0 20px 25px -5px rgba(0, 0, 0, 0.15)',
         fontFamily: fonts.body,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: colors.ledgerCharcoal }}>
+          <div style={{ fontSize: 18, fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal }}>
             Manager Inbox {unread > 0 ? <span style={{ color: colors.signetBurgundy }}>({unread} new)</span> : null}
           </div>
-          <div style={{ fontSize: 11, color: colors.mulchBrown }}>
+          <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 2 }}>
             {summary.total} findings · {summary.critical} critical · {summary.warning} warning · {summary.info} info ·{' '}
             {summary.open} open
             {eventStatus === 'live' ? ' · live' : eventStatus === 'reconnecting' ? ' · reconnecting' : ''}
           </div>
         </div>
-        <button type="button" onClick={onClose} aria-label="Close Manager Inbox" className="btn btn-outline" style={{ fontSize: 12, padding: '4px 10px' }}>
-          Close
-        </button>
+        {isInline ? null : (
+          <button type="button" onClick={onClose} aria-label="Close Manager Inbox" className="btn btn-outline" style={{ fontSize: 12, padding: '4px 12px' }}>
+            ✕ Close
+          </button>
+        )}
       </div>
 
       {error ? <div style={{ fontSize: 12, color: colors.signetBurgundy, marginBottom: 8 }}>{error}</div> : null}
@@ -146,38 +161,38 @@ export function ManagerInbox({ open, onClose, notifications = [], eventStatus = 
         <div style={{ fontSize: 12, color: colors.mulchBrown, padding: 12 }}>No open findings. Deterministic collectors found nothing to triage.</div>
       ) : null}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {sorted.map((item) => {
           const sev = SEVERITY_STYLE[item.severity];
           const stale = isInboxItemStale(item);
           const prefill = inboxCommandPrefill(item);
           const detail = openItemId === item.id ? openDetail : null;
           return (
-            <div
+            <article
               key={item.id}
-              role="button"
-              tabIndex={0}
-              aria-label={`${item.title} (${item.count})`}
+              aria-label={`${sev.label} catalog finding: ${item.title}`}
               onClick={() => void openItem(item)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') void openItem(item);
-              }}
               style={{
                 border: `1px solid ${colors.cardBorder}`,
                 borderRadius: rounded.md,
-                padding: '10px 12px',
-                cursor: 'pointer',
+                padding: '12px 14px',
                 background: colors.whiteSurface,
+                boxShadow: '0 1px 2px rgba(33,20,20,0.03)',
+                cursor: 'pointer',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: sev.color, background: sev.background, padding: '2px 6px', borderRadius: 4 }}>
                   {sev.label}
                 </span>
-                <span style={{ fontSize: 11, fontWeight: 600, color: colors.ledgerCharcoal, flex: 1 }}>{item.title}</span>
+                <span
+                  style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal, flex: 1 }}
+                >
+                  {item.title}
+                </span>
                 <span style={{ fontSize: 11, color: colors.mulchBrown }}>{formatInboxAge(item.lastSeenAt)}</span>
               </div>
-              <div style={{ fontSize: 11, color: colors.mulchBrown, marginBottom: 4 }}>
+              <div style={{ fontSize: 12, color: colors.mulchBrown, marginBottom: 6 }}>
                 {item.summary} · <span style={{ color: colors.ledgerCharcoal, fontWeight: 600 }}>{item.count}</span>
                 {item.scope.kind !== 'catalog' && item.scope.kind !== 'sku_set'
                   ? ` · scope ${item.scope.kind}`
@@ -188,27 +203,37 @@ export function ManagerInbox({ open, onClose, notifications = [], eventStatus = 
                 </span>
               </div>
               {detail ? (
-                <div style={{ fontSize: 11, color: detail.isCurrent ? colors.uniformGreen : colors.signetBurgundy, marginBottom: 4 }}>
+                <div style={{ fontSize: 11, color: detail.isCurrent ? colors.uniformGreen : colors.signetBurgundy, marginBottom: 6 }}>
                   {detail.isCurrent
                     ? `Current source confirmed (${detail.currentCount ?? item.count}).`
                     : 'This finding is out of date — re-open from the source before acting.'}
                 </div>
               ) : null}
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
                 {prefill ? (
-                  <code style={{ fontSize: 11, color: colors.mulchBrown, background: '#f4f1ea', padding: '2px 6px', borderRadius: 4 }}>{prefill}</code>
+                  <code style={{ fontSize: 11, color: colors.mulchBrown, background: colors.feedBagCream, padding: '2px 6px', borderRadius: 4 }}>{prefill}</code>
                 ) : null}
                 <div style={{ flex: 1 }} />
+                {prefill && onAskManager ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAskManager(prefill);
+                    }}
+                    style={{ fontSize: 11, padding: '3px 10px', background: colors.seedlingGreen }}
+                  >
+                    Ask Manager ➔
+                  </button>
+                ) : null}
                 {item.lifecycle === 'open' ? (
                   <button
                     type="button"
                     disabled={busyId === item.id}
                     className="btn btn-outline"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void act(item, 'acknowledge');
-                    }}
-                    style={{ fontSize: 11, padding: '2px 8px' }}
+                    onClick={(e) => { e.stopPropagation(); void act(item, 'acknowledge'); }}
+                    style={{ fontSize: 11, padding: '3px 10px' }}
                   >
                     Acknowledge
                   </button>
@@ -218,20 +243,47 @@ export function ManagerInbox({ open, onClose, notifications = [], eventStatus = 
                     type="button"
                     disabled={busyId === item.id}
                     className="btn btn-outline"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void act(item, 'resolve');
-                    }}
-                    style={{ fontSize: 11, padding: '2px 8px' }}
+                    onClick={(e) => { e.stopPropagation(); void act(item, 'resolve'); }}
+                    style={{ fontSize: 11, padding: '3px 10px' }}
                   >
                     Resolve
                   </button>
                 ) : null}
               </div>
-            </div>
+            </article>
           );
         })}
       </div>
+    </div>
+  );
+
+  if (isInline) {
+    return (
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', background: colors.feedBagCream }}>
+        {cardContent}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'rgba(33, 20, 20, 0.45)',
+        backdropFilter: 'blur(2px)',
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+      onClick={onClose}
+    >
+      {cardContent}
     </div>
   );
 }

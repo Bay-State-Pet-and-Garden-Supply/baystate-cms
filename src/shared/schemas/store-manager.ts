@@ -188,6 +188,8 @@ export const StoreManagerChatRequestSchema = z.object({
    * before the run starts. Scope changes start a new run/turn context.
    */
   pinnedScope: StoreManagerPinnedScopeSchema.nullable().optional(),
-}).strict();
+  id: z.string().optional(),
+  trigger: z.string().optional(),
+});
 
 export type StoreManagerChatRequest = z.infer<typeof StoreManagerChatRequestSchema>;

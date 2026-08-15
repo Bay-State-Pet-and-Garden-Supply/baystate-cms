@@ -1,6 +1,24 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
-import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus, SourcingDecision } from '../../shared/schemas/onboarding';
+import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus, SourcingDecision, SourcingDecisionV2 } from '../../shared/schemas/onboarding';
+import { getAcceptedAttemptIdsForItem, isAcceptanceMigrationCompleted } from './onboarding-acceptance-repo';
+import { supersedeCurrentSourcingGeneration, getCurrentSourcingGeneration, getEvidenceAttemptsByItemAndGeneration } from './onboarding-evidence-repo';
+import { getCurrentGenerationAcceptedAttemptIds } from './onboarding-acceptance-repo';
+import { SOURCING_ENTRY_POLICY_VERSION, isCurrentSourcingEntryPolicy } from '../../onboarding/sourcing/entry-policy';
+import {
+  buildDistributorRecordProjection,
+  type ProjectionResolutionInput,
+  type SourcingProjectionReasonCode,
+} from '../../onboarding/sourcing/distributor-record-projection';
+import { SourcingDecisionV2Schema } from '../../shared/schemas/onboarding';
+
+/**
+ * Onboarding item with the durable sourcing entry-policy version hydrated
+ * (Amendment A). The version is a column on `onboarding_items`; the shared
+ * `OnboardingItem` schema predates it, so repo returns carry it as an
+ * intersection type without widening the shared schema.
+ */
+export type OnboardingItemWithEntryPolicy = OnboardingItem & { sourcingEntryPolicyVersion: number };
 
 export interface OnboardingItemRow {
   id: string;
@@ -23,6 +41,7 @@ export interface OnboardingItemRow {
   is_duplicate: number;
   existing_sku: string | null;
   source_type: string | null;
+  sourcing_entry_policy_version: number | null;
   accepted_evidence_attempt_ids_json: string | null;
   accepted_evidence_attempt_id: string | null;
   sourcing_decision_json: string | null;
@@ -50,9 +69,32 @@ export interface InsertItemData {
 
 const STAGE_ORDER: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
-const PIPELINE_STAGES = STAGE_ORDER;
+/**
+ * Guarded JSON parse for the serialized sourcing decision. Returns the parsed
+ * decision, or null when the stored JSON is malformed. Row hydration must
+ * never throw on corrupt authority data; downstream consumers (e.g. the
+ * distributor-record materializer) validate the decision and fail closed with
+ * a stable code when it is absent or invalid.
+ */
+function safeParseDecision(raw: string): SourcingDecision | SourcingDecisionV2 | null {
+  try {
+    return JSON.parse(raw) as SourcingDecision | SourcingDecisionV2;
+  } catch {
+    return null;
+  }
+}
 
-function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
+function mapRowToItem(row: OnboardingItemRow): OnboardingItemWithEntryPolicy {
+  // Acceptances hydrate from the relational authority once the distributor
+  // V2 migration marker exists (ADR 0014: normalized rows are 100%
+  // authoritative — empty means zero acceptances, never legacy JSON).
+  // Pre-migration databases keep the legacy JSON column fallback.
+  const acceptedEvidenceAttemptIds = isAcceptanceMigrationCompleted()
+    ? getAcceptedAttemptIdsForItem(row.id)
+    : row.accepted_evidence_attempt_ids_json
+      ? (JSON.parse(row.accepted_evidence_attempt_ids_json) as string[])
+      : [];
+
   return {
     id: row.id,
     batchId: row.batch_id,
@@ -66,11 +108,13 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
     expectedName: row.expected_name ?? null,
     coordinatedTitle: row.coordinated_title ?? null,
     sourceType: (row.source_type ?? 'official_page') as 'official_page' | 'distributor_record',
-    acceptedEvidenceAttemptIds: row.accepted_evidence_attempt_ids_json
-      ? (JSON.parse(row.accepted_evidence_attempt_ids_json) as string[])
-      : [],
+    sourcingEntryPolicyVersion: row.sourcing_entry_policy_version ?? 0,
+    acceptedEvidenceAttemptIds,
     acceptedEvidenceAttemptId: row.accepted_evidence_attempt_id ?? null,
-    sourcingDecision: row.sourcing_decision_json ? JSON.parse(row.sourcing_decision_json) : null,
+    // Guarded parse (Milestone D round-8): a malformed serialized decision
+    // must NEVER throw during row hydration. The materializer validates the
+    // decision authority and fails closed with a stable code when absent.
+    sourcingDecision: row.sourcing_decision_json ? safeParseDecision(row.sourcing_decision_json) : null,
     stage: (row.stage || 'sourcing') as PipelineStage,
     stageStatus: (row.stage_status || 'pending') as StageStatus,
     status: (row.status || 'imported') as ItemStatus,
@@ -92,18 +136,19 @@ export function insertItems(
   batchId: string,
   items: InsertItemData[],
   entryStage: PipelineStage = 'discovery',
-): OnboardingItem[] {
+  sourcingEntryPolicyVersion: number = 0,
+): OnboardingItemWithEntryPolicy[] {
   const db = getDb();
   const now = new Date().toISOString();
   const stmt = db.query(
     `INSERT INTO onboarding_items
       (id, batch_id, upc, name, price, quantity, brand_hint, department_hint, source_url, expected_name,
        status, stage, stage_status, error_message, retry_count, is_duplicate, existing_sku,
-       extraction_data_json, curation_data_json, row_number, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', ?, ?, NULL, 0, ?, ?, NULL, NULL, ?, ?, ?)`,
+       extraction_data_json, curation_data_json, row_number, sourcing_entry_policy_version, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', ?, ?, NULL, 0, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
   );
 
-  const inserted: OnboardingItem[] = [];
+  const inserted: OnboardingItemWithEntryPolicy[] = [];
 
   const insertAll = db.transaction(() => {
     for (const item of items) {
@@ -129,6 +174,7 @@ export function insertItems(
         isDuplicateNum,
         item.existingSku ?? null,
         item.rowNumber,
+        sourcingEntryPolicyVersion,
         now,
         now,
       );
@@ -144,6 +190,7 @@ export function insertItems(
         sourceUrl: item.sourceUrl ?? null,
         expectedName: null,
         sourceType: 'official_page',
+        sourcingEntryPolicyVersion,
         acceptedEvidenceAttemptIds: [],
         acceptedEvidenceAttemptId: null,
         sourcingDecision: null,
@@ -169,7 +216,7 @@ export function insertItems(
 
 // ─── LOOKUPS ────────────────────────────────────────────────────────────────────
 
-export function findItemById(id: string): OnboardingItem | undefined {
+export function findItemById(id: string): OnboardingItemWithEntryPolicy | undefined {
   const db = getDb();
   const row = db.query('SELECT * FROM onboarding_items WHERE id = ?').get(id) as OnboardingItemRow | undefined;
   return row ? mapRowToItem(row) : undefined;
@@ -308,9 +355,16 @@ export function claimItemsForProcessing(
   limit: number,
   workspaceId: string,
   workerId: string,
-): OnboardingItem[] {
+): OnboardingItemWithEntryPolicy[] {
   const db = getDb();
   const now = new Date().toISOString();
+
+  // Amendment A: Sourcing claims require the exact current entry-policy
+  // version in BOTH the atomic subquery and the outer CAS — pre-amendment
+  // (policy 0) items, including the legacy stranded rows, are never
+  // automatically claimed/observed. Other stages are unchanged.
+  const isSourcingClaim = stage === 'sourcing';
+  const versionClause = isSourcingClaim ? ' AND sourcing_entry_policy_version = ?' : '';
 
   // Atomic UPDATE with subquery. The outer AND stage_status = 'pending'
   // prevents claiming items already picked up by a concurrent worker.
@@ -324,11 +378,14 @@ export function claimItemsForProcessing(
        JOIN onboarding_batches b ON i.batch_id = b.id
        WHERE b.workspace_id = ? AND b.status = 'active'
        AND i.stage = ? AND i.stage_status = 'pending'
+       ${versionClause}
        ORDER BY i.row_number
        LIMIT ?
      )
-     AND stage_status = 'pending'`,
-    [workerId, now, now, workspaceId, stage, limit],
+     AND stage_status = 'pending'${versionClause}`,
+    isSourcingClaim
+      ? [workerId, now, now, workspaceId, stage, SOURCING_ENTRY_POLICY_VERSION, limit, SOURCING_ENTRY_POLICY_VERSION]
+      : [workerId, now, now, workspaceId, stage, limit],
   );
 
   if (result.changes === 0) return [];
@@ -408,6 +465,29 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
       if (item.stageStatus !== 'completed') {
         skipped++;
         continue;
+      }
+
+      // Sourcing items with OPEN hard identity conflicts can never advance
+      // through the generic endpoint (ADR 0014): resolution must clear every
+      // hard conflict and complete via `completeSourcingWithDecision` first.
+      // Stale superseded-generation conflicts are audit-only and never block.
+      if (item.stage === 'sourcing') {
+        const openConflict = db
+          .query(
+            `SELECT 1 FROM onboarding_evidence_conflicts
+             WHERE item_id = ? AND severity = 'hard' AND status = 'open'
+               AND sourcing_generation_id IS (
+               SELECT id FROM sourcing_generations
+               WHERE item_id = ?
+               ORDER BY rowid DESC LIMIT 1
+             )
+             LIMIT 1`,
+          )
+          .get(id, id);
+        if (openConflict) {
+          skipped++;
+          continue;
+        }
       }
 
       let nextStage: PipelineStage;
@@ -682,19 +762,6 @@ export function sendItemsToPreviousStage(
 }
 
 
-// ─── DEPRECATED — kept for backward compat during migration ────────────────────
-function updateItemStatus(
-  id: string,
-  status: ItemStatus,
-  errorMessage?: string | null,
-): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-  db.query(
-    'UPDATE onboarding_items SET status = ?, error_message = ?, updated_at = ? WHERE id = ?',
-  ).run(status, errorMessage ?? null, now, id);
-}
-
 /** @deprecated Use setDiscoverySourceUrl instead (sets stage_status only, no legacy status) */
 // fallow-ignore-next-line unused-export
 export function updateItemSourceUrl(id: string, url: string): void {
@@ -749,33 +816,6 @@ export function incrementRetryCount(id: string): number {
   return row.retry_count;
 }
 
-/** @deprecated Use getStageCounts instead */
-function countItemsByStatus(batchId: string): Record<string, number> {
-  const db = getDb();
-  const rows = db.query(
-    'SELECT status, COUNT(*) as count FROM onboarding_items WHERE batch_id = ? GROUP BY status',
-  ).all(batchId) as Array<{ status: string; count: number }>;
-
-  const counts: Record<string, number> = {};
-  for (const row of rows) {
-    counts[row.status] = row.count;
-  }
-  return counts;
-}
-
-/** @deprecated Use getPendingItemsByStage instead */
-function getNextPendingItems(
-  batchId: string,
-  status: ItemStatus,
-  limit: number,
-): OnboardingItem[] {
-  const db = getDb();
-  const rows = db.query(
-    'SELECT * FROM onboarding_items WHERE batch_id = ? AND status = ? ORDER BY row_number LIMIT ?',
-  ).all(batchId, status, limit) as OnboardingItemRow[];
-  return rows.map(mapRowToItem);
-}
-
 export interface WeeklyReportProductItem {
   id: string;
   upc: string;
@@ -825,14 +865,14 @@ export function getWeeklyReportItems(startDateIso: string, endDateIso: string): 
       try {
         const curation = JSON.parse(r.curation_data_json);
         if (curation?.curatedTitle) displayTitle = curation.curatedTitle;
-      } catch {}
+      } catch { /* malformed JSON -> ignore */ }
     } else if (r.expected_name) {
       displayTitle = r.expected_name;
     } else if (r.extraction_data_json) {
       try {
         const ext = JSON.parse(r.extraction_data_json);
         if (ext?.title) displayTitle = ext.title;
-      } catch {}
+      } catch { /* malformed JSON -> ignore */ }
     }
 
     return {
@@ -858,27 +898,310 @@ export function getWeeklyReportItems(startDateIso: string, endDateIso: string): 
  * `fallbackSourcingItemsToDiscovery` (audited `fallback_to_discovery`). No
  * generic helper may recreate the legacy Sourcing → Curation bypass.
  */
+/**
+ * Write a Sourcing decision onto a row WITHOUT transitioning its stage.
+ * Sourcing-stage guarded: only rows currently in the `sourcing` stage are
+ * written (audit-only callers / tests); returns false when the CAS fails.
+ * Automatic completion MUST go through `completeSourcingWithDecision`.
+ */
 export function updateSourcingDecision(
   id: string,
   decision: SourcingDecision,
-): void {
+): boolean {
+  // ADR 0014: the legacy route is audit-readable but never CREATABLE through
+  // any production helper. Historical fixtures use direct SQL instead.
+  if (decision.route === 'bundle_to_curation') {
+    return false;
+  }
   const db = getDb();
   const now = new Date().toISOString();
   const jsonStr = JSON.stringify(decision);
 
-  db.query(
+  const result = db.query(
     `UPDATE onboarding_items
      SET sourcing_decision_json = ?, stage_status = 'completed', error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND stage = 'sourcing'`,
   ).run(jsonStr, now, id);
+  return result.changes > 0;
+}
+
+/**
+ * Route/target matrix for Sourcing completion (ADR 0014). Sourcing advances
+ * ONLY to adjacent Discovery; Curation is unreachable.
+ */
+const SOURCING_COMPLETION_TARGETS: Record<SourcingDecision['route'], PipelineStage> = {
+  evidence_to_discovery: 'discovery',
+  fallback_to_discovery: 'discovery',
+  degraded_fallback_to_discovery: 'discovery',
+  distributor_record_to_extraction: 'extraction',
+  needs_input_conflict: 'sourcing',
+  retry_provider_errors: 'sourcing',
+  // Legacy audit value: never creatable or actionable.
+  bundle_to_curation: 'sourcing',
+};
+
+/**
+ * The ONLY automatic Sourcing completion transition (ADR 0014).
+ *
+ * Guards (all fail closed with a reason, never partially applied):
+ * - the row must currently be in the `sourcing` stage;
+ * - the requested target stage must match the decision route's matrix
+ *   (evidence_to_discovery/fallback_to_discovery → discovery/pending,
+ *   needs_input_conflict → sourcing/needs_input,
+ *   retry_provider_errors → sourcing/pending);
+ * - `bundle_to_curation` is rejected outright;
+ * - evidence routes refuse when open hard conflicts remain;
+ * - `needs_input_conflict` requires the item to currently be `needs_input`.
+ */
+export function completeSourcingWithDecision(
+  itemId: string,
+  decision: SourcingDecision | SourcingDecisionV2,
+  targetStage: 'discovery' | 'extraction' | 'sourcing',
+): { ok: boolean; reason?: string } {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  if (decision.route === 'bundle_to_curation') {
+    return { ok: false, reason: 'bundle_to_curation is prohibited (ADR 0014)' };
+  }
+
+  const expectedTarget = SOURCING_COMPLETION_TARGETS[decision.route];
+  if (expectedTarget !== targetStage) {
+    return { ok: false, reason: `route ${decision.route} targets ${expectedTarget}, not ${targetStage}` };
+  }
+
+  const item = findItemById(itemId);
+  if (!item) return { ok: false, reason: 'item_not_found' };
+  if (item.stage !== 'sourcing') {
+    return { ok: false, reason: `not_eligible:${item.stage}/${item.stageStatus}` };
+  }
+
+  // Automatic/manual distributor routing is gated on the durable entry-policy
+  // version (Amendment A): only post-amendment (marker-v1) imports may target
+  // Extraction through a distributor record. Marker-v0 items are preserved as
+  // operator-controlled Continue-to-Discovery (the legacy fallback).
+  if (targetStage === 'extraction' && !isCurrentSourcingEntryPolicy(item.sourcingEntryPolicyVersion)) {
+    return { ok: false, reason: 'distributor routing requires sourcing_entry_policy_version=1' };
+  }
+
+  // The extraction decision must validate against the strict V2 route schema
+  // (MA invariant): distributor Extraction is inexpressible without
+  // generation/attempt/provider/hash provenance.
+  if (targetStage === 'extraction') {
+    const v2 = SourcingDecisionV2Schema.safeParse(decision);
+    if (!v2.success) {
+      return { ok: false, reason: 'invalid_v2_distributor_decision' };
+    }
+    if (v2.data.route !== 'distributor_record_to_extraction') {
+      return { ok: false, reason: 'extraction target requires distributor_record_to_extraction route' };
+    }
+  }
+
+  if (targetStage === 'discovery' || targetStage === 'extraction') {
+    const openConflict = db
+      .query(
+        `SELECT 1 FROM onboarding_evidence_conflicts
+         WHERE item_id = ? AND severity = 'hard' AND status = 'open'
+           AND sourcing_generation_id IS (
+             SELECT id FROM sourcing_generations
+             WHERE item_id = ?
+             ORDER BY rowid DESC LIMIT 1
+           )
+         LIMIT 1`,
+      )
+      .get(itemId, itemId);
+    if (openConflict) {
+      return { ok: false, reason: 'open_hard_conflicts' };
+    }
+  }
+
+  let nextStatus: StageStatus = 'pending';
+  if (decision.route === 'needs_input_conflict') {
+    if (item.stageStatus !== 'needs_input') {
+      return { ok: false, reason: `needs_input_conflict requires needs_input, got ${item.stageStatus}` };
+    }
+    nextStatus = 'needs_input';
+  }
+
+  const jsonStr = JSON.stringify(decision);
+  // Extraction routing atomically binds the item to the distributor record:
+  // source_type becomes 'distributor_record' and source_url stays NULL (no
+  // fake official URL is ever invented — ADR 0014 Amendment A).
+  const result = targetStage === 'extraction'
+    ? db.query(
+        `UPDATE onboarding_items
+         SET sourcing_decision_json = ?, stage = ?, stage_status = ?, source_type = 'distributor_record',
+             source_url = NULL, error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+         WHERE id = ? AND stage = 'sourcing'`,
+      ).run(jsonStr, targetStage, nextStatus, now, itemId)
+    : db.query(
+        `UPDATE onboarding_items
+         SET sourcing_decision_json = ?, stage = ?, stage_status = ?, error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+         WHERE id = ? AND stage = 'sourcing'`,
+      ).run(jsonStr, targetStage, nextStatus, now, itemId);
+
+  if (result.changes === 0) {
+    return { ok: false, reason: 'transition_failed' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Complete Sourcing through the canonical projection authority (Amendment A).
+ *
+ * Recomputes `buildDistributorRecordProjection` for the item's CURRENT
+ * generation with the given operator resolution inputs (candidate/custom/
+ * dismiss semantics) applied, then routes exactly as automatic routing does:
+ *
+ * - qualified → `distributor_record_to_extraction` (marker-v1 only; marker-v0
+ *   items are preserved as operator-controlled Continue-to-Discovery);
+ * - not qualified (accepted-but-insufficient / no current generation) →
+ *   `evidence_to_discovery`.
+ *
+ * Never the previous blanket evidence_to_discovery final step: a qualified
+ * resolution bundle reaches Extraction. All writes go through
+ * `completeSourcingWithDecision` (stage guard, route/target matrix, marker
+ * gate, open-conflict refusal, V2 decision validation). Returns the outcome
+ * with qualification details for the route layer.
+ */
+export interface CompleteSourcingViaProjectionResult {
+  ok: boolean;
+  reason?: string;
+  qualified: boolean;
+  route: 'distributor_record_to_extraction' | 'evidence_to_discovery' | null;
+  reasonCodes?: SourcingProjectionReasonCode[];
+  evidenceHash?: string | null;
+}
+
+export function completeSourcingViaProjection(
+  itemId: string,
+  resolutions: ProjectionResolutionInput[] = [],
+  options: { strictQualification?: boolean } = {},
+): CompleteSourcingViaProjectionResult {
+  const item = findItemById(itemId);
+  if (!item) {
+    return { ok: false, reason: 'item_not_found', qualified: false, route: null };
+  }
+  if (item.stage !== 'sourcing') {
+    return { ok: false, reason: `not_eligible:${item.stage}/${item.stageStatus}`, qualified: false, route: null };
+  }
+  if (item.stageStatus !== 'needs_input') {
+    return { ok: false, reason: `requires needs_input, got ${item.stageStatus}`, qualified: false, route: null };
+  }
+
+  const generation = getCurrentSourcingGeneration(itemId);
+  // No generation → no generation-scoped evidence can qualify; the legacy
+  // (marker-v0 / stranded) item completes via evidence_to_discovery.
+  if (!generation) {
+    if (options.strictQualification) {
+      return { ok: false, reason: 'no_current_generation', qualified: false, route: null, reasonCodes: ['no_accepted_evidence'] };
+    }
+    const decision: SourcingDecision = {
+      route: 'evidence_to_discovery',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: [],
+      providerIds: [],
+      conflicts: [],
+      warnings: [],
+      decidedAt: new Date().toISOString(),
+    };
+    const res = completeSourcingWithDecision(itemId, decision, 'discovery');
+    if (!res.ok) return { ok: false, reason: res.reason, qualified: false, route: null };
+    return { ok: true, qualified: false, route: 'evidence_to_discovery', evidenceHash: null };
+  }
+
+  const attempts = getEvidenceAttemptsByItemAndGeneration(itemId, generation.id);
+  const acceptedIds = getCurrentGenerationAcceptedAttemptIds(itemId);
+
+  const projection = buildDistributorRecordProjection({
+    itemId,
+    itemUpc: item.upc,
+    sourcingGenerationId: generation.id,
+    attempts,
+    acceptedAttemptIds: acceptedIds,
+    resolutions,
+  });
+
+  const now = new Date().toISOString();
+
+  if (!projection.qualified) {
+    // Strict manual action: the operator explicitly chose "use distributor
+    // record" — an insufficient projection fails truthfully (the fallback
+    // action exists for Continue-to-Discovery).
+    if (options.strictQualification) {
+      return {
+        ok: false,
+        reason: 'not_qualified',
+        qualified: false,
+        route: null,
+        reasonCodes: projection.reasonCodes,
+        evidenceHash: null,
+      };
+    }
+    const decision: SourcingDecision | SourcingDecisionV2 = {
+      schemaVersion: 2,
+      route: 'evidence_to_discovery',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
+      providerIds: projection.providerIds,
+      conflicts: [],
+      warnings: projection.warnings,
+      decidedAt: now,
+    };
+    const res = completeSourcingWithDecision(itemId, decision, 'discovery');
+    if (!res.ok) return { ok: false, reason: res.reason, qualified: false, route: null };
+    return { ok: true, qualified: false, route: 'evidence_to_discovery', reasonCodes: projection.reasonCodes, evidenceHash: null };
+  }
+
+  if (!isCurrentSourcingEntryPolicy(item.sourcingEntryPolicyVersion)) {
+    // Marker-v0: qualified evidence still completes to Discovery (legacy
+    // operator-controlled cohort never routes to Extraction).
+    const decision: SourcingDecision | SourcingDecisionV2 = {
+      schemaVersion: 2,
+      route: 'evidence_to_discovery',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
+      providerIds: projection.providerIds,
+      conflicts: [],
+      warnings: projection.warnings,
+      decidedAt: now,
+    };
+    const res = completeSourcingWithDecision(itemId, decision, 'discovery');
+    if (!res.ok) return { ok: false, reason: res.reason, qualified: true, route: null };
+    return { ok: true, qualified: true, route: 'evidence_to_discovery', evidenceHash: projection.evidenceHash };
+  }
+
+  const decision: SourcingDecisionV2 = {
+    schemaVersion: 2,
+    route: 'distributor_record_to_extraction',
+    origin: 'operator_override',
+    acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
+    providerIds: projection.providerIds,
+    sourcingGenerationId: generation.id,
+    evidenceHash: projection.evidenceHash,
+    sourceType: 'distributor_record',
+    target: 'extraction',
+    conflicts: [],
+    warnings: projection.warnings,
+    decidedAt: now,
+  };
+  const res = completeSourcingWithDecision(itemId, decision, 'extraction');
+  if (!res.ok) return { ok: false, reason: res.reason, qualified: true, route: null };
+  return {
+    ok: true,
+    qualified: true,
+    route: 'distributor_record_to_extraction',
+    evidenceHash: projection.evidenceHash,
+  };
 }
 
 /**
  * Audit helper: build the operator-override fallback decision written when a
  * stranded Sourcing item is moved to Discovery.
  */
-function fallbackSourcingDecision(decidedAt: string): SourcingDecision {
+function fallbackSourcingDecision(decidedAt: string): SourcingDecision | SourcingDecisionV2 {
   return {
+    schemaVersion: 2,
     route: 'fallback_to_discovery',
     origin: 'operator_override',
     acceptedEvidenceAttemptIds: [],
@@ -891,19 +1214,59 @@ function fallbackSourcingDecision(decidedAt: string): SourcingDecision {
 
 /**
  * Apply the audited fallback transition to a Sourcing row: write a fresh
- * `fallback_to_discovery` operator-override decision and move it to
- * `discovery/pending`, clearing error/claim/retry state. No-op (returns
- * false) when the row is not currently in the sourcing stage.
+ * operator-override decision and move it to `discovery/pending`, clearing
+ * error/claim/retry state. No-op (returns false) when the row is not
+ * currently in the sourcing stage.
+ *
+ * Evidence-aware audit route (MC item 7): when the item has accepted
+ * current-generation evidence the decision is `evidence_to_discovery` with
+ * the accepted attempt/provider provenance; otherwise `fallback_to_discovery`.
  */
 function applyFallbackTransition(id: string, decidedAt: string): boolean {
   const db = getDb();
+  const acceptedIds = getCurrentGenerationAcceptedAttemptIds(id);
+  const decision: SourcingDecision | SourcingDecisionV2 = acceptedIds.length > 0
+    ? {
+        schemaVersion: 2,
+        route: 'evidence_to_discovery',
+        origin: 'operator_override',
+        acceptedEvidenceAttemptIds: acceptedIds,
+        providerIds: [],
+        conflicts: [],
+        warnings: [],
+        decidedAt,
+      }
+    : fallbackSourcingDecision(decidedAt);
   const result = db.query(
     `UPDATE onboarding_items
      SET sourcing_decision_json = ?, stage = 'discovery', stage_status = 'pending', error_message = NULL,
          retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
      WHERE id = ? AND stage = 'sourcing'`,
-  ).run(JSON.stringify(fallbackSourcingDecision(decidedAt)), decidedAt, id);
+  ).run(JSON.stringify(decision), decidedAt, id);
   return result.changes > 0;
+}
+
+/**
+ * ADR 0014: an item with OPEN HARD identity conflicts (current generation)
+ * can never be moved to Discovery through the operator fallback — conflicts
+ * must be resolved through the durable resolution workflow first (the LAST
+ * resolution completes the item). Stranded legacy items have no conflicts,
+ * so the safety-patch fallback flow is unaffected.
+ */
+function hasOpenCurrentHardConflicts(id: string): boolean {
+  const db = getDb();
+  const row = db
+    .query(
+      `SELECT 1 FROM onboarding_evidence_conflicts
+       WHERE item_id = ? AND severity = 'hard' AND status = 'open'
+         AND sourcing_generation_id IS (
+           SELECT id FROM sourcing_generations
+           WHERE item_id = ? ORDER BY rowid DESC LIMIT 1
+         )
+       LIMIT 1`,
+    )
+    .get(id, id);
+  return !!row;
 }
 
 export interface SourcingFallbackResult {
@@ -968,7 +1331,98 @@ export function fallbackSourcingItemToDiscovery(id: string): SingleItemFallbackR
   if (item.stage !== 'sourcing') {
     return { moved: false, reason: `not_eligible:${item.stage}/${item.stageStatus}` };
   }
+  // Fail closed on unresolved hard identity conflicts (ADR 0014).
+  if (hasOpenCurrentHardConflicts(id)) {
+    return { moved: false, reason: 'open_hard_conflicts' };
+  }
   return { moved: applyFallbackTransition(id, new Date().toISOString()) };
+}
+
+/**
+ * Operator "Continue with Official Site Discovery" for a distributor-source
+ * Extraction item (Amendment A, Milestone D).
+ *
+ * In ONE guarded transaction: set `source_type` back to `official_page`, keep
+ * `source_url` NULL (no fake URL is invented), clear the active item
+ * extraction payload, move the item to `discovery/pending`, and record the
+ * operator override decision (`fallback_to_discovery`). Generations,
+ * attempts, conflicts, acceptances, and prior extraction audit rows are
+ * preserved untouched. Only extraction-stage items in pending/failed/
+ * completed (before Curation) are eligible; later-stage items must use the
+ * existing reviewed send-back flow — no post-Review history rewrite.
+ *
+ * Returns `{ ok: false, reason }` on wrong stage / ownership / source type;
+ * never throws.
+ */
+export function revertToOfficialDiscovery(
+  itemId: string,
+  workspaceId: string,
+): { ok: true } | { ok: false; reason: string } {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  // All guards and writes live INSIDE one transaction: a concurrent state
+  // change is impossible to observe between check and write, and a guarded
+  // UPDATE with an affected-row check rolls back (writes nothing) when the
+  // item moved underneath us.
+  return db.transaction(() => {
+    const item = findItemById(itemId);
+    if (!item) return { ok: false as const, reason: 'item_not_found' };
+    if (item.sourceType !== 'distributor_record') {
+      return { ok: false as const, reason: 'not_distributor_source' };
+    }
+    // Only extraction-stage items (pending/failed/completed-before-curation)
+    // may revert; a completed extraction that already advanced must use the
+    // reviewed send-back flow.
+    if (item.stage !== 'extraction') {
+      return { ok: false as const, reason: `not_eligible:${item.stage}/${item.stageStatus}` };
+    }
+    if (!['pending', 'failed', 'completed'].includes(item.stageStatus)) {
+      return { ok: false as const, reason: `not_eligible:${item.stage}/${item.stageStatus}` };
+    }
+    // Workspace ownership (fail closed).
+    const batch = db
+      .query('SELECT workspace_id FROM onboarding_batches WHERE id = ?')
+      .get(item.batchId) as { workspace_id: string } | undefined;
+    if (!batch || batch.workspace_id !== workspaceId) {
+      return { ok: false as const, reason: 'workspace_mismatch' };
+    }
+
+    // Strict V2 decision (the only creatable decision format, Amendment A):
+    // route fallback_to_discovery with full provenance and operator origin.
+    const generationRow = db
+      .query('SELECT id FROM sourcing_generations WHERE item_id = ? ORDER BY rowid DESC LIMIT 1')
+      .get(itemId) as { id: string } | undefined;
+    const decision = {
+      schemaVersion: 2,
+      route: 'fallback_to_discovery',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: [] as string[],
+      providerIds: [] as string[],
+      sourcingGenerationId: generationRow?.id,
+      sourceType: 'official_page',
+      target: 'discovery',
+      conflicts: [],
+      warnings: ['Operator chose Continue with Official Site Discovery after distributor-record extraction'],
+      decidedAt: now,
+    };
+
+    const result = db.query(
+      `UPDATE onboarding_items
+       SET source_type = 'official_page', source_url = NULL, extraction_data_json = NULL,
+           sourcing_decision_json = ?, stage = 'discovery', stage_status = 'pending',
+           error_message = NULL, retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+       WHERE id = ? AND stage = 'extraction' AND stage_status IN ('pending', 'failed', 'completed')
+         AND source_type = 'distributor_record'`,
+    ).run(JSON.stringify(decision), now, itemId);
+    if (result.changes === 0) {
+      // The guards passed in-transaction but the guarded UPDATE matched no
+      // row: a concurrent mutation won the race. Nothing was written.
+      return { ok: false as const, reason: 'concurrent_state_change' };
+    }
+
+    return { ok: true as const };
+  })();
 }
 
 export interface ResetForRetryResult {
@@ -1021,6 +1475,18 @@ export function resetItemsForRetry(
     }
     if (item.stage === 'sourcing' && !options.sourcingEngineEnabled) {
       toFallback.push(id);
+    } else if (item.stage === 'sourcing' && options.sourcingEngineEnabled) {
+      // Engine ON: retry stays in Sourcing but supersedes the evidence
+      // generation and resets to pending for a clean re-run (ADR 0014).
+      // Marker-v0 (pre-Amendment-A) items are excluded: their cohort is
+      // operator-controlled Continue-to-Discovery even when the engine is
+      // globally ON (MC item 9) — never an automatic re-claim.
+      if (item.sourcingEntryPolicyVersion === SOURCING_ENTRY_POLICY_VERSION) {
+        toResetInPlace.push(id);
+        supersedeCurrentSourcingGeneration(id, 'operator_retry');
+      } else {
+        toFallback.push(id);
+      }
     } else {
       toResetInPlace.push(id);
     }

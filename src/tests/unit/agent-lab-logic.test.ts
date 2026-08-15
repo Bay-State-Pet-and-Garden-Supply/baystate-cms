@@ -477,6 +477,46 @@ describe('computeMetrics', () => {
     const result = computeMetrics(runs, projections);
     expect(result.abstentionRate).toBe(0.5);
   });
+
+  it('computes deterministic completion, agent escalation, and profile hit rates', () => {
+    const runs = [
+      makeRun({ id: 'r1', status: 'completed', actualCost: 0, piVersion: 'preflight-1.0.0' }),
+      makeRun({ id: 'r2', status: 'completed', actualCost: 0.05 }),
+    ];
+    const projections = new Map<string, PiRunProjection>();
+    projections.set('r1', {
+      run: runs[0],
+      steps: [],
+      toolCalls: [],
+      sources: [],
+      evidence: [{ id: 'e1', runId: 'r1', targetField: 'title', valueJson: '"Title"', extractionMethod: 'profile_selector', sourceId: 's1', sourceField: null, reliability: 'authoritative', directSupport: 1, snippet: null, metadataJson: '{}', createdAt: '' }],
+      conflicts: [],
+      assets: [],
+      result: { ...makeResultRow('{}'), disposition: 'submitted' },
+      comparisons: [],
+      eventCount: 0,
+    });
+    projections.set('r2', {
+      run: runs[1],
+      steps: [],
+      toolCalls: [{ id: 't1', runId: 'r2', stepId: 's1', sequence: 1, toolName: 'search_upc', toolVersion: '1.0.0', policyOutcome: 'allowed', requestHash: null, responseHash: null, artifactRef: null, latencyMs: 100, costUsd: 0.05, startedAt: '', completedAt: '', errorJson: null }],
+      sources: [],
+      evidence: [],
+      conflicts: [],
+      assets: [],
+      result: { ...makeResultRow('{}'), disposition: 'submitted' },
+      comparisons: [],
+      eventCount: 0,
+    });
+
+    const metrics = computeMetrics(runs, projections);
+    expect(metrics.deterministicCount).toBe(1);
+    expect(metrics.deterministicRate).toBe(0.5);
+    expect(metrics.escalatedCount).toBe(1);
+    expect(metrics.escalationRate).toBe(0.5);
+    expect(metrics.profileHitCount).toBe(1);
+    expect(metrics.profileHitRate).toBe(0.5);
+  });
 });
 
 // ---------------------------------------------------------------------------

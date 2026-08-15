@@ -20,6 +20,7 @@ import type {
   DomainDiagnosticsEntry,
   DomainDiagnosticsResponse,
   ProfileBlockedItem,
+  DistributorEvidenceAttemptView,
 } from '../shared/schemas/onboarding';
 import type {
   WorkerHealthResponse,
@@ -151,8 +152,101 @@ export async function advanceItems(itemIds: string[]): Promise<{ advanced: numbe
   });
 }
 
-export async function resetStageItems(itemIds: string[]): Promise<{ success: boolean }> {
-  return request<{ success: boolean }>('/items/reset', {
+/**
+ * Effective onboarding capabilities reported by the server (Amendment A).
+ * The board uses these to decide which Sourcing actions may be surfaced;
+ * the server remains the authoritative gate. No secret references or
+ * connection details are ever part of this payload.
+ */
+export interface OnboardingCapabilities {
+  sourcing: {
+    engineEnabled: boolean;
+    /** Sourcing mode (null when OFF / invalid / malformed configuration). */
+    mode: 'observe' | 'manual' | 'automatic' | null;
+    /** Stable non-secret reason for the current capability state. */
+    configurationReason: string;
+    /** Durable entry-policy version governing worker claims (1 = post-amendment). */
+    entryPolicyVersion: number;
+  };
+}
+
+/**
+ * Server-derived qualification of the current distributor record (Amendment
+ * A). Present when an item sits at sourcing/needs_input with an evaluated
+ * generation. `qualified` uses the SAME deterministic authority as automatic
+ * routing — the client never recomputes it and never supplies ids/hash.
+ */
+export interface SourcingQualificationView {
+  qualified: boolean;
+  reasonCodes: string[];
+  acceptedEvidenceAttemptIds: string[];
+  providerIds: string[];
+  evidenceHash: string | null;
+  /** The current sourcing generation the view derives from (null when absent). */
+  sourcingGenerationId: string | null;
+}
+
+export type SourcingResolutionAction = 'use_distributor_record' | 'fallback_to_discovery';
+
+/**
+ * Strict Sourcing resolution (Amendment A): the client sends ONLY the
+ * action; the server derives every accepted-id/hash/provider value and
+ * recomputes qualification. `use_distributor_record` is a manual-mode
+ * operator decision; `fallback_to_discovery` is the audited continue path.
+ */
+export async function resolveSourcingAction(
+  itemId: string,
+  action: SourcingResolutionAction,
+): Promise<{ success: boolean; item?: unknown }> {
+  return request<{ success: boolean; item?: unknown }>(`/items/${itemId}/resolve-sourcing`, {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  });
+}
+
+/**
+ * Operator "Continue with Official Site Discovery" for a distributor-source
+ * item at Extraction (MD item 8). The server reverts the item to
+ * official-page sourcing (source_url stays null), clears the active
+ * extraction payload, moves it to discovery/pending, and preserves all
+ * sourcing evidence in one guarded transaction. No body is required — the
+ * server is the only authority.
+ */
+export async function continueWithOfficialDiscovery(
+  itemId: string,
+): Promise<{ success: boolean; item?: OnboardingItem }> {
+  return request<{ success: boolean; item?: OnboardingItem }>(`/items/${itemId}/continue-with-official-discovery`, {
+    method: 'POST',
+  });
+}
+
+export async function getOnboardingCapabilities(): Promise<OnboardingCapabilities> {
+  return request<OnboardingCapabilities>('/capabilities');
+}
+
+export interface SourcingFallbackItem {
+  id: string;
+  reason: string;
+}
+
+export interface FallbackSourcingItemsResponse {
+  moved: string[];
+  skipped: SourcingFallbackItem[];
+}
+
+export async function fallbackSourcingItemsToDiscovery(
+  itemIds: string[],
+): Promise<FallbackSourcingItemsResponse> {
+  return request<FallbackSourcingItemsResponse>('/items/fallback-sourcing-to-discovery', {
+    method: 'POST',
+    body: JSON.stringify({ itemIds }),
+  });
+}
+
+export async function resetStageItems(
+  itemIds: string[],
+): Promise<{ success: boolean; moved?: string[]; reset?: string[]; skipped?: Array<{ id: string; reason: string }> }> {
+  return request<{ success: boolean; moved?: string[]; reset?: string[]; skipped?: Array<{ id: string; reason: string }> }>('/items/reset', {
     method: 'POST',
     body: JSON.stringify({ itemIds }),
   });
@@ -288,10 +382,31 @@ export interface ItemDetailResponse {
   item: OnboardingItem;
   sources: OnboardingSource[];
   extraction: ExtractionData | null;
-  evidenceAttempts?: any[];
+  evidenceAttempts?: DistributorEvidenceAttemptView[];
+  /** Sourcing generations for the item (ADR 0014 audit view). */
+  generations?: SourcingGenerationView[];
+  /** Durable evidence conflicts with candidates (ADR 0014). */
+  conflicts?: OnboardingConflictView[];
+  /** Amendment A: server-derived distributor-record qualification (manual mode). */
+  /** Server-derived distributor-record qualification view; null when no current sourcing generation (or not sourcing stage). */
+  sourcingQualificationView?: SourcingQualificationView | null;
+  /** Amendment A: durable entry-policy version (0 = legacy pre-amendment row). */
+  sourcingEntryPolicyVersion?: number;
   consistencyWarnings: ConsistencyWarning[];
   /** PR10: active-cohort semantic validation surface (omitted in legacy mode). */
   semanticValidation?: SemanticValidationPayload;
+}
+
+/** Sourcing generation audit row (ADR 0014: immutable, supersession-linked). */
+export interface SourcingGenerationView {
+  id: string;
+  itemId: string;
+  status: 'running' | 'completed' | 'superseded' | 'failed';
+  supersedesId: string | null;
+  reason: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  createdAt: string;
 }
 
 export async function getItemDetail(itemId: string): Promise<ItemDetailResponse> {
@@ -1022,3 +1137,112 @@ export async function getWeeklyReport(startDate?: string, endDate?: string): Pro
   return request(`/weekly-report${q ? `?${q}` : ''}`);
 }
 
+
+// ─── Multi-Distributor Sourcing (ADR 0014) ────────────────────────────────────
+// Typed client calls for the distributor connection/brand-profile Settings
+// surface and the item evidence-conflict review surface. Raw secrets never
+// travel over the wire: the server reports only a `secretConfigured` boolean.
+
+export interface DistributorConnectionView {
+  id: string;
+  distributorId: string;
+  distributorName: string;
+  connectorType: 'api' | 'ftp_catalog' | 'csv' | 'legacy_adapter';
+  enabled: boolean;
+  secretConfigured: boolean;
+  configuration: Record<string, unknown>;
+  authorityPolicy: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrandProfileView {
+  id: string;
+  brand: string;
+  aliases: string[];
+  preferredDistributorIds: string[];
+}
+
+export type OnboardingConflictView = import('../shared/schemas/distributor').OnboardingEvidenceConflict;
+
+export async function getDistributorConnections(): Promise<{ connections: DistributorConnectionView[] }> {
+  return request<{ connections: DistributorConnectionView[] }>('/settings/connections');
+}
+
+export async function createDistributorConnection(body: {
+  distributorId: string;
+  connectorType: DistributorConnectionView['connectorType'];
+  secretRef?: string | null;
+  configuration?: Record<string, unknown>;
+  authorityPolicy?: Record<string, unknown>;
+}): Promise<{ connection: DistributorConnectionView }> {
+  // Amendment A: connections are ALWAYS created disabled (the server rejects
+  // create-as-enabled). Enablement is a separate explicit PATCH after
+  // fixture/credential/health checks — see updateDistributorConnection.
+  return request<{ connection: DistributorConnectionView }>('/settings/connections', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateDistributorConnection(
+  id: string,
+  body: Partial<{
+    connectorType: DistributorConnectionView['connectorType'];
+    secretRef: string | null;
+    configuration: Record<string, unknown>;
+    authorityPolicy: Record<string, unknown>;
+    enabled: boolean;
+  }>,
+): Promise<{ connection: DistributorConnectionView }> {
+  return request<{ connection: DistributorConnectionView }>(`/settings/connections/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getDistributors(): Promise<{ distributors: Array<{ id: string; name: string; status: string }> }> {
+  return request<{ distributors: Array<{ id: string; name: string; status: string }> }>('/settings/distributors');
+}
+
+export async function getBrandProfiles(): Promise<{ profiles: BrandProfileView[] }> {
+  return request<{ profiles: BrandProfileView[] }>('/settings/brand-profiles');
+}
+
+export async function upsertBrandProfile(body: {
+  brand: string;
+  aliases?: string[];
+  preferredDistributorIds?: string[];
+}): Promise<{ profile: BrandProfileView }> {
+  return request<{ profile: BrandProfileView }>('/settings/brand-profiles', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteBrandProfile(brand: string): Promise<{ success: boolean }> {
+  return request<{ success: boolean }>(`/settings/brand-profiles/${encodeURIComponent(brand)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function getItemConflicts(itemId: string): Promise<{ conflicts: OnboardingConflictView[] }> {
+  return request<{ conflicts: OnboardingConflictView[] }>(`/items/${itemId}/conflicts`);
+}
+
+export async function resolveItemConflict(
+  itemId: string,
+  conflictId: string,
+  body:
+    | { action: 'resolve_candidate'; candidateId: string }
+    | { action: 'custom_value'; customValue: string }
+    | { action: 'dismiss' },
+): Promise<{ success: boolean; item?: unknown; conflicts?: OnboardingConflictView[] }> {
+  return request<{ success: boolean; item?: unknown; conflicts?: OnboardingConflictView[] }>(
+    `/items/${itemId}/conflicts/${conflictId}/resolve`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  );
+}

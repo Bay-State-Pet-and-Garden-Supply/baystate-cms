@@ -14,6 +14,7 @@ import type {
   CohortRun,
   ExecutionEvidenceProjectionV1,
   ExecutionEvidenceProjectionMemberV1,
+  ExecutionEvidenceProjectionMemberV2,
 } from '../../shared/schemas/cohorts';
 
 /**
@@ -456,8 +457,11 @@ describe('computeCohortTitleInputHash — model execution authority slice (PR6 C
     // is for. The fixtures above are fully deterministic (fixed strings,
     // no UUIDs), so this value is stable across runs and machines.
     // PR13 review R2: recomputed under the v2 payload (parameters included).
-    expect(hash(makeParams())).toBe('d1983b647952e4b556eea018d4c7a1e2d468eb3da03a89f46ea56bb2fc45c3eb');
-    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('d1983b647952e4b556eea018d4c7a1e2d468eb3da03a89f46ea56bb2fc45c3eb');
+    // Milestone E: recomputed AGAIN under the v2 composition WITH the
+    // `sourceProvenance` slice (official-page normalization for the V1-style
+    // fixture member) — an intentional, reviewed composition change.
+    expect(hash(makeParams())).toBe('264bda1109ad5cf535d1e64c7bb764b7bd0e4f4aacdc83ec27779dccc86b16b9');
+    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('264bda1109ad5cf535d1e64c7bb764b7bd0e4f4aacdc83ec27779dccc86b16b9');
   });
 
   it('the plan entry provider/model/promptTemplateVersion/ruleVersion each participate', () => {
@@ -671,6 +675,18 @@ describe('titleAuthorityFromProjectionMember — the pure builder (PR6 C2)', () 
       packagingOcrTitle: 'PawCo Chicken Recipe',
       ocrWeight: '5 lb',
       ocrFlavor: 'Chicken',
+      // Milestone E: official-page provenance normalization for V1 members.
+      sourceProvenance: {
+        itemSourceType: 'official_page',
+        sourceUrl: 'https://brand.example/p1',
+        extractionSourceType: 'official_page',
+        extractionSourceUrl: 'https://brand.example/p1',
+        extractionMethod: '',
+        sourcingGenerationId: null,
+        acceptedEvidenceAttemptIds: [],
+        providerIds: [],
+        distributorEvidenceHash: null,
+      },
     });
   });
 
@@ -687,6 +703,101 @@ describe('titleAuthorityFromProjectionMember — the pure builder (PR6 C2)', () 
       packagingOcrTitle: 'PawCo Chicken 5 lb Pouch',
       ocrWeight: null,
       ocrFlavor: null,
+      sourceProvenance: {
+        itemSourceType: 'official_page',
+        sourceUrl: 'https://brand.example/p1',
+        extractionSourceType: 'official_page',
+        extractionSourceUrl: 'https://brand.example/p1',
+        extractionMethod: '',
+        sourcingGenerationId: null,
+        acceptedEvidenceAttemptIds: [],
+        providerIds: [],
+        distributorEvidenceHash: null,
+      },
     });
+  });
+});
+
+describe('Milestone E — source-kind/provenance drift (title input identity)', () => {
+  /** A V2 member with distributor provenance (the exact V2 shape cohorts.ts adds). */
+  function distributorMember(
+    overrides: Partial<ExecutionEvidenceProjectionMemberV2> = {},
+  ): ExecutionEvidenceProjectionMemberV2 {
+    return {
+      ...makeMember(),
+      itemSourceType: 'distributor_record',
+      extractionSourceType: 'distributor_record',
+      extractionMethod: 'distributor_record_v1',
+      sourcingGenerationId: 'gen-1',
+      acceptedEvidenceAttemptIds: ['att-1'],
+      acceptedProviderIds: ['phillips'],
+      distributorEvidenceHash: 'a'.repeat(64),
+      extraction: {
+        ...makeMember().extraction,
+        distributorSku: 'DSKU-1',
+        manufacturerPartNumber: 'MPN-1',
+        variantAttributes: { flavor: 'chicken' },
+      },
+      ...overrides,
+    } as ExecutionEvidenceProjectionMemberV2;
+  }
+
+  function projectionWithMembers(members: Array<ExecutionEvidenceProjectionMemberV1 | ExecutionEvidenceProjectionMemberV2>) {
+    return makeProjection(members as ExecutionEvidenceProjectionMemberV1[]);
+  }
+
+  it('distributor provenance changes the T-hash vs the same member as official-page', () => {
+    const official = makeParams({ projection: projectionWithMembers([makeMember()]) });
+    const distributor = makeParams({ projection: projectionWithMembers([distributorMember()]) });
+    expect(computeCohortTitleInputHash(distributor)).not.toBe(computeCohortTitleInputHash(official));
+  });
+
+  it('source-kind drift (official vs distributor) with identical title text still changes identity', () => {
+    const official = makeParams({ projection: projectionWithMembers([makeMember()]) });
+    const distributorSameText = makeParams({
+      projection: projectionWithMembers([distributorMember()]),
+    });
+    // The title text is identical (makeMember supplies it); only the source
+    // kind differs — the hash MUST differ (ME input-identity rule).
+    expect(computeCohortTitleInputHash(distributorSameText)).not.toBe(computeCohortTitleInputHash(official));
+  });
+
+  it('generation drift changes the T-hash for distributor members', () => {
+    const g1 = makeParams({ projection: projectionWithMembers([distributorMember({ sourcingGenerationId: 'gen-1' })]) });
+    const g2 = makeParams({ projection: projectionWithMembers([distributorMember({ sourcingGenerationId: 'gen-2' })]) });
+    expect(computeCohortTitleInputHash(g2)).not.toBe(computeCohortTitleInputHash(g1));
+  });
+
+  it('accepted-attempt-set drift changes the T-hash for distributor members', () => {
+    const a1 = makeParams({ projection: projectionWithMembers([distributorMember({ acceptedEvidenceAttemptIds: ['att-1'] })]) });
+    const a2 = makeParams({ projection: projectionWithMembers([distributorMember({ acceptedEvidenceAttemptIds: ['att-1', 'att-2'] })]) });
+    expect(computeCohortTitleInputHash(a2)).not.toBe(computeCohortTitleInputHash(a1));
+  });
+
+  it('distributor evidence-hash drift changes the T-hash for distributor members', () => {
+    const h1 = makeParams({ projection: projectionWithMembers([distributorMember({ distributorEvidenceHash: 'a'.repeat(64) })]) });
+    const h2 = makeParams({ projection: projectionWithMembers([distributorMember({ distributorEvidenceHash: 'b'.repeat(64) })]) });
+    expect(computeCohortTitleInputHash(h2)).not.toBe(computeCohortTitleInputHash(h1));
+  });
+
+  it('a V1 member (no source fields) hashes identically to a normalized official-page V2 member', () => {
+    // V1 normalize compatibility: the same member WITHOUT the V2 source fields
+    // and a V2 member explicitly set to official_page with empty provenance
+    // must hash identically (V1 adaptation contract).
+    const v1 = makeParams({ projection: projectionWithMembers([makeMember()]) });
+    const v2Official = makeParams({
+      projection: projectionWithMembers([
+        distributorMember({
+          itemSourceType: 'official_page',
+          extractionSourceType: 'official_page',
+          extractionMethod: '',
+          sourcingGenerationId: null,
+          acceptedEvidenceAttemptIds: [],
+          acceptedProviderIds: [],
+          distributorEvidenceHash: null,
+        }),
+      ]),
+    });
+    expect(computeCohortTitleInputHash(v2Official)).toBe(computeCohortTitleInputHash(v1));
   });
 });

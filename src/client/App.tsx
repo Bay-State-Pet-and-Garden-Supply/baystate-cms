@@ -11,7 +11,6 @@ import { CatalogHealth } from './components/CatalogHealth';
 import { Onboarding } from './components/Onboarding';
 import { StoreManagerAssistant } from './components/StoreManagerAssistant';
 import { Settings } from './components/Settings';
-import { WeeklyReportModal } from './components/WeeklyReportModal';
 import { AgentLab } from './components/agent-lab/AgentLab';
 import { colors, fonts, rounded } from './theme';
 
@@ -152,9 +151,7 @@ function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [selectedSku, setSelectedSku] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
-  const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
   const hasPushedHistory = useRef(false);
-
   const handleNavigate = (newView: View, replace = false) => {
     setView(newView);
     const url = new URL(window.location.href);
@@ -381,18 +378,7 @@ function App() {
           </div>
         )}
         <div style={navStyles.navSpacer} />
-        <button
-          style={navStyles.reportBtn}
-          onClick={() => setShowWeeklyReportModal(true)}
-          title="Generate Weekly Manager Report"
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <line x1="18" y1="20" x2="18" y2="10"></line>
-            <line x1="12" y1="20" x2="12" y2="4"></line>
-            <line x1="6" y1="20" x2="6" y2="14"></line>
-          </svg>
-          Weekly Report
-        </button>
+
         <span style={navStyles.navStatus}>
           <span style={navStyles.statusDot} aria-hidden="true" />
           {workspace ? workspace.name : 'Store Disconnected'}
@@ -550,9 +536,7 @@ function App() {
         </>
       )}
 
-      {showWeeklyReportModal && (
-        <WeeklyReportModal onClose={() => setShowWeeklyReportModal(false)} />
-      )}
+
     </div>
   );
 }

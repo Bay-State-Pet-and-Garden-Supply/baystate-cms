@@ -64,41 +64,65 @@ export function RunHistory({ open, onClose, onSelectRun }: RunHistoryProps) {
   if (!open) return null;
 
   return (
-    <div style={{ padding: 12, fontFamily: fonts.body }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <strong style={{ fontFamily: fonts.display, fontSize: 15 }}>Run History</strong>
-        <button type="button" onClick={onClose} aria-label="Close Run History" className="btn btn-outline" style={{ fontSize: 12, padding: '4px 10px' }}>
-          Close
-        </button>
+    <div
+      style={{
+        background: colors.whiteSurface,
+        border: `1px solid ${colors.cardBorder}`,
+        borderRadius: rounded.lg,
+        padding: '24px',
+        fontFamily: fonts.body,
+        boxShadow: '0 1px 3px rgba(33,20,20,0.04)',
+        maxWidth: 900,
+        width: '100%',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: `1px solid ${colors.cardBorder}`, paddingBottom: 16 }}>
+        <div>
+          <h3 style={{ fontFamily: fonts.display, fontSize: 18, fontWeight: 700, color: colors.ledgerCharcoal, margin: '0 0 4px' }}>Run History</h3>
+          <div style={{ fontSize: 12, color: colors.mulchBrown }}>
+            Audit log of all Store Manager execution runs, tool dispatches, and terminal outcomes.
+          </div>
+        </div>
       </div>
 
-      <label style={{ fontSize: 12, color: colors.mulchBrown }}>
-        Entrypoint
-        <select
-          value={entrypoint}
-          onChange={(e) => {
-            setEntrypoint(e.target.value);
-            setCursor(null);
-          }}
-          style={{ marginLeft: 8, fontSize: 12, padding: '2px 6px' }}
-        >
-          <option value="">All</option>
-          {['chat', 'command', 'schedule', 'event', 'playbook', 'replay', 'plan_preview'].map((kind) => (
-            <option key={kind} value={kind}>
-              {entrypointLabel(kind)}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <label style={{ fontSize: 12, color: colors.ledgerCharcoal, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+          Filter by Entrypoint:
+          <select
+            value={entrypoint}
+            onChange={(e) => {
+              setEntrypoint(e.target.value);
+              setCursor(null);
+            }}
+            style={{
+              fontSize: 12,
+              padding: '6px 12px',
+              borderRadius: rounded.md,
+              border: `1px solid ${colors.cardBorder}`,
+              background: colors.whiteSurface,
+              color: colors.ledgerCharcoal,
+            }}
+          >
+            <option value="">All Entrypoints</option>
+            {['chat', 'command', 'schedule', 'event', 'playbook', 'replay', 'plan_preview'].map((kind) => (
+              <option key={kind} value={kind}>
+                {entrypointLabel(kind)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
 
-      {error ? <div style={{ color: '#8b1e2d', margin: '8px 0' }}>{error}</div> : null}
+      {error ? <div style={{ color: colors.signetBurgundy, background: '#fee2e2', padding: '10px 14px', borderRadius: rounded.md, fontSize: 12, margin: '12px 0' }}>{error}</div> : null}
 
       {runs.length === 0 && !loading ? (
-        <div style={{ color: colors.mulchBrown, marginTop: 12 }}>No runs recorded yet.</div>
+        <div style={{ color: colors.mulchBrown, textAlign: 'center', padding: '32px 16px', fontSize: 13, fontStyle: 'italic' }}>
+          No execution runs recorded yet.
+        </div>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0 0' }}>
+        <ul style={{ listStyle: 'none', padding: 0, margin: '12px 0 0 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {runs.map((run) => (
-            <li key={run.runId} style={{ marginBottom: 6 }}>
+            <li key={run.runId}>
               <button
                 type="button"
                 onClick={() => onSelectRun(run.runId)}
@@ -108,23 +132,42 @@ export function RunHistory({ open, onClose, onSelectRun }: RunHistoryProps) {
                   textAlign: 'left',
                   display: 'flex',
                   justifyContent: 'space-between',
-                  gap: 8,
+                  gap: 12,
                   alignItems: 'center',
                   border: `1px solid ${colors.cardBorder}`,
                   borderRadius: rounded.md,
-                  padding: '8px 10px',
-                  background: '#fffdf7',
+                  padding: '12px 16px',
+                  background: colors.whiteSurface,
                   fontSize: 13,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.borderColor = colors.uniformGreen;
+                  e.currentTarget.style.background = colors.feedBagCream;
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.borderColor = colors.cardBorder;
+                  e.currentTarget.style.background = colors.whiteSurface;
                 }}
               >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {runSummary(run)}
-                </span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, overflow: 'hidden', flex: 1 }}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600, color: colors.ledgerCharcoal }}>
+                    {runSummary(run)}
+                  </span>
+                  <span style={{ fontSize: 11, color: colors.mulchBrown, fontFamily: fonts.mono }}>
+                    Run ID: {run.runId} · {new Date(run.createdAt).toLocaleString()}
+                  </span>
+                </div>
                 <span
                   style={{
                     color: STATUS_COLOR[run.terminalStatus ?? ''] ?? colors.mulchBrown,
                     fontSize: 12,
+                    fontWeight: 700,
                     whiteSpace: 'nowrap',
+                    padding: '3px 8px',
+                    borderRadius: rounded.sm,
+                    background: colors.feedBagCream,
                   }}
                 >
                   {terminalStatusLabel(run.terminalStatus)} · {run.artifactCount} artifact{run.artifactCount === 1 ? '' : 's'}
@@ -136,9 +179,11 @@ export function RunHistory({ open, onClose, onSelectRun }: RunHistoryProps) {
       )}
 
       {cursor && (
-        <button type="button" onClick={() => void load(false)} disabled={loading} className="btn btn-outline" style={{ fontSize: 12, padding: '4px 10px', marginTop: 4 }}>
-          {loading ? 'Loading…' : 'Load more'}
-        </button>
+        <div style={{ marginTop: 16, textAlign: 'center' }}>
+          <button type="button" onClick={() => void load(false)} disabled={loading} className="btn btn-outline" style={{ fontSize: 12, padding: '6px 16px' }}>
+            {loading ? 'Loading…' : 'Load more runs'}
+          </button>
+        </div>
       )}
     </div>
   );

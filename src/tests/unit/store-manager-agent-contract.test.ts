@@ -119,7 +119,7 @@ describe('Store Manager prompt — tool metadata cannot drift from the runtime',
 
   it('renders approval requirements and state transitions from policy metadata', () => {
     const guidelines = buildToolGuidelines();
-    const repair = STORE_MANAGER_TOOL_POLICIES['repairChangeSetImages'];
+    const repair = STORE_MANAGER_TOOL_POLICIES['repair_approved_change_set_images'];
     expect(repair.requiresApproval).toBe(true);
     expect(guidelines).toMatch(/operator approval required/i);
     expect(guidelines).toContain(repair.stateTransition);

@@ -22,7 +22,8 @@ import {
   completeReviewStage,
   bulkAssignBrand,
   bulkSkipItems,
-  bulkRetryItems
+  bulkRetryItems,
+  getOnboardingCapabilities,
 } from '../onboarding-api';
 import { ViewHeader } from './common/ViewHeader';
 import { colors } from '../theme';
@@ -36,6 +37,11 @@ import { matchExistingBrand } from '../../shared/brand-matcher';
 
 export function Onboarding() {
   const [showSettings, setShowSettings] = useState(false);
+
+  // Sourcing engine capability (server-reported; fail closed to false).
+  // While false, Sourcing items may only continue to Discovery.
+  const [sourcingEngineEnabled, setSourcingEngineEnabled] = useState(false);
+  const [capabilitiesError, setCapabilitiesError] = useState<string | null>(null);
   // Deep-linked settings tab (`?view=onboarding&settingsTab=curation` — the
   // "Open Curation Targets settings" banner links land here, not on the
   // generic ?view=settings page). Read once at mount: the banner anchors are
@@ -56,6 +62,22 @@ export function Onboarding() {
   const [items, setItems] = useState<OnboardingItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Load onboarding capabilities once on mount; fail closed (engine disabled)
+  // when the fetch fails, surfacing the error rather than engine actions.
+  useEffect(() => {
+    let cancelled = false;
+    getOnboardingCapabilities()
+      .then((caps) => {
+        if (cancelled) return;
+        setSourcingEngineEnabled(caps.sourcing?.engineEnabled === true);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setCapabilitiesError(err instanceof Error ? err.message : String(err));
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   // Upload modal states
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -896,6 +918,11 @@ export function Onboarding() {
         />
 
         {error && <div style={{ color: '#dc2626', background: '#fef2f2', padding: 12, borderRadius: 6, marginBottom: 20 }}>{error}</div>}
+        {capabilitiesError && !error && (
+          <div style={{ color: '#92400e', background: '#fffbeb', padding: 12, borderRadius: 6, marginBottom: 20, fontSize: 13 }}>
+            ⚙️ Onboarding capabilities unavailable ({capabilitiesError}) — Sourcing engine treated as disabled.
+          </div>
+        )}
 
         {batches.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '60px 24px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8 }}>
@@ -1232,6 +1259,7 @@ export function Onboarding() {
           onBack={handleBackToBatches}
           cachedBrandSites={cachedBrandSites}
           _catalogBrands={catalogBrands}
+          sourcingEngineEnabled={sourcingEngineEnabled}
           onRefreshBrandSites={loadBrandSites}
           onOpenProfileBuilder={(domain, item) => {
             setProfileBuilderDomain(domain);

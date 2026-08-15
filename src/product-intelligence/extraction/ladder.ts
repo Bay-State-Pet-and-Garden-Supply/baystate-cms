@@ -18,6 +18,7 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/29
  */
+import { createRequire } from 'node:module';
 import type { PageExtractionResult, ExtractedFieldEvidence, ExtractedImageCandidate } from '../tools/contract';
 import {
   classifyPageIdentity,
@@ -46,6 +47,7 @@ export interface LadderOptions {
       url: string,
       signal: AbortSignal,
       timeoutMs: number,
+      expected?: { gtin?: string; name?: string; brandHint?: string | null },
     ): Promise<{ fields: ExtractedFieldEvidence[]; images: Array<{ url: string; sourcePath?: string }> } | null>;
   }>;
   /** Layer 5: rendered browser with network capture (injected worker client). */
@@ -402,13 +404,15 @@ export async function runExtractionLadder(
       layersUsed.push('platform_none');
   }
 
-  // Layer 4: registered domain profiles (declared seam, none registered).
+  // Layer 4: registered domain profiles (CSS selector extractors).
+  let profileMatched = false;
   for (const profile of options.profiles ?? []) {
     if (!profile.matches(finalUrl)) continue;
+    profileMatched = true;
     layersUsed.push('profile_selector');
     fetchModes.push('profile_selector');
     try {
-      const out = await profile.extract(finalUrl, signal, timeoutMs);
+      const out = await profile.extract(finalUrl, signal, timeoutMs, expected);
       if (out) {
         for (const f of out.fields) addField(f.field, f.value, 'profile_selector', f.sourcePath);
         for (const image of out.images) {
@@ -420,6 +424,9 @@ export async function runExtractionLadder(
     } catch {
       layersUsed.push('profile_failed');
     }
+  }
+  if (!profileMatched) {
+    layersUsed.push('profile_miss');
   }
 
   // Promote recorded field evidence into the identity accumulators: layers
@@ -480,7 +487,10 @@ export async function runExtractionLadder(
       } else if (snapshot.jsonLd.some(jsonLdLeafProductProof)) {
         noteProof('structured');
       }
-      if (browserEvidence.methodsUsed.length > 0) layersUsed.push('browser_parsed');
+      if (browserEvidence.methodsUsed.length > 0) {
+        layersUsed.push('browser_parsed');
+        layersUsed.push('browser_success');
+      }
       if (snapshot.warnings.length > 0) layersUsed.push('browser_warnings');
       browserSignals = snapshot.pageStructureSignals ?? [];
       finalUrl = snapshot.finalUrl || finalUrl;
@@ -491,6 +501,26 @@ export async function runExtractionLadder(
       brand ??= fields.find((f) => f.field === 'brand')?.value ?? null;
       size ??= fields.find((f) => f.field === 'size')?.value ?? null;
       if (browserOut.variant) variant = browserOut.variant;
+
+      // Phase 3: Trigger background domain profile proposal on profile_miss + browser_success
+      if (layersUsed.includes('profile_miss') && layersUsed.includes('browser_success')) {
+        try {
+          const pageDomain = new URL(finalUrl).hostname.replace(/^www\./, '').trim();
+          if (pageDomain) {
+            const lazyReq = createRequire(import.meta.url);
+            const gov = lazyReq('../../onboarding/profile-governance-service') as {
+              requestDomainProfileProposal?: (d: string, opts: { sourceUrl: string; expectedName?: string; brandHint?: string | null }) => unknown;
+            };
+            gov.requestDomainProfileProposal?.(pageDomain, {
+              sourceUrl: finalUrl,
+              expectedName: expected.name,
+              brandHint: expected.brandHint,
+            });
+          }
+        } catch {
+          // background proposal trigger is strictly non-blocking
+        }
+      }
     } catch {
       layersUsed.push('browser_failed');
     }

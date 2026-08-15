@@ -112,7 +112,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
   ): Promise<ProductResearchResult> {
     this.calls += 1;
     this.lastContext = context;
-    if (this.hangUntilAborted) {
+    if (this.hangUntilAborted && !context.signal?.aborted) {
       await new Promise<void>((resolve) => {
         const onAbort = (): void => {
           context.signal?.removeEventListener('abort', onAbort);

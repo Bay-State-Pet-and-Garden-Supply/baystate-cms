@@ -217,6 +217,28 @@ export const ExtractionDataSchema = z.object({
   distributorImageCandidates: z.array(DistributorImageCandidateSchema).optional().default(() => []),
   /** Approved distributor images with rights attestation. */
   distributorImageApprovals: z.array(DistributorImageApprovalSchema).optional().default(() => []),
+  /** Distributor SKU from the qualified distributor record (distributor_record sources only). */
+  distributorSku: z.string().nullable().default(null),
+  /** Manufacturer part number from the qualified distributor record (distributor_record sources only). */
+  manufacturerPartNumber: z.string().nullable().default(null),
+  /** Whitelisted variant attributes from the qualified record: normalized axis → value. */
+  variantAttributes: z.record(z.string(), z.string()).default(() => ({})),
+  /**
+   * Dedicated distributor-record provenance (Amendment A): the sourcing
+   * generation, canonical evidence hash, sorted accepted attempt ids, sorted
+   * provider ids, and observed catalog versions that produced this
+   * materialization. Non-null exactly for `distributor_record` sources.
+   */
+  distributorRecordProvenance: z
+    .object({
+      sourcingGenerationId: z.string(),
+      evidenceHash: z.string(),
+      acceptedEvidenceAttemptIds: z.array(z.string()),
+      providerIds: z.array(z.string()),
+      catalogVersions: z.array(z.string()),
+    })
+    .nullable()
+    .default(null),
   sourceUrl: z.string().nullable().default(null),
   confidence: z.number().min(0).max(1).default(0),
   fieldProvenance: z.record(z.string(), z.string()).default(() => ({})),
@@ -244,15 +266,32 @@ export type ExtractionData = z.infer<typeof ExtractionDataSchema>;
 
 /**
  * The automatic routing decision after Sourcing evaluates all provider results.
+ *
+ * Amendment A adds `distributor_record_to_extraction`: the ONLY automatic
+ * Discovery-skipping route (qualified distributor record → extraction).
+ * `bundle_to_curation` remains parse-only for historical audit rows — no
+ * schema, request, repository transition, worker, route, or UI may create or
+ * act on it.
  */
 export const SourcingRouteEnum = z.enum([
   'bundle_to_curation',
+  'evidence_to_discovery',
   'fallback_to_discovery',
   'needs_input_conflict',
   'retry_provider_errors',
   'degraded_fallback_to_discovery',
+  'distributor_record_to_extraction',
 ]);
 export type SourcingRoute = z.infer<typeof SourcingRouteEnum>;
+
+/**
+ * Route/target matrix (ADR 0014): Sourcing advances ONLY to adjacent
+ * Discovery. `evidence_to_discovery` is the new coherent-evidence route
+ * (accepted current-generation evidence, guarded move to discovery/pending);
+ * `bundle_to_curation` survives only as a legacy persisted-audit value for
+ * historical rows — no schema, request, repository transition, worker,
+ * route, or UI may create or act on it.
+ */
 
 /**
  * How the Sourcing decision was made.
@@ -272,6 +311,12 @@ export type SourcingConflict = z.infer<typeof SourcingConflictSchema>;
 
 /**
  * The full Sourcing routing decision, persisted on the item.
+ *
+ * This is the LEGACY writer shape (pre-Amendment-A, no `schemaVersion`),
+ * kept intact for byte-compatible hydration of existing rows. It is
+ * PARSE-ONLY for `bundle_to_curation` and no longer the creatable authority:
+ * repositories, services, routes, and workers must write through
+ * `CreatableSourcingDecisionSchema` (V2) once migrated (Milestones B/C).
  */
 export const SourcingDecisionSchema = z.object({
   route: SourcingRouteEnum,
@@ -284,23 +329,207 @@ export const SourcingDecisionSchema = z.object({
 });
 export type SourcingDecision = z.infer<typeof SourcingDecisionSchema>;
 
+/**
+ * Read-only compatibility parser for historical decisions (pre-versioning
+ * rows and legacy audit `bundle_to_curation` values). Never accepted by a
+ * mutation helper.
+ */
+/**
+ * Legacy read-only parser for pre-Amendment-A decisions.
+ *
+ * MUST NOT downgrade malformed V2 payloads: any object carrying a
+ * `schemaVersion` key belongs to the V2 read path (and must fail there),
+ * never the legacy parser. The legacy WRITER (`SourcingDecisionSchema`)
+ * is intentionally unchanged; only the read-facing alias gains the guard.
+ */
+export const LegacySourcingDecisionSchema = SourcingDecisionSchema.extend({
+  // `schemaVersion` is a KNOWN key whose presence always fails (z.never), so
+  // malformed V2 payloads can never downgrade to legacy. Unknown keys are
+  // still stripped as before, keeping historical rows readable. NB: a plain
+  // `.refine` would be useless here — object schemas strip unknown keys
+  // BEFORE refinement, so the parsed value would never contain schemaVersion.
+  schemaVersion: z.never().optional(),
+});
+export type LegacySourcingDecision = z.infer<typeof LegacySourcingDecisionSchema>;
+
+const UNIQUE_STRINGS = (values: string[]) => new Set(values).size === values.length;
+const UNIQUE_STRINGS_MSG = 'values must be unique';
+
+/**
+ * Strict route-specific decision schema (Amendment A, schema version 2).
+ * Each route variant enforces its own accepted-attempt / provider /
+ * generation / hash / source-type / target invariants (see the plan's
+ * route-specific decision contract). The route/target matrix is enforced
+ * at the schema level: a caller-provided target that disagrees with the
+ * route is rejected. `bundle_to_curation` has NO variant — it is not
+ * creatable.
+ */
+export const SourcingDecisionV2Schema = z.discriminatedUnion('route', [
+  z.object({
+    schemaVersion: z.literal(2),
+    route: z.literal('distributor_record_to_extraction'),
+    origin: SourcingRoutingOriginEnum,
+    acceptedEvidenceAttemptIds: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(64)
+      .refine(UNIQUE_STRINGS, UNIQUE_STRINGS_MSG),
+    providerIds: z.array(z.string().min(1)).min(1).max(64).refine(UNIQUE_STRINGS, UNIQUE_STRINGS_MSG),
+    sourcingGenerationId: z.string().min(1),
+    /** Canonical SHA-256 hex of the deterministic distributor-record projection. */
+    evidenceHash: z.string().regex(/^[0-9a-f]{64}$/, 'evidenceHash must be a canonical SHA-256 hex digest'),
+    sourceType: z.literal('distributor_record'),
+    target: z.literal('extraction'),
+    conflicts: z.array(SourcingConflictSchema).max(128).default(() => []),
+    warnings: z.array(z.string().max(500)).max(128).default(() => []),
+    decidedAt: z.string().datetime({ offset: true }),
+  }).strict(),
+  z.object({
+    schemaVersion: z.literal(2),
+    route: z.literal('evidence_to_discovery'),
+    origin: SourcingRoutingOriginEnum,
+    acceptedEvidenceAttemptIds: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(64)
+      .refine(UNIQUE_STRINGS, UNIQUE_STRINGS_MSG),
+    providerIds: z.array(z.string().min(1)).min(1).max(64).refine(UNIQUE_STRINGS, UNIQUE_STRINGS_MSG),
+    sourcingGenerationId: z.string().min(1),
+    sourceType: z.literal('official_page'),
+    target: z.literal('discovery'),
+    conflicts: z.array(SourcingConflictSchema).max(128).default(() => []),
+    warnings: z.array(z.string().max(500)).max(128).default(() => []),
+    decidedAt: z.string().datetime({ offset: true }),
+  }).strict(),
+  z.object({
+    schemaVersion: z.literal(2),
+    route: z.literal('fallback_to_discovery'),
+    origin: SourcingRoutingOriginEnum,
+    acceptedEvidenceAttemptIds: z.array(z.string()).max(0),
+    providerIds: z.array(z.string().min(1).max(64)).max(64).default(() => []),
+    sourcingGenerationId: z.string().min(1).optional(),
+    sourceType: z.literal('official_page'),
+    target: z.literal('discovery'),
+    conflicts: z.array(SourcingConflictSchema).max(128).default(() => []),
+    warnings: z.array(z.string().max(500)).max(128).default(() => []),
+    decidedAt: z.string().datetime({ offset: true }),
+  }).strict(),
+  z.object({
+    schemaVersion: z.literal(2),
+    route: z.literal('degraded_fallback_to_discovery'),
+    origin: SourcingRoutingOriginEnum,
+    acceptedEvidenceAttemptIds: z.array(z.string()).max(0),
+    providerIds: z.array(z.string().min(1)).min(1).max(64).refine(UNIQUE_STRINGS, UNIQUE_STRINGS_MSG),
+    sourcingGenerationId: z.string().min(1),
+    sourceType: z.literal('official_page'),
+    target: z.literal('discovery'),
+    conflicts: z.array(SourcingConflictSchema).max(128).default(() => []),
+    warnings: z.array(z.string().max(500)).max(128).default(() => []),
+    decidedAt: z.string().datetime({ offset: true }),
+  }).strict(),
+  z.object({
+    schemaVersion: z.literal(2),
+    route: z.literal('needs_input_conflict'),
+    origin: SourcingRoutingOriginEnum,
+    acceptedEvidenceAttemptIds: z.array(z.string()).max(0),
+    providerIds: z.array(z.string().min(1)).min(1).max(64).refine(UNIQUE_STRINGS, UNIQUE_STRINGS_MSG),
+    sourcingGenerationId: z.string().min(1),
+    sourceType: z.literal('official_page').optional(),
+    target: z.literal('sourcing'),
+    // A needs_input_conflict decision MUST carry at least one hard conflict.
+    conflicts: z
+      .array(SourcingConflictSchema)
+      .min(1)
+      .max(128)
+      .refine(
+        (cs) => cs.some((c) => c.severity === 'hard'),
+        'needs_input_conflict requires at least one hard conflict',
+      ),
+    warnings: z.array(z.string().max(500)).max(128).default(() => []),
+    decidedAt: z.string().datetime({ offset: true }),
+  }).strict(),
+  z.object({
+    schemaVersion: z.literal(2),
+    route: z.literal('retry_provider_errors'),
+    origin: SourcingRoutingOriginEnum,
+    acceptedEvidenceAttemptIds: z.array(z.string()).max(0),
+    providerIds: z.array(z.string().min(1)).min(1).max(64).refine(UNIQUE_STRINGS, UNIQUE_STRINGS_MSG),
+    sourcingGenerationId: z.string().min(1),
+    sourceType: z.literal('official_page').optional(),
+    target: z.literal('sourcing'),
+    conflicts: z.array(SourcingConflictSchema).max(128).default(() => []),
+    warnings: z.array(z.string().max(500)).max(128).default(() => []),
+    decidedAt: z.string().datetime({ offset: true }),
+  }).strict(),
+]);
+export type SourcingDecisionV2 = z.infer<typeof SourcingDecisionV2Schema>;
+
+/**
+ * Read union used for hydration: strict V2 decisions plus legacy rows.
+ */
+export const SourcingDecisionReadSchema = z.union([SourcingDecisionV2Schema, LegacySourcingDecisionSchema]);
+export type SourcingDecisionRead = z.infer<typeof SourcingDecisionReadSchema>;
+
+/**
+ * The ONLY creatable decision input (Amendment A): strict V2, route-specific.
+ * Repositories, services, routes, and workers validate through this schema
+ * once migrated; legacy-shaped decisions are rejected (no schemaVersion).
+ */
+export const CreatableSourcingDecisionSchema = SourcingDecisionV2Schema;
+export type CreatableSourcingDecision = SourcingDecisionV2;
+
 // ─── Request Schemas for Sourcing Resolution ───────────────────────────────────
 
 /**
- * Resolve a Sourcing item by selecting a coherent subset or falling back to Discovery.
+ * Resolve a Sourcing item by falling back to Discovery.
+ *
+ * `bundle_to_curation` survives in `SourcingRouteEnum` only as a legacy
+ * persisted-audit value for historical rows; no request schema, repository
+ * transition, route, or UI may create or act on it.
  */
-export const ResolveSourcingUseSelectedBundleSchema = z.object({
-  action: z.literal('use_selected_bundle'),
-  selectedAttemptIds: z.array(z.string()).min(1),
-});
 export const ResolveSourcingFallbackToDiscoverySchema = z.object({
   action: z.literal('fallback_to_discovery'),
 });
+
+/**
+ * Strict manual routing action (Amendment A, MC item 7): use the qualified
+ * distributor record and skip Discovery. The server recomputes qualification
+ * and IGNORES any client-supplied ids/hash/providers — this schema is closed
+ * so an attempt to smuggle provenance fails validation.
+ */
+export const ResolveSourcingUseDistributorRecordSchema = z
+  .object({
+    action: z.literal('use_distributor_record'),
+  })
+  .strict();
+
 export const ResolveSourcingRequestSchema = z.discriminatedUnion('action', [
-  ResolveSourcingUseSelectedBundleSchema,
   ResolveSourcingFallbackToDiscoverySchema,
+  ResolveSourcingUseDistributorRecordSchema,
 ]);
 export type ResolveSourcingRequest = z.infer<typeof ResolveSourcingRequestSchema>;
+
+/**
+ * Bulk repair request: move stranded `sourcing/pending` items to Discovery
+ * with an audited `fallback_to_discovery` operator-override decision.
+ */
+export const FallbackSourcingItemsRequestSchema = z.object({
+  itemIds: z.array(z.string().min(1)).min(1),
+});
+export type FallbackSourcingItemsRequest = z.infer<typeof FallbackSourcingItemsRequestSchema>;
+
+/**
+ * Bulk repair response: deterministic counts plus per-item skip reasons so a
+ * partial result is visible instead of silently reported as full success.
+ */
+export const FallbackSourcingItemsResponseSchema = z.object({
+  moved: z.array(z.string()),
+  skipped: z.array(z.object({
+    id: z.string(),
+    reason: z.string(),
+  })),
+});
+export type FallbackSourcingItemsResponse = z.infer<typeof FallbackSourcingItemsResponseSchema>;
 
 /**
  * Approve a distributor image for use in a product draft.
@@ -554,8 +783,8 @@ export const OnboardingItemSchema = z.object({
   acceptedEvidenceAttemptIds: z.array(z.string()).default(() => []),
   /** @deprecated Use acceptedEvidenceAttemptIds instead. Kept for backward compat. */
   acceptedEvidenceAttemptId: z.string().nullable().default(null),
-  /** The auto-routing decision from Sourcing evaluation. */
-  sourcingDecision: SourcingDecisionSchema.nullable().default(null),
+  /** The auto-routing decision from Sourcing evaluation. Legacy writer shape, or the strict V2 shape (Amendment A) once written. */
+  sourcingDecision: z.union([SourcingDecisionSchema, SourcingDecisionV2Schema]).nullable().default(null),
   /** Current pipeline stage for this item. */
   stage: PipelineStageEnum,
   /** Status within the current stage. */
@@ -1043,6 +1272,8 @@ export const DiscoveryCardSummarySchema = z.object({
 export const DistributorEvidenceAttemptViewSchema = z.object({
   id: z.string(),
   providerId: z.string(),
+  distributorConnectionId: z.string().nullable().optional(),
+  catalogSnapshotId: z.string().nullable().optional(),
   lookupUpc: z.string(),
   outcome: z.enum(['found', 'not_stocked', 'source_error']),
   confidence: z.number().min(0).max(1),
@@ -1052,7 +1283,13 @@ export const DistributorEvidenceAttemptViewSchema = z.object({
   description: z.string().nullable(),
   imageUrls: z.array(z.string()).default(() => []),
   warnings: z.array(z.string()).default(() => []),
+  errorCode: z.string().nullable().optional(),
   errorMessage: z.string().nullable(),
+  catalogVersion: z.string().nullable().optional(),
+  observedAt: z.string().nullable().optional(),
+  expiresAt: z.string().nullable().optional(),
+  /** Immutable sourcing generation this attempt belongs to (ADR 0014). */
+  sourcingGenerationId: z.string().nullable().optional(),
   createdAt: z.string(),
   /** Whether this attempt is accepted in the item's current acceptedEvidenceAttemptIds. */
   isAccepted: z.boolean().default(false),

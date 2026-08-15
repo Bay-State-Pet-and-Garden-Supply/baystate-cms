@@ -21,6 +21,7 @@ import {
 interface SchedulesPanelProps {
   open: boolean;
   onClose: () => void;
+  variant?: 'modal' | 'inline';
 }
 
 const TONE_COLOR: Record<string, string> = {
@@ -38,7 +39,7 @@ const PRESET_OPTIONS: StoreManagerRecurrencePreset[] = ['daily', 'nightly', 'wee
  * system read-only, and "Run now" is not an approval shortcut. UI shows the
  * timezone, next run, last run, read-only posture, and occurrence history.
  */
-export function SchedulesPanel({ open, onClose }: SchedulesPanelProps) {
+export function SchedulesPanel({ open, onClose, variant = 'inline' }: SchedulesPanelProps) {
   const [schedules, setSchedules] = useState<StoreManagerScheduleDefinition[]>([]);
   const [templates, setTemplates] = useState<StoreManagerScheduleTemplate[]>([]);
   const [occurrences, setOccurrences] = useState<Record<string, StoreManagerScheduleOccurrence[]>>({});
@@ -87,43 +88,51 @@ export function SchedulesPanel({ open, onClose }: SchedulesPanelProps) {
   if (!open) return null;
 
   const sorted = sortSchedules(schedules);
+  const selectedTemplate = templates.find((t) => t.kind === templateKind);
 
-  const act = async (id: string, fn: () => Promise<unknown>) => {
-    setBusyId(id);
+  const toggle = async (schedule: StoreManagerScheduleDefinition) => {
+    setBusyId(schedule.id);
     setError(null);
     try {
-      await fn();
+      const { setStoreManagerScheduleEnabled } = await import('../../store-manager-api');
+      await setStoreManagerScheduleEnabled(schedule.id, !schedule.enabled);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Action failed.');
+      setError(err instanceof Error ? err.message : 'Toggle failed.');
     } finally {
       setBusyId(null);
     }
   };
 
-  const toggle = (schedule: StoreManagerScheduleDefinition) =>
-    act(schedule.id, async () => {
-      const { setStoreManagerScheduleEnabled } = await import('../../store-manager-api');
-      await setStoreManagerScheduleEnabled(schedule.id, !schedule.enabled);
-    });
-
-  const runNow = (schedule: StoreManagerScheduleDefinition) =>
-    act(schedule.id, async () => {
+  const runNow = async (schedule: StoreManagerScheduleDefinition) => {
+    setBusyId(schedule.id);
+    setError(null);
+    try {
       const { runStoreManagerScheduleNow } = await import('../../store-manager-api');
       const result = await runStoreManagerScheduleNow(schedule.id);
       if (result.result.status === 'failed' || result.result.status === 'unavailable') {
         throw new Error(`Run failed: ${result.result.errorCode ?? result.result.status}`);
       }
-    });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Run failed.');
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const create = async () => {
     setCreateError(null);
+    if (!name.trim()) {
+      setCreateError('Name is required.');
+      return;
+    }
     setBusyId('__create__');
     try {
       const { createStoreManagerSchedule } = await import('../../store-manager-api');
       await createStoreManagerSchedule({
         templateKind: templateKind as StoreManagerScheduleTemplate['kind'],
-        name: name.trim() || (templates.find((t) => t.kind === templateKind)?.name ?? 'Schedule'),
+        name: name.trim(),
         timezone: timezone.trim() || 'UTC',
         recurrencePreset: preset,
         timeOfDay,
@@ -133,46 +142,47 @@ export function SchedulesPanel({ open, onClose }: SchedulesPanelProps) {
       setName('');
       await load();
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : 'Schedule create failed.');
+      setCreateError(err instanceof Error ? err.message : 'Create failed.');
     } finally {
       setBusyId(null);
     }
   };
 
-  const selectedTemplate = templates.find((t) => t.kind === templateKind);
+  const isInline = variant === 'inline';
 
-  return (
+  const cardContent = (
     <div
-      role="dialog"
+      role={isInline ? 'region' : 'dialog'}
+      aria-modal={isInline ? undefined : true}
       aria-label="Schedules — read-only scheduled runs"
+      onClick={(e) => e.stopPropagation()}
       style={{
-        position: 'absolute',
-        right: 24,
-        top: 64,
-        zIndex: 50,
-        width: 520,
-        maxHeight: '80vh',
+        width: '100%',
+        maxWidth: isInline ? 900 : 580,
+        maxHeight: isInline ? undefined : '85vh',
         overflowY: 'auto',
-        padding: 16,
+        padding: 24,
         background: colors.whiteSurface,
         border: `1px solid ${colors.cardBorder}`,
-        borderRadius: rounded.md,
-        boxShadow: '0 12px 32px rgba(0,0,0,0.16)',
+        borderRadius: rounded.lg,
+        boxShadow: isInline ? '0 1px 3px rgba(33,20,20,0.04)' : '0 20px 25px -5px rgba(0, 0, 0, 0.15)',
         fontFamily: fonts.body,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: colors.ledgerCharcoal }}>
+          <div style={{ fontSize: 16, fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal }}>
             Schedules <span style={{ fontSize: 10, fontWeight: 700, color: colors.uniformGreen, marginLeft: 6 }}>READ-ONLY</span>
           </div>
-          <div style={{ fontSize: 11, color: colors.mulchBrown }}>
+          <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 2 }}>
             {schedules.length} schedule(s) · scheduled runs can inspect and report but can never stage, approve, publish, sync, or repair
           </div>
         </div>
-        <button type="button" onClick={onClose} aria-label="Close Schedules" className="btn btn-outline" style={{ fontSize: 12, padding: '4px 10px' }}>
-          Close
-        </button>
+        {isInline ? null : (
+          <button type="button" onClick={onClose} aria-label="Close Schedules" className="btn btn-outline" style={{ fontSize: 12, padding: '4px 12px' }}>
+            ✕ Close
+          </button>
+        )}
       </div>
 
       {error ? <div style={{ fontSize: 12, color: colors.signetBurgundy, marginBottom: 8 }}>{error}</div> : null}
@@ -185,7 +195,7 @@ export function SchedulesPanel({ open, onClose }: SchedulesPanelProps) {
           type="button"
           onClick={() => setCreating(true)}
           className="btn btn-primary"
-          style={{ fontSize: 12, padding: '6px 12px', marginBottom: 12 }}
+          style={{ fontSize: 12, padding: '6px 14px', marginBottom: 12 }}
         >
           + New schedule
         </button>
@@ -330,6 +340,36 @@ export function SchedulesPanel({ open, onClose }: SchedulesPanelProps) {
           No schedules yet. Schedules run read-only and are disabled by default.
         </div>
       ) : null}
+    </div>
+  );
+
+  if (isInline) {
+    return (
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', background: colors.feedBagCream }}>
+        {cardContent}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'rgba(33, 20, 20, 0.45)',
+        backdropFilter: 'blur(2px)',
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+      onClick={onClose}
+    >
+      {cardContent}
     </div>
   );
 }

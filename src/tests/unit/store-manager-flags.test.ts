@@ -16,27 +16,27 @@ describe('Store Manager console flags (Issue 4)', () => {
     resetStoreManagerFlagsOverride();
   });
 
-  it('ships the operations console enabled; defaults every automation flag OFF (chat surface is never gated)', () => {
+  it('ships the operations console enabled with all automation flags enabled by default (chat surface is never gated)', () => {
     const flags = loadStoreManagerFlags({});
     expect(flags.operationsConsoleEnabled).toBe(true);
-    expect(flags.schedulesEnabled).toBe(false);
-    expect(flags.eventTriggersEnabled).toBe(false);
-    expect(flags.playbooksEnabled).toBe(false);
-    expect(flags.bulkReviewEnabled).toBe(false);
-    expect(flags.notificationsEnabled).toBe(false);
+    expect(flags.schedulesEnabled).toBe(true);
+    expect(flags.eventTriggersEnabled).toBe(true);
+    expect(flags.playbooksEnabled).toBe(true);
+    expect(flags.bulkReviewEnabled).toBe(true);
+    expect(flags.notificationsEnabled).toBe(true);
     expect(flags.killSwitch).toBe(false);
   });
 
   it('parses env booleans with the BAYSTATE_CMS_STORE_MANAGER_* names', () => {
     const flags = loadStoreManagerFlags({
-      BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED: 'true',
-      BAYSTATE_CMS_STORE_MANAGER_NOTIFICATIONS_ENABLED: '1',
+      BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED: 'false',
+      BAYSTATE_CMS_STORE_MANAGER_NOTIFICATIONS_ENABLED: '0',
       BAYSTATE_CMS_STORE_MANAGER_KILL_SWITCH: 'yes',
     });
-    expect(flags.schedulesEnabled).toBe(true);
-    expect(flags.notificationsEnabled).toBe(true);
+    expect(flags.schedulesEnabled).toBe(false);
+    expect(flags.notificationsEnabled).toBe(false);
     expect(flags.killSwitch).toBe(true);
-    expect(flags.playbooksEnabled).toBe(false);
+    expect(flags.playbooksEnabled).toBe(true);
   });
 
   it('fails closed on unparseable env values (never guesses)', () => {
@@ -44,23 +44,23 @@ describe('Store Manager console flags (Issue 4)', () => {
       BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED: 'maybe',
       BAYSTATE_CMS_STORE_MANAGER_EVENT_TRIGGERS_ENABLED: 'banana',
     });
-    expect(flags.schedulesEnabled).toBe(false);
-    expect(flags.eventTriggersEnabled).toBe(false);
+    expect(flags.schedulesEnabled).toBe(true);
+    expect(flags.eventTriggersEnabled).toBe(true);
   });
 
   it('empty/undefined env keeps defaults', () => {
-    expect(loadStoreManagerFlags({ BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED: '' }).schedulesEnabled).toBe(false);
-    expect(loadStoreManagerFlags({ BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED: undefined }).schedulesEnabled).toBe(false);
+    expect(loadStoreManagerFlags({ BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED: '' }).schedulesEnabled).toBe(true);
+    expect(loadStoreManagerFlags({ BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED: undefined }).schedulesEnabled).toBe(true);
   });
 
   it('override swaps effective values in memory and reset restores env', () => {
-    overrideStoreManagerFlags({ schedulesEnabled: true, killSwitch: false });
+    overrideStoreManagerFlags({ schedulesEnabled: false, killSwitch: false });
     const effective = getStoreManagerFlags();
-    expect(effective.schedulesEnabled).toBe(true);
-    // env remains off
-    expect(loadStoreManagerFlags({}).schedulesEnabled).toBe(false);
+    expect(effective.schedulesEnabled).toBe(false);
+    // env remains on
+    expect(loadStoreManagerFlags({}).schedulesEnabled).toBe(true);
     resetStoreManagerFlagsOverride();
-    expect(getStoreManagerFlags().schedulesEnabled).toBe(false);
+    expect(getStoreManagerFlags().schedulesEnabled).toBe(true);
   });
 
   it('kill switch dominance is representable: enabled schedules + killSwitch', () => {
@@ -73,7 +73,7 @@ describe('Store Manager console flags (Issue 4)', () => {
   });
 
   it('defaults are immutable (no shared mutation)', () => {
-    expect(DEFAULT_STORE_MANAGER_FLAGS.schedulesEnabled).toBe(false);
+    expect(DEFAULT_STORE_MANAGER_FLAGS.schedulesEnabled).toBe(true);
     expect(DEFAULT_STORE_MANAGER_FLAGS.killSwitch).toBe(false);
   });
 });

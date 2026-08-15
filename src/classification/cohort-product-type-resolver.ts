@@ -32,6 +32,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { hashCanonicalJson } from '../shared/stable-id';
+import { sourceProvenanceFromMember } from '../onboarding/cohort-title-hash';
 import type {
   ClassificationEvidence,
   BrandConfig,
@@ -39,7 +40,8 @@ import type {
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
 import type {
   ExecutionEvidenceProjectionMemberV1,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjectionMemberV2,
+  ExecutionEvidenceProjection,
 } from '../shared/schemas/cohorts';
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 import { matchKeywordOptions } from './curation-target-matcher';
@@ -119,7 +121,7 @@ export interface DeterministicTypeMatchResult {
  * snapshot in scope) and trusts the digest frozen at freeze time.
  */
 export function evidenceFromProjection(
-  memberProjection: ExecutionEvidenceProjectionMemberV1,
+  memberProjection: ExecutionEvidenceProjectionMemberV1 | ExecutionEvidenceProjectionMemberV2,
   options: EvidenceFromProjectionOptions = {},
 ): ClassificationEvidence[] {
   const evidence: ClassificationEvidence[] = [];
@@ -128,6 +130,40 @@ export function evidenceFromProjection(
   const sourceUrl = memberProjection.sourceUrl;
   const ext = memberProjection.extraction;
   const identity = memberProjection.spreadsheetIdentity;
+  // V2 members carry the distributor identity fields (SKU/MPN/variants); V1
+  // members normalize to official-page provenance and have none.
+  const extV2 =
+    'itemSourceType' in memberProjection
+      ? (memberProjection as ExecutionEvidenceProjectionMemberV2).extraction
+      : null;
+
+  // Milestone E: source-kind/provenance binding of the frozen member. A
+  // distributor-record member is a THIRD-PARTY evidence source: its
+  // classification evidence uses source='distributor_record', a null
+  // classification URL, identity-only fields, and provenance metadata — and
+  // is NEVER labeled 'official_product_page'. V1 members normalize to
+  // official-page provenance (distributor routing did not exist then).
+  const sourceProvenance = sourceProvenanceFromMember(memberProjection);
+  const distributorSource = sourceProvenance.itemSourceType === 'distributor_record';
+  const distributorMetadata = distributorSource
+    ? {
+        provenance: 'distributor_record',
+        providerIds: sourceProvenance.providerIds,
+        acceptedEvidenceAttemptIds: sourceProvenance.acceptedEvidenceAttemptIds,
+        sourcingGenerationId: sourceProvenance.sourcingGenerationId,
+        evidenceHash: sourceProvenance.distributorEvidenceHash,
+        // Per-field provenance from the frozen member (Milestone E review):
+        // distributor identity evidence carries the same field-level
+        // provenance the main evidence-extraction stage emits.
+        fieldProvenance: ext.fieldProvenance ?? {},
+      }
+    : undefined;
+  const pageSource: ClassificationEvidence['source'] = distributorSource
+    ? 'distributor_record'
+    : 'official_product_page';
+  // Distributor evidence carries NO classification URL (identity-only; the
+  // real distributor page URL stays on the immutable evidence attempt).
+  const pageEvidenceUrl = distributorSource ? null : sourceUrl;
 
   const push = (entry: Omit<ClassificationEvidence, 'id' | 'runId' | 'stageName' | 'productSku' | 'capturedAt'>): void => {
     evidence.push({
@@ -149,31 +185,67 @@ export function evidenceFromProjection(
     push({ attributeId: null, source: 'spreadsheet', reliability: 'medium', sourceUrl: null, sourceField: 'brand', snippet: identity.brandHint.slice(0, 300), value: identity.brandHint, metadata: { provenance: 'spreadsheet_import' } });
   }
 
-  // ── Normalized extraction fields (official product page) ───────────────
-  const pageSource: ClassificationEvidence['source'] = 'official_product_page';
+  // ── Normalized extraction fields ────────────────────────────────────────
+  // Distributor-record members carry IDENTITY-ONLY extraction data: title/
+  // brand/weight only — never description, bullets, search keywords, or
+  // arbitrary custom fields (those would elevate third-party copy into
+  // classification evidence). Official-page members keep the full mapping.
+  const identityFields: Array<{ field: string; value: string; sourceField: string; snippet: string }> = [];
   if (ext.title && ext.title.trim()) {
-    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'name', snippet: ext.title.slice(0, 300), value: ext.title, metadata: { provenance: 'official_product_page' } });
+    identityFields.push({ field: 'name', value: ext.title, sourceField: 'name', snippet: ext.title.slice(0, 300) });
   }
   if (ext.brand && ext.brand.trim()) {
-    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'brand', snippet: ext.brand.slice(0, 300), value: ext.brand, metadata: { provenance: 'official_product_page' } });
+    identityFields.push({ field: 'brand', value: ext.brand, sourceField: 'brand', snippet: ext.brand.slice(0, 300) });
   }
   if (ext.weight && ext.weight.trim()) {
-    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'weight', snippet: ext.weight.slice(0, 300), value: ext.weight, metadata: { provenance: 'official_product_page' } });
+    identityFields.push({ field: 'weight', value: ext.weight, sourceField: 'weight', snippet: ext.weight.slice(0, 300) });
   }
-  if (ext.description && ext.description.trim()) {
-    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'description', snippet: ext.description.slice(0, 500), value: ext.description, metadata: { provenance: 'official_product_page' } });
+  // Milestone E review: distributor identity evidence includes the frozen
+  // distributor SKU, MPN, and whitelisted variant attributes (identity fields
+  // present in the V2 member extraction) — matching the main evidence-
+  // extraction stage's distributor mapping. Never copy/images/claims.
+  if (distributorSource) {
+    if (extV2?.distributorSku && extV2.distributorSku.trim()) {
+      identityFields.push({ field: 'distributorSku', value: extV2.distributorSku, sourceField: 'distributor_sku', snippet: extV2.distributorSku.slice(0, 300) });
+    }
+    if (extV2?.manufacturerPartNumber && extV2.manufacturerPartNumber.trim()) {
+      identityFields.push({ field: 'manufacturerPartNumber', value: extV2.manufacturerPartNumber, sourceField: 'manufacturer_part_number', snippet: extV2.manufacturerPartNumber.slice(0, 300) });
+    }
+    for (const [key, rawVal] of Object.entries(extV2?.variantAttributes ?? {})) {
+      const value = String(rawVal ?? '').trim();
+      if (!value) continue;
+      identityFields.push({ field: key, value, sourceField: key, snippet: value.slice(0, 300) });
+    }
   }
-  for (const bullet of ext.bulletPoints) {
-    if (!bullet || !bullet.trim()) continue;
-    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'bullet_point', snippet: String(bullet).slice(0, 300), value: String(bullet), metadata: { provenance: 'official_product_page' } });
+  for (const f of identityFields) {
+    push({
+      attributeId: null,
+      source: pageSource,
+      reliability: 'medium',
+      sourceUrl: pageEvidenceUrl,
+      sourceField: f.sourceField,
+      snippet: f.snippet,
+      value: f.value,
+      metadata: distributorMetadata ?? { provenance: 'official_product_page' },
+    });
   }
-  if (ext.searchKeywords && ext.searchKeywords.trim()) {
-    push({ attributeId: null, source: pageSource, reliability: 'low', sourceUrl, sourceField: 'search_keywords', snippet: ext.searchKeywords.slice(0, 300), value: ext.searchKeywords, metadata: { provenance: 'product_data' } });
-  }
-  for (const [key, rawVal] of Object.entries(ext.customFields)) {
-    const value = String(rawVal ?? '').trim();
-    if (!value) continue;
-    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: key, snippet: value.slice(0, 300), value, metadata: { provenance: 'product_data' } });
+
+  if (!distributorSource) {
+    if (ext.description && ext.description.trim()) {
+      push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'description', snippet: ext.description.slice(0, 500), value: ext.description, metadata: { provenance: 'official_product_page' } });
+    }
+    for (const bullet of ext.bulletPoints) {
+      if (!bullet || !bullet.trim()) continue;
+      push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'bullet_point', snippet: String(bullet).slice(0, 300), value: String(bullet), metadata: { provenance: 'official_product_page' } });
+    }
+    if (ext.searchKeywords && ext.searchKeywords.trim()) {
+      push({ attributeId: null, source: pageSource, reliability: 'low', sourceUrl, sourceField: 'search_keywords', snippet: ext.searchKeywords.slice(0, 300), value: ext.searchKeywords, metadata: { provenance: 'product_data' } });
+    }
+    for (const [key, rawVal] of Object.entries(ext.customFields)) {
+      const value = String(rawVal ?? '').trim();
+      if (!value) continue;
+      push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: key, snippet: value.slice(0, 300), value, metadata: { provenance: 'product_data' } });
+    }
   }
 
   // ── FROZEN packaging OCR materialization (NO model call) ────────────────
@@ -905,7 +977,7 @@ export interface FamilyInvariantFinding {
  *   strings, so a family mismatch stays visible.
  */
 export function validateCohortFamilyInvariants(
-  projection: ExecutionEvidenceProjectionV1,
+  projection: ExecutionEvidenceProjection,
   memberResults: PerMemberProductTypeResult[],
   brands: BrandConfig[] = [],
 ): FamilyInvariantFinding[] {

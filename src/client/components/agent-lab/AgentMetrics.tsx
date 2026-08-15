@@ -138,6 +138,32 @@ export function AgentMetrics({ onOpenRun }: Props) {
       </div>
 
       <div style={styles.card}>
+        <h2 style={styles.title}>Extraction & Routing Efficiency</h2>
+        <div style={styles.statGrid}>
+          <div style={styles.stat}>
+            <div style={styles.statLabel}>Deterministic Hits</div>
+            <div style={styles.statValue}>{metrics.deterministicCount}</div>
+          </div>
+          <div style={styles.stat}>
+            <div style={styles.statLabel}>Deterministic Rate</div>
+            <div style={styles.statValue}>{formatPct(metrics.deterministicRate)}</div>
+          </div>
+          <div style={styles.stat}>
+            <div style={styles.statLabel}>Agent Escalations</div>
+            <div style={styles.statValue}>{metrics.escalatedCount}</div>
+          </div>
+          <div style={styles.stat}>
+            <div style={styles.statLabel}>Escalation Rate</div>
+            <div style={styles.statValue}>{formatPct(metrics.escalationRate)}</div>
+          </div>
+          <div style={styles.stat}>
+            <div style={styles.statLabel}>Profile Hit Rate</div>
+            <div style={styles.statValue}>{formatPct(metrics.profileHitRate)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={styles.card}>
         <h2 style={styles.title}>Tool enforcement</h2>
         {toolRates && toolRates.total > 0 ? (
           <div style={styles.statGrid}>

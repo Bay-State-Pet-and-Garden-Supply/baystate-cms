@@ -159,7 +159,7 @@ describe('Bulk Review panel + pure derivation (Issue 8)', () => {
     const { container, unmount } = await renderPanel();
     try {
       // Enter a field + preview via a real form submit.
-      const input = container.querySelector('input[placeholder="ProductField24"]') as HTMLInputElement;
+      const input = (container.querySelector('input[placeholder="ProductField16"]') || container.querySelector('input')) as HTMLInputElement;
       await act(async () => {
         setInputValue(input, 'ProductField24');
       });

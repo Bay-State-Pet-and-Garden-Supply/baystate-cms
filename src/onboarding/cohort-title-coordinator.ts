@@ -138,7 +138,7 @@ import type {
   CohortRun,
   CurationCohort,
   CurationCohortMember,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjection,
 } from '../shared/schemas/cohorts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -223,8 +223,8 @@ export interface EnsureCohortTitlesCoordinatedParams {
   run: CohortRun;
   workspaceId: string;
   workspacePath: string;
-  /** The frozen execution-evidence projection (execution contract). */
-  projection: ExecutionEvidenceProjectionV1;
+  /** The frozen execution-evidence projection (v1 or v2 — source-aware). */
+  projection: ExecutionEvidenceProjection;
   cohort: CurationCohort;
   members: CurationCohortMember[];
   /** Frozen product-line sibling context (PR3 hardening Commit B / R2). */

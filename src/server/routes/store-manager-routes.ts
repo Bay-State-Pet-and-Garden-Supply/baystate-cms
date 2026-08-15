@@ -277,7 +277,7 @@ route.get('/store-manager/insights', (c) => {
     return c.json({ error: 'No workspace loaded.' }, 400);
   }
 
-  const field = c.req.query('field') || 'ProductField24';
+  const field = c.req.query('field') || 'ProductField16';
   try {
     const report = generateProductFieldAuditReport(workspace.id, field);
     return c.json(report);
@@ -319,7 +319,7 @@ route.post('/store-manager/proposals/generate', async (c) => {
 
   try {
     const body = await c.req.json().catch(() => ({}));
-    const field = body.field || 'ProductField24';
+    const field = body.field || 'ProductField16';
     const useAi = !!body.useAi;
 
     let proposals: GenerateAiProposalsResult | null = null;

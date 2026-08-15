@@ -68,32 +68,38 @@ export function CommandPalette({ input, commands, onExecute, onPrefill }: Comman
     [showingCompletions, suggestions, matches, input, onExecute, onPrefill],
   );
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  useEffect(() => {
     if (!visible || listLength === 0) return;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setHighlightedIndex((i) => (i + 1) % listLength);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setHighlightedIndex((i) => (i - 1 + listLength) % listLength);
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      runAction(highlightedIndex);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      onPrefill('');
-    }
-  };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setHighlightedIndex((i) => (i + 1) % listLength);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setHighlightedIndex((i) => (i - 1 + listLength) % listLength);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        runAction(highlightedIndex);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        onPrefill('');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [visible, listLength, highlightedIndex, runAction, onPrefill]);
 
   if (!visible || listLength === 0) return null;
 
   return (
     <ul
       ref={listRef}
+      id="command-palette-listbox"
       role="listbox"
       aria-label="Store Manager commands"
       className="store-manager-command-palette"
-      onKeyDown={handleKeyDown}
       style={{
         position: 'absolute',
         bottom: '100%',
@@ -114,22 +120,41 @@ export function CommandPalette({ input, commands, onExecute, onPrefill }: Comman
     >
       {showingCompletions
         ? suggestions.map((s, i) => (
-            <li key={s} role="option" aria-selected={i === highlightedIndex}>
+            <li
+              key={s}
+              role="option"
+              aria-selected={i === highlightedIndex}
+              onMouseEnter={() => setHighlightedIndex(i)}
+              onClick={() => runAction(i)}
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left',
+                padding: '8px 10px',
+                borderRadius: rounded.sm,
+                background: i === highlightedIndex ? colors.feedBagCream : 'transparent',
+                color: colors.ledgerCharcoal,
+                cursor: 'pointer',
+                fontSize: 13,
+                boxSizing: 'border-box',
+              }}
+            >
               <button
                 type="button"
-                onMouseEnter={() => setHighlightedIndex(i)}
-                onClick={() => runAction(i)}
+                tabIndex={-1}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  runAction(i);
+                }}
                 style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '8px 10px',
+                  background: 'none',
                   border: 'none',
-                  borderRadius: rounded.sm,
-                  background: i === highlightedIndex ? colors.feedBagCream : 'transparent',
-                  color: colors.ledgerCharcoal,
+                  padding: 0,
+                  font: 'inherit',
+                  color: 'inherit',
                   cursor: 'pointer',
-                  fontSize: 13,
+                  textAlign: 'left',
+                  width: '100%',
                 }}
               >
                 <span style={{ fontWeight: 700 }}>{s}</span>
@@ -140,33 +165,33 @@ export function CommandPalette({ input, commands, onExecute, onPrefill }: Comman
             </li>
           ))
         : matches.map((command, i) => (
-            <li key={command.name} role="option" aria-selected={i === highlightedIndex}>
-              <button
-                type="button"
-                onMouseEnter={() => setHighlightedIndex(i)}
-                onClick={() => runAction(i)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '8px 10px',
-                  border: 'none',
-                  borderRadius: rounded.sm,
-                  background: i === highlightedIndex ? colors.feedBagCream : 'transparent',
-                  color: colors.ledgerCharcoal,
-                  cursor: 'pointer',
-                }}
-              >
-                <div style={{ fontWeight: 700, fontSize: 13 }}>
-                  /{command.name}
-                  {command.aliases.length > 0 && (
-                    <span style={{ color: colors.mulchBrown, fontWeight: 500, marginLeft: 8, fontSize: 11 }}>
-                      {command.aliases.map((a) => `/${a}`).join(' ')}
-                    </span>
-                  )}
-                </div>
-                <div style={{ color: colors.mulchBrown, fontSize: 11, marginTop: 2 }}>{command.description}</div>
-              </button>
+            <li
+              key={command.name}
+              role="option"
+              aria-selected={i === highlightedIndex}
+              onMouseEnter={() => setHighlightedIndex(i)}
+              onClick={() => runAction(i)}
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left',
+                padding: '8px 10px',
+                borderRadius: rounded.sm,
+                background: i === highlightedIndex ? colors.feedBagCream : 'transparent',
+                color: colors.ledgerCharcoal,
+                cursor: 'pointer',
+                boxSizing: 'border-box',
+              }}
+            >
+              <div style={{ fontWeight: 700, fontSize: 13 }}>
+                /{command.name}
+                {command.aliases.length > 0 && (
+                  <span style={{ color: colors.mulchBrown, fontWeight: 500, marginLeft: 8, fontSize: 11 }}>
+                    {command.aliases.map((a) => `/${a}`).join(' ')}
+                  </span>
+                )}
+              </div>
+              <div style={{ color: colors.mulchBrown, fontSize: 11, marginTop: 2 }}>{command.description}</div>
             </li>
           ))}
     </ul>

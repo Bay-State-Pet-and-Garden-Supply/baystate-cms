@@ -112,7 +112,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [activeView, setActiveView] = useState<OperationsViewId>('chat');
   const [inspectedRunId, setInspectedRunId] = useState<string | null>(null);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
-  const { notifications, status: eventStatus } = useStoreManagerEvents();
+  const { notifications, status: eventStatus, markRead: markNotificationRead } = useStoreManagerEvents();
   const [commandOutput, setCommandOutput] = useState<{
     raw: string;
     loading: boolean;
@@ -510,7 +510,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   };
 
   // Helper to parse bold markdown inside text
-  const parseInlineMarkdown = (text: string, isUser = false) => {
+  const parseInlineMarkdown = (text: string, _isUser = false) => {
     const parts = [];
     let key = 0;
     const regex = /(\*\*|`)(.*?)\1/g;
@@ -524,19 +524,19 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
       const marker = match[1];
       const content = match[2];
       if (marker === '**') {
-        parts.push(<strong key={key++} style={{ fontWeight: 700, color: isUser ? '#FFFFFF' : 'inherit' }}>{content}</strong>);
+        parts.push(<strong key={key++} style={{ fontWeight: 700, color: 'inherit' }}>{content}</strong>);
       } else {
         parts.push(
           <code
             key={key++}
             style={{
-              background: isUser ? 'rgba(255, 255, 255, 0.2)' : colors.feedBagCream,
+              background: colors.feedBagCream,
               padding: '2px 6px',
               borderRadius: rounded.xs,
               fontFamily: fonts.mono,
               fontSize: '13px',
-              color: isUser ? '#FFFFFF' : colors.signetBurgundy,
-              border: isUser ? '1px solid rgba(255, 255, 255, 0.3)' : `1px solid ${colors.cardBorder}`,
+              color: colors.signetBurgundy,
+              border: `1px solid ${colors.cardBorder}`,
             }}
           >
             {content}
@@ -556,8 +556,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   // Helper renderer for Markdown in assistant/user messages
   const renderMarkdownLine = (line: string, idx: number, isUser = false) => {
     const trimmed = line.trim();
-    const textColor = isUser ? '#FFFFFF' : colors.ledgerCharcoal;
-    const headColor = isUser ? '#FFFFFF' : colors.ledgerCharcoal;
+    const textColor = colors.ledgerCharcoal;
+    const headColor = colors.ledgerCharcoal;
 
     if (trimmed.startsWith('# ')) {
       return (
@@ -569,7 +569,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             fontWeight: 700,
             color: headColor,
             margin: '18px 0 8px',
-            borderBottom: isUser ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${colors.cardBorder}`,
+            borderBottom: `1px solid ${colors.cardBorder}`,
             paddingBottom: '4px',
           }}
         >
@@ -586,7 +586,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     }
     if (trimmed.startsWith('### ')) {
       return (
-        <h3 key={idx} style={{ fontFamily: fonts.display, fontSize: '14px', fontWeight: 700, color: isUser ? '#FFFFFF' : colors.mulchBrown, margin: '12px 0 4px' }}>
+        <h3 key={idx} style={{ fontFamily: fonts.display, fontSize: '14px', fontWeight: 700, color: colors.mulchBrown, margin: '12px 0 4px' }}>
           {parseInlineMarkdown(trimmed.substring(4), isUser)}
         </h3>
       );
@@ -1237,6 +1237,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     <div
       style={{
         display: 'flex',
+        flexDirection: 'column',
         height: 'calc(100vh - 54px)',
         maxHeight: 'calc(100vh - 54px)',
         background: colors.feedBagCream,
@@ -1244,159 +1245,58 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         fontFamily: fonts.body,
       }}
     >
-      {/* Left Sidebar - Chat History */}
-      <aside
+      {/* Store Manager Unified Top Header Bar */}
+      <header
         style={{
-          width: isSidebarOpen ? '260px' : '0px',
-          minWidth: isSidebarOpen ? '260px' : '0px',
-          flexShrink: 0,
-          background: colors.feedBagCream,
-          borderRight: isSidebarOpen ? `1px solid ${colors.cardBorder}` : 'none',
           display: 'flex',
           flexDirection: 'column',
-          overflow: 'hidden',
-          transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+          background: colors.whiteSurface,
+          borderBottom: `1px solid ${colors.cardBorder}`,
+          boxShadow: '0 1px 3px rgba(33,20,20,0.03)',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 16px 8px 16px' }}>
-          <button
-            onClick={startNewChat}
-            className="btn btn-primary"
-            style={{
-              flex: 1,
-              padding: '9px 12px',
-              fontFamily: fonts.display,
-              fontSize: '0.8rem',
-              textAlign: 'center',
-            }}
-          >
-            + New Chat Thread
-          </button>
-          <button
-            onClick={() => setIsSidebarOpen(false)}
-            title="Collapse sidebar"
-            style={{
-              background: colors.whiteSurface,
-              border: `1px solid ${colors.cardBorder}`,
-              borderRadius: rounded.sm,
-              padding: '7px 9px',
-              cursor: 'pointer',
-              fontSize: 12,
-              color: colors.ledgerCharcoal,
-            }}
-          >
-            ◀
-          </button>
-        </div>
-
-        <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 16px' }}>
-          <div style={{ fontSize: '11px', fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em' }}>
-            Conversations (Last 7 Days)
-          </div>
-          
-          {threads.length === 0 ? (
-            <div style={{ fontSize: '12px', color: colors.mulchBrown, fontStyle: 'italic', textAlign: 'center', marginTop: 16 }}>
-              No recent conversations
-            </div>
-          ) : (
-            threads.map(thread => {
-              const isActive = thread.id === currentThreadId;
-              return (
-                <div
-                  key={thread.id}
-                  onClick={() => selectThread(thread)}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    width: '100%',
-                    padding: '10px 12px',
-                    marginBottom: '6px',
-                    borderRadius: rounded.md,
-                    background: isActive ? colors.whiteSurface : 'transparent',
-                    border: isActive ? `1px solid ${colors.uniformGreen}` : '1px solid transparent',
-                    boxShadow: isActive ? '0 1px 3px rgba(33,20,20,0.06)' : 'none',
-                    cursor: 'pointer',
-                    fontSize: '13px',
-                    fontWeight: isActive ? 700 : 500,
-                    color: isActive ? colors.ledgerCharcoal : colors.mulchBrown,
-                    transition: 'all 0.15s',
-                  }}
-                  onMouseOver={e => {
-                    if (!isActive) e.currentTarget.style.background = colors.whiteSurface;
-                  }}
-                  onMouseOut={e => {
-                    if (!isActive) e.currentTarget.style.background = 'transparent';
-                  }}
-                >
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '8px', flex: 1 }}>
-                    {thread.title}
-                  </span>
-                  <button
-                    onClick={e => deleteThread(e, thread.id)}
-                    style={{
-                      border: 'none',
-                      background: 'none',
-                      padding: 0,
-                      color: colors.mulchBrown,
-                      cursor: 'pointer',
-                      fontSize: '14px',
-                    }}
-                    onMouseOver={e => (e.currentTarget.style.color = colors.signetBurgundy)}
-                    onMouseOut={e => (e.currentTarget.style.color = colors.mulchBrown)}
-                    title="Delete conversation"
-                  >
-                    ✕
-                  </button>
-                </div>
-              );
-            })
-          )}
-        </div>
-      </aside>
-
-      {/* Right Area - Chat Window */}
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-        {/* Header */}
-        <header
+        {/* Top Control Row */}
+        <div
           style={{
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
             padding: '12px 24px',
-            background: colors.whiteSurface,
-            borderBottom: `1px solid ${colors.cardBorder}`,
             gap: 16,
             flexWrap: 'wrap',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            {!isSidebarOpen && (
-              <button
-                onClick={() => setIsSidebarOpen(true)}
-                title="Expand sidebar"
-                style={{
-                  background: colors.whiteSurface,
-                  border: `1px solid ${colors.cardBorder}`,
-                  borderRadius: rounded.sm,
-                  padding: '6px 10px',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  color: colors.ledgerCharcoal,
-                  fontWeight: 600,
-                }}
-              >
-                ▶ Threads
-              </button>
-            )}
             <ViewHeader
-              title="Store Manager AI Assistant"
-              description={currentThreadTitle ? `Thread: "${currentThreadTitle}"` : 'Interactive catalog auditing and refactoring advisor.'}
+              title={
+                activeView === 'chat'
+                  ? 'Store Manager AI Assistant'
+                  : activeView === 'schedules'
+                    ? 'Store Manager Schedules'
+                    : activeView === 'triggers'
+                      ? 'Event Triggers'
+                      : activeView === 'playbooks'
+                        ? 'Automation Playbooks'
+                        : activeView === 'bulk'
+                          ? 'Bulk Catalog Review'
+                          : activeView === 'inbox'
+                            ? 'Manager Inbox'
+                            : activeView === 'history'
+                              ? 'Run History & Audit Log'
+                              : 'Operational Preferences'
+              }
+              description={
+                activeView === 'chat'
+                  ? currentThreadTitle
+                    ? `Thread: "${currentThreadTitle}"`
+                    : 'Interactive catalog auditing and refactoring advisor.'
+                  : 'Workspace-wide store operations management.'
+              }
               style={{ marginBottom: 0 }}
               badge={
                 <span
                   style={{
-                    fontSize: '10px',
+                    fontSize: '11px',
                     fontWeight: 700,
                     padding: '2px 8px',
                     borderRadius: rounded.full,
@@ -1478,83 +1378,233 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             <NotificationCenter
               notifications={notifications}
               status={eventStatus}
-              onMarkRead={(id) => {
-                void import('../store-manager-api').then(({ markStoreManagerNotificationRead }) => markStoreManagerNotificationRead(id));
-              }}
+              onMarkRead={markNotificationRead}
             />
           </div>
-        </header>
+        </div>
 
-        <OperationsConsole
-          flags={consoleFlags}
-          activeView={activeView}
-          onNavigate={setActiveView}
-          views={CONSOLE_VIEWS}
-          renderView={(view) => {
-            switch (view) {
-              case 'preferences':
-                return <PreferencesPanel open onClose={() => setActiveView('chat')} />;
-              case 'playbooks':
-                return <PlaybooksPanel open onClose={() => setActiveView('chat')} />;
-              case 'bulk':
-                return (
-                  <BulkReviewPanel
-                    open
-                    onClose={() => setActiveView('chat')}
-                    onRequestReview={(objective) => {
-                      if (!selectedModel) return;
-                      sendMessage({ text: objective });
-                    }}
-                  />
-                );
-              case 'inbox':
-                return <ManagerInbox open onClose={() => setActiveView('chat')} notifications={notifications} eventStatus={eventStatus} />;
-              case 'schedules':
-                return <SchedulesPanel open onClose={() => setActiveView('chat')} />;
-              case 'triggers':
-                return <TriggersPanel open onClose={() => setActiveView('chat')} />;
-              case 'history':
-                return (
-                  <RunHistory
-                    open
-                    onClose={() => setActiveView('chat')}
-                    onSelectRun={(runId) => {
-                      setInspectedRunId(runId);
-                    }}
-                  />
-                );
-              case 'chat':
-              default:
-                return null;
-            }
-          }}
-        />
-        <RunInspector
-          runId={inspectedRunId}
-          onClose={() => setInspectedRunId(null)}
-          onReplay={(runId) => {
-            void (async () => {
-              try {
-                const api = await import('../store-manager-api');
-                await api.replayStoreManagerRun(runId);
-                setActiveView('history');
-              } catch (err) {
-                console.error('Replay failed:', err instanceof Error ? err.message : err);
-              }
-            })();
-          }}
-          onCompare={(runId) => {
-            setCompareRunId(runId);
-          }}
-        />
-        <RunComparison
-          open={compareRunId !== null}
-          onClose={() => setCompareRunId(null)}
-          preselectedRunId={compareRunId ?? undefined}
-        />
+        {/* Console Nav Tabs Row */}
+        <div style={{ padding: '0 24px 10px 24px', borderTop: `1px solid ${colors.cardBorder}`, paddingTop: 10 }}>
+          <OperationsConsole
+            flags={consoleFlags}
+            activeView={activeView}
+            onNavigate={setActiveView}
+            views={CONSOLE_VIEWS}
+            renderView={() => null}
+          />
+        </div>
+      </header>
 
-        {/* Main Chat Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Main Workspace Body */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', position: 'relative', overflow: 'hidden' }}>
+        {/* Left Sidebar - Chat History (Contextual to Chat View) */}
+        {activeView === 'chat' && (
+          <aside
+            aria-label="Chat threads"
+            style={{
+              width: isSidebarOpen ? '260px' : '0px',
+              minWidth: isSidebarOpen ? '260px' : '0px',
+              flexShrink: 0,
+              background: colors.feedBagCream,
+              borderRight: isSidebarOpen ? `1px solid ${colors.cardBorder}` : 'none',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 16px 8px 16px' }}>
+              <button
+                onClick={startNewChat}
+                className="btn btn-primary"
+                style={{
+                  flex: 1,
+                  padding: '9px 12px',
+                  fontFamily: fonts.display,
+                  fontSize: '0.8rem',
+                  textAlign: 'center',
+                }}
+              >
+                + New Chat Thread
+              </button>
+              <button
+                onClick={() => setIsSidebarOpen(false)}
+                title="Collapse sidebar"
+                aria-label="Collapse threads sidebar"
+                style={{
+                  background: colors.whiteSurface,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: rounded.sm,
+                  padding: '7px 9px',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: colors.ledgerCharcoal,
+                }}
+              >
+                ◀
+              </button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 16px' }}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em' }}>
+                Conversations (Last 7 Days)
+              </div>
+              
+              {threads.length === 0 ? (
+                <div style={{ fontSize: '12px', color: colors.mulchBrown, fontStyle: 'italic', textAlign: 'center', marginTop: 16 }}>
+                  No recent conversations
+                </div>
+              ) : (
+                threads.map(thread => {
+                  const isActive = thread.id === currentThreadId;
+                  return (
+                    <div
+                      key={thread.id}
+                      onClick={() => selectThread(thread)}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        width: '100%',
+                        padding: '10px 12px',
+                        marginBottom: '6px',
+                        borderRadius: rounded.md,
+                        background: isActive ? colors.whiteSurface : 'transparent',
+                        border: isActive ? `1px solid ${colors.uniformGreen}` : '1px solid transparent',
+                        boxShadow: isActive ? '0 1px 3px rgba(33,20,20,0.06)' : 'none',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: isActive ? 700 : 500,
+                        color: isActive ? colors.ledgerCharcoal : colors.mulchBrown,
+                        transition: 'all 0.15s',
+                      }}
+                      onMouseOver={e => {
+                        if (!isActive) e.currentTarget.style.background = colors.whiteSurface;
+                      }}
+                      onMouseOut={e => {
+                        if (!isActive) e.currentTarget.style.background = 'transparent';
+                      }}
+                    >
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '8px', flex: 1 }}>
+                        {thread.title}
+                      </span>
+                      <button
+                        onClick={e => deleteThread(e, thread.id)}
+                        style={{
+                          border: 'none',
+                          background: 'none',
+                          padding: 0,
+                          color: colors.mulchBrown,
+                          cursor: 'pointer',
+                          fontSize: '14px',
+                        }}
+                        onMouseOver={e => (e.currentTarget.style.color = colors.signetBurgundy)}
+                        onMouseOut={e => (e.currentTarget.style.color = colors.mulchBrown)}
+                        title="Delete conversation"
+                        aria-label={`Delete thread ${thread.title}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </aside>
+        )}
+
+        {/* Primary Content View Area */}
+        <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
+          <RunInspector
+            runId={inspectedRunId}
+            onClose={() => setInspectedRunId(null)}
+            onReplay={(runId) => {
+              void (async () => {
+                try {
+                  const api = await import('../store-manager-api');
+                  await api.replayStoreManagerRun(runId);
+                  setActiveView('history');
+                } catch (err) {
+                  console.error('Replay failed:', err instanceof Error ? err.message : err);
+                }
+              })();
+            }}
+            onCompare={(runId) => {
+              setCompareRunId(runId);
+            }}
+          />
+          <RunComparison
+            open={compareRunId !== null}
+            onClose={() => setCompareRunId(null)}
+            preselectedRunId={compareRunId ?? undefined}
+          />
+
+          {activeView === 'schedules' ? (
+            <SchedulesPanel open onClose={() => setActiveView('chat')} variant="inline" />
+          ) : activeView === 'triggers' ? (
+            <TriggersPanel open onClose={() => setActiveView('chat')} variant="inline" />
+          ) : activeView === 'playbooks' ? (
+            <PlaybooksPanel open onClose={() => setActiveView('chat')} variant="inline" />
+          ) : activeView === 'bulk' ? (
+            <BulkReviewPanel
+              open
+              onClose={() => setActiveView('chat')}
+              onRequestReview={(objective) => {
+                if (selectedModel) sendMessage({ text: objective });
+                setActiveView('chat');
+              }}
+              variant="inline"
+            />
+          ) : activeView === 'inbox' ? (
+            <ManagerInbox
+              open
+              onClose={() => setActiveView('chat')}
+              notifications={notifications}
+              eventStatus={eventStatus}
+              variant="inline"
+              onAskManager={(prompt) => {
+                if (selectedModel) sendMessage({ text: prompt });
+                setActiveView('chat');
+              }}
+            />
+          ) : activeView === 'preferences' ? (
+            <PreferencesPanel open onClose={() => setActiveView('chat')} variant="inline" />
+          ) : activeView === 'history' ? (
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', background: colors.feedBagCream }}>
+              <RunHistory
+                open
+                onClose={() => setActiveView('chat')}
+                onSelectRun={(runId) => {
+                  setInspectedRunId(runId);
+                }}
+              />
+            </div>
+          ) : activeView === 'chat' ? (
+            <>
+              {!isSidebarOpen && (
+                <div style={{ padding: '16px 32px 0 32px', display: 'flex', alignItems: 'center' }}>
+                  <button
+                    onClick={() => setIsSidebarOpen(true)}
+                    title="Expand sidebar"
+                    aria-label="Expand threads sidebar"
+                    style={{
+                      background: colors.whiteSurface,
+                      border: `1px solid ${colors.cardBorder}`,
+                      borderRadius: rounded.sm,
+                      padding: '6px 12px',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      color: colors.ledgerCharcoal,
+                      fontWeight: 600,
+                      boxShadow: '0 1px 2px rgba(33,20,20,0.04)',
+                    }}
+                  >
+                    ▶ Conversations (Threads)
+                  </button>
+                </div>
+              )}
+              {/* Main Chat Body */}
+              <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 16 }}>
           {messages.length === 0 ? (
             <div style={{ margin: 'auto', maxWidth: 640, textAlign: 'center', padding: '40px 24px', backgroundColor: colors.whiteSurface, borderRadius: rounded.lg, border: `1px solid ${colors.cardBorder}`, boxShadow: '0 1px 3px rgba(33,20,20,0.04)' }}>
               <h3 style={{ fontSize: '20px', fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal, margin: '0 0 8px' }}>
@@ -1568,10 +1618,10 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 {[
                   { title: 'Summarize Catalog Health', prompt: 'Summarize catalog health.' },
                   { title: 'Show Products with Blockers', prompt: 'Show products with blockers.' },
-                  { title: 'Audit ProductField24', prompt: 'Audit ProductField24.' },
-                  { title: 'Find Duplicate Brands', prompt: 'Find duplicate Brand values.' },
+                  { title: 'Audit ProductField16 (Brand)', prompt: 'Audit ProductField16.' },
+                  { title: 'Audit ProductField24 (Category)', prompt: 'Audit ProductField24.' },
+                  { title: 'Find Duplicate Brands (ProductField16)', prompt: 'Find duplicate Brand values in ProductField16.' },
                   { title: 'Find Products Missing Images', prompt: 'Which products are missing images?' },
-                  { title: 'Show Unsynced Products', prompt: 'Show unsynced or drifted products.' },
                 ].map((item, idx) => (
                   <button
                     key={idx}
@@ -1620,9 +1670,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                       maxWidth: isUser ? '75%' : '85%',
                       padding: '16px 20px',
                       borderRadius: rounded.lg,
-                      background: colors.whiteSurface,
-                      border: `1px solid ${colors.cardBorder}`,
-                      borderLeft: isUser ? `4px solid ${colors.uniformGreen}` : `1px solid ${colors.cardBorder}`,
+                      background: isUser ? colors.whiteSurface : colors.whiteSurface,
+                      border: `1px solid ${isUser ? colors.seedlingGreen : colors.cardBorder}`,
                       color: colors.ledgerCharcoal,
                       boxShadow: '0 1px 3px rgba(33,20,20,0.04)',
                     }}
@@ -1683,6 +1732,10 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                           }
                           return null;
                         })
+                      ) : (message as any).content ? (
+                        <div>{renderMessageContent(String((message as any).content), isUser)}</div>
+                      ) : (message as any).text ? (
+                        <div>{renderMessageContent(String((message as any).text), isUser)}</div>
                       ) : null}
                     </div>
                   </div>
@@ -2167,6 +2220,9 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             Send
           </button>
         </form>
+            </>
+          ) : null}
+        </main>
       </div>
     </div>
   );

@@ -31,9 +31,17 @@
  * - NO non-title projection fields: `description`, `bulletPoints`,
  *   `searchKeywords`, `customFields`, `fieldProvenance`,
  *   `primaryImage`/`additionalImages`.
- * - NO `evidenceHash` (H2 member evidence identity — it changes on OCR
- *   *re-runs* even when the title text is identical), NO `ocrInputHash` /
- *   `ocrExecutionDigest` (OCR *provenance*, not title text).
+ * - NO OCR-evidence `evidenceHash` / `ocrInputHash` / `ocrExecutionDigest`
+ *   (OCR *provenance*, not title text — an OCR re-run must never retitle).
+ * - Milestone E EXCEPTION: the narrow source-kind/provenance BINDING slice
+ *   (`sourceProvenance` — item/extraction source type, URL null-ness,
+ *   extraction method, sourcing generation id, sorted accepted attempt /
+ *   provider ids, distributor evidence hash) DOES participate. Distributor-
+ *   record evidence is a different input identity than official-page
+ *   evidence, and generation/attempt/hash drift must never reuse title
+ *   outputs (plan acceptance: source/generation/attempt/hash drift blocks
+ *   reuse). For official-page members the slice is the constant
+ *   official_page identity (no behavioral change to official re-runs).
  * - NO H3 config / H4 Page catalog (titles do not depend on them).
  * - Only the title H5 slice: the frozen `cohort_title_consolidation` plan
  *   entry (provider/model/promptTemplateVersion/ruleVersion) + `FORMAT_RULES`
@@ -72,8 +80,9 @@ import {
 import type { ModelExecutionPlanEntry } from '../classification/model-operation-registry';
 import type {
   CohortRun,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjection,
   ExecutionEvidenceProjectionMemberV1,
+  ExecutionEvidenceProjectionMemberV2,
 } from '../shared/schemas/cohorts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -82,7 +91,7 @@ export interface CohortTitleInputHashParams {
   /** The cohort run (final_membership_hash + execution Product Type). */
   run: CohortRun;
   /** Frozen per-member title authority (the persisted execution-evidence-v1 payload). */
-  projection: ExecutionEvidenceProjectionV1;
+  projection: ExecutionEvidenceProjection;
   /** Frozen `cohort_title_consolidation` plan entry (H5 title slice); absent → registry consts. */
   titlePlanEntry?: ModelExecutionPlanEntry;
   /**
@@ -171,6 +180,67 @@ export interface CohortTitleAuthorityMember {
   ocrWeight: string | null;
   /** Title-format-relevant OCR flavor (DECISION-Q); null when OCR is absent. */
   ocrFlavor: string | null;
+  /**
+   * Milestone E: source-kind/provenance binding of the frozen member. A
+   * distributor-record member differs in input identity from an official-page
+   * member even when the title text is identical; drift in source kind,
+   * generation, accepted attempts, providers, or the distributor evidence hash
+   * MUST change the hash so stale evidence is never reused for titles.
+   * Historical V1 members (no source-type fields) normalize to official_page.
+   */
+  sourceProvenance: SourceProvenanceSlice;
+}
+
+/**
+ * Milestone E source-provenance identity slice (shared by T/P hashes and the
+ * product-type resolver). Field names MUST match the V2 member schema fields
+ * Worker A adds to ExecutionEvidenceProjectionV2 in src/shared/schemas/cohorts.ts:
+ * itemSourceType, extractionSourceType, extractionMethod, sourcingGenerationId,
+ * acceptedEvidenceAttemptIds, acceptedProviderIds, distributorEvidenceHash (plus the
+ * existing V1 sourceUrl/extractionSourceUrl). The accessor is tolerant: V1
+ * members (no source-type fields) normalize to official_page provenance.
+ */
+export interface SourceProvenanceSlice {
+  itemSourceType: 'official_page' | 'distributor_record';
+  sourceUrl: string | null;
+  extractionSourceType: 'official_page' | 'distributor_record';
+  extractionSourceUrl: string | null;
+  extractionMethod: string | null;
+  sourcingGenerationId: string | null;
+  acceptedEvidenceAttemptIds: string[];
+  providerIds: string[];
+  distributorEvidenceHash: string | null;
+}
+
+/**
+ * Tolerant source-provenance accessor. Reads the V2 provenance fields when
+ * present; normalizes V1 members (distributor routing did not exist when V1
+ * snapshots were written) to official-page provenance. Arrays are sorted so
+ * the canonical JSON is order-insensitive.
+ */
+export function sourceProvenanceFromMember(
+  member: ExecutionEvidenceProjectionMemberV1 | ExecutionEvidenceProjectionMemberV2,
+): SourceProvenanceSlice {
+  // V2 members carry the provenance fields; V1 members (distributor routing
+  // did not exist when V1 was written) normalize to official_page.
+  const v2 = 'itemSourceType' in member;
+  const m = member as ExecutionEvidenceProjectionMemberV2;
+  return {
+    itemSourceType: v2 ? m.itemSourceType : 'official_page',
+    sourceUrl: member.sourceUrl ?? null,
+    extractionSourceType: v2 ? m.extractionSourceType : 'official_page',
+    extractionSourceUrl: member.extractionSourceUrl ?? null,
+    // Matches normalizeExecutionEvidenceProjectionMemberV1's official-page
+    // normalization (extractionMethod: '') so V1 and normalized-V2 hash
+    // identically (V1 compatibility contract).
+    extractionMethod: v2 ? m.extractionMethod : '',
+    sourcingGenerationId: v2 ? m.sourcingGenerationId : null,
+    acceptedEvidenceAttemptIds: v2 ? [...m.acceptedEvidenceAttemptIds].sort() : [],
+    // V2 names the provider set `acceptedProviderIds` (cohorts.ts); V1 has
+    // no provider set and normalizes empty.
+    providerIds: v2 ? [...m.acceptedProviderIds].sort() : [],
+    distributorEvidenceHash: v2 ? m.distributorEvidenceHash : null,
+  };
 }
 
 // ─── Pure builder ─────────────────────────────────────────────────────────────
@@ -199,7 +269,7 @@ export function normalizeTitleAuthorityString(value: string | null, maxChars: nu
 }
 
 export function titleAuthorityFromProjectionMember(
-  member: ExecutionEvidenceProjectionMemberV1,
+  member: ExecutionEvidenceProjectionMemberV1 | ExecutionEvidenceProjectionMemberV2,
 ): CohortTitleAuthorityMember {
   const ocr = member.extraction.ocr.packagingOcrData;
   const brandMax = TITLE_AUTHORITY_TRUNCATION.brandMaxChars;
@@ -214,6 +284,10 @@ export function titleAuthorityFromProjectionMember(
     packagingOcrTitle: normalizeTitleAuthorityString(ocr?.productName ?? member.extraction.packagingTitle, signalMax),
     ocrWeight: normalizeTitleAuthorityString(ocr?.weight ?? null, signalMax),
     ocrFlavor: normalizeTitleAuthorityString(ocr?.flavorVariety ?? null, signalMax),
+    // Milestone E: the frozen source-kind/provenance binding participates in
+    // the T-hash (drift changes the input identity — stale distributor
+    // evidence can never reuse title outputs).
+    sourceProvenance: sourceProvenanceFromMember(member),
   };
 }
 

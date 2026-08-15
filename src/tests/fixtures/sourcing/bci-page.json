@@ -1,0 +1,28 @@
+{
+  "Items": [
+    {
+      "ID": "bci-2001",
+      "Name": "OrderCloud Fish Food Flakes 2 oz",
+      "Description": "Tropical fish food flakes, 2 oz.",
+      "xp": {
+        "UPC": "012345678905",
+        "Brand": "OrderCloud",
+        "Weight": 2,
+        "Images": ["https://cdn.example.com/bci/012345678905-front.jpg"]
+      }
+    },
+    {
+      "ID": "bci-2002",
+      "Name": "OrderCloud Reptile Heat Lamp 75W",
+      "xp": {
+        "UPC": "042100005264",
+        "Brand": "OrderCloud"
+      }
+    }
+  ],
+  "Meta": {
+    "Page": 1,
+    "PageSize": 100,
+    "TotalCount": 2
+  }
+}

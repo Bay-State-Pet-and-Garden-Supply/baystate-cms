@@ -60,7 +60,7 @@ export const STORE_MANAGER_TOOL_DISPLAY: Record<string, StoreManagerToolDisplayM
     actionLabel: 'Audit a ProductField',
     stateTransition: 'none',
   },
-  proposeProductFieldNormalization: {
+  preview_product_field_normalization: {
     riskClass: 'read',
     requiresApproval: false,
     actionLabel: 'Preview normalization recommendations',
@@ -78,25 +78,25 @@ export const STORE_MANAGER_TOOL_DISPLAY: Record<string, StoreManagerToolDisplayM
     actionLabel: 'Explain next actions',
     stateTransition: 'none',
   },
-  generateNormalizationProposals: {
+  store_product_field_normalization_proposals: {
     riskClass: 'proposal_write',
     requiresApproval: true,
     actionLabel: 'Store normalization proposals',
     stateTransition: 'stored proposal created (status: proposed); catalog unchanged',
   },
-  dismissNormalizationProposal: {
+  dismiss_stored_proposal: {
     riskClass: 'proposal_write',
     requiresApproval: true,
     actionLabel: 'Dismiss a stored proposal',
     stateTransition: 'stored proposal -> dismissed; catalog unchanged',
   },
-  applyNormalizationProposal: {
+  stage_stored_proposal_in_change_set: {
     riskClass: 'catalog_mutation',
     requiresApproval: true,
     actionLabel: 'Stage a stored proposal in a Change Set',
     stateTransition: 'stored proposal -> staged in Change Set (draft changes); not approved, not published, not synced',
   },
-  repairChangeSetImages: {
+  repair_approved_change_set_images: {
     riskClass: 'network_filesystem_repair',
     requiresApproval: true,
     actionLabel: 'Repair Change Set images (network download + file write)',
@@ -129,7 +129,40 @@ export const STORE_MANAGER_TOOL_DISPLAY: Record<string, StoreManagerToolDisplayM
     actionLabel: 'Stage the exact bulk-review batch in a Change Set',
     stateTransition: 'bulk batch (pending) -> proposals staged in Change Set (draft); batch status applied; not approved, not published, not synced',
   },
+
+  // Legacy names from pre-#40 history: presentation only, never executable.
+  proposeProductFieldNormalization: {
+    riskClass: 'read',
+    requiresApproval: false,
+    actionLabel: 'Preview normalization recommendations (legacy)',
+    stateTransition: 'none (in-memory recommendation only)',
+  },
+  generateNormalizationProposals: {
+    riskClass: 'proposal_write',
+    requiresApproval: true,
+    actionLabel: 'Store normalization proposals (legacy)',
+    stateTransition: 'stored proposal created (status: proposed); catalog unchanged',
+  },
+  dismissNormalizationProposal: {
+    riskClass: 'proposal_write',
+    requiresApproval: true,
+    actionLabel: 'Dismiss a stored proposal (legacy)',
+    stateTransition: 'stored proposal -> dismissed; catalog unchanged',
+  },
+  applyNormalizationProposal: {
+    riskClass: 'catalog_mutation',
+    requiresApproval: true,
+    actionLabel: 'Stage a stored proposal in a Change Set (legacy)',
+    stateTransition: 'stored proposal -> staged in Change Set (draft changes); not approved, not published, not synced',
+  },
+  repairChangeSetImages: {
+    riskClass: 'network_filesystem_repair',
+    requiresApproval: true,
+    actionLabel: 'Repair Change Set images (legacy)',
+    stateTransition: 'Change Set images re-downloaded into workspace products/images',
+  },
 };
+
 
 export const STORE_MANAGER_RISK_LABELS: Record<StoreManagerRiskClass, string> = {
   read: 'Read only — no side effects',
@@ -154,12 +187,12 @@ export interface ApprovalCardCopy {
 /** Bounded one-line scope description for a tool invocation. */
 function describeScope(toolName: string, input: Record<string, unknown>): string {
   switch (toolName) {
-    case 'generateNormalizationProposals':
+    case 'store_product_field_normalization_proposals':
       return `Field: ${String(input.field ?? '?')}`;
-    case 'dismissNormalizationProposal':
-    case 'applyNormalizationProposal':
+    case 'dismiss_stored_proposal':
+    case 'stage_stored_proposal_in_change_set':
       return `Proposal: ${String(input.proposalId ?? '?')}`;
-    case 'repairChangeSetImages':
+    case 'repair_approved_change_set_images':
       return `Change Set: ${String(input.changeSetId ?? '?')}`;
     default:
       return 'Catalog workspace';

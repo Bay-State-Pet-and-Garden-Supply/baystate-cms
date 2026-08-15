@@ -4,106 +4,293 @@ import { randomUUID } from 'node:crypto';
 export interface OnboardingExtractionRow {
   id: string;
   item_id: string;
-  source_url: string;
+  source_url: string | null;
   extraction_data_json: string;
   extraction_method: string;
   confidence: number;
   images_json: string | null;
   raw_structured_data_json: string | null;
+  source_type: string | null;
+  sourcing_generation_id: string | null;
+  accepted_evidence_attempt_ids_json: string | null;
+  evidence_hash: string | null;
   created_at: string;
 }
 
-export function insertExtraction(data: {
+/**
+ * Amendment A discriminated extraction input. Two branches:
+ *
+ * - `official_page` (the pre-Amendment contract, sourceType optional for
+ *   backward compatibility): requires a NON-EMPTY source URL; any current
+ *   extraction method is allowed.
+ * - `distributor_record`: requires a NULL source URL, method
+ *   `distributor_record_v1`, a current sourcing generation, non-empty
+ *   sorted-unique accepted evidence attempt ids, and a canonical 64-hex
+ *   evidence hash. Provenance is mandatory — a distributor-record
+ *   extraction without it is a schema violation.
+ */
+export type InsertExtractionInput = { itemId: string; extractionDataJson: string; confidence: number; imagesJson?: string | null; rawStructuredDataJson?: string | null } & (
+  | {
+      sourceType?: 'official_page' | null;
+      sourceUrl: string;
+      extractionMethod: string;
+    }
+  | {
+      sourceType: 'distributor_record';
+      sourceUrl: null | undefined;
+      extractionMethod: 'distributor_record_v1';
+      sourcingGenerationId: string;
+      acceptedEvidenceAttemptIds: string[];
+      evidenceHash: string;
+    }
+);
+
+const EVIDENCE_HASH_RE = /^[0-9a-f]{64}$/;
+
+function safeParseJsonArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Runtime-widened input shape for defensive validation (no union discriminant). */
+type ExtractionInputWide = {
   itemId: string;
-  sourceUrl: string;
+  sourceType: 'official_page' | 'distributor_record' | null | undefined;
+  sourceUrl: string | null | undefined;
   extractionDataJson: string;
   extractionMethod: string;
   confidence: number;
   imagesJson?: string | null;
   rawStructuredDataJson?: string | null;
-}): OnboardingExtractionRow {
+  sourcingGenerationId?: string | null;
+  acceptedEvidenceAttemptIds?: string[];
+  evidenceHash?: string;
+};
+
+/**
+ * The single extraction writer. Validates the discriminated input fail-closed
+ * (official_page requires a real URL; distributor_record requires null URL +
+ * `distributor_record_v1` + generation + accepted ids + hash), persists the
+ * provenance columns, and returns the durable row.
+ */
+export function insertExtraction(data: InsertExtractionInput): OnboardingExtractionRow {
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
 
+  // Widen to a flat (non-union) shape for runtime defensive checks: TS
+  // aliased-discriminant narrowing would otherwise derive `never` after the
+  // contradictory distributor sourceUrl guard (a typed distributor input can
+  // never carry a URL, but untyped runtime callers can). Validation lives in
+  // a standalone function so the narrowing never collapses the input inside
+  // this writer.
+  const input = data as unknown as ExtractionInputWide;
+
+  const { sourceType, sourceUrl, sourcingGenerationId, acceptedEvidenceAttemptIds, evidenceHash } =
+    validateAndResolveExtractionInput(input, db);
+
   db.query(
     `INSERT INTO onboarding_extractions
-      (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json, raw_structured_data_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json, raw_structured_data_json,
+       source_type, sourcing_generation_id, accepted_evidence_attempt_ids_json, evidence_hash, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
-    data.itemId,
-    data.sourceUrl,
-    data.extractionDataJson,
-    data.extractionMethod,
-    data.confidence,
-    data.imagesJson ?? null,
-    data.rawStructuredDataJson ?? null,
+    input.itemId,
+    sourceUrl,
+    input.extractionDataJson,
+    input.extractionMethod,
+    input.confidence,
+    input.imagesJson ?? null,
+    input.rawStructuredDataJson ?? null,
+    sourceType,
+    sourcingGenerationId,
+    acceptedEvidenceAttemptIds.length > 0 ? JSON.stringify(acceptedEvidenceAttemptIds) : null,
+    evidenceHash,
     now,
   );
 
   return {
     id,
-    item_id: data.itemId,
-    source_url: data.sourceUrl,
-    extraction_data_json: data.extractionDataJson,
-    extraction_method: data.extractionMethod,
-    confidence: data.confidence,
-    images_json: data.imagesJson ?? null,
-    raw_structured_data_json: data.rawStructuredDataJson ?? null,
+    item_id: input.itemId,
+    source_url: sourceUrl,
+    extraction_data_json: input.extractionDataJson,
+    extraction_method: input.extractionMethod,
+    confidence: input.confidence,
+    images_json: input.imagesJson ?? null,
+    raw_structured_data_json: input.rawStructuredDataJson ?? null,
+    source_type: sourceType,
+    sourcing_generation_id: sourcingGenerationId,
+    accepted_evidence_attempt_ids_json: acceptedEvidenceAttemptIds.length > 0 ? JSON.stringify(acceptedEvidenceAttemptIds) : null,
+    evidence_hash: evidenceHash,
     created_at: now,
+  };
+}
+
+/**
+ * Discriminated validation + projection of the extraction input. Throws on
+ * every fail-closed mismatch; returns the persisted column values. Lives
+ * outside `insertExtraction` so TS narrowing cannot collapse the union to
+ * `never` after the defensive guards.
+ */
+function validateAndResolveExtractionInput(
+  input: ExtractionInputWide,
+  db: ReturnType<typeof getDb>,
+): {
+  sourceType: 'official_page' | 'distributor_record';
+  sourceUrl: string | null;
+  sourcingGenerationId: string | null;
+  acceptedEvidenceAttemptIds: string[];
+  evidenceHash: string | null;
+} {
+  const isDistributorRecord = input.sourceType === 'distributor_record';
+
+  if (isDistributorRecord) {
+    if (input.sourceUrl !== null && input.sourceUrl !== undefined) {
+      throw new Error('distributor_record extraction requires a NULL source URL (never a fabricated URL)');
+    }
+    if (input.extractionMethod !== 'distributor_record_v1') {
+      throw new Error(`distributor_record extraction requires extractionMethod 'distributor_record_v1' (got '${input.extractionMethod}')`);
+    }
+    if (!input.sourcingGenerationId) {
+      throw new Error('distributor_record extraction requires a sourcing generation id');
+    }
+    if (!Array.isArray(input.acceptedEvidenceAttemptIds) || input.acceptedEvidenceAttemptIds.length === 0) {
+      throw new Error('distributor_record extraction requires non-empty accepted evidence attempt ids');
+    }
+    if (new Set(input.acceptedEvidenceAttemptIds).size !== input.acceptedEvidenceAttemptIds.length) {
+      throw new Error('distributor_record extraction accepted evidence attempt ids must be unique');
+    }
+    if (!EVIDENCE_HASH_RE.test(input.evidenceHash ?? '')) {
+      throw new Error('distributor_record extraction requires a canonical 64-hex evidence hash');
+    }
+    // The generation must be the item's CURRENT generation (stale or foreign
+    // generations can never materialize a distributor-record extraction).
+    const current = db
+      .query('SELECT id FROM sourcing_generations WHERE item_id = ? ORDER BY rowid DESC LIMIT 1')
+      .get(input.itemId) as { id: string } | undefined;
+    if (!current || current.id !== input.sourcingGenerationId) {
+      throw new Error("distributor_record extraction requires the item's CURRENT sourcing generation");
+    }
+    return {
+      sourceType: 'distributor_record',
+      sourceUrl: null,
+      sourcingGenerationId: input.sourcingGenerationId,
+      acceptedEvidenceAttemptIds: [...new Set(input.acceptedEvidenceAttemptIds)].sort(),
+      evidenceHash: input.evidenceHash!,
+    };
+  }
+
+  if (!input.sourceUrl || !input.sourceUrl.trim()) {
+    throw new Error('official_page extraction requires a non-empty source URL');
+  }
+  return {
+    sourceType: input.sourceType ?? 'official_page',
+    sourceUrl: input.sourceUrl,
+    sourcingGenerationId: null,
+    acceptedEvidenceAttemptIds: [],
+    evidenceHash: null,
   };
 }
 
 /**
  * Update the extraction_data_json on the latest extraction record for an item.
  * Used when a user edits extraction results via the pipeline board save flow.
+ *
+ * MD round-7 (defect 1b): row-level immutability — a PRESERVED
+ * distributor_record row is audit-only and can never be mutated through this
+ * writer, even after the item reverted to an official source. Returns false
+ * (no mutation) when no row exists or the latest row is distributor-sourced.
  */
-export function updateLatestExtractionData(itemId: string, extractionDataJson: string): void {
+export function updateLatestExtractionData(itemId: string, extractionDataJson: string): boolean {
   const db = getDb();
+  const row = db
+    .query('SELECT source_type FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
+    .get(itemId) as { source_type: string | null } | undefined;
+  if (!row || (row.source_type ?? 'official_page') === 'distributor_record') return false;
   db.query(
     `UPDATE onboarding_extractions
      SET extraction_data_json = ?
-     WHERE id = (SELECT id FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC LIMIT 1)`,
+     WHERE id = (SELECT id FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1)`,
   ).run(extractionDataJson, itemId);
+  return true;
 }
 
 export function getLatestExtraction(itemId: string): OnboardingExtractionRow | undefined {
   const db = getDb();
   return db.query(
-    'SELECT * FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC LIMIT 1',
+    'SELECT * FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
   ).get(itemId) as OnboardingExtractionRow | undefined;
 }
 
 /**
- * Latest extraction `source_url` per onboarding item, in ONE batched query.
- * Returns a Map keyed by item id; items without any extraction row are
- * absent from the map. Used by cohort readiness to bind each member's
- * selected source to the source recorded when its extraction evidence was
- * frozen (issue #30 round-3 R4).
+ * Find the durable distributor-record extraction row for an item, if any.
+ *
+ * Find-by-immutable-identity-then-validate: looks up ANY extraction row with
+ * method 'distributor_record_v1' (regardless of hash/source_type/generation)
+ * and returns the latest (created_at DESC, rowid DESC). The materializer's
+ * idempotent-retry guard uses this shape so every provenance column is
+ * GENUINELY revalidated — if the row exists it must match the recomputed
+ * decision in full, and any divergence fails closed rather than inserting a
+ * second (possibly divergent) row.
  */
-export function getLatestExtractionSourcesByItemIds(itemIds: string[]): Map<string, string> {
+export function findDistributorRecordExtraction(itemId: string): OnboardingExtractionRow | undefined {
   const db = getDb();
-  const sources = new Map<string, string>();
-  if (itemIds.length === 0) return sources;
-  const placeholders = itemIds.map(() => '?').join(', ');
-  const rows = db.query(
-    `SELECT e.item_id, e.source_url
-     FROM onboarding_extractions e
-     JOIN (
-       SELECT item_id, MAX(created_at) AS max_created_at
-       FROM onboarding_extractions
-       WHERE item_id IN (${placeholders})
-       GROUP BY item_id
-     ) latest ON latest.item_id = e.item_id AND latest.max_created_at = e.created_at`,
-  ).all(...itemIds) as Array<{ item_id: string; source_url: string }>;
-  for (const row of rows) sources.set(row.item_id, row.source_url);
-  return sources;
+  const row = db.query(
+    `SELECT * FROM onboarding_extractions
+     WHERE item_id = ? AND extraction_method = 'distributor_record_v1'
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  ).get(itemId) as OnboardingExtractionRow | undefined;
+  return row;
 }
 
-function listExtractionsByItem(itemId: string): OnboardingExtractionRow[] {
+export interface ExtractionBinding {
+  sourceUrl: string | null;
+  sourceType: 'official_page' | 'distributor_record';
+  extractionMethod: string;
+  sourcingGenerationId: string | null;
+  acceptedEvidenceAttemptIds: string[];
+  evidenceHash: string | null;
+}
+
+/**
+ * Latest extraction BINDINGS per onboarding item, in ONE batched query
+ * (Amendment A replacement for the URL-only `getLatestExtractionSourcesByItemIds`):
+ * source URL (nullable), source type, extraction method, sourcing generation,
+ * canonical accepted-evidence-attempt ids, and evidence hash. Returns a Map
+ * keyed by item id; items without any extraction row are absent from the map.
+ */
+export function getLatestExtractionBindingsByItemIds(itemIds: string[]): Map<string, ExtractionBinding> {
   const db = getDb();
-  return db.query(
-    'SELECT * FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC',
-  ).all(itemId) as OnboardingExtractionRow[];
+  const bindings = new Map<string, ExtractionBinding>();
+  if (itemIds.length === 0) return bindings;
+  const placeholders = itemIds.map(() => '?').join(', ');
+  // Window-function tiebreaker: equal created_at rows resolve by rowid DESC,
+  // so the latest extraction is deterministic even on millisecond ties.
+  const rows = db.query(
+    `SELECT * FROM (
+       SELECT e.*, ROW_NUMBER() OVER (
+         PARTITION BY e.item_id
+         ORDER BY e.created_at DESC, e.rowid DESC
+       ) AS rn
+       FROM onboarding_extractions e
+       WHERE e.item_id IN (${placeholders})
+     ) WHERE rn = 1`,
+  ).all(...itemIds) as OnboardingExtractionRow[];
+  for (const row of rows) {
+    bindings.set(row.item_id, {
+      sourceUrl: row.source_url,
+      sourceType: (row.source_type ?? 'official_page') as 'official_page' | 'distributor_record',
+      extractionMethod: row.extraction_method,
+      sourcingGenerationId: row.sourcing_generation_id,
+      acceptedEvidenceAttemptIds: safeParseJsonArray(row.accepted_evidence_attempt_ids_json),
+      evidenceHash: row.evidence_hash,
+    });
+  }
+  return bindings;
 }

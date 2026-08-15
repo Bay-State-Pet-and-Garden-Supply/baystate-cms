@@ -48,7 +48,14 @@
  *   replaced by this structured canonical JSON.
  * - NO non-page projection fields: `bulletPoints`, `searchKeywords`,
  *   `customFields`, `fieldProvenance`, `piEvidence`, `evidenceHash`,
- *   `ocrInputHash` / `ocrExecutionDigest` (OCR provenance), images, sourcing.
+ *   `ocrInputHash` / `ocrExecutionDigest` (OCR provenance), images.
+ * - Milestone E EXCEPTION: the narrow source-kind/provenance binding slice
+ *   (`sourceProvenance` — see cohort-title-hash.ts) DOES participate in the
+ *   P-hash as input identity. It is intentionally NOT rendered into the page
+ *   prompt (the rendered context stays product-line semantics); the
+ *   hashed-authority == prompted-authority rule therefore applies to the
+ *   rendered page fields only, with the source binding as a strict
+ *   identity gate on top. V1 members normalize to official_page.
  * - NO `modelPolicyDigest` (titles' P2); the page model authority is the
  *   operation-specific `{provider, model}` slice only.
  *
@@ -70,11 +77,14 @@ import { getModelExecutionPlanEntry, type RuntimeClassificationSnapshot } from '
 import type { ProductLineItemSnapshot } from '../classification/types';
 import {
   type ExecutionTypeTitleAuthority,
+  type SourceProvenanceSlice,
+  sourceProvenanceFromMember,
 } from './cohort-title-hash';
 import type {
   CohortRun,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjection,
   ExecutionEvidenceProjectionMemberV1,
+  ExecutionEvidenceProjectionMemberV2,
 } from '../shared/schemas/cohorts';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -127,6 +137,14 @@ export interface CohortPageAuthorityMember {
   productForm: string | null;
   /** OCR health-concern functions, sorted for determinism. */
   healthConcern: string[];
+  /**
+   * Milestone E: source-kind/provenance binding (see
+   * `sourceProvenanceFromMember` in cohort-title-hash.ts). Distributor-record
+   * members are a different page input identity than official-page members;
+   * generation/attempt/hash drift changes the P-hash so stale evidence is
+   * never reused for page assignment. V1 members normalize to official_page.
+   */
+  sourceProvenance: SourceProvenanceSlice;
 }
 
 /** The frozen operation-specific Page model authority (DECISION-B). */
@@ -195,7 +213,7 @@ export interface CohortPageAuthorityBundleParams {
   /** The cohort run (execution Product Type resolution). */
   run: CohortRun;
   /** Frozen per-member Page authority (the persisted execution-evidence-v1 payload). */
-  projection: ExecutionEvidenceProjectionV1;
+  projection: ExecutionEvidenceProjection;
   /** Frozen product-line sibling context (contract symmetry — the canonical
    *  members are normalized from the projection via
    *  `pageAuthorityFromProjectionMember`; the bundle output is the ONE
@@ -319,7 +337,7 @@ export function pageAuthorityMemberToSnapshot(
  * authority is independent of OCR array order.
  */
 export function pageAuthorityFromProjectionMember(
-  member: ExecutionEvidenceProjectionMemberV1,
+  member: ExecutionEvidenceProjectionMemberV1 | ExecutionEvidenceProjectionMemberV2,
 ): CohortPageAuthorityMember {
   const ocr = member.extraction.ocr.packagingOcrData;
   const trunc = PAGE_AUTHORITY_TRUNCATION;
@@ -334,6 +352,8 @@ export function pageAuthorityFromProjectionMember(
     lifeStage: ocr?.lifeStage ?? null,
     productForm: ocr?.productForm ?? null,
     healthConcern: [...(ocr?.healthConcernFunction ?? [])].sort(),
+    // Milestone E: source-kind/provenance binding participates in the P-hash.
+    sourceProvenance: sourceProvenanceFromMember(member),
   };
 }
 

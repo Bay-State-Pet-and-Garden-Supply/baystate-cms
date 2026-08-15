@@ -17,6 +17,17 @@ import {
   recordHistoryEvent,
 } from '../db/repositories/classification-run-repo';
 import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
+import {
+  getCurrentGenerationAcceptedAttemptIds,
+} from '../db/repositories/onboarding-acceptance-repo';
+import {
+  getEvidenceAttemptsByItemAndGeneration,
+  getCurrentSourcingGeneration,
+} from '../db/repositories/onboarding-evidence-repo';
+import { findDistributorRecordExtraction } from '../db/repositories/onboarding-extraction-repo';
+import { listResolvedConflictResolutions } from '../db/repositories/onboarding-conflict-repo';
+import { buildDistributorRecordProjection } from './sourcing/distributor-record-projection';
+import { SourcingDecisionV2Schema } from '../shared/schemas/onboarding';
 import { getCohortRunById,
   listDependenciesForProposal,
 } from '../db/repositories/classification-cohort-run-repo';
@@ -251,12 +262,155 @@ function computePromotionGate(
     dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
     currentAuthorityHashes,
   });
+  if (!gate.ok) {
+    return {
+      ok: gate.ok,
+      reason: gate.reason,
+      activeRun,
+      activeProposals,
+    };
+  }
+
+  // Milestone E (item 9): a distributor-source item may draft ONLY while its
+  // materialized extraction still matches the sourcing authority — a stale,
+  // superseded, or tampered materialization can never draft even after
+  // Review. Mirrors the materializer's read-only authority checks: extraction
+  // row source type/generation/hash, current (non-superseded) generation,
+  // and accepted-attempt set equality.
+  const distributorGate = checkDistributorPromotionProvenance(item, workspaceId);
+  if (!distributorGate.ok) {
+    return {
+      ok: false,
+      reason: distributorGate.reason,
+      activeRun,
+      activeProposals,
+    };
+  }
+
   return {
-    ok: gate.ok,
-    reason: gate.ok ? null : gate.reason,
+    ok: true,
+    reason: null,
     activeRun,
     activeProposals,
   };
+}
+
+/**
+ * Milestone E promotion provenance gate for distributor-source items. Read-
+ * only; mirrors the materializer's authority rechecks. Non-distributor items
+ * always pass (official path unchanged). Fail-closed reasons are stable and
+ * never leak evidence contents.
+ */
+function checkDistributorPromotionProvenance(
+  item: OnboardingItem,
+  workspaceId: string,
+): { ok: true } | { ok: false; reason: string } {
+  if (item.sourceType !== 'distributor_record') {
+    return { ok: true };
+  }
+
+  // The item's decision must be the V2 distributor route.
+  const decision = item.sourcingDecision;
+  if (!decision || (decision as { route?: string }).route !== 'distributor_record_to_extraction') {
+    return { ok: false, reason: 'Distributor promotion blocked: missing or invalid distributor routing decision' };
+  }
+  const decisionParse = SourcingDecisionV2Schema.safeParse(decision);
+  if (!decisionParse.success) {
+    return { ok: false, reason: 'Distributor promotion blocked: malformed distributor routing decision' };
+  }
+  const parsedDecision = decisionParse.data;
+  if (parsedDecision.route !== 'distributor_record_to_extraction') {
+    return { ok: false, reason: 'Distributor promotion blocked: wrong routing decision' };
+  }
+
+  // Workspace ownership of the item.
+  const batch = findBatchById(item.batchId);
+  if (!batch || batch.workspaceId !== workspaceId) {
+    return { ok: false, reason: 'Distributor promotion blocked: item workspace mismatch' };
+  }
+
+  // Current (non-superseded) generation must exactly match the decision.
+  const generation = getCurrentSourcingGeneration(item.id);
+  if (!generation || generation.id !== parsedDecision.sourcingGenerationId) {
+    return { ok: false, reason: 'Distributor promotion blocked: stale sourcing generation' };
+  }
+  if (generation.status === 'superseded') {
+    return { ok: false, reason: 'Distributor promotion blocked: superseded sourcing generation' };
+  }
+
+  // Relational acceptances must exactly match the decision's accepted set.
+  const acceptedIds = getCurrentGenerationAcceptedAttemptIds(item.id);
+  if (!sameStringSet(acceptedIds, parsedDecision.acceptedEvidenceAttemptIds)) {
+    return { ok: false, reason: 'Distributor promotion blocked: accepted evidence mismatch' };
+  }
+
+  // The durable extraction row must be the distributor materialization with
+  // matching generation + evidence hash. Milestone E review hardening: the
+  // row's OWN source type and accepted-attempt column are verified — a row
+  // whose source_type was tampered to official_page (or whose accepted-ids
+  // column diverged) fails closed even when generation/hash match.
+  const extraction = findDistributorRecordExtraction(item.id);
+  if (!extraction) {
+    return { ok: false, reason: 'Distributor promotion blocked: missing distributor extraction' };
+  }
+  if (extraction.source_type !== 'distributor_record') {
+    return { ok: false, reason: 'Distributor promotion blocked: extraction source type mismatch' };
+  }
+  if (extraction.source_url !== null) {
+    return { ok: false, reason: 'Distributor promotion blocked: distributor extraction must have a null URL' };
+  }
+  if (extraction.sourcing_generation_id !== generation.id) {
+    return { ok: false, reason: 'Distributor promotion blocked: extraction generation mismatch' };
+  }
+  const extractionAcceptedIds = parseJsonStringArray(extraction.accepted_evidence_attempt_ids_json);
+  if (!sameStringSet(extractionAcceptedIds, parsedDecision.acceptedEvidenceAttemptIds)) {
+    return { ok: false, reason: 'Distributor promotion blocked: extraction accepted-evidence mismatch' };
+  }
+
+  // Recompute the canonical projection from the SAME inputs the decision was
+  // made from (persisted operator resolutions included) and compare hashes.
+  const attempts = getEvidenceAttemptsByItemAndGeneration(item.id, generation.id);
+  const declaredVariantAxes = Array.from(
+    new Set(
+      attempts.flatMap((a) => (a.variantAxisDeclarations ?? []).map((d) => d.normalizedAxis)),
+    ),
+  );
+  const projection = buildDistributorRecordProjection({
+    itemId: item.id,
+    itemUpc: item.upc,
+    sourcingGenerationId: generation.id,
+    attempts,
+    acceptedAttemptIds: parsedDecision.acceptedEvidenceAttemptIds,
+    declaredVariantAxes,
+    resolutions: listResolvedConflictResolutions(item.id),
+  });
+  if (!projection.qualified || projection.evidenceHash !== parsedDecision.evidenceHash) {
+    return { ok: false, reason: 'Distributor promotion blocked: evidence hash mismatch (evidence changed since review)' };
+  }
+  if (extraction.evidence_hash !== parsedDecision.evidenceHash) {
+    return { ok: false, reason: 'Distributor promotion blocked: extraction hash mismatch (materialization tampered)' };
+  }
+
+  return { ok: true };
+}
+
+function sameStringSet(a: string[], b: string[]): boolean {
+  const sa = new Set(a);
+  const sb = new Set(b);
+  if (sa.size !== sb.size) return false;
+  for (const v of sa) if (!sb.has(v)) return false;
+  return true;
+}
+
+/** Parse a persisted JSON string array column; non-array/malformed → []. */
+function parseJsonStringArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -351,21 +505,19 @@ export async function promoteItems(
     const brandFolder = slugify(brandName) || 'unbranded';
     const imageStem = slugify(finalTitle) || slugify(item.upc) || 'product';
 
-    const evidenceAttemptImages: string[] = [];
-    try {
-      const attempts = db.query(
-        `SELECT identity_json FROM onboarding_evidence_attempts WHERE item_id = ? OR lookup_upc = ?`
-      ).all(item.id, item.upc) as { identity_json: string | null }[];
-      for (const att of attempts) {
-        if (!att.identity_json) continue;
-        const ident = JSON.parse(att.identity_json);
-        if (Array.isArray(ident.images)) {
-          for (const img of ident.images) {
-            if (typeof img === 'string' && img.trim()) evidenceAttemptImages.push(img.trim());
-          }
-        }
-      }
-    } catch { /* ignore */ }
+    // Milestone E (BLOCKER #1 closure): raw distributor evidence URLs —
+    // including accepted/current-generation ones — contribute ZERO commerce
+    // downloads. The `item_id OR lookup_upc` evidence query is DELETED; only
+    // official extracted images (extractionData.primaryImage/additionalImages)
+    // and the separately verified PI-import gate (verifyImportedResultGate)
+    // may reach the downloader. PI-6 commerceApproved assets are the ONLY
+    // distributor image path (none exist at promotion time today).
+    //
+    // Hard boundary (Milestone E review): a distributor-source item NEVER
+    // passes image args to the downloader — even if its payload somehow
+    // acquired a URL — because the distributor payload is identity-only and
+    // images may not enter commerce without PI-6 approval.
+    const isDistributorSource = item.sourceType === 'distributor_record';
 
     try {
       const processed = await downloadAndProcessImages(
@@ -373,8 +525,8 @@ export async function promoteItems(
         item.upc,
         brandFolder,
         imageStem,
-        extractionData.primaryImage ?? null,
-        [...(extractionData.additionalImages || []), ...evidenceAttemptImages],
+        isDistributorSource ? null : extractionData.primaryImage ?? null,
+        isDistributorSource ? [] : [...(extractionData.additionalImages || [])],
       );
       processedImagesMap.set(item.id, processed);
     } catch (err) {

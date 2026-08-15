@@ -49,6 +49,7 @@ import {
   findProfileGenerationById,
   listProfileGenerationsByDomain,
   updateProfileGenerationStatus,
+  insertProfileGeneration,
 } from '../db/repositories/profile-generation-repo';
 import {
   insertProfileGenerationRevision,
@@ -106,6 +107,66 @@ export const MIN_IMAGE_APPROVAL_SAMPLES = 2;
  *  and to avoid a runaway request fan-out. */
 // fallow-ignore-next-line unused-export
 export const MAX_VALIDATION_SAMPLES = 10;
+
+/**
+ * Request a governed domain profile proposal for an unprofiled domain.
+ *
+ * Enforces:
+ * 1. Domain normalization.
+ * 2. Active profile deduplication: skips if an approved profile already exists.
+ * 3. Open proposal deduplication: skips if an active, non-terminal proposal exists.
+ * 4. 24-hour cooldown: skips if a proposal attempt was created in the last 24h.
+ */
+export function requestDomainProfileProposal(
+  domain: string,
+  options: {
+    sourceUrl?: string;
+    expectedName?: string | null;
+    brandHint?: string | null;
+  } = {},
+): { created: boolean; generationId?: string; reason?: string } {
+  const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
+  if (!normalizedDomain) return { created: false, reason: 'invalid_domain' };
+
+  // 1. Check existing approved profile
+  const existingProfile = findProfileByDomain(normalizedDomain);
+  if (existingProfile) {
+    return { created: false, reason: 'profile_already_exists' };
+  }
+
+  // 2. Check open / recent generation records (cooldown + deduplication)
+  const recentGenerations = listProfileGenerationsByDomain(normalizedDomain, {
+    orderBy: 'created_at',
+    orderDirection: 'DESC',
+    limit: 5,
+  });
+
+  const active = recentGenerations.find((g) => g.status !== 'rejected' && g.status !== 'failed');
+  if (active) {
+    return { created: false, generationId: active.id, reason: 'open_proposal_exists' };
+  }
+
+  const latest = recentGenerations[0];
+  if (latest) {
+    const ageMs = Date.now() - new Date(latest.createdAt).getTime();
+    if (ageMs < 24 * 60 * 60 * 1000) {
+      return { created: false, generationId: latest.id, reason: 'cooldown_active' };
+    }
+  }
+
+  // 3. Create proposed generation record
+  const record = insertProfileGeneration({
+    domain: normalizedDomain,
+    sourceUrl: options.sourceUrl ?? `https://${normalizedDomain}`,
+    expectedName: options.expectedName ?? null,
+    brandHint: options.brandHint ?? null,
+    selectors: {},
+    status: 'proposed',
+    confidence: 0,
+  });
+
+  return { created: true, generationId: record.id };
+}
 
 // ─── Domain governance summary ────────────────────────────────────────────────
 

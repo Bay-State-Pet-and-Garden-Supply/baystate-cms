@@ -1,17 +1,27 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { unlinkSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
-import { insertItems } from '../../db/repositories/onboarding-item-repo';
+import {
+  insertItems,
+  updateItemStageStatus,
+  completeSourcingWithDecision,
+} from '../../db/repositories/onboarding-item-repo';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
 import { listChangeSets, listChangeSetItems } from '../../db/repositories/change-set-repo';
 import { assignProductToPageId } from '../../db/repositories/page-repo';
-import { type ExtractionData, ExtractionDataSchema } from '../../shared/schemas/onboarding';
+import { type ExtractionData, ExtractionDataSchema, type SourcingDecisionV2 } from '../../shared/schemas/onboarding';
+import { startSourcingGeneration, insertEvidenceAttempt } from '../../db/repositories/onboarding-evidence-repo';
+import { recordAcceptances } from '../../db/repositories/onboarding-acceptance-repo';
+import { buildDistributorRecordProjection } from '../../onboarding/sourcing/distributor-record-projection';
+import { SOURCING_ENTRY_POLICY_VERSION } from '../../onboarding/sourcing/entry-policy';
+import { createDistributor, createConnection } from '../../db/repositories/distributor-repo';
+import { materializeDistributorRecordExtraction } from '../../onboarding/sourcing/distributor-record-materializer';
 
 describe('Draft Promoter Service', () => {
   const testDbPath = path.resolve(import.meta.dirname, 'promoter-test.db');
@@ -1788,4 +1798,338 @@ describe('Draft Promoter Service', () => {
     ).get(healthy.upc) as { c: number };
     expect(healthyDrafts.c).toBe(1);
   });
+
+// ─── Milestone E: promotion image boundary + distributor provenance gate ──────
+
+/**
+ * Seed an evidence attempt whose identityJson carries images. The Milestone E
+ * fix deleted the `item_id OR lookup_upc` evidence query entirely, so NONE of
+ * these marker images may reach the image downloader or the draft media —
+ * regardless of acceptance, generation, or workspace.
+ */
+function seedAttemptWithImages(opts: {
+  itemId: string;
+  providerId?: string;
+  upc: string;
+  generationId?: string | null;
+  images: string[];
+}): string {
+  const db = getDb();
+  const id = `att-${randomUUID().slice(0, 8)}`;
+  const now = new Date().toISOString();
+  db.query(
+    `INSERT INTO onboarding_evidence_attempts
+      (id, item_id, provider_id, lookup_upc, outcome, confidence, evidence_url,
+       matched_fields_json, identity_json, warnings_json, error_code, error_message,
+       catalog_version, observed_at, sourcing_generation_id, duration_ms, created_at)
+     VALUES (?, ?, ?, ?, 'found', 0.9, NULL, ?, ?, NULL, NULL, NULL, 'v2026.3', ?, ?, NULL, ?)`,
+  ).run(
+    id,
+    opts.itemId,
+    opts.providerId ?? 'phillips',
+    opts.upc,
+    JSON.stringify(['upc']),
+    JSON.stringify({ upc: opts.upc, name: 'Product', images: opts.images }),
+    now,
+    opts.generationId ?? null,
+    now,
+  );
+  return id;
+}
+
+describe('Milestone E — promotion image boundary (BLOCKER #1 closure)', () => {
+  it('evidence-attempt images (same-item, stale-generation, same-UPC foreign) cause ZERO downloads and never reach the draft', async () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'ME Image Boundary',
+      fileName: 'me-images.xlsx',
+      totalItems: 1,
+    });
+    const [item] = insertItems(batch.id, [{
+      upc: '100000000001',
+      name: 'Boundary Product',
+      price: '$9.99',
+      brandHint: 'Boundary Brand',
+      rowNumber: 1,
+    }]);
+    const extractionData = ExtractionDataSchema.parse({
+      title: 'Boundary Product',
+      brand: 'Boundary Brand',
+      description: 'Boundary description.',
+      bulletPoints: [],
+      primaryImage: 'products/100000000001/images/primary.jpg',
+      additionalImages: [],
+      price: '$9.99',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: 'https://boundary.example/100000000001',
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const curationData = {
+      curatedTitle: 'Boundary Product',
+      titleSource: 'web',
+      suggestedPages: ['Toys'],
+      suggestedProductType: null,
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'manual',
+    };
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO page_index
+       (id, name, file_name, page_hash, created_at, updated_at)
+       VALUES ('me-boundary-page', 'Toys', 'toys.html', 'me-boundary-hash', ?, ?)`,
+      [now, now],
+    );
+    db.run(
+      `UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion',
+          stage_status = 'pending', status = 'ready', source_type = 'official_page'
+       WHERE id = ?`,
+      [JSON.stringify(extractionData), JSON.stringify(curationData), item.id],
+    );
+
+    // Evidence the OLD `item_id OR lookup_upc` query would have matched:
+    const gen = startSourcingGeneration(item.id, 'automatic');
+    // (a) same-item attempt with images
+    seedAttemptWithImages({ itemId: item.id, upc: item.upc, generationId: gen.id, images: ['evidence/a.jpg'] });
+    // (b) stale-generation attempt (old generation superseded)
+    const staleGen = startSourcingGeneration(item.id, 'automatic');
+    // supersede the current one so staleGen is NOT current
+    db.query(`UPDATE sourcing_generations SET status = 'superseded' WHERE id = ?`).run(staleGen.id);
+    seedAttemptWithImages({ itemId: item.id, upc: item.upc, generationId: staleGen.id, images: ['evidence/b.jpg'] });
+    // (c) same-lookup-UPC attempt on a DIFFERENT item (the old `lookup_upc`
+    // match would have pulled this item's images too). The foreign item has
+    // its OWN UPC; only the attempt's lookup_upc equals the target's UPC.
+    const foreignBatch = createBatch({ workspaceId: wsId, name: 'Foreign', fileName: 'f.csv', totalItems: 1 });
+    const [foreignItem] = insertItems(foreignBatch.id, [{ upc: '300000000003', name: 'Foreign Item', rowNumber: 1 }]);
+    seedAttemptWithImages({ itemId: foreignItem.id, upc: item.upc, images: ['evidence/c.jpg'] });
+
+    seedAcceptedCategoryProposal(db, item.upc, 'Toys', `run-${item.upc}-${randomUUID().slice(0, 4)}`);
+
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(promoteRes.count).toBe(1);
+    expect(promoteRes.changeSetId).toBeDefined();
+
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
+    expect(csItems.length).toBe(1);
+    const draft = JSON.parse(csItems[0].draftJson);
+    const media = draft.core?.media ?? {};
+    // The ONLY image is the official extracted primary; no evidence marker
+    // (evidence/a.jpg, evidence/b.jpg, evidence/c.jpg) anywhere.
+    expect(media.primary).toBe('products/100000000001/images/primary.jpg');
+    expect(media.additional ?? []).toEqual([]);
+    const serialized = JSON.stringify(draft);
+    expect(serialized).not.toContain('evidence/a.jpg');
+    expect(serialized).not.toContain('evidence/b.jpg');
+    expect(serialized).not.toContain('evidence/c.jpg');
+  });
+});
+
+describe('Milestone E — distributor promotion provenance gate (computePromotionGate)', () => {
+  /** Build a fully qualified distributor item at promotion/pending with a durable materialized extraction row. */
+  function seedQualifiedDistributorItem(): { item: { id: string; upc: string }; decision: SourcingDecisionV2 } {
+    const sku = '200000000002';
+    const batch = createBatch({ workspaceId: wsId, name: 'ME Distributor Gate', fileName: 'me-dist.xlsx', totalItems: 1 });
+    const [item] = insertItems(
+      batch.id,
+      [{ upc: sku, name: 'Dist Product', price: '$14.99', rowNumber: 1 }],
+      'sourcing',
+      SOURCING_ENTRY_POLICY_VERSION,
+    );
+    const db = getDb();
+    const gen = startSourcingGeneration(item.id, 'automatic');
+    const distId = `phillips-${randomUUID().slice(0, 4)}`;
+    const dist = createDistributor({ id: distId, name: 'Phillips', status: 'active' });
+    void dist;
+    const conn = createConnection({ workspaceId: wsId, distributorId: distId, connectorType: 'api' });
+    const attempt = insertEvidenceAttempt({
+      itemId: item.id,
+      providerId: 'phillips',
+      distributorConnectionId: conn.id,
+      lookupUpc: sku,
+      outcome: 'found',
+      confidence: 0.9,
+      evidenceUrl: null,
+      matchedFields: ['upc', 'name'],
+      identityJson: JSON.stringify({ upc: sku, name: 'Dist Product 5lb', brand: 'Dist Brand', weight: '5 lb' }),
+      warningsJson: null,
+      errorCode: null,
+      errorMessage: null,
+      catalogVersion: 'v2026.3',
+      observedAt: '2026-08-13T00:00:00.000Z',
+      sourcingGenerationId: gen.id,
+      durationMs: 12,
+    });
+    recordAcceptances(item.id, [attempt.id], 'system', 'test');
+    const projection = buildDistributorRecordProjection({
+      itemId: item.id,
+      itemUpc: sku,
+      sourcingGenerationId: gen.id,
+      attempts: [attempt],
+      acceptedAttemptIds: [attempt.id],
+      declaredVariantAxes: [],
+    });
+    if (!projection.qualified) {
+      throw new Error(`fixture must qualify: ${projection.reasonCodes.join(',')}`);
+    }
+    const decision: SourcingDecisionV2 = {
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
+      providerIds: projection.providerIds,
+      sourcingGenerationId: gen.id,
+      conflicts: [],
+      warnings: [],
+      decidedAt: new Date().toISOString(),
+      evidenceHash: projection.evidenceHash,
+      sourceType: 'distributor_record',
+      target: 'extraction',
+    };
+    const routed = completeSourcingWithDecision(item.id, decision, 'extraction');
+    if (!routed.ok) throw new Error(`routing failed: ${routed.reason}`);
+    // Claim + materialize (the durable distributor extraction row + payload).
+    updateItemStageStatus(item.id, 'in_progress');
+    const materialized = materializeDistributorRecordExtraction(item.id, wsId);
+    if (!materialized.ok) throw new Error(`materialization failed: ${materialized.code}`);
+    // Advance to promotion/pending with curation data + gate-ready proposals.
+    const extractionData = ExtractionDataSchema.parse({
+      title: 'Dist Product',
+      brand: 'Dist Brand',
+      description: null,
+      bulletPoints: [],
+      primaryImage: null,
+      additionalImages: [],
+      price: null,
+      weight: '5 lb',
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: null,
+      confidence: 0,
+      fieldProvenance: {},
+    });
+    const curationData = {
+      curatedTitle: 'Dist Product',
+      titleSource: 'web',
+      suggestedPages: ['Toys'],
+      suggestedProductType: null,
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'manual',
+    };
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO page_index
+       (id, name, file_name, page_hash, created_at, updated_at)
+       VALUES ('me-dist-page', 'Toys', 'toys.html', 'me-dist-hash', ?, ?)`,
+      [now, now],
+    );
+    db.run(
+      `UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion',
+          stage_status = 'pending', status = 'ready'
+       WHERE id = ?`,
+      [JSON.stringify(extractionData), JSON.stringify(curationData), item.id],
+    );
+    seedAcceptedCategoryProposal(db, sku, 'Toys', `run-${sku}-${randomUUID().slice(0, 4)}`);
+    return { item: { id: item.id, upc: sku }, decision };
+  }
+
+  it('a valid distributor materialization passes the promotion gate (identity-only drafts still block on the mandatory primary image)', async () => {
+    const { item, decision } = seedQualifiedDistributorItem();
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    // The provenance gate PASSES (no 'Distributor promotion blocked' reason):
+    // the item only fails the DRAFT builder's mandatory-image rule because
+    // distributor extraction is identity-only (no commerce images yet — PI-6).
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).not.toContain('Distributor promotion blocked');
+    expect(promoteRes.failures[0].error).toContain('Primary Image');
+    void decision;
+  });
+
+  it('a TAMPERED extraction evidence hash blocks promotion (stale materialization cannot draft)', async () => {
+    const { item } = seedQualifiedDistributorItem();
+    getDb().query(`UPDATE onboarding_extractions SET evidence_hash = ? WHERE item_id = ?`).run('b'.repeat(64), item.id);
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('hash mismatch');
+  });
+
+  it('a SUPERSEDED sourcing generation blocks promotion', async () => {
+    const { item } = seedQualifiedDistributorItem();
+    getDb().query(`UPDATE sourcing_generations SET status = 'superseded' WHERE item_id = ?`).run(item.id);
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('superseded');
+  });
+
+  it('a TAMPERED extraction-row source_type blocks promotion (Milestone E review)', async () => {
+    const { item } = seedQualifiedDistributorItem();
+    // The durable row no longer says distributor_record — the immutability of
+    // the materialization is broken, so drafting must fail closed even though
+    // generation + hash still match.
+    getDb().query(`UPDATE onboarding_extractions SET source_type = 'official_page' WHERE item_id = ?`).run(item.id);
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('source type mismatch');
+  });
+
+  it('a TAMPERED extraction-row accepted-attempt column blocks promotion (Milestone E review)', async () => {
+    const { item, decision } = seedQualifiedDistributorItem();
+    // The durable accepted-attempt column diverges from the decision set — a
+    // row whose materialization provenance was rewritten can never draft.
+    getDb().query(`UPDATE onboarding_extractions SET accepted_evidence_attempt_ids_json = ? WHERE item_id = ?`).run(
+      JSON.stringify([...decision.acceptedEvidenceAttemptIds, 'att-foreign']),
+      item.id,
+    );
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('accepted-evidence mismatch');
+  });
+
+  it('a distributor payload containing raw image URLs NEVER reaches the downloader (Milestone E review)', async () => {
+    const { item } = seedQualifiedDistributorItem();
+    // Simulate a tampered/acquired payload with raw distributor URLs: the
+    // provenance gate still passes (the durable row is untampered), but the
+    // downloader boundary must pass ZERO image args for distributor sources —
+    // the URL never becomes a processed image, so the draft builder still
+    // reports the mandatory-primary-image failure (no media, no fetch).
+    const row = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(item.id) as { extraction_data_json: string };
+    const payload = JSON.parse(row.extraction_data_json);
+    payload.primaryImage = 'https://evidence.example/primary.jpg';
+    payload.additionalImages = ['https://evidence.example/alt1.jpg', 'https://evidence.example/alt2.jpg'];
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(payload), item.id);
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    // Unique run/proposal ids (the deterministic seed collides across the
+    // gate-failing siblings which run earlier and never reach the proposal
+    // check — this test passes the gate and needs a fresh accepted proposal).
+    seedAcceptedCategoryProposal(getDb(), item.upc, 'Dog Food', `run-img-${randomUUID().slice(0, 6)}`);
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    // The draft builder fails on the missing primary IMAGE (the raw URL was
+    // never downloaded/processed) — and there is NO download failure and no
+    // media anywhere in any change-set item.
+    expect(promoteRes.failures[0].error).toContain('Primary Image');
+    expect(promoteRes.failures[0].error).not.toContain('https://evidence.example');
+  });
+});
 });

@@ -44,6 +44,7 @@ import { buildResearchPrompt } from './pi/pi-prompt-builder';
 import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
 import type { BundleImageCandidate } from './workflow/bundle';
+import { runDeterministicPreflight } from './preflight';
 
 const PI_RESULT_SCHEMA_VERSION = 1;
 
@@ -543,7 +544,20 @@ export async function startProductIntelligenceRun(
   const completed = (async () => {
     let result: ProductResearchResult;
     try {
-      result = await executor.startResearch(parsedInput, context, sink);
+      let preflightResult: ProductResearchResult | null = null;
+      try {
+        preflightResult = await runDeterministicPreflight(parsedInput, context, sink);
+      } catch (preflightErr) {
+        sink.emitDomain('log', {
+          message: `Deterministic preflight fell through: ${preflightErr instanceof Error ? preflightErr.message : String(preflightErr)}`,
+        });
+      }
+
+      if (preflightResult) {
+        result = preflightResult;
+      } else {
+        result = await executor.startResearch(parsedInput, context, sink);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       transitionPiRunStatus(run.id, 'failed', { errorCode: 'unknown', errorMessage: message });
@@ -1318,7 +1332,7 @@ export async function replayPiRun(
     compare?: boolean;
     executor?: ProductIntelligenceExecutor;
   },
-): Promise<{ run: PiRunRow; mode: 'deterministic' | 'rerun' }> {
+): Promise<{ run: PiRunRow; mode: 'deterministic' | 'rerun'; completed?: Promise<ProductResearchResult> }> {
   const origin = getPiRun(runId);
   if (!origin) throw new Error(`Product intelligence run not found: ${runId}`);
   if (origin.status === 'running') {
@@ -1458,7 +1472,7 @@ export async function replayPiRun(
   if (options.compare) {
     createPiComparison({ runId: started.run.id, baselineType: 'pi_run', baselineRef: origin.id });
   }
-  return { run: started.run, mode: 'rerun' };
+  return { run: started.run, mode: 'rerun', completed: started.completed };
 }
 
 export type { PiRunRow };

@@ -1,5 +1,6 @@
 import React from 'react';
 import type { ExtractionData } from '../../../shared/schemas/onboarding';
+import type { SourcingQualificationView } from '../../onboarding-api';
 
 interface ExtractionStagePanelProps {
   extractionData: ExtractionData | null;
@@ -9,6 +10,24 @@ interface ExtractionStagePanelProps {
   manualUrlInput: string;
   setManualUrlInput: (url: string) => void;
   onSetManualUrl: (url: string) => Promise<void>;
+  /** Item source type (Amendment A): distributor_record items use the deterministic materializer, not a scraped page. */
+  sourceType?: 'official_page' | 'distributor_record';
+  /**
+   * Server-derived distributor-record qualification view (from item detail).
+   * Used to render sourcing provenance for distributor items whose extraction
+   * payload is not yet materialized (extraction pending / failed): the
+   * accepted attempts, providers, and evidence hash remain visible even when
+   * `extractionData` is null.
+   */
+  qualificationView?: SourcingQualificationView | null;
+  /** Item stage status: distinguishes extraction pending vs failed null-payload states. */
+  stageStatus?: string;
+  /**
+   * Operator "Continue with Official Site Discovery" (MD item 8). Provided by
+   * the board only for distributor-source extraction items at pending/failed/
+   * completed-before-curation. The server owns the guarded transaction.
+   */
+  onContinueWithOfficialDiscovery?: () => Promise<void>;
 }
 
 export function ExtractionStagePanel({
@@ -19,15 +38,112 @@ export function ExtractionStagePanel({
   manualUrlInput,
   setManualUrlInput,
   onSetManualUrl,
+  sourceType = 'official_page',
+  qualificationView = null,
+  stageStatus,
+  onContinueWithOfficialDiscovery,
 }: ExtractionStagePanelProps) {
+  const isDistributor = sourceType === 'distributor_record';
+  const distributorProvenance = extractionData?.distributorRecordProvenance ?? null;
+  const distributorProviderIds = extractionData?.distributorProviderIds ?? [];
+  const distributorAttemptIds = extractionData?.distributorEvidenceAttemptIds ?? [];
+  const notYetMaterialized = isDistributor && !extractionData;
+  const materializationFailed = notYetMaterialized && stageStatus === 'failed';
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Source URL Banner */}
+      {/* Source Banner */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <h3 style={{ fontSize: 13, fontWeight: 700, margin: 0, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-          🔗 Source URL
+          {isDistributor ? '🏬 Distributor Record' : '🔗 Source URL'}
         </h3>
-        {showEditUrl ? (
+
+        {isDistributor ? (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+              background: '#fffbeb',
+              padding: '10px 14px',
+              borderRadius: 8,
+              border: '1px solid #fde68a',
+            }}
+          >
+            <span style={{ fontSize: 13, color: '#92400e', fontWeight: 600 }}>
+              {extractionData
+                ? 'Materialized from a qualified distributor record (no product page).'
+                : materializationFailed
+                  ? 'Materialization failed — review provenance and use the guarded fallback.'
+                  : 'Distributor record qualified — materialization pending (no product page).'}
+            </span>
+            {distributorProviderIds.length > 0 ? (
+              <span style={{ fontSize: 12, color: '#78350f' }}>
+                Providers: <strong>{distributorProviderIds.join(', ')}</strong>
+              </span>
+            ) : qualificationView && qualificationView.providerIds.length > 0 ? (
+              <span style={{ fontSize: 12, color: '#78350f' }}>
+                Providers: <strong>{qualificationView.providerIds.join(', ')}</strong>
+              </span>
+            ) : null}
+            {distributorProvenance ? (
+              <details style={{ fontSize: 12, color: '#78350f' }}>
+                <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Distributor provenance (generation / attempts / hash)</summary>
+                <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span>Generation: <strong>{distributorProvenance.sourcingGenerationId}</strong></span>
+                  <span>Accepted attempts: <strong>{distributorProvenance.acceptedEvidenceAttemptIds.join(', ') || '—'}</strong></span>
+                  <span>Catalog versions: <strong>{distributorProvenance.catalogVersions.join(', ') || '—'}</strong></span>
+                  <span>Evidence hash: <code style={{ wordBreak: 'break-all' }}>{distributorProvenance.evidenceHash}</code></span>
+                </div>
+              </details>
+            ) : qualificationView ? (
+              <details style={{ fontSize: 12, color: '#78350f' }}>
+                <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                  Distributor qualification (providers / attempts / hash)
+                </summary>
+                <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span>Qualified: <strong>{qualificationView.qualified ? 'yes' : 'no'}</strong></span>
+                  {qualificationView.reasonCodes.length > 0 && (
+                    <span>Reason codes: <strong>{qualificationView.reasonCodes.join(', ')}</strong></span>
+                  )}
+                  <span>Generation: <strong>{qualificationView.sourcingGenerationId ?? '—'}</strong></span>
+                  <span>Accepted attempts: <strong>{qualificationView.acceptedEvidenceAttemptIds.join(', ') || '—'}</strong></span>
+                  <span>Evidence hash: <code style={{ wordBreak: 'break-all' }}>{qualificationView.evidenceHash ?? '—'}</code></span>
+                </div>
+              </details>
+            ) : null}
+            {distributorAttemptIds.length > 0 ? (
+              <span style={{ fontSize: 12, color: '#78350f' }}>
+                Evidence attempts: <strong>{distributorAttemptIds.join(', ')}</strong>
+              </span>
+            ) : qualificationView && qualificationView.acceptedEvidenceAttemptIds.length > 0 ? (
+              <span style={{ fontSize: 12, color: '#78350f' }}>
+                Evidence attempts: <strong>{qualificationView.acceptedEvidenceAttemptIds.join(', ')}</strong>
+              </span>
+            ) : null}
+            {onContinueWithOfficialDiscovery && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await onContinueWithOfficialDiscovery();
+                }}
+                style={{
+                  alignSelf: 'flex-start',
+                  padding: '6px 12px',
+                  background: '#fff',
+                  border: '1px solid #d97706',
+                  color: '#92400e',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                Continue with Official Site Discovery
+              </button>
+            )}
+          </div>
+        ) : showEditUrl ? (
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               type="text"
@@ -108,34 +224,63 @@ export function ExtractionStagePanel({
       {extractionData ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 16, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
           <h3 style={{ fontSize: 13, fontWeight: 700, margin: 0, color: '#1e293b', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            📋 Raw Scraped Spec Data
+            {isDistributor ? '📦 Distributor Record Data (identity-only)' : '📋 Raw Scraped Spec Data'}
           </h3>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <tbody>
               {extractionData.title && (
                 <tr>
-                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Title</td>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Title</td>
                   <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9', wordBreak: 'break-word', fontWeight: 500 }}>{extractionData.title}</td>
                 </tr>
               )}
               {extractionData.brand && (
                 <tr>
-                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Brand</td>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Brand</td>
                   <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.brand}</td>
                 </tr>
               )}
-              {extractionData.description && (
+              {extractionData.weight && (
                 <tr>
-                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Description</td>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Weight</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.weight}</td>
+                </tr>
+              )}
+              {isDistributor && extractionData.distributorSku && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Distributor SKU</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.distributorSku}</td>
+                </tr>
+              )}
+              {isDistributor && extractionData.manufacturerPartNumber && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>MPN</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.manufacturerPartNumber}</td>
+                </tr>
+              )}
+              {isDistributor &&
+                extractionData.variantAttributes &&
+                Object.keys(extractionData.variantAttributes).length > 0 &&
+                Object.entries(extractionData.variantAttributes).map(([axis, value]) => (
+                  <tr key={axis}>
+                    <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>{axis}</td>
+                    <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{String(value)}</td>
+                  </tr>
+                ))}
+              {!isDistributor && extractionData.description && (
+                <tr>
+                  <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Description</td>
                   <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9', wordBreak: 'break-word', lineHeight: 1.4 }}>
                     {extractionData.description.slice(0, 500)}{extractionData.description.length > 500 ? '…' : ''}
                   </td>
                 </tr>
               )}
-              {extractionData.customFields && Object.keys(extractionData.customFields).length > 0 && (
+              {!isDistributor &&
+                extractionData.customFields &&
+                Object.keys(extractionData.customFields).length > 0 && (
                 Object.entries(extractionData.customFields).map(([fieldName, value]) => (
                   <tr key={fieldName}>
-                    <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>{fieldName}</td>
+                    <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>{fieldName}</td>
                     <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{String(value)}</td>
                   </tr>
                 ))
@@ -158,7 +303,13 @@ export function ExtractionStagePanel({
         </div>
       ) : (
         <div style={{ padding: 16, border: '1px solid #e5e7eb', borderRadius: 8, background: '#f9fafb', fontSize: 13, color: '#6b7280', fontStyle: 'italic' }}>
-          No raw extraction data available yet for this item.
+          {isDistributor
+            ? qualificationView && !extractionData
+              ? materializationFailed
+                ? 'Distributor record materialization failed. Review the provenance below and use the guarded fallback, or re-run when evidence changes.'
+                : 'Distributor evidence is qualified; record materialization is pending.'
+              : 'No distributor record materialization available yet for this item.'
+            : 'No raw extraction data available yet for this item.'}
         </div>
       )}
     </div>

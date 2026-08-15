@@ -6,6 +6,7 @@ import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import { listItemsByBatch } from '../../db/repositories/onboarding-item-repo';
+import { overrideSourcingFlags, resetSourcingFlagsOverride } from '../../onboarding/flags';
 import app from '../../server/app';
 
 describe('Onboarding Duplicate Product Skipping', () => {
@@ -13,6 +14,7 @@ describe('Onboarding Duplicate Product Skipping', () => {
   const wsId = 'ws-skip-test-id';
 
   beforeAll(() => {
+    overrideSourcingFlags({ sourcingEngineEnabled: false });
     try { resetDb(); } catch { /* ok */ }
     initDb(testDbPath);
     runMigrations();
@@ -54,6 +56,7 @@ describe('Onboarding Duplicate Product Skipping', () => {
   });
 
   afterAll(() => {
+    resetSourcingFlagsOverride();
     closeDb();
     try { unlinkSync(testDbPath); } catch { /* ok */ }
   });
@@ -95,6 +98,10 @@ describe('Onboarding Duplicate Product Skipping', () => {
     expect(items.length).toBe(1);
     expect(items[0].upc).toBe('SKU-NEW');
     expect(items[0].isDuplicate).toBe(false);
+    // Disabled sourcing engine: the surviving new item enters Discovery.
+    expect(items[0].stage).toBe('discovery');
+    expect(items[0].stageStatus).toBe('pending');
+    expect(items[0].sourcingDecision).toBeNull();
   });
 
   it('should return 400 error when all products in the batch are duplicates', async () => {

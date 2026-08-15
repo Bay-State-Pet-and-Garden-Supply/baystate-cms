@@ -239,10 +239,10 @@ describe('PI-10 replay modes', () => {
 
   it('same-configuration rerun launches a real execution with the origin config', async () => {
     const origin = makeTerminalRun();
-    // P0-2/P0-4: a rerun requires the origin policy to be an active approved record.
     seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
     const executor = new FakeExecutor();
-    const { run, mode } = await replayPiRun(origin, { mode: 'rerun', executor });
+    const { run, mode, completed } = await replayPiRun(origin, { mode: 'rerun', executor });
+    if (completed) await completed;
 
     expect(mode).toBe('rerun');
     expect(executor.calls).toBe(1);
@@ -318,7 +318,8 @@ describe('PI-10 replay modes', () => {
     const origin = makeTerminalRun('pi');
     seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
     const executor = new FakeExecutor();
-    const { run, mode } = await replayPiRun(origin, { mode: 'rerun', executor });
+    const { run, mode, completed } = await replayPiRun(origin, { mode: 'rerun', executor });
+    if (completed) await completed;
     expect(mode).toBe('rerun');
     expect(executor.calls).toBe(1);
     expect(run.originRunId).toBe(origin);
@@ -333,7 +334,8 @@ describe('PI-10 replay modes', () => {
     expect(originRow.basePolicyId).toBeTruthy();
     expect(originRow.policyOverridesJson).toContain('maxToolCalls');
     const executor = new FakeExecutor();
-    const { run, mode } = await replayPiRun(origin.id, { mode: 'rerun', executor });
+    const { run, mode, completed } = await replayPiRun(origin.id, { mode: 'rerun', executor });
+    if (completed) await completed;
     expect(mode).toBe('rerun');
     expect(executor.calls).toBe(1);
     // The replay run inherits the origin's base lineage (rerun-of-rerun

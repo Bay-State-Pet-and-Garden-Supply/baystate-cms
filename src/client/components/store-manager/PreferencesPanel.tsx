@@ -6,6 +6,7 @@ import { formatPreferenceRevision } from '../../store-manager-command-logic';
 interface PreferencesPanelProps {
   open: boolean;
   onClose: () => void;
+  variant?: 'modal' | 'inline';
 }
 
 /**
@@ -13,7 +14,7 @@ interface PreferencesPanelProps {
  * workspace configuration — the model has no tool to write them and chat text
  * is never parsed into them. Saving creates a NEW immutable revision.
  */
-export function PreferencesPanel({ open, onClose }: PreferencesPanelProps) {
+export function PreferencesPanel({ open, onClose, variant = 'inline' }: PreferencesPanelProps) {
   const [labelsJson, setLabelsJson] = useState('{}');
   const [vendorConvention, setVendorConvention] = useState('unknown');
   const [healthExclusions, setHealthExclusions] = useState('');
@@ -49,6 +50,17 @@ export function PreferencesPanel({ open, onClose }: PreferencesPanelProps) {
       cancelled = true;
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -105,37 +117,40 @@ export function PreferencesPanel({ open, onClose }: PreferencesPanelProps) {
     }
   };
 
-  return (
+  const isInline = variant === 'inline';
+
+  const cardContent = (
     <div
-      role="dialog"
+      role={isInline ? 'region' : 'dialog'}
+      aria-modal={isInline ? undefined : true}
       aria-label="Store Manager operational preferences"
+      onClick={(e) => e.stopPropagation()}
       style={{
-        position: 'absolute',
-        right: 24,
-        top: 64,
-        zIndex: 50,
-        width: 420,
-        maxHeight: '70vh',
+        width: '100%',
+        maxWidth: isInline ? 800 : 480,
+        maxHeight: isInline ? undefined : '85vh',
         overflowY: 'auto',
-        padding: 16,
+        padding: 24,
         background: colors.whiteSurface,
         border: `1px solid ${colors.cardBorder}`,
-        borderRadius: rounded.md,
-        boxShadow: '0 12px 32px rgba(0,0,0,0.16)',
+        borderRadius: rounded.lg,
+        boxShadow: isInline ? '0 1px 3px rgba(33,20,20,0.04)' : '0 20px 25px -5px rgba(0, 0, 0, 0.15)',
         fontFamily: fonts.body,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: colors.ledgerCharcoal }}>Operational preferences</div>
-          <div style={{ fontSize: 11, color: colors.mulchBrown }}>{formatPreferenceRevision(active)}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal }}>Operational preferences</div>
+          <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 2 }}>{formatPreferenceRevision(active)}</div>
         </div>
-        <button type="button" onClick={onClose} aria-label="Close preferences" className="btn btn-outline" style={{ fontSize: 12, padding: '4px 10px' }}>
-          Close
-        </button>
+        {isInline ? null : (
+          <button type="button" onClick={onClose} aria-label="Close preferences" className="btn btn-outline" style={{ fontSize: 12, padding: '4px 12px' }}>
+            ✕ Close
+          </button>
+        )}
       </div>
 
-      <div style={{ fontSize: 11, color: colors.mulchBrown, marginBottom: 10 }}>
+      <div style={{ fontSize: 12, color: colors.mulchBrown, marginBottom: 12 }}>
         Explicit, versioned workspace configuration. Saved revisions are immutable; edits create a new version. The
         assistant never writes or infers preferences from chat.
       </div>
@@ -147,16 +162,16 @@ export function PreferencesPanel({ open, onClose }: PreferencesPanelProps) {
           onChange={(e) => setLabelsJson(e.target.value)}
           rows={3}
           spellCheck={false}
-          style={{ width: '100%', marginTop: 4, padding: 8, fontSize: 12, fontFamily: fonts.mono, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+          style={{ width: '100%', marginTop: 4, padding: 8, fontSize: 12, fontFamily: fonts.mono, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, boxSizing: 'border-box' }}
         />
       </label>
 
-      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 8 }}>
+      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 12 }}>
         Vendor identifier convention
         <select
           value={vendorConvention}
           onChange={(e) => setVendorConvention(e.target.value)}
-          style={{ width: '100%', marginTop: 4, padding: 6, fontSize: 12, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+          style={{ width: '100%', marginTop: 4, padding: 6, fontSize: 12, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, boxSizing: 'border-box' }}
         >
           <option value="unknown">(none)</option>
           <option value="upc_a">UPC-A</option>
@@ -166,7 +181,7 @@ export function PreferencesPanel({ open, onClose }: PreferencesPanelProps) {
         </select>
       </label>
 
-      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 8 }}>
+      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 12 }}>
         Health exclusions (one SKU per line)
         <textarea
           value={healthExclusions}
@@ -174,29 +189,59 @@ export function PreferencesPanel({ open, onClose }: PreferencesPanelProps) {
           rows={3}
           spellCheck={false}
           placeholder="SKU-100&#10;SKU-200"
-          style={{ width: '100%', marginTop: 4, padding: 8, fontSize: 12, fontFamily: fonts.mono, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+          style={{ width: '100%', marginTop: 4, padding: 8, fontSize: 12, fontFamily: fonts.mono, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, boxSizing: 'border-box' }}
         />
       </label>
 
-      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 8 }}>
+      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 12 }}>
         Review-scope defaults (JSON)
         <textarea
           value={reviewScopesJson}
           onChange={(e) => setReviewScopesJson(e.target.value)}
           rows={3}
           spellCheck={false}
-          style={{ width: '100%', marginTop: 4, padding: 8, fontSize: 12, fontFamily: fonts.mono, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+          style={{ width: '100%', marginTop: 4, padding: 8, fontSize: 12, fontFamily: fonts.mono, borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, boxSizing: 'border-box' }}
         />
       </label>
 
-      {error && <div style={{ color: colors.signetBurgundy, fontSize: 12, marginTop: 8 }}>{error}</div>}
-      {notice && <div style={{ color: colors.seedlingGreen, fontSize: 12, marginTop: 8 }}>{notice}</div>}
+      {error && <div style={{ color: colors.signetBurgundy, fontSize: 12, marginTop: 10 }}>{error}</div>}
+      {notice && <div style={{ color: colors.seedlingGreen, fontSize: 12, marginTop: 10 }}>{notice}</div>}
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button type="button" onClick={save} disabled={saving} className="btn btn-primary" style={{ fontSize: 12, padding: '6px 16px' }}>
+      <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
+        <button type="button" onClick={save} disabled={saving} className="btn btn-primary" style={{ fontSize: 12, padding: '8px 18px' }}>
           {saving ? 'Saving…' : 'Save new revision'}
         </button>
       </div>
+    </div>
+  );
+
+  if (isInline) {
+    return (
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', background: colors.feedBagCream }}>
+        {cardContent}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'rgba(33, 20, 20, 0.45)',
+        backdropFilter: 'blur(2px)',
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+      onClick={onClose}
+    >
+      {cardContent}
     </div>
   );
 }

@@ -1609,3 +1609,474 @@ describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
     expect(db.query("SELECT value FROM app_meta WHERE key = 'store_manager_runtime_schema_version'").get()).toBeTruthy();
   });
 });
+
+describe('Distributor V2 schema migration (ADR 0014)', () => {
+  const v2DbPath = '/tmp/baystate-cms-v2-test.db';
+  let db: ReturnType<typeof getDb>;
+
+  beforeAll(() => {
+    try { unlinkSync(v2DbPath); } catch { /* ok */ }
+    initDb(v2DbPath);
+    runMigrations();
+    db = getDb();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(v2DbPath); } catch { /* ok */ }
+  });
+
+  function evidenceColumnNames(): string[] {
+    return (db.query('PRAGMA table_info(onboarding_evidence_attempts)').all() as Array<{ name: string }>).map((c) => c.name);
+  }
+
+  function downgradeToPreV2(): void {
+    // Simulate a pre-V2 database: drop the six recovered tables + generation
+    // table + brand profiles, drop the idempotency index, delete the marker,
+    // and rebuild onboarding_evidence_attempts to the exact 13-column shape.
+    db.exec('DROP TABLE IF EXISTS onboarding_item_evidence_acceptances');
+    db.exec('DROP TABLE IF EXISTS onboarding_evidence_conflict_candidates');
+    db.exec('DROP TABLE IF EXISTS onboarding_evidence_conflicts');
+    db.exec('DROP TABLE IF EXISTS distributor_catalog_snapshots');
+    db.exec('DROP TABLE IF EXISTS distributor_connections');
+    db.exec('DROP TABLE IF EXISTS distributors');
+    db.exec('DROP TABLE IF EXISTS sourcing_generations');
+    db.exec('DROP TABLE IF EXISTS brand_advisory_profiles');
+    db.exec('DROP INDEX IF EXISTS idx_evidence_attempts_generation_provider');
+    db.exec("DELETE FROM app_meta WHERE key = 'distributor_v2_schema_version'");
+
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec(`CREATE TABLE onboarding_evidence_attempts_13 (
+      id TEXT PRIMARY KEY,
+      item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+      provider_id TEXT NOT NULL,
+      lookup_upc TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 0.0,
+      evidence_url TEXT,
+      matched_fields_json TEXT NOT NULL DEFAULT '[]',
+      identity_json TEXT,
+      warnings_json TEXT,
+      error_code TEXT,
+      error_message TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    db.exec(`INSERT INTO onboarding_evidence_attempts_13
+      SELECT id, item_id, provider_id, lookup_upc, outcome, confidence, evidence_url,
+             matched_fields_json, identity_json, warnings_json, error_code, error_message, created_at
+      FROM onboarding_evidence_attempts`);
+    db.exec('DROP TABLE onboarding_evidence_attempts');
+    db.exec('ALTER TABLE onboarding_evidence_attempts_13 RENAME TO onboarding_evidence_attempts');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_onboarding_evidence_attempts_item ON onboarding_evidence_attempts(item_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_onboarding_evidence_attempts_provider ON onboarding_evidence_attempts(provider_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_onboarding_evidence_attempts_upc ON onboarding_evidence_attempts(lookup_upc)');
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+
+  it('fresh install creates all V2 tables, columns, and the marker', () => {
+    const tables = db
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('sourcing_generations','distributors','distributor_connections','distributor_catalog_snapshots','onboarding_evidence_conflicts','onboarding_evidence_conflict_candidates','onboarding_item_evidence_acceptances','brand_advisory_profiles')")
+      .all() as Array<{ name: string }>;
+    expect(new Set(tables.map((t) => t.name))).toEqual(
+      new Set(['sourcing_generations','distributors','distributor_connections','distributor_catalog_snapshots','onboarding_evidence_conflicts','onboarding_evidence_conflict_candidates','onboarding_item_evidence_acceptances','brand_advisory_profiles']),
+    );
+
+    const cols = evidenceColumnNames();
+    for (const col of ['distributor_connection_id','catalog_snapshot_id','catalog_version','observed_at','expires_at','sourcing_generation_id']) {
+      expect(cols).toContain(col);
+    }
+
+    const marker = db.query("SELECT value FROM app_meta WHERE key = 'distributor_v2_schema_version'").get() as { value: string };
+    expect(marker.value).toBe('1');
+  });
+
+  it('idempotent second run changes nothing', () => {
+    expect(() => runMigrations()).not.toThrow();
+    const rows = db.query("SELECT COUNT(*) as cnt FROM app_meta WHERE key = 'distributor_v2_schema_version'").get() as { cnt: number };
+    expect(rows.cnt).toBe(1);
+  });
+
+  it('13-column pre-V2 database upgrades: columns added (incl. catalog_version), backfill, legacy binding', () => {
+    // Seed a legacy workspace/item/attempt chain BEFORE downgrade so the
+    // attempt survives the table rebuild.
+    insertWorkspace({
+      id: 'v2-w1', name: 'V2 WS', workspacePath: '/tmp/v2-ws', gitPath: '/tmp/v2-ws/.git',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      bootstrapStatus: 'complete', baselineCommit: null,
+    });
+    const batch = createBatch({ workspaceId: 'v2-w1', name: 'V2 Batch', fileName: 'v2.csv', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '012345678999', name: 'Legacy Item', rowNumber: 1 }]);
+
+    downgradeToPreV2();
+    expect(evidenceColumnNames()).not.toContain('catalog_version');
+    expect(evidenceColumnNames()).not.toContain('sourcing_generation_id');
+
+    // Legacy attempt with a NULL observed_at (pre-V2 rows have no such column).
+    db.query(
+      `INSERT INTO onboarding_evidence_attempts (id, item_id, provider_id, lookup_upc, outcome, confidence, evidence_url, matched_fields_json, identity_json, warnings_json, error_code, error_message, created_at)
+       VALUES ('legacy-attempt-1', ?, 'phillips', '012345678999', 'found', 0.9, NULL, '[]', NULL, NULL, NULL, NULL, '2026-01-02T00:00:00.000Z')`,
+    ).run(item.id);
+
+    // Re-run migrations: the V2 block must re-execute on the pre-V2 database.
+    runMigrations();
+
+    const cols = evidenceColumnNames();
+    for (const col of ['distributor_connection_id','catalog_snapshot_id','catalog_version','observed_at','expires_at','sourcing_generation_id']) {
+      expect(cols).toContain(col);
+    }
+
+    // observed_at backfilled from created_at.
+    const attempt = db.query('SELECT observed_at, created_at, distributor_connection_id FROM onboarding_evidence_attempts WHERE id = ?').get('legacy-attempt-1') as
+      { observed_at: string; created_at: string; distributor_connection_id: string | null };
+    expect(attempt.observed_at).toBe(attempt.created_at);
+
+    // Deterministic legacy distributor + connection bound to the attempt.
+    const conn = db.query('SELECT id, connector_type, workspace_id FROM distributor_connections WHERE id = ?').get(attempt.distributor_connection_id) as
+      { id: string; connector_type: string; workspace_id: string } | undefined;
+    expect(conn).toBeTruthy();
+    expect(conn!.connector_type).toBe('legacy_adapter');
+    expect(conn!.workspace_id).toBe('v2-w1');
+    const dist = db.query('SELECT id FROM distributors WHERE id = ?').get('legacy_phillips') as { id: string } | undefined;
+    expect(dist).toBeTruthy();
+  });
+
+  it('mid-migration failure leaves NO marker (fail closed, re-runnable after fix)', () => {
+    downgradeToPreV2();
+
+    // Introduce an FK violation that the block's foreign_key_check catches:
+    // a ghost attempt row (FKs were off during downgrade rebuild path, so we
+    // insert with FKs off explicitly).
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.query(
+      `INSERT INTO onboarding_evidence_attempts (id, item_id, provider_id, lookup_upc, outcome, confidence, evidence_url, matched_fields_json, identity_json, warnings_json, error_code, error_message, created_at)
+       VALUES ('ghost-attempt', 'ghost-item', 'phillips', '012345678999', 'found', 0.9, NULL, '[]', NULL, NULL, NULL, NULL, '2026-01-02T00:00:00.000Z')`,
+    ).run();
+    db.exec('PRAGMA foreign_keys = ON');
+
+    // The V2 block throws on foreign_key_check inside ONE transaction: the
+    // marker must be absent AND every V2 table must be rolled back.
+    expect(() => runMigrations()).toThrow(/foreign_key_check/);
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'distributor_v2_schema_version'").get()).toBeNull();
+    const rolledBack = db
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('distributors','sourcing_generations')")
+      .all() as Array<{ name: string }>;
+    expect(rolledBack.length).toBe(0);
+
+    // Removing the violation lets the block complete and write the marker.
+    db.query('DELETE FROM onboarding_evidence_attempts WHERE id = ?').run('ghost-attempt');
+    expect(() => runMigrations()).not.toThrow();
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'distributor_v2_schema_version'").get()).toBeTruthy();
+  });
+});
+
+describe('Default-On Sourcing schema migration (Amendment A)', () => {
+  const onDbPath = '/tmp/baystate-cms-default-on-test.db';
+  let db: ReturnType<typeof getDb>;
+
+  beforeAll(() => {
+    try { unlinkSync(onDbPath); } catch { /* ok */ }
+    initDb(onDbPath);
+    runMigrations();
+    db = getDb();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(onDbPath); } catch { /* ok */ }
+  });
+
+  function itemColumnNames(): string[] {
+    return (db.query('PRAGMA table_info(onboarding_items)').all() as Array<{ name: string }>).map((c) => c.name);
+  }
+
+  function extractionColumnNames(): Array<{ name: string; notnull: number }> {
+    return db.query('PRAGMA table_info(onboarding_extractions)').all() as Array<{ name: string; notnull: number }>;
+  }
+
+  function extractionSql(): string {
+    return (db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'onboarding_extractions'").get() as { sql: string }).sql;
+  }
+
+  function evidenceColumnNames(): string[] {
+    return (db.query('PRAGMA table_info(onboarding_evidence_attempts)').all() as Array<{ name: string }>).map((c) => c.name);
+  }
+
+  function classificationEvidenceSql(): string {
+    return (db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_evidence'").get() as { sql: string }).sql;
+  }
+
+  /** Restore the exact pre-Amendment-A shapes and delete the marker. */
+  function downgradeToPreAmendment(): void {
+    const target = getDb();
+    target.exec("DELETE FROM app_meta WHERE key = 'default_on_sourcing_schema_version'");
+
+    // onboarding_items back to the pre-amendment shape.
+    target.exec('ALTER TABLE onboarding_items DROP COLUMN source_type;');
+    target.exec('ALTER TABLE onboarding_items DROP COLUMN sourcing_entry_policy_version;');
+
+    // onboarding_extractions back to NOT NULL source_url, no provenance columns.
+    target.exec('PRAGMA foreign_keys = OFF');
+    target.exec(`
+      CREATE TABLE onboarding_extractions_old (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+        source_url TEXT NOT NULL,
+        extraction_data_json TEXT NOT NULL,
+        extraction_method TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.0,
+        images_json TEXT,
+        raw_structured_data_json TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    target.exec(`INSERT INTO onboarding_extractions_old
+      SELECT id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json, raw_structured_data_json, created_at
+      FROM onboarding_extractions`);
+    target.exec('DROP TABLE onboarding_extractions;');
+    target.exec('ALTER TABLE onboarding_extractions_old RENAME TO onboarding_extractions;');
+    target.exec('CREATE INDEX IF NOT EXISTS idx_onboarding_extractions_item ON onboarding_extractions(item_id);');
+
+    // classification_evidence back to the pre-amendment source CHECK.
+    target.exec(`
+      CREATE TABLE classification_evidence_old (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+        onboarding_item_id TEXT,
+        product_sku TEXT NOT NULL,
+        stage_name TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('spreadsheet', 'official_product_page', 'third_party_page', 'visual_product_evidence', 'page_context', 'approved_product_example', 'catalog_manager_guidance', 'catalog_product')),
+        reliability TEXT NOT NULL DEFAULT 'unknown' CHECK (reliability IN ('high', 'medium', 'low', 'conflicting', 'unknown')),
+        attribute_id TEXT,
+        source_url TEXT,
+        source_field TEXT,
+        snippet TEXT,
+        value_json TEXT,
+        metadata_json TEXT,
+        snapshot_json TEXT,
+        retention_expires_at TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    target.exec('INSERT INTO classification_evidence_old SELECT * FROM classification_evidence;');
+    target.exec('DROP TABLE classification_evidence;');
+    target.exec('ALTER TABLE classification_evidence_old RENAME TO classification_evidence;');
+    target.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_run ON classification_evidence(run_id);');
+    target.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_product_source ON classification_evidence(product_sku, source);');
+    target.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_product ON classification_evidence(product_sku);');
+    target.exec('PRAGMA foreign_keys = ON');
+
+    // Evidence attempts: drop duration_ms + variant_axis_declarations
+    // (appended last, so plain DROP COLUMN statements are legal) AND their
+    // markers — the upgrade path must genuinely re-run BOTH amendment blocks
+    // in order so the fresh and upgraded column ORDER converges.
+    target.exec('ALTER TABLE onboarding_evidence_attempts DROP COLUMN duration_ms;');
+    target.exec('ALTER TABLE onboarding_evidence_attempts DROP COLUMN variant_axis_declarations;');
+    target.exec("DELETE FROM app_meta WHERE key = 'sourcing_variant_axes_schema_version'");
+  }
+
+  it('fresh install: item source/entry-policy columns, nullable extraction URL + provenance, duration_ms, expanded CHECK, marker', () => {
+    const itemCols = itemColumnNames();
+    expect(itemCols).toContain('source_type');
+    expect(itemCols).toContain('sourcing_entry_policy_version');
+
+    const extCols = extractionColumnNames();
+    expect(extCols.find((c) => c.name === 'source_url')?.notnull).toBe(0);
+    for (const col of ['source_type', 'sourcing_generation_id', 'accepted_evidence_attempt_ids_json', 'evidence_hash']) {
+      expect(extCols.map((c) => c.name)).toContain(col);
+    }
+    expect(extractionSql()).toContain('distributor_record');
+
+    expect(evidenceColumnNames()).toContain('duration_ms');
+    expect(classificationEvidenceSql()).toContain('distributor_record');
+
+    const marker = db.query("SELECT value FROM app_meta WHERE key = 'default_on_sourcing_schema_version'").get() as { value: string };
+    expect(marker.value).toBe('1');
+  });
+
+  it('idempotent second run changes nothing', () => {
+    expect(() => runMigrations()).not.toThrow();
+    const rows = db.query("SELECT COUNT(*) as cnt FROM app_meta WHERE key = 'default_on_sourcing_schema_version'").get() as { cnt: number };
+    expect(rows.cnt).toBe(1);
+  });
+
+  it('pre-amendment database upgrades: columns added, extractions rebuilt nullable with provenance, CHECK expanded, rows preserved', () => {
+    // Seed a workspace/item + extraction row + classification evidence row so
+    // the rebuilds are observable.
+    insertWorkspace({
+      id: 'on-ws', name: 'On WS', workspacePath: '/tmp/on-ws', gitPath: '/tmp/on-ws/.git',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      bootstrapStatus: 'complete', baselineCommit: null,
+    });
+    const batch = createBatch({ workspaceId: 'on-ws', name: 'On Batch', fileName: 'on.csv', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '012345678911', name: 'On Item', rowNumber: 1 }]);
+    db.query(
+      `INSERT INTO onboarding_extractions (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json, raw_structured_data_json, created_at)
+       VALUES ('ext-on-1', ?, 'https://brand.example/p', '{}', 'worker', 0.9, NULL, NULL, '2026-01-02T00:00:00.000Z')`,
+    ).run(item.id);
+    db.query(
+      `INSERT INTO classification_runs (id, workspace_id, onboarding_item_id, product_sku, source_kind, status, started_at)
+       VALUES ('run-on-1', 'on-ws', ?, 'SKU-ON-1', 'onboarding', 'queued', '2026-01-02T00:00:00.000Z')`,
+    ).run(item.id);
+    db.query(
+      `INSERT INTO classification_evidence (id, run_id, onboarding_item_id, product_sku, stage_name, source, reliability, created_at)
+       VALUES ('ce-on-1', 'run-on-1', ?, 'SKU-ON-1', 'evidence_extraction', 'official_product_page', 'medium', '2026-01-02T00:00:00.000Z')`,
+    ).run(item.id);
+
+    downgradeToPreAmendment();
+    expect(itemColumnNames()).not.toContain('source_type');
+    expect(extractionColumnNames().find((c) => c.name === 'source_url')?.notnull).toBe(1);
+    expect(evidenceColumnNames()).not.toContain('duration_ms');
+    expect(classificationEvidenceSql()).not.toContain('distributor_record');
+
+    runMigrations();
+
+    // Columns restored.
+    expect(itemColumnNames()).toContain('source_type');
+    expect(itemColumnNames()).toContain('sourcing_entry_policy_version');
+    expect(extractionColumnNames().find((c) => c.name === 'source_url')?.notnull).toBe(0);
+    for (const col of ['source_type', 'sourcing_generation_id', 'accepted_evidence_attempt_ids_json', 'evidence_hash']) {
+      expect(extractionColumnNames().map((c) => c.name)).toContain(col);
+    }
+    expect(evidenceColumnNames()).toContain('duration_ms');
+    expect(classificationEvidenceSql()).toContain('distributor_record');
+
+    // Rows preserved with the same ids; copied extractions get official_page + null provenance.
+    const ext = db.query('SELECT id, source_url, source_type, sourcing_generation_id, accepted_evidence_attempt_ids_json, evidence_hash FROM onboarding_extractions WHERE id = ?').get('ext-on-1') as
+      { id: string; source_url: string; source_type: string; sourcing_generation_id: string | null; accepted_evidence_attempt_ids_json: string | null; evidence_hash: string | null };
+    expect(ext).toBeTruthy();
+    expect(ext.source_url).toBe('https://brand.example/p');
+    expect(ext.source_type).toBe('official_page');
+    expect(ext.sourcing_generation_id).toBeNull();
+    expect(ext.accepted_evidence_attempt_ids_json).toBeNull();
+    expect(ext.evidence_hash).toBeNull();
+    const ce = db.query('SELECT id, source FROM classification_evidence WHERE id = ?').get('ce-on-1') as { id: string; source: string };
+    expect(ce).toBeTruthy();
+    expect(ce.source).toBe('official_product_page');
+
+    const marker = db.query("SELECT value FROM app_meta WHERE key = 'default_on_sourcing_schema_version'").get() as { value: string };
+    expect(marker.value).toBe('1');
+  });
+
+  it('mid-migration failure leaves NO marker and preserves the old table (fail closed, re-runnable after fix)', () => {
+    downgradeToPreAmendment();
+
+    // Inject an FK violation that the block's foreign_key_check catches: a
+    // ghost extraction row referencing a nonexistent item.
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.query(
+      `INSERT INTO onboarding_extractions (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json, raw_structured_data_json, created_at)
+       VALUES ('ext-ghost', 'ghost-item', 'https://x.example', '{}', 'worker', 0.9, NULL, NULL, '2026-01-02T00:00:00.000Z')`,
+    ).run();
+    db.exec('PRAGMA foreign_keys = ON');
+
+    expect(() => runMigrations()).toThrow(/foreign_key_check/);
+    // Marker absent AND the extraction table keeps its pre-amendment shape
+    // (NOT NULL source_url) because the transaction rolled back.
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'default_on_sourcing_schema_version'").get()).toBeNull();
+    expect(extractionColumnNames().find((c) => c.name === 'source_url')?.notnull).toBe(1);
+
+    // Removing the violation lets the block complete and write the marker.
+    db.query('DELETE FROM onboarding_extractions WHERE id = ?').run('ext-ghost');
+    expect(() => runMigrations()).not.toThrow();
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'default_on_sourcing_schema_version'").get()).toBeTruthy();
+    expect(extractionColumnNames().find((c) => c.name === 'source_url')?.notnull).toBe(0);
+  });
+
+  it('upgrades a legacy DEFAULT 1 distributor_connections to DEFAULT 0 while preserving row values', () => {
+    // Seed a workspace + distributor + connection row (operator-controlled, ENABLED).
+    insertWorkspace({
+      id: 'conn-ws', name: 'Conn WS', workspacePath: '/tmp/conn-ws', gitPath: '/tmp/conn-ws/.git',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      bootstrapStatus: 'complete', baselineCommit: null,
+    });
+    db.exec("INSERT INTO distributors (id, name, status, created_at, updated_at) VALUES ('phillips', 'Phillips', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')");
+    const now = '2026-01-01T00:00:00.000Z';
+    db.query(
+      `INSERT INTO distributor_connections (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+       VALUES ('conn-on-1', 'conn-ws', 'phillips', 'api', NULL, '{}', '{}', 1, ?, ?)`,
+    ).run(now, now);
+
+    // Rebuild to the pre-Amendment-A storage shape: DEFAULT 1.
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE distributor_connections_old (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspace(id),
+        distributor_id TEXT NOT NULL REFERENCES distributors(id) ON DELETE CASCADE,
+        connector_type TEXT NOT NULL CHECK (connector_type IN ('api', 'ftp_catalog', 'csv', 'legacy_adapter')),
+        secret_ref TEXT,
+        configuration_json TEXT DEFAULT '{}',
+        authority_policy_json TEXT DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    db.exec('INSERT INTO distributor_connections_old SELECT * FROM distributor_connections');
+    db.exec('DROP TABLE distributor_connections;');
+    db.exec('ALTER TABLE distributor_connections_old RENAME TO distributor_connections;');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_workspace ON distributor_connections(workspace_id);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_distributor ON distributor_connections(distributor_id);');
+    db.exec('PRAGMA foreign_keys = ON');
+
+    // Re-run the block: marker absent → executes; all other guards skip (the
+    // item/extraction/evidence/classification shapes are already amended).
+    db.exec("DELETE FROM app_meta WHERE key = 'default_on_sourcing_schema_version'");
+    expect(() => runMigrations()).not.toThrow();
+
+    // Storage default is now fail-closed; the operator-controlled ENABLED row
+    // value is preserved exactly (never silently rewritten).
+    const enabledCol = (db.query('PRAGMA table_info(distributor_connections)').all() as Array<{ name: string; dflt_value: string | null }>)
+      .find((c) => c.name === 'enabled');
+    expect(enabledCol?.dflt_value).toBe('0');
+    const connRow = db.query('SELECT enabled FROM distributor_connections WHERE id = ?').get('conn-on-1') as { enabled: number };
+    expect(connRow.enabled).toBe(1);
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'default_on_sourcing_schema_version'").get()).toBeTruthy();
+  });
+
+  it('fresh and upgraded databases converge to the same final schema definitions', () => {
+    const tables = ['onboarding_items', 'onboarding_extractions', 'distributor_connections', 'classification_evidence', 'onboarding_evidence_attempts'];
+    const snapshot = (targetDb: ReturnType<typeof getDb>) =>
+      Object.fromEntries(
+        tables.map((t) => [
+          t,
+          (targetDb.query(`PRAGMA table_info(${t})`).all() as Array<{ name: string; type: string; notnull: number; dflt_value: string | null; pk: number }>)
+            .map(({ name, type, notnull, dflt_value, pk }) => ({ name, type, notnull, dflt_value, pk })),
+        ]),
+      );
+
+    // Two GENUINELY separate databases: the fresh install and the pre-amendment
+    // upgrade must converge on identical column definitions INCLUDING ORDER.
+    // (The previous version captured 'fresh' from the shared DB after other
+    // tests had already upgraded it, hiding the fresh-vs-ALTER ordering
+    // difference — this test uses its own DB paths and must not share state.)
+    const freshPath = '/tmp/baystate-cms-convergence-fresh.db';
+    const upgradePath = '/tmp/baystate-cms-convergence-upgrade.db';
+    try { unlinkSync(freshPath); } catch { /* ok */ }
+    try { unlinkSync(upgradePath); } catch { /* ok */ }
+
+    // Fresh install: brand-new empty database through the full migration chain.
+    closeDb();
+    initDb(freshPath);
+    runMigrations();
+    const fresh = snapshot(getDb());
+    closeDb();
+
+    // Pre-amendment upgrade: brand-new database migrated (same chain), then
+    // restored to the exact pre-Amendment-A shapes, then re-migrated via the
+    // default_on_sourcing block. This is the only path difference.
+    initDb(upgradePath);
+    runMigrations();
+    downgradeToPreAmendment();
+    expect(() => runMigrations()).not.toThrow();
+    const upgraded = snapshot(getDb());
+    closeDb();
+
+    try { unlinkSync(freshPath); } catch { /* ok */ }
+    try { unlinkSync(upgradePath); } catch { /* ok */ }
+
+    // Column lists (order-sensitive), types, NOT NULL flags, defaults, and PK
+    // roles must be identical between the two databases.
+    expect(upgraded).toEqual(fresh);
+  });
+});

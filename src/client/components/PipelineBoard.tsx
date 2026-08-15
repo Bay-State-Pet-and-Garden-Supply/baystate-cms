@@ -5,17 +5,24 @@ import {
   resetStageItems,
   skipStageItems,
   moveToPreviousStage,
+  fallbackSourcingItemsToDiscovery,
   updateItem,
   getItemDetail,
+  resolveItemConflict,
+  resolveSourcingAction,
+  continueWithOfficialDiscovery,
   setItemUrl,
   submitDecisions,
   completeReviewStage,
+  getOnboardingCapabilities,
   OnboardingApiError,
   getCurationTargets,
   getClassificationReadiness,
   type CurationTargetsResponse,
   type ConsistencyWarning,
   type SemanticValidationPayload,
+  type SourcingGenerationView,
+  type SourcingQualificationView,
 } from '../onboarding-api';
 import type {
   OnboardingItem,
@@ -25,8 +32,9 @@ import type {
   PipelineStage,
   StageStatus,
   BrandSite,
-  ResolveSourcingRequest,
+  DistributorEvidenceAttemptView,
 } from '../../shared/schemas/onboarding';
+import type { OnboardingEvidenceConflict } from '../../shared/schemas/distributor';
 import type {
   ClassificationProposal,
   ClassificationProposalDecision,
@@ -165,6 +173,8 @@ interface PipelineBoardProps {
   onRefreshBrandSites: () => void;
   onOpenProfileBuilder?: (domain: string, item: OnboardingItem) => void;
   onOpenBrandSetup?: (brandHint?: string | null) => void;
+  /** Sourcing engine capability (server-reported). While false, Sourcing items may only continue to Discovery. */
+  sourcingEngineEnabled: boolean;
 }
 
 export function PipelineBoard({
@@ -176,6 +186,7 @@ export function PipelineBoard({
   onRefreshBrandSites: _onRefreshBrandSites,
   onOpenProfileBuilder,
   onOpenBrandSetup,
+  sourcingEngineEnabled,
 }: PipelineBoardProps) {
   const [staged, setStaged] = useState<Record<PipelineStage, OnboardingItem[]>>({
     sourcing: [],
@@ -198,7 +209,9 @@ export function PipelineBoard({
   const reviewItemRef = React.useRef<string | null>(null);
   const reviewGenerationRef = React.useRef(0);
   const [reviewSources, setReviewSources] = useState<OnboardingSource[]>([]);
-  const [reviewEvidenceAttempts, setReviewEvidenceAttempts] = useState<any[]>([]);
+  const [reviewEvidenceAttempts, setReviewEvidenceAttempts] = useState<DistributorEvidenceAttemptView[]>([]);
+  const [reviewConflicts, setReviewConflicts] = useState<OnboardingEvidenceConflict[]>([]);
+  const [reviewGenerations, setReviewGenerations] = useState<SourcingGenerationView[]>([]);
   const [reviewExtraction, setReviewExtraction] = useState<ExtractionData | null>(null);
   const [editFields, setEditFields] = useState<Partial<ExtractionData>>({});
   const [activeImageIdx, setActiveImageIdx] = useState(0);
@@ -224,6 +237,38 @@ export function PipelineBoard({
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [reviewTransitioning, setReviewTransitioning] = useState(false);
+  // Amendment A: effective Sourcing mode + configuration reason from
+  // /onboarding/capabilities. Defaults degrade to the prop (engineEnabled
+  // → automatic) while the fetch is in flight or fails.
+  const [sourcingMode, setSourcingMode] = useState<'observe' | 'manual' | 'automatic' | null>(null);
+  const [configurationReason, setConfigurationReason] = useState<string | null>(null);
+  // Effective routing capability (Amendment A): engine enabled AND a routing
+  // mode. OFF/invalid/observe never reset Sourcing rows in place (that would
+  // strand unclaimed items) — the audited fallback path is used instead.
+  // While the capabilities fetch is in flight (mode null) this fails closed;
+  // the server remains authoritative either way.
+  const sourcingCapabilityActive =
+    sourcingEngineEnabled && (sourcingMode === 'manual' || sourcingMode === 'automatic');
+  // Server-derived distributor-record qualification + entry-policy version
+  // for the open review item (Amendment A manual mode).
+  const [reviewQualificationView, setReviewQualificationView] = useState<SourcingQualificationView | null>(null);
+  const [reviewEntryPolicyVersion, setReviewEntryPolicyVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOnboardingCapabilities()
+      .then((caps) => {
+        if (cancelled) return;
+        const s = caps.sourcing;
+        setSourcingMode(s?.mode ?? null);
+        setConfigurationReason(s?.configurationReason ?? null);
+      })
+      .catch(() => {
+        // Degrade: mode stays null (the engineEnabled prop governs the
+        // board's action surface); the server remains authoritative.
+      });
+    return () => { cancelled = true; };
+  }, []);
   const reviewTransitionRef = React.useRef<{ itemId: string; generation: number } | null>(null);
   // Decision transport is scoped per onboarding item so a late save for item A
   // cannot read/write predecessor state belonging to item B.
@@ -435,6 +480,7 @@ export function PipelineBoard({
           setReviewExtraction(null);
           setEditFields({});
         }
+        setReviewQualificationView(res.sourcingQualificationView ?? null);
         if (res.item?.curationData) setCurationFields(res.item.curationData);
         installCanonicalDecisionState(res.item);
         setConsistencyWarnings(res.consistencyWarnings ?? []);
@@ -567,12 +613,61 @@ export function PipelineBoard({
     const selectedItems = getSelectedItems();
     if (selectedItems.length === 0) return;
 
+    // While the sourcing engine is disabled (or in observe/invalid mode),
+    // Sourcing rows cannot be reset in place (that would strand them) —
+    // route them through the audited fallback-to-Discovery repair instead.
+    const sourcingItems = !sourcingCapabilityActive
+      ? selectedItems.filter(item => item.stage === 'sourcing')
+      : [];
+    const resetItems = selectedItems.filter(item => item.stage !== 'sourcing' || sourcingCapabilityActive);
+
     const count = selectedItems.length;
-    if (!confirm(`Reset ${count} selected product(s)?`)) return;
+    const repairNote = sourcingItems.length > 0
+      ? `\n\n${sourcingItems.length} Sourcing item(s) will move to Discovery (sourcing engine disabled).`
+      : '';
+    if (!confirm(`Reset ${count} selected product(s)?${repairNote}`)) return;
 
     setLoading(true);
     try {
-      await resetStageItems(selectedItems.map(item => item.id));
+      if (resetItems.length > 0) {
+        await resetStageItems(resetItems.map(item => item.id));
+      }
+      if (sourcingItems.length > 0) {
+        const res = await fallbackSourcingItemsToDiscovery(sourcingItems.map(item => item.id));
+        if (res.skipped.length > 0) {
+          setError(`${res.skipped.length} Sourcing item(s) could not be moved: ${res.skipped.map(s => s.reason).join(', ')}`);
+        }
+      }
+      clearSelection();
+      await fetchStaged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
+   * Bulk audited repair: move selected `sourcing/pending` items to Discovery
+   * (sourcing engine disabled). Distinct from Advance/Reset — this is the
+   * operator repair operation for the inert stage.
+   */
+  const handleContinueToDiscoverySelected = async () => {
+    const selectedItems = getSelectedItems();
+    const eligibleItems = selectedItems.filter(
+      item => item.stage === 'sourcing' && item.stageStatus === 'pending',
+    );
+    if (eligibleItems.length === 0) return;
+
+    const count = eligibleItems.length;
+    if (!confirm(`Continue ${count} Sourcing item(s) to Discovery?\n\nThis records a fallback-to-Discovery decision and lets the Discovery worker pick them up.`)) return;
+
+    setLoading(true);
+    try {
+      const res = await fallbackSourcingItemsToDiscovery(eligibleItems.map(item => item.id));
+      if (res.skipped.length > 0) {
+        setError(`${res.skipped.length} item(s) could not be moved: ${res.skipped.map(s => s.reason).join(', ')}`);
+      }
       clearSelection();
       await fetchStaged();
     } catch (err) {
@@ -679,6 +774,11 @@ export function PipelineBoard({
     const generation = reviewGenerationRef.current + 1;
     reviewGenerationRef.current = generation;
     reviewItemRef.current = item.id;
+    // Clear sourcing state immediately: item B must never briefly show
+    // item A's evidence/conflicts/generations while its detail loads.
+    setReviewEvidenceAttempts([]);
+    setReviewConflicts([]);
+    setReviewGenerations([]);
     setReviewItem(item);
     setManualUrlInput(item.sourceUrl || '');
     setManualImageUrl('');
@@ -713,6 +813,9 @@ export function PipelineBoard({
       setReviewItem(res.item);
       setReviewSources(res.sources);
       setReviewEvidenceAttempts(res.evidenceAttempts ?? []);
+      setReviewConflicts(res.conflicts ?? []);
+      setReviewGenerations(res.generations ?? []);
+      setReviewQualificationView(res.sourcingQualificationView ?? null);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
       setSemanticValidation(res.semanticValidation ?? null);
       // Prefer extraction from the dedicated extractions table, then fall
@@ -766,6 +869,9 @@ export function PipelineBoard({
     reviewItemRef.current = null;
     setReviewItem(null);
     setReviewSources([]);
+    setReviewEvidenceAttempts([]);
+    setReviewConflicts([]);
+    setReviewGenerations([]);
     setReviewExtraction(null);
     setEditFields({});
     setCurationFields({});
@@ -814,7 +920,17 @@ export function PipelineBoard({
       const transport = getDecisionTransport(itemId);
       transport.mutationVersion += 1;
       const mutationVersion = transport.mutationVersion;
-      await resetStageItems([itemId]);
+      // While the sourcing engine is disabled (or observe/invalid), a
+      // Sourcing row cannot be reset in place (that would strand it) — use
+      // the audited fallback repair.
+      if (reviewItem.stage === 'sourcing' && !sourcingCapabilityActive) {
+        const res = await fallbackSourcingItemsToDiscovery([itemId]);
+        if (res.skipped.length > 0) {
+          throw new Error(`Cannot continue item to Discovery: ${res.skipped[0]?.reason ?? 'transition_failed'}`);
+        }
+      } else {
+        await resetStageItems([itemId]);
+      }
       const res = await getItemDetail(itemId);
       if (!isCurrentReviewVersion(
         reviewItemRef.current,
@@ -1236,7 +1352,57 @@ export function PipelineBoard({
     reviewItem && getDecisionTransport(reviewItem.id).decisionQueue.hasFailure(),
   );
 
-  const handleResolveSourcing = async (request: ResolveSourcingRequest) => {
+  /**
+   * Refresh the review drawer from the server after ANY sourcing mutation
+   * (continue / conflict resolve / retry). Never optimistic: the drawer
+   * always reflects the persisted decision, generation, and evidence.
+   */
+  const refreshReviewItemDetail = useCallback(async () => {
+    if (!reviewItem) return;
+    // Capture the review version BEFORE the await: a late response for an
+    // item that was closed/replaced must never overwrite the open item.
+    const itemId = reviewItem.id;
+    const generation = reviewGenerationRef.current;
+    const transport = getDecisionTransport(itemId);
+    const mutationVersion = transport.mutationVersion;
+    const detail = await getItemDetail(itemId);
+    if (!isCurrentReviewVersion(
+      reviewItemRef.current,
+      reviewGenerationRef.current,
+      transport.mutationVersion,
+      itemId,
+      generation,
+      mutationVersion,
+    )) return;
+    setReviewItem(detail.item);
+    setReviewSources(detail.sources);
+    setReviewEvidenceAttempts(detail.evidenceAttempts ?? []);
+    setReviewConflicts(detail.conflicts ?? []);
+    setReviewGenerations(detail.generations ?? []);
+    setReviewQualificationView(detail.sourcingQualificationView ?? null);
+    // Amendment A: entry-policy version from the detail payload (server
+    // always sends it); fall back to the hydrated item row at runtime.
+    const itemEntryPolicy = (detail.item as unknown as { sourcingEntryPolicyVersion?: number } | null)
+      ?.sourcingEntryPolicyVersion;
+    setReviewEntryPolicyVersion(detail.sourcingEntryPolicyVersion ?? itemEntryPolicy ?? 0);
+    setConsistencyWarnings(detail.consistencyWarnings ?? []);
+    setSemanticValidation(detail.semanticValidation ?? null);
+    const extractionData = detail.extraction ?? detail.item?.extractionData ?? null;
+    if (extractionData) {
+      setReviewExtraction(extractionData);
+      setEditFields(extractionData);
+    }
+    if (detail.item?.curationData) setCurationFields(detail.item.curationData);
+    installCanonicalDecisionState(detail.item);
+    await fetchStaged();
+  }, [reviewItem, fetchStaged, installCanonicalDecisionState]);
+
+  /**
+   * Single-item audited continuation: move the review item from Sourcing to
+   * Discovery (the only supported Sourcing resolution while the engine is
+   * disabled — no distributor-bundle routing exists).
+   */
+  const handleContinueToDiscovery = async () => {
     if (!reviewItem) return;
     setSaveStatus('saving');
     setSaveError(null);
@@ -1244,19 +1410,86 @@ export function PipelineBoard({
       const res = await fetch(`/api/onboarding/items/${reviewItem.id}/resolve-sourcing`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
+        body: JSON.stringify({ action: 'fallback_to_discovery' }),
       });
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || 'Failed to resolve sourcing');
+        throw new Error(data.error || 'Failed to continue to discovery');
       }
       setSaveStatus('saved');
       setTimeout(() => setSaveStatus('idle'), 1500);
 
-      const detail = await getItemDetail(reviewItem.id);
-      setReviewItem(detail.item);
-      setReviewEvidenceAttempts(detail.evidenceAttempts ?? []);
-      await fetchStaged();
+      await refreshReviewItemDetail();
+    } catch (err) {
+      setSaveStatus('error');
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /**
+   * Resolve a durable sourcing conflict (ADR 0014): resolve_candidate |
+   * custom_value | dismiss. Refreshes the drawer + board after success —
+   * never optimistic advancement.
+   */
+  const handleResolveConflict = async (
+    conflictId: string,
+    body:
+      | { action: 'resolve_candidate'; candidateId: string }
+      | { action: 'custom_value'; customValue: string }
+      | { action: 'dismiss' },
+  ) => {
+    if (!reviewItem) return;
+    setSaveStatus('saving');
+    setSaveError(null);
+    try {
+      await resolveItemConflict(reviewItem.id, conflictId, body);
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 1500);
+      await refreshReviewItemDetail();
+    } catch (err) {
+      setSaveStatus('error');
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /**
+   * Engine-ON retry: POST /onboarding/items/:id/retry supersedes the
+   * current evidence generation and resets the sourcing item for a clean
+   * re-run (ADR 0014). Refreshes the drawer + board after success.
+   */
+  const handleRetrySourcing = async () => {
+    if (!reviewItem) return;
+    setSaveStatus('saving');
+    setSaveError(null);
+    try {
+      const res = await fetch(`/api/onboarding/items/${reviewItem.id}/retry`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to re-run sourcing');
+      }
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 1500);
+      await refreshReviewItemDetail();
+    } catch (err) {
+      setSaveStatus('error');
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /**
+   * Manual-mode operator decision: adopt the qualified distributor record.
+   * Sends ONLY the action — the server recomputes qualification and derives
+   * every accepted-id/hash/provider value (Amendment A).
+   */
+  const handleUseDistributorRecord = async () => {
+    if (!reviewItem) return;
+    setSaveStatus('saving');
+    setSaveError(null);
+    try {
+      await resolveSourcingAction(reviewItem.id, 'use_distributor_record');
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 1500);
+      await refreshReviewItemDetail();
     } catch (err) {
       setSaveStatus('error');
       setSaveError(err instanceof Error ? err.message : String(err));
@@ -1612,6 +1845,12 @@ export function PipelineBoard({
   }, [reviewItem]);
 
   const selectedItems = getSelectedItems();
+  // While the sourcing engine is disabled (or observe/invalid mode),
+  // sourcing/pending rows are repaired through the audited
+  // Continue-to-Discovery action (not generic Advance/Reset).
+  const hasContinueToDiscoveryEligible = !sourcingCapabilityActive && selectedItems.some(
+    item => item.stage === 'sourcing' && item.stageStatus === 'pending',
+  );
   const hasSendBackEligible = selectedItems.some(item => item.stage !== 'sourcing');
   const hasResetEligible = selectedItems.length > 0;
   const hasSkipEligible = selectedItems.some(item => item.stage !== 'promotion');
@@ -1674,7 +1913,7 @@ export function PipelineBoard({
               ← All Batches
             </button>
             <h1 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: '#111827' }}>
-              Pipeline Board: <span style={{ color: '#7c3aed' }}>{batchName}</span>
+              Pipeline Board: <span style={{ color: '#2563eb' }}>{batchName}</span>
             </h1>
           </div>
           <div style={{ fontSize: 12, color: '#6b7280' }}>
@@ -1705,6 +1944,28 @@ export function PipelineBoard({
                           }}
                         >
                           ◀ Send Back
+                        </button>
+                      )}
+                      {hasContinueToDiscoveryEligible && (
+                        <button
+                          onClick={handleContinueToDiscoverySelected}
+                          disabled={loading}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            background: '#2563eb',
+                            border: '1px solid #2563eb',
+                            color: '#ffffff',
+                            borderRadius: 4,
+                            cursor: loading ? 'not-allowed' : 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 2,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          → Continue to Discovery
                         </button>
                       )}
                       {hasResetEligible && (
@@ -1781,7 +2042,7 @@ export function PipelineBoard({
                             padding: '4px 8px',
                             fontSize: 11,
                             fontWeight: 600,
-                            background: '#7c3aed',
+                            background: '#2563eb',
                             color: '#fff',
                             border: 'none',
                             borderRadius: 4,
@@ -1851,6 +2112,7 @@ export function PipelineBoard({
           consistencyWarnings={consistencyWarnings}
           semanticValidation={semanticValidation}
           handleResetSingle={handleResetSingle}
+          suppressReset={reviewItem.stage === 'sourcing' && !sourcingCapabilityActive}
           saveStatus={saveStatus}
           saveError={saveError}
           hasRetryableSaveFailure={hasRetryableSaveFailure}
@@ -1932,18 +2194,18 @@ export function PipelineBoard({
               {reviewItem.stage === 'sourcing' && (
                 <SourcingStagePanel
                   reviewItem={reviewItem}
+                  sourcingEngineEnabled={sourcingEngineEnabled}
+                  sourcingMode={sourcingMode}
+                  configurationReason={configurationReason}
+                  sourcingEntryPolicyVersion={reviewEntryPolicyVersion}
+                  sourcingQualificationView={reviewQualificationView}
                   evidenceAttempts={reviewEvidenceAttempts}
-                  onResolveSourcing={handleResolveSourcing}
-                  onRetrySourcing={async () => {
-                    if (!reviewItem) return;
-                    await resetStageItems([reviewItem.id]);
-                    const detail = await getItemDetail(reviewItem.id);
-                    setReviewItem(detail.item);
-                    if (detail.evidenceAttempts) {
-                      setReviewEvidenceAttempts(detail.evidenceAttempts);
-                    }
-                    await fetchStaged();
-                  }}
+                  conflicts={reviewConflicts}
+                  generations={reviewGenerations}
+                  onContinueToDiscovery={handleContinueToDiscovery}
+                  onUseDistributorRecord={handleUseDistributorRecord}
+                  onResolveConflict={handleResolveConflict}
+                  onRetry={handleRetrySourcing}
                 />
               )}
 
@@ -2008,6 +2270,26 @@ export function PipelineBoard({
                     setReviewItem(res.item);
                     setManualUrlInput(res.item.sourceUrl || '');
                   }}
+                  sourceType={reviewItem.sourceType}
+                  qualificationView={reviewQualificationView}
+                  stageStatus={reviewItem.stageStatus}
+                  onContinueWithOfficialDiscovery={
+                    reviewItem.sourceType === 'distributor_record' &&
+                    ['pending', 'failed', 'completed'].includes(reviewItem.stageStatus)
+                      ? async () => {
+                          try {
+                            await continueWithOfficialDiscovery(reviewItem.id);
+                            const detail = await getItemDetail(reviewItem.id);
+                            setReviewItem(detail.item);
+                            setReviewExtraction(null);
+                            setShowEditUrl(false);
+                            await fetchStaged();
+                          } catch (err) {
+                            alert('Failed to continue with official discovery: ' + String(err));
+                          }
+                        }
+                      : undefined
+                  }
                 />
               )}
 

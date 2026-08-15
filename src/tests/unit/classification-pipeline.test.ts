@@ -207,6 +207,41 @@ describe('Classification Pipeline Integration', () => {
     expect(getAcceptedProposals('TEST-SKU-2', run.id).length).toBeGreaterThan(0);
   });
 
+  it('distributor evidence passes through reviewable classification without official labeling or null-URL violation', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-DIST', snapId, snapHash);
+    const distMeta = {
+      provenance: 'distributor_record',
+      sourcingGenerationId: 'gen-dist-1',
+      acceptedEvidenceAttemptIds: ['a2', 'a1'],
+      acceptedProviderIds: ['bci', 'phillips'],
+      distributorEvidenceHash: 'a'.repeat(64),
+      fieldProvenance: { title: 'phillips' },
+    };
+    const evidence = [
+      { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-DIST', attributeId: null, source: 'distributor_record' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Distributor Dog Food Chicken 20 lb', value: 'Distributor Dog Food Chicken 20 lb', metadata: distMeta, capturedAt: new Date().toISOString() },
+      { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-DIST', attributeId: null, source: 'distributor_record' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'weight', snippet: '20 lb', value: '20 lb', metadata: distMeta, capturedAt: new Date().toISOString() },
+    ];
+    persistFixtureEvidence(run.id, evidence);
+    const result = await runPipeline(
+      [evidenceExtractionStage, primaryProductTypeStage],
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
+      { sku: 'TEST-SKU-DIST', evidence, acceptedProposals: [], allProposals: [] },
+    );
+    // Reviewable outcome: a primary-product-type proposal or a reviewable
+    // abstention — never a silent bypass.
+    expect(result.proposals.some(p => p.proposalType === 'primary_product_type' || p.proposalType === 'reviewable_abstention')).toBe(true);
+
+    // Persisted evidence is truthful: distributor_record source, NULL
+    // classification URL, never elevated to official_product_page.
+    const persisted = getEvidenceByRun(run.id);
+    expect(persisted.length).toBeGreaterThan(0);
+    expect(persisted.every(e => e.source === 'distributor_record')).toBe(true);
+    expect(persisted.every(e => e.sourceUrl === null)).toBe(true);
+    expect(persisted.some(e => e.source === 'official_product_page')).toBe(false);
+  });
+
   it('name consolidation stage returns metadata without field_assignment proposals', async () => {
     const config = loadClassificationConfig(workspacePath);
     const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);

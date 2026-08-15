@@ -260,8 +260,7 @@ describe('Store Manager chat runtime telemetry (epic #42, #37)', () => {
     // An unregistered id cannot be attributed: explicit unknown provider.
     insertStoreManagerUnavailableCall(workspaceId, 'not-a-registered-model');
     const unknown = getAiModelCallsByWorkspace(workspaceId)
-      .filter((r) => r.status === 'unavailable')
-      .at(-1);
+      .find((r) => r.status === 'unavailable' && r.model === 'not-a-registered-model');
     expect(unknown?.provider).toBe('unknown');
     expect(unknown?.model).toBe('not-a-registered-model');
   });

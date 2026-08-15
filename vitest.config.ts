@@ -86,6 +86,8 @@ export default defineConfig({
       'src/tests/unit/pi-network-boundary.test.ts',
       'src/tests/unit/pi-review-decisions.test.ts',
       'src/tests/unit/pi-reuse-policies.test.ts',
+      'src/tests/unit/pi-deterministic-preflight.test.ts',
+      'src/tests/unit/pi-governed-proposal-trigger.test.ts',
       'src/tests/unit/classification-integrity-audit.test.ts',
       'src/tests/unit/sqlite-backup-verifier.test.ts',
       'src/tests/unit/classification-integrity-cli.test.ts',
@@ -114,6 +116,18 @@ export default defineConfig({
       'src/tests/unit/sourcing-resolution.test.ts',
       'src/tests/unit/sourcing-stage-order.test.ts',
       'src/tests/unit/sourcing-safety-routes.test.ts',
+      'src/tests/unit/distributor-v2.test.ts',
+      'src/tests/unit/acceptance-migration.test.ts',
+      'src/tests/unit/conflict-resolution.test.ts',
+      'src/tests/unit/sourcing-engine.test.ts',
+      'src/tests/unit/sourcing-reconciler.test.ts',
+      'src/tests/unit/sourcing-pass-through.test.ts',
+      'src/tests/unit/sourcing-recovery-acceptance.test.ts',
+      'src/tests/unit/distributor-routes.test.ts',
+      // DB-backed suites committed without vitest registration (bun:sqlite /
+      // bun:test imports — vitest cannot collect them; run under test:db)
+      'src/tests/unit/store-manager-execution-boundary.test.ts',
+      'src/tests/unit/store-manager-operations-migration.test.ts',
       // Operations-console epic DB suites (Issues 3-9): bun:sqlite/bun:test
       // imports — excluded here, registered in package.json test:db.
       'src/tests/unit/store-manager-action-diff.test.ts',
@@ -123,14 +137,12 @@ export default defineConfig({
       'src/tests/unit/store-manager-event-runtime.test.ts',
       'src/tests/unit/store-manager-event-worker.test.ts',
       'src/tests/unit/store-manager-events-sse.test.ts',
-      'src/tests/unit/store-manager-execution-boundary.test.ts',
       'src/tests/unit/store-manager-history-query.test.ts',
       'src/tests/unit/store-manager-history.test.ts',
       'src/tests/unit/store-manager-inbox-repo.test.ts',
       'src/tests/unit/store-manager-inbox.test.ts',
       'src/tests/unit/store-manager-notifications.test.ts',
       'src/tests/unit/store-manager-operations-acceptance.test.ts',
-      'src/tests/unit/store-manager-operations-migration.test.ts',
       'src/tests/unit/store-manager-playbook-repo.test.ts',
       'src/tests/unit/store-manager-playbook-runner.test.ts',
       'src/tests/unit/store-manager-playbook-templates.test.ts',
@@ -142,8 +154,9 @@ export default defineConfig({
       'src/tests/unit/store-manager-scheduler.test.ts',
       'src/tests/unit/store-manager-scope.test.ts',
       'src/tests/unit/store-manager-trigger-repo.test.ts',
-      // DB-backed suites committed without vitest registration (bun:sqlite /
-      // bun:test imports — vitest cannot collect them; run under test:db)
+      'src/tests/unit/sourcing-default-on-e2e.test.ts',
+      'src/tests/unit/sourcing-observe-mode.test.ts',
+      'src/tests/unit/distributor-record-materializer.test.ts',
       // DB-backed suites committed without vitest registration (bun:sqlite /
       // bun:test imports — vitest cannot collect them; run under test:db)
       'src/tests/unit/attribute-editor.test.ts',

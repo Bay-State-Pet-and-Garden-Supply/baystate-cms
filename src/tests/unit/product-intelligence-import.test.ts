@@ -33,6 +33,7 @@ import {
   DEFAULT_PRODUCT_INTELLIGENCE_FLAGS,
   overrideProductIntelligenceFlags,
 } from '../../product-intelligence/flags';
+import { overrideSourcingFlags, resetSourcingFlagsOverride } from '../../onboarding/flags';
 import {
   importRunToOnboarding,
   UnresolvedEvidenceError,
@@ -129,10 +130,12 @@ describe('PI-8 onboarding import', () => {
       allowOnboardingImport: true,
       allowBatchRuns: false,
     });
+    overrideSourcingFlags({ sourcingEngineEnabled: false });
   });
 
   afterAll(() => {
     overrideProductIntelligenceFlags(DEFAULT_PRODUCT_INTELLIGENCE_FLAGS);
+    resetSourcingFlagsOverride();
     closeDb();
     try {
       unlinkSync(testDbPath);
@@ -202,12 +205,50 @@ describe('PI-8 onboarding import', () => {
     expect(item).toBeTruthy();
     expect(item?.upc).toBe('085000079585');
     expect(item?.name).toBe('STELLA CHKN BROTH 16OZ');
+    // While the Sourcing engine capability is disabled, create-mode imports
+    // enter Discovery (never stranding at sourcing/pending), but they STILL
+    // carry the current sourcing entry-policy version (1) because they are
+    // post-Amendment-A production imports (ADR 0014 Amendment A).
+    expect(item?.stage).toBe('discovery');
+    expect(item?.stageStatus).toBe('pending');
+    expect(item?.sourcingEntryPolicyVersion).toBe(1);
 
     const evidence = item?.extractionData?.productIntelligenceEvidence;
     expect(evidence).toBeTruthy();
     expect(evidence?.[0]?.runId).toBe(runId);
     expect(evidence?.[0]?.resultHash).toBeTruthy();
     expect(evidence?.[0]?.approvedImageIds).toHaveLength(1); // only the bundle-cited asset
+  });
+
+  it('create-mode import enters Sourcing only when the sourcing engine capability is enabled', () => {
+    const runId = makeCompletedRun('085000079586', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const approved = seedAsset(runId, true);
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        {
+          sourceId: 'src-1',
+          sourceArtifactId: 'a1',
+          url: 'https://cdn.example.com/i.jpg',
+          role: 'primary',
+          verifiedAssetId: approved.id,
+        },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+
+    overrideSourcingFlags({ sourcingEngineEnabled: true });
+    try {
+      const result = importRunToOnboarding(runId, { mode: 'create', importingUser: 'tester' });
+      expect(result.created).toBe(true);
+      const item = findItemById(result.item.id);
+      expect(item?.stage).toBe('sourcing');
+      expect(item?.stageStatus).toBe('pending');
+      // Production create-imports are post-Amendment-A: entry-policy version 1.
+      expect(item?.sourcingEntryPolicyVersion).toBe(1);
+    } finally {
+      resetSourcingFlagsOverride();
+    }
   });
 
   it('imports ONLY the bundle-cited asset, not the run\'s whole verification history', () => {
@@ -351,6 +392,10 @@ describe('PI-8 onboarding import', () => {
     const refreshed = findItemById(item.id);
     expect(refreshed?.name).toBe('Existing Product'); // never overwritten
     expect(refreshed?.price).toBeNull();
+    // Augment mode never changes the item's stage or entry-policy version:
+    // the seeded item was created without an explicit version (stays 0).
+    expect(refreshed?.stage).toBe('discovery');
+    expect(refreshed?.sourcingEntryPolicyVersion).toBe(0);
     const evidence = refreshed?.extractionData?.productIntelligenceEvidence;
     expect(evidence?.[0]?.evidence.map((e) => e.field)).toContain('price');
     expect(JSON.parse(result.importRecord.overriddenValuesJson)).toMatchObject({ price: '12.99' });

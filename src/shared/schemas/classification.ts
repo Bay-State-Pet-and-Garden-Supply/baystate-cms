@@ -695,6 +695,14 @@ export const EvidenceSourceEnum = z.enum([
   'approved_product_example',
   'catalog_manager_guidance',
   'catalog_product',
+  /**
+   * Amendment A (default-on): evidence materialized from a qualified
+   * distributor record (source_type 'distributor_record'). Third-party
+   * classification source label ONLY — it is never claim/composition
+   * authority, never labeled `official_product_page`, and never grants
+   * commerce rights. PI-6 remains the sole path for distributor images.
+   */
+  'distributor_record',
 ]);
 
 export type EvidenceSource = z.infer<typeof EvidenceSourceEnum>;

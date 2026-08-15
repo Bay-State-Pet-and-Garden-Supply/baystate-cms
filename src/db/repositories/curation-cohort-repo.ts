@@ -102,6 +102,14 @@ export function mapCohortMemberRow(row: Record<string, any>): CurationCohortMemb
  * (round-3 R4 — a source change rebinds the hash), and the sorted
  * `productIntelligenceEvidence[].resultHash` list (PI imports participate in
  * evidence stability per issue #30's extraction completeness contract).
+ *
+ * Amendment A: the hash ALSO binds the item `sourceType` and sorted
+ * distributor provenance (the sourcing generation id carried by the routing
+ * decision and the sorted accepted-evidence-attempt ids) — an item whose
+ * source switched from `official_page` to `distributor_record`, or whose
+ * accepted evidence set changed, rebinds the hash. Provenance is sorted so
+ * the hash is order-insensitive.
+ *
  * Returns NULL when the item has no extraction data yet.
  */
 export function computeExtractionHash(item: OnboardingItem): string | null {
@@ -111,11 +119,22 @@ export function computeExtractionHash(item: OnboardingItem): string | null {
     .map((entry: any) => (entry && typeof entry.resultHash === 'string' ? entry.resultHash : null))
     .filter((hash: string | null): hash is string => hash !== null)
     .sort();
+  // V2 routing decisions carry `sourcingGenerationId`; read it defensively
+  // (legacy decisions may not) so provenance is never fabricated.
+  const decision = item.sourcingDecision as (Record<string, unknown> & { sourcingGenerationId?: string | null }) | null;
+  const sourcingGenerationId =
+    decision && typeof decision.sourcingGenerationId === 'string' ? decision.sourcingGenerationId : null;
+  const acceptedEvidenceAttemptIds = [...(item.acceptedEvidenceAttemptIds ?? [])].sort();
   return hashCanonicalJson({
     extractionData,
     sourcingDecision: item.sourcingDecision ?? null,
     sourceUrl: item.sourceUrl ?? null,
     productIntelligenceResultHashes: piResultHashes,
+    sourceType: item.sourceType ?? 'official_page',
+    distributorProvenance: {
+      sourcingGenerationId,
+      acceptedEvidenceAttemptIds,
+    },
   });
 }
 

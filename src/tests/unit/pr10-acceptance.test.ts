@@ -302,6 +302,8 @@ function newWorkspace(): { workspaceId: string; workspacePath: string } {
   const wsPath = path.join(workspacePath, `ws-${workspaceId.slice(0, 8)}`);
   fs.mkdirSync(path.join(wsPath, '.baystate-cms'), { recursive: true });
   fs.mkdirSync(path.join(wsPath, 'store', 'classification'), { recursive: true });
+  initDb(path.join(wsPath, '.baystate-cms', 'app.db'));
+  runMigrations();
   insertWorkspaceRow(workspaceId, wsPath);
   return { workspaceId, workspacePath: wsPath };
 }

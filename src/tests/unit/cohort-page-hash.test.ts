@@ -21,6 +21,7 @@ import type {
   CohortRun,
   ExecutionEvidenceProjectionV1,
   ExecutionEvidenceProjectionMemberV1,
+  ExecutionEvidenceProjectionMemberV2,
 } from '../../shared/schemas/cohorts';
 
 /**
@@ -622,6 +623,18 @@ describe('pageAuthorityFromProjectionMember — the pure builder (PR7 C2)', () =
       lifeStage: 'Adult',
       productForm: 'Pate',
       healthConcern: ['Hairball'],
+      // Milestone E: official-page provenance normalization for V1 members.
+      sourceProvenance: {
+        itemSourceType: 'official_page',
+        sourceUrl: 'https://brand.example/p1',
+        extractionSourceType: 'official_page',
+        extractionSourceUrl: 'https://brand.example/p1',
+        extractionMethod: '',
+        sourcingGenerationId: null,
+        acceptedEvidenceAttemptIds: [],
+        providerIds: [],
+        distributorEvidenceHash: null,
+      },
     });
   });
 
@@ -641,6 +654,18 @@ describe('pageAuthorityFromProjectionMember — the pure builder (PR7 C2)', () =
       lifeStage: null,
       productForm: null,
       healthConcern: [],
+      // Milestone E: official-page provenance normalization for V1 members.
+      sourceProvenance: {
+        itemSourceType: 'official_page',
+        sourceUrl: 'https://brand.example/p1',
+        extractionSourceType: 'official_page',
+        extractionSourceUrl: 'https://brand.example/p1',
+        extractionMethod: '',
+        sourcingGenerationId: null,
+        acceptedEvidenceAttemptIds: [],
+        providerIds: [],
+        distributorEvidenceHash: null,
+      },
     });
   });
 });
@@ -722,5 +747,82 @@ describe('PR7 review R2 (F2c) — FROZEN-PLAN Page model authority (P1-C)', () =
       .toBe(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelExecutionAuthority: { provider: 'ollama', model: 'qwen2.5vl:latest', promptTemplateVersion: 'cohort-page-assignment-parent-prompt-v2', ruleVersion: 'cohort-page-assignment-parent-rules-v2' } })));
     expect(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelExecutionAuthority: { provider: 'ollama', model: 'qwen2.5vl:latest', promptTemplateVersion: 'cohort-page-assignment-parent-prompt-v2', ruleVersion: 'different-version' } })))
       .not.toBe(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelExecutionAuthority: undefined })));
+  });
+});
+
+describe('Milestone E — source-kind/provenance drift (page input identity)', () => {
+  /** A V2 member with distributor provenance (the exact V2 shape cohorts.ts adds). */
+  function distributorMember(
+    overrides: Partial<ExecutionEvidenceProjectionMemberV2> = {},
+  ): ExecutionEvidenceProjectionMemberV2 {
+    return {
+      ...makeMember(),
+      itemSourceType: 'distributor_record',
+      extractionSourceType: 'distributor_record',
+      extractionMethod: 'distributor_record_v1',
+      sourcingGenerationId: 'gen-1',
+      acceptedEvidenceAttemptIds: ['att-1'],
+      acceptedProviderIds: ['phillips'],
+      distributorEvidenceHash: 'a'.repeat(64),
+      extraction: {
+        ...makeMember().extraction,
+        distributorSku: 'DSKU-1',
+        manufacturerPartNumber: 'MPN-1',
+        variantAttributes: { flavor: 'chicken' },
+      },
+      ...overrides,
+    } as ExecutionEvidenceProjectionMemberV2;
+  }
+
+  function projectionWithMembers(members: Array<ExecutionEvidenceProjectionMemberV1 | ExecutionEvidenceProjectionMemberV2>) {
+    return makeProjection(members as ExecutionEvidenceProjectionMemberV1[]);
+  }
+
+  it('distributor provenance changes the P-hash vs the same member as official-page', () => {
+    expect(hash(makeParams({ projection: projectionWithMembers([makeMember()]) })))
+      .not.toBe(hash(makeParams({ projection: projectionWithMembers([distributorMember()]) })));
+  });
+
+  it('source-kind drift with identical page text still changes identity', () => {
+    // makeMember() supplies identical page text; only the source kind differs.
+    const official = makeParams({ projection: projectionWithMembers([makeMember()]) });
+    const distributor = makeParams({ projection: projectionWithMembers([distributorMember()]) });
+    expect(hash(distributor)).not.toBe(hash(official));
+  });
+
+  it('generation drift changes the P-hash for distributor members', () => {
+    const g1 = makeParams({ projection: projectionWithMembers([distributorMember({ sourcingGenerationId: 'gen-1' })]) });
+    const g2 = makeParams({ projection: projectionWithMembers([distributorMember({ sourcingGenerationId: 'gen-2' })]) });
+    expect(hash(g2)).not.toBe(hash(g1));
+  });
+
+  it('accepted-attempt-set drift changes the P-hash for distributor members', () => {
+    const a1 = makeParams({ projection: projectionWithMembers([distributorMember({ acceptedEvidenceAttemptIds: ['att-1'] })]) });
+    const a2 = makeParams({ projection: projectionWithMembers([distributorMember({ acceptedEvidenceAttemptIds: ['att-1', 'att-2'] })]) });
+    expect(hash(a2)).not.toBe(hash(a1));
+  });
+
+  it('distributor evidence-hash drift changes the P-hash for distributor members', () => {
+    const h1 = makeParams({ projection: projectionWithMembers([distributorMember({ distributorEvidenceHash: 'a'.repeat(64) })]) });
+    const h2 = makeParams({ projection: projectionWithMembers([distributorMember({ distributorEvidenceHash: 'b'.repeat(64) })]) });
+    expect(hash(h2)).not.toBe(hash(h1));
+  });
+
+  it('a V1 member hashes identically to a normalized official-page V2 member', () => {
+    const v1 = makeParams({ projection: projectionWithMembers([makeMember()]) });
+    const v2Official = makeParams({
+      projection: projectionWithMembers([
+        distributorMember({
+          itemSourceType: 'official_page',
+          extractionSourceType: 'official_page',
+          extractionMethod: '',
+          sourcingGenerationId: null,
+          acceptedEvidenceAttemptIds: [],
+          acceptedProviderIds: [],
+          distributorEvidenceHash: null,
+        }),
+      ]),
+    });
+    expect(hash(v2Official)).toBe(hash(v1));
   });
 });

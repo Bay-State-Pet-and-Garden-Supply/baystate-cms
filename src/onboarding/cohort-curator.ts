@@ -66,7 +66,10 @@ import {
   updateItemStageStatus,
   updateItemCurationData,
 } from '../db/repositories/onboarding-item-repo';
-import { getLatestExtractionSourcesByItemIds } from '../db/repositories/onboarding-extraction-repo';
+import {
+  getLatestExtractionBindingsByItemIds,
+  type ExtractionBinding,
+} from '../db/repositories/onboarding-extraction-repo';
 import { completeRun, createRun } from '../db/repositories/classification-run-repo';
 import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
 import {
@@ -142,15 +145,19 @@ import {
 import { groupByProductLine } from './cohort-name-coordinator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
 import {
-  PROJECTION_VERSION,
-  ExecutionEvidenceProjectionV1Schema,
+  PROJECTION_VERSION_V2,
+  ExecutionEvidenceProjectionV2Schema,
+  parseExecutionEvidenceProjection,
+  normalizeExecutionEvidenceProjectionMemberV1,
 } from '../shared/schemas/cohorts';
 import type {
   CohortRun,
   CurationCohort,
   CurationCohortMember,
+  ExecutionEvidenceProjectionMemberV2,
   ExecutionEvidenceProjectionMemberV1,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjectionMember,
+  ExecutionEvidenceProjectionV2,
   ExecutionProductTypeOutcome,
   CohortTitleOutput,
 } from '../shared/schemas/cohorts';
@@ -265,8 +272,8 @@ export function buildExecutionEvidenceProjection(
   cohort: CurationCohort,
   members: CurationCohortMember[],
   items: OnboardingItem[],
-  extractionSources: Map<string, string>,
-): ExecutionEvidenceProjectionV1 {
+  extractionSources: Map<string, ExtractionBinding>,
+): ExecutionEvidenceProjectionV2 {
   if (cohort.workspaceId !== workspaceId) {
     throw new Error(`Execution-evidence projection workspace mismatch: cohort belongs to ${cohort.workspaceId}, expected ${workspaceId}.`);
   }
@@ -278,18 +285,17 @@ export function buildExecutionEvidenceProjection(
     if (!item) {
       throw new Error(`Execution-evidence projection: member item ${member.onboardingItemId} not found.`);
     }
-    const extractionSourceUrl = extractionSources.get(item.id) ?? null;
-    return buildExecutionEvidenceProjectionMember(member, item, extractionSourceUrl);
+    return buildExecutionEvidenceProjectionMember(member, item, extractionSources.get(item.id));
   });
 
-  const projection: ExecutionEvidenceProjectionV1 = {
-    version: 'execution-evidence-v1',
+  const projection: ExecutionEvidenceProjectionV2 = {
+    version: 'execution-evidence-v2',
     cohortId: cohort.id,
     batchId: cohort.batchId,
     groupingVersion: cohort.groupingVersion,
     members: memberEntries,
   };
-  const parsed = ExecutionEvidenceProjectionV1Schema.safeParse(projection);
+  const parsed = ExecutionEvidenceProjectionV2Schema.safeParse(projection);
   if (!parsed.success) {
     throw new Error(`Execution-evidence projection failed schema validation: ${JSON.stringify(parsed.error.issues)}`);
   }
@@ -308,8 +314,8 @@ export function buildExecutionEvidenceProjection(
 function buildExecutionEvidenceProjectionMember(
   member: CurationCohortMember,
   item: OnboardingItem,
-  extractionSourceUrl: string | null,
-): ExecutionEvidenceProjectionMemberV1 {
+  binding: ExtractionBinding | undefined,
+): ExecutionEvidenceProjectionMemberV2 {
   const ext: Record<string, any> = item.extractionData ?? {};
 
   const piEvidence = ((ext as { productIntelligenceEvidence?: Array<{ runId?: string; resultHash?: string; importRecordId?: string }> }).productIntelligenceEvidence ?? [])
@@ -332,14 +338,40 @@ function buildExecutionEvidenceProjectionMember(
     throw new Error(`Execution-evidence projection: member ${member.onboardingItemId} has an incomplete Product Intelligence import (piImportComplete cannot be asserted).`);
   }
 
-  return ExecutionEvidenceProjectionV1Schema.shape.members.element.parse({
+  // Amendment A provenance: item-level source, extraction binding provenance,
+  // and the distributor identity fields (identity-only, never copy/commerce).
+  const distributorProvenance =
+    (ext as { distributorRecordProvenance?: { providerIds?: string[]; evidenceHash?: string } | null })
+      .distributorRecordProvenance ?? null;
+  const itemSourceType = item.sourceType ?? 'official_page';
+  const extractionSourceType = binding?.sourceType ?? 'official_page';
+  const extractionSourceUrl = binding?.sourceUrl ?? null;
+  const acceptedEvidenceAttemptIds = Array.from(
+    new Set([
+      ...(binding?.acceptedEvidenceAttemptIds ?? []),
+      ...(item.acceptedEvidenceAttemptIds ?? []),
+    ]),
+  ).sort();
+  const acceptedProviderIds = Array.from(
+    new Set(distributorProvenance?.providerIds ?? []),
+  ).sort();
+
+  return ExecutionEvidenceProjectionV2Schema.shape.members.element.parse({
+    version: 'execution-evidence-v2',
     onboardingItemId: item.id,
     ordinal: member.ordinal,
     productSku: item.upc ?? null,
     extractionComplete: true,
     sourceUrl: item.sourceUrl ?? null,
-    extractionSourceUrl: extractionSourceUrl,
+    extractionSourceUrl,
     sourcingDecision: item.sourcingDecision ?? null,
+    itemSourceType,
+    extractionSourceType,
+    extractionMethod: binding?.extractionMethod ?? '',
+    sourcingGenerationId: binding?.sourcingGenerationId ?? null,
+    acceptedEvidenceAttemptIds,
+    acceptedProviderIds,
+    distributorEvidenceHash: binding?.evidenceHash ?? distributorProvenance?.evidenceHash ?? null,
     spreadsheetIdentity: {
       name: item.name,
       expectedName: item.expectedName ?? null,
@@ -362,6 +394,9 @@ function buildExecutionEvidenceProjectionMember(
       customFields: ext.customFields ?? {},
       fieldProvenance: ext.fieldProvenance ?? {},
       packagingTitle: ext.packagingTitle ?? null,
+      distributorSku: ext.distributorSku ?? null,
+      manufacturerPartNumber: ext.manufacturerPartNumber ?? null,
+      variantAttributes: ext.variantAttributes ?? {},
       ocr: {
         outcome: ext.ocrOutcome ?? null,
         packagingOcrData: ext.packagingOcrData ?? null,
@@ -882,7 +917,7 @@ export async function freezeCohortForExecution(
       throw new Error(`Freeze aborted: member item ${member.onboardingItemId} not found in batch ${cohort.batchId}.`);
     }
   }
-  const extractionSources = getLatestExtractionSourcesByItemIds(members.map(member => member.onboardingItemId));
+  const extractionSources = getLatestExtractionBindingsByItemIds(members.map(member => member.onboardingItemId));
   const membershipHash = computeMembershipHash(members.map(member => member.onboardingItemId));
   if (membershipHash !== run.candidateMembershipHash) {
     throw new Error(`Freeze aborted: cohort membership changed since claim (candidate ${run.candidateMembershipHash}, current ${membershipHash}).`);
@@ -913,7 +948,7 @@ export async function freezeCohortForExecution(
       lastHeartbeatAt = Date.now();
     }
     const item = itemsById.get(member.onboardingItemId)!;
-    const extractionSourceUrl = extractionSources.get(item.id) ?? null;
+    const extractionSourceUrl = extractionSources.get(item.id)?.sourceUrl ?? null;
     const currentOcrInputHash = computeOcrInputHash(item, extractionSourceUrl);
 
     const snapshot = buildRuntimeSnapshot({
@@ -1055,7 +1090,7 @@ export async function freezeCohortForExecution(
     // writes here; the per-member results feed the final CAS aggregation.
     let memberTypeLlmResult: MemberLlmRankResult | null = null;
     if (cohortTypeResolutionActive) {
-      const memberProjection = buildExecutionEvidenceProjectionMember(member, frozenItem, extractionSourceUrl);
+      const memberProjection = buildExecutionEvidenceProjectionMember(member, frozenItem, extractionSources.get(item.id));
       const typeEvidence = evidenceFromProjection(memberProjection);
       const resolvedTypeTarget = resolveTargetsFromSnapshot(snapshot).productTypes[0] ?? null;
       const typeOptions = resolvedTypeTarget?.options ?? [];
@@ -1170,7 +1205,7 @@ export async function freezeCohortForExecution(
       }
       const reloadedItems = listItemsByBatch(reloadedCohort.batchId);
       const reloadedItemsById = new Map(reloadedItems.map(item => [item.id, item]));
-      const reloadedExtractionSources = getLatestExtractionSourcesByItemIds(reloadedMembers.map(member => member.onboardingItemId));
+      const reloadedExtractionSources = getLatestExtractionBindingsByItemIds(reloadedMembers.map(member => member.onboardingItemId));
 
       // (c) each member's CURRENT evidence hash + ocrInputHash still match the
       // frozen values captured during the freeze window.
@@ -1183,7 +1218,7 @@ export async function freezeCohortForExecution(
         if (!currentEvidenceHash || currentEvidenceHash !== frozen.frozenEvidenceHash) {
           throw new CohortFreezeCasError(`member ${frozen.member.onboardingItemId} evidence changed during the freeze window (frozen hash ${frozen.frozenEvidenceHash}, current ${currentEvidenceHash ?? 'none'}).`);
         }
-        const currentExtractionSource = reloadedExtractionSources.get(currentItem.id) ?? null;
+        const currentExtractionSource = reloadedExtractionSources.get(currentItem.id)?.sourceUrl ?? null;
         const currentOcrInputHash = computeOcrInputHash(currentItem, currentExtractionSource);
         if (currentOcrInputHash !== frozen.frozenOcrInputHash) {
           throw new CohortFreezeCasError(`member ${frozen.member.onboardingItemId} input set changed during the freeze window (ocrInputHash mismatch).`);
@@ -1215,7 +1250,7 @@ export async function freezeCohortForExecution(
       const persisted = persistCohortSnapshot({
         workspaceId,
         snapshotHash: h2,
-        projectionVersion: PROJECTION_VERSION,
+        projectionVersion: PROJECTION_VERSION_V2,
         payloadJson,
       });
 
@@ -1431,7 +1466,7 @@ export function verifyCohortRunFrozen(
     if (cohort.membershipHash !== run.candidateMembershipHash) return false;
 
     const items = listItemsByBatch(cohort.batchId);
-    const extractionSources = getLatestExtractionSourcesByItemIds(members.map(member => member.onboardingItemId));
+    const extractionSources = getLatestExtractionBindingsByItemIds(members.map(member => member.onboardingItemId));
     const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, extractionSources);
     if (hashCanonicalJson(projection) !== run.evidenceSnapshotHash) return false;
 
@@ -1543,7 +1578,7 @@ export function observeCohortShadowTypeResolution(
       if (members.length === 0) continue;
       const items = listItemsByBatch(cohort.batchId);
       const itemsById = new Map(items.map(item => [item.id, item]));
-      const extractionSources = getLatestExtractionSourcesByItemIds(members.map(member => member.onboardingItemId));
+      const extractionSources = getLatestExtractionBindingsByItemIds(members.map(member => member.onboardingItemId));
 
       const memberInputs: CohortMemberInput[] = [];
       for (const member of members) {
@@ -1552,7 +1587,7 @@ export function observeCohortShadowTypeResolution(
         const memberProjection = buildExecutionEvidenceProjectionMember(
           member,
           item,
-          extractionSources.get(item.id) ?? null,
+          extractionSources.get(item.id),
         );
         // In-memory snapshot — never persisted; only the product-type option
         // resolution path is consumed by the resolver.
@@ -1625,7 +1660,7 @@ export function observeCohortShadowTypeResolution(
  */
 export interface PreparedCohortContext {
   /** Frozen member execution-evidence projection (contract C). */
-  memberProjection: ExecutionEvidenceProjectionMemberV1;
+  memberProjection: ExecutionEvidenceProjectionMember;
   /** Parent cohort run id (child runs link via cohort_run_id). */
   parentRunId: string;
   /** Persisted runtime snapshot refs created at freeze (child run config refs). */
@@ -1773,10 +1808,21 @@ export interface PreparedCohortContext {
 /** The frozen `extractionData` view for one member projection — shared by
  *  `buildFrozenItem` (live identity) and `frozenItemFromProjection` (synthetic
  *  sibling views). Constructed PURELY from projection fields. */
+/**
+ * Normalize a versioned frozen member to the V2 shape. Historical V1 members
+ * normalize to official-page provenance (in-memory only — persisted V1 bytes
+ * are never rewritten).
+ */
+function toV2Member(projection: ExecutionEvidenceProjectionMember): ExecutionEvidenceProjectionMemberV2 {
+  if ('itemSourceType' in projection) return projection as ExecutionEvidenceProjectionMemberV2;
+  return normalizeExecutionEvidenceProjectionMemberV1(projection as ExecutionEvidenceProjectionMemberV1);
+}
+
 function frozenExtractionData(
-  projection: ExecutionEvidenceProjectionMemberV1,
+  projection: ExecutionEvidenceProjectionMember,
 ): OnboardingItem['extractionData'] {
-  const frozen = projection.extraction;
+  const member = toV2Member(projection);
+  const frozen = member.extraction;
   return {
     title: frozen.title ?? null,
     brand: frozen.brand ?? null,
@@ -1789,6 +1835,9 @@ function frozenExtractionData(
     customFields: { ...frozen.customFields },
     fieldProvenance: { ...frozen.fieldProvenance },
     packagingTitle: frozen.packagingTitle ?? null,
+    distributorSku: frozen.distributorSku ?? null,
+    manufacturerPartNumber: frozen.manufacturerPartNumber ?? null,
+    variantAttributes: { ...frozen.variantAttributes },
     packagingOcrData: frozen.ocr.packagingOcrData ?? null,
     ocrOutcome: frozen.ocr.outcome ?? null,
     ocrInputHash: frozen.ocr.ocrInputHash,
@@ -1806,17 +1855,20 @@ function frozenExtractionData(
 }
 
 export function buildFrozenItem(
-  projection: ExecutionEvidenceProjectionMemberV1,
+  projection: ExecutionEvidenceProjectionMember,
   liveItem: OnboardingItem,
 ): OnboardingItem {
-  const spread = projection.spreadsheetIdentity;
+  projection = toV2Member(projection);
+  const member = toV2Member(projection);
+  const spread = member.spreadsheetIdentity;
   // PR3 hardening C (4): the executed member is CONSTRUCTED — never assembled
   // by spreading the live item. (a) the permitted live identity/pipeline
   // fields below (pipeline state, not semantic evidence); (b) every SEMANTIC
   // field from the frozen projection: spreadsheet identity, authoritative
-  // sourceUrl, sourcingDecision, and a purely projection-built extraction
-  // view. Live semantic fields (sourcingDecision, accepted attempt IDs, prior
-  // curation data, source type) can never leak into the executed member.
+  // sourceUrl, sourcingDecision, source type, accepted provenance, and a
+  // purely projection-built extraction view. Live semantic fields
+  // (sourcingDecision, accepted attempt IDs, prior curation data, source
+  // type) can never leak into the executed member.
   return {
     // (a) Live identity / pipeline state.
     id: liveItem.id,
@@ -1840,14 +1892,16 @@ export function buildFrozenItem(
     price: spread.price,
     quantity: spread.quantity,
     // Authoritative null STAYS null — never fall back to a post-freeze live value.
-    sourceUrl: projection.sourceUrl,
-    sourceType: 'official_page',
+    sourceUrl: member.sourceUrl,
+    // Amendment A: source type + accepted provenance restored from the frozen
+    // member — never hardcoded, never read live post-freeze.
+    sourceType: member.itemSourceType,
     coordinatedTitle: null,
     acceptedEvidenceAttemptId: null,
-    acceptedEvidenceAttemptIds: [],
-    sourcingDecision: projection.sourcingDecision,
+    acceptedEvidenceAttemptIds: [...member.acceptedEvidenceAttemptIds],
+    sourcingDecision: member.sourcingDecision,
     curationData: null,
-    extractionData: frozenExtractionData(projection),
+    extractionData: frozenExtractionData(member),
   };
 }
 
@@ -1856,10 +1910,11 @@ export function buildFrozenItem(
  *  extraction. Used ONLY as the frozen sibling input for title coordination
  *  (`coordinateCohortItemsOnce`); never persisted. */
 function frozenItemFromProjection(
-  projection: ExecutionEvidenceProjectionMemberV1,
+  projection: ExecutionEvidenceProjectionMember,
   batchId: string,
 ): OnboardingItem {
-  const spread = projection.spreadsheetIdentity;
+  const member = toV2Member(projection);
+  const spread = member.spreadsheetIdentity;
   return {
     id: projection.onboardingItemId,
     batchId,
@@ -1869,12 +1924,12 @@ function frozenItemFromProjection(
     quantity: spread.quantity,
     brandHint: spread.brandHint,
     departmentHint: spread.departmentHint,
-    sourceUrl: projection.sourceUrl,
+    sourceUrl: member.sourceUrl,
     expectedName: spread.expectedName,
-    sourceType: 'official_page',
-    acceptedEvidenceAttemptIds: [],
+    sourceType: member.itemSourceType,
+    acceptedEvidenceAttemptIds: [...member.acceptedEvidenceAttemptIds],
     acceptedEvidenceAttemptId: null,
-    sourcingDecision: projection.sourcingDecision,
+    sourcingDecision: member.sourcingDecision,
     stage: 'curation',
     stageStatus: 'pending',
     status: 'curated',
@@ -1926,9 +1981,9 @@ export interface FrozenProductLineContext {
 export function buildFrozenProductLineContext(
   cohort: CurationCohort,
   members: CurationCohortMember[],
-  projections: ExecutionEvidenceProjectionMemberV1[],
+  projections: ExecutionEvidenceProjectionMember[],
 ): FrozenProductLineContext {
-  const ordered = [...projections].sort((a, b) => a.ordinal - b.ordinal);
+  const ordered = projections.map(toV2Member).sort((a, b) => a.ordinal - b.ordinal);
   const siblingNames: string[] = [];
   const siblingWebTitles: string[] = [];
   const siblingOcrTitles: string[] = [];
@@ -2036,10 +2091,11 @@ export class MemberCommitCrashSimulationError extends Error {
  */
 function buildPreparedCohortContextForMember(
   parentRun: CohortRun,
-  memberProjection: ExecutionEvidenceProjectionMemberV1,
+  memberProjection: ExecutionEvidenceProjectionMember,
   childRun: ClassificationRunRow,
   workspaceId: string,
 ): PreparedCohortContext {
+  memberProjection = toV2Member(memberProjection);
   if (!childRun.configSnapshotId || !childRun.configSnapshotHash) {
     throw new Error(
       `processCohort: member ${memberProjection.onboardingItemId} child run ${childRun.id} has no frozen snapshot refs.`,
@@ -2076,7 +2132,7 @@ function buildPreparedCohortContextForMember(
     source: resolvedEffectiveType.source,
   };
   return {
-    memberProjection,
+    memberProjection: toV2Member(memberProjection),
     parentRunId: parentRun.id,
     memberSnapshotId: childRun.configSnapshotId,
     memberSnapshotHash: childRun.configSnapshotHash,
@@ -2207,9 +2263,11 @@ export async function processCohort(
     completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
     throw new Error(reason);
   }
-  let projection: ExecutionEvidenceProjectionV1;
+  let projection: ExecutionEvidenceProjectionV2;
   try {
-    projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snapshot.payloadJson));
+    // Central adapter: V2 first, historical V1 normalized to official-page
+    // provenance (parse-only — persisted V1 bytes are never rewritten).
+    projection = parseExecutionEvidenceProjection(JSON.parse(snapshot.payloadJson));
   } catch (err) {
     const reason = `processCohort aborted: run ${run.id} snapshot payload is corrupt: ${err instanceof Error ? err.message : String(err)}`;
     completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });

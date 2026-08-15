@@ -14,7 +14,7 @@ import {
   updateItemExtractionData,
   findItemById,
 } from '../../db/repositories/onboarding-item-repo';
-import { insertExtraction } from '../../db/repositories/onboarding-extraction-repo';
+import { insertExtraction, type ExtractionBinding } from '../../db/repositories/onboarding-extraction-repo';
 import {
   refreshCandidateCohorts,
   updateCohortStatus,
@@ -61,7 +61,11 @@ import {
   getCohortCurationFlags,
 } from '../../classification/flags';
 import { ClassificationManifestV2Schema, ClassificationFocusedFileNames } from '../../shared/schemas/classification';
-import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
+import {
+  ExecutionEvidenceProjectionV1Schema,
+  ExecutionEvidenceProjectionV2Schema,
+  parseExecutionEvidenceProjection,
+} from '../../shared/schemas/cohorts';
 import type { CurationCohort, ExecutionEvidenceProjectionMemberV1 } from '../../shared/schemas/cohorts';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
@@ -428,10 +432,10 @@ describe('execution-evidence projection builder (PR3 M2)', () => {
     });
     const cohort = cohorts[0];
     const members = getCohortMembers(cohort.id);
-    const sources = new Map(items.map(item => [item.id, item.sourceUrl ?? '']));
+    const sources = new Map(items.map(item => [item.id, { sourceUrl: item.sourceUrl ?? null, sourceType: 'official_page' as const, extractionMethod: 'test', sourcingGenerationId: null, acceptedEvidenceAttemptIds: [], evidenceHash: null }]));
     const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
 
-    expect(projection.version).toBe('execution-evidence-v1');
+    expect(projection.version).toBe('execution-evidence-v2');
     expect(projection.cohortId).toBe(cohort.id);
     expect(projection.batchId).toBe(cohort.batchId);
     expect(projection.groupingVersion).toBe('product-family-v1');
@@ -469,7 +473,7 @@ describe('execution-evidence projection builder (PR3 M2)', () => {
       expect(member.evidenceHash).toMatch(/^[a-f0-9]{64}$/);
     }
     // The projection round-trips through the versioned schema.
-    expect(ExecutionEvidenceProjectionV1Schema.safeParse(projection).success).toBe(true);
+    expect(ExecutionEvidenceProjectionV2Schema.safeParse(projection).success).toBe(true);
   });
 
   it('ocrInputHash is stable for the same input set and changes when the image set changes', () => {
@@ -479,7 +483,7 @@ describe('execution-evidence projection builder (PR3 M2)', () => {
     });
     const cohort = cohorts[0];
     const members = getCohortMembers(cohort.id);
-    const sources = new Map(items.map(item => [item.id, item.sourceUrl ?? '']));
+    const sources = new Map(items.map(item => [item.id, { sourceUrl: item.sourceUrl ?? null, sourceType: 'official_page' as const, extractionMethod: 'test', sourcingGenerationId: null, acceptedEvidenceAttemptIds: [], evidenceHash: null }]));
     const a = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
     const b = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
     expect(a.members[0].extraction.ocr.ocrInputHash).toBe(b.members[0].extraction.ocr.ocrInputHash);
@@ -504,7 +508,7 @@ describe('execution-evidence projection builder (PR3 M2)', () => {
     });
     const cohort = cohorts[0];
     const members = getCohortMembers(cohort.id);
-    const sources = new Map(items.map(item => [item.id, item.sourceUrl ?? '']));
+    const sources = new Map(items.map(item => [item.id, { sourceUrl: item.sourceUrl ?? null, sourceType: 'official_page' as const, extractionMethod: 'test', sourcingGenerationId: null, acceptedEvidenceAttemptIds: [], evidenceHash: null }]));
     const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
     for (const member of projection.members) {
       const item = items.find(i => i.id === member.onboardingItemId)!;
@@ -512,6 +516,208 @@ describe('execution-evidence projection builder (PR3 M2)', () => {
     }
     const hashes = new Set(projection.members.map(m => m.evidenceHash));
     expect(hashes.size).toBe(2);
+  });
+
+  it('V2 member carries Amendment A source provenance and distributor identity fields', () => {
+    const { workspaceId } = newWorkspace();
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    const cohort = cohorts[0];
+    const members = getCohortMembers(cohort.id);
+    // Simulate a distributor-record materialization: item source type,
+    // payload provenance, and a distributor extraction binding.
+    const item = items[0];
+    // A distributor item carries NO source URL (no fake official URL).
+    getDb().query('UPDATE onboarding_items SET source_url = NULL WHERE id = ?').run(item.id);
+    const prov = {
+      sourcingGenerationId: 'gen-dist-1',
+      evidenceHash: 'a'.repeat(64),
+      acceptedEvidenceAttemptIds: ['a1', 'a2'],
+      providerIds: ['phillips', 'bci'],
+      catalogVersions: ['v2026.3'],
+    };
+    getDb().query('UPDATE onboarding_items SET source_type = ? WHERE id = ?').run('distributor_record', item.id);
+    const payload = {
+      ...item.extractionData,
+      distributorSku: 'DSKU-1',
+      manufacturerPartNumber: 'MPN-1',
+      variantAttributes: { flavor: 'Chicken' },
+      sourceType: 'distributor_record',
+      distributorRecordProvenance: prov,
+    };
+    updateItemExtractionData(item.id, JSON.stringify(payload));
+    const sources = new Map<string, ExtractionBinding>([
+      [item.id, {
+        sourceUrl: null,
+        sourceType: 'distributor_record',
+        extractionMethod: 'distributor_record_v1',
+        sourcingGenerationId: 'gen-dist-1',
+        acceptedEvidenceAttemptIds: ['a2', 'a1'],
+        evidenceHash: 'a'.repeat(64),
+      }],
+    ]);
+    const updatedItem = findItemById(item.id)!;
+    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, [updatedItem], sources);
+    const member = projection.members[0];
+    expect(member.itemSourceType).toBe('distributor_record');
+    expect(member.extractionSourceType).toBe('distributor_record');
+    expect(member.extractionMethod).toBe('distributor_record_v1');
+    expect(member.sourcingGenerationId).toBe('gen-dist-1');
+    // Sorted-unique accepted ids + provider ids.
+    expect(member.acceptedEvidenceAttemptIds).toEqual(['a1', 'a2']);
+    expect(member.acceptedProviderIds).toEqual(['bci', 'phillips']);
+    expect(member.distributorEvidenceHash).toBe('a'.repeat(64));
+    expect(member.sourceUrl).toBeNull();
+    expect(member.extractionSourceUrl).toBeNull();
+    expect(member.extraction.distributorSku).toBe('DSKU-1');
+    expect(member.extraction.manufacturerPartNumber).toBe('MPN-1');
+    expect(member.extraction.variantAttributes).toEqual({ flavor: 'Chicken' });
+
+    // buildFrozenItem restores source type + accepted provenance from the
+    // frozen member (never hardcoded, never live post-freeze).
+    const frozen = buildFrozenItem(member, updatedItem);
+    expect(frozen.sourceType).toBe('distributor_record');
+    expect(frozen.sourceUrl).toBeNull();
+    expect(frozen.acceptedEvidenceAttemptIds).toEqual(['a1', 'a2']);
+    expect(frozen.extractionData?.distributorSku).toBe('DSKU-1');
+  });
+
+  it('historical V1 snapshots normalize to V2 official-page provenance (parse-only, never rewritten)', () => {
+    const { workspaceId } = newWorkspace();
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    const cohort = cohorts[0];
+    const members = getCohortMembers(cohort.id);
+    const sources = new Map(items.map(item => [item.id, { sourceUrl: item.sourceUrl ?? null, sourceType: 'official_page' as const, extractionMethod: 'test', sourcingGenerationId: null, acceptedEvidenceAttemptIds: [], evidenceHash: null }]));
+    // Build a V2 projection, then re-encode its core as a V1 payload.
+    const v2 = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
+    const v1Payload = {
+      version: 'execution-evidence-v1',
+      cohortId: v2.cohortId,
+      batchId: v2.batchId,
+      groupingVersion: v2.groupingVersion,
+      members: v2.members.map(m => ({
+        onboardingItemId: m.onboardingItemId,
+        ordinal: m.ordinal,
+        productSku: m.productSku,
+        extractionComplete: m.extractionComplete,
+        sourceUrl: m.sourceUrl,
+        extractionSourceUrl: m.extractionSourceUrl,
+        sourcingDecision: m.sourcingDecision,
+        spreadsheetIdentity: m.spreadsheetIdentity,
+        extraction: m.extraction,
+        evidenceHash: m.evidenceHash,
+      })),
+    };
+    // V1 schema parse-only: it must parse the V1 payload and NOT the V2 one.
+    expect(ExecutionEvidenceProjectionV1Schema.safeParse(v1Payload).success).toBe(true);
+    expect(ExecutionEvidenceProjectionV1Schema.safeParse(v2).success).toBe(false);
+    // The adapter normalizes V1 → V2 with official-page provenance.
+    const normalized = parseExecutionEvidenceProjection(v1Payload);
+    expect(normalized.version).toBe('execution-evidence-v2');
+    expect(normalized.members[0].itemSourceType).toBe('official_page');
+    expect(normalized.members[0].extractionSourceType).toBe('official_page');
+    expect(normalized.members[0].acceptedEvidenceAttemptIds).toEqual([]);
+    expect(normalized.members[0].distributorEvidenceHash).toBeNull();
+    expect(normalized.members[0].extraction.distributorSku).toBeNull();
+    expect(normalized.members[0].extraction.variantAttributes).toEqual({});
+  });
+
+  it('V2 members self-version AND preserve the full V2 sourcing decision through the freeze parse', () => {
+    const { workspaceId } = newWorkspace();
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction(),
+    });
+    const cohort = cohorts[0];
+    const members = getCohortMembers(cohort.id);
+    // Seed a V2 distributor decision directly on the item row (V2-only
+    // authority: schemaVersion/evidenceHash/sourceType/target must survive).
+    const v2Decision = {
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: ['att-1'],
+      providerIds: ['phillips'],
+      sourcingGenerationId: 'gen-1',
+      evidenceHash: 'b'.repeat(64),
+      sourceType: 'distributor_record',
+      target: 'extraction',
+      conflicts: [],
+      warnings: [],
+      decidedAt: '2026-08-14T00:00:00.000Z',
+    };
+    getDb().run('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?', [
+      JSON.stringify(v2Decision),
+      items[0].id,
+    ]);
+    const binding = {
+      sourceUrl: null,
+      sourceType: 'distributor_record' as const,
+      extractionMethod: 'distributor_record_v1',
+      sourcingGenerationId: 'gen-1',
+      acceptedEvidenceAttemptIds: ['att-1'],
+      evidenceHash: 'b'.repeat(64),
+    };
+    const sources = new Map([[items[0].id, binding]]);
+    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, [findItemById(items[0].id)!], sources);
+
+    expect(projection.members[0].version).toBe('execution-evidence-v2');
+    // The V2-only decision authority is preserved verbatim (Milestone E
+    // review): schemaVersion, evidenceHash, sourceType, target, generation.
+    const frozenDecision = projection.members[0].sourcingDecision as Record<string, unknown>;
+    expect(frozenDecision.schemaVersion).toBe(2);
+    expect(frozenDecision.route).toBe('distributor_record_to_extraction');
+    expect(frozenDecision.evidenceHash).toBe('b'.repeat(64));
+    expect(frozenDecision.sourceType).toBe('distributor_record');
+    expect(frozenDecision.target).toBe('extraction');
+    expect(frozenDecision.sourcingGenerationId).toBe('gen-1');
+    // The whole projection still round-trips the V2 schema.
+    expect(ExecutionEvidenceProjectionV2Schema.safeParse(projection).success).toBe(true);
+  });
+
+  it('V1 normalization yields self-versioned V2 members with the legacy decision intact', () => {
+    const { workspaceId } = newWorkspace();
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction(),
+    });
+    const cohort = cohorts[0];
+    const members = getCohortMembers(cohort.id);
+    // Legacy (pre-Amendment-A) decision shape — no schemaVersion.
+    const legacyDecision = {
+      route: 'evidence_to_discovery',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: [],
+      providerIds: [],
+      conflicts: [],
+      warnings: [],
+      decidedAt: '2026-08-14T00:00:00.000Z',
+    };
+    getDb().run('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?', [
+      JSON.stringify(legacyDecision),
+      items[0].id,
+    ]);
+    // A V2-built projection with a legacy decision must parse and normalize
+    // identically: build V2, strip the V2-only keys to a V1 payload, then
+    // re-parse through the adapter and verify the legacy decision survived.
+    const officialBinding = {
+      sourceUrl: items[0].sourceUrl ?? 'https://brand.example.com/1',
+      sourceType: 'official_page' as const,
+      extractionMethod: 'test',
+      sourcingGenerationId: null,
+      acceptedEvidenceAttemptIds: [],
+      evidenceHash: null,
+    };
+    const sources = new Map([[items[0].id, officialBinding]]);
+    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, [findItemById(items[0].id)!], sources);
+    const member = projection.members[0];
+    expect(member.version).toBe('execution-evidence-v2');
+    // Legacy decision stays readable (the read union accepts it) and the
+    // member round-trips the V2 member schema.
+    expect((member.sourcingDecision as Record<string, unknown>).schemaVersion).toBeUndefined();
+    expect((member.sourcingDecision as Record<string, unknown>).route).toBe('evidence_to_discovery');
+    expect(ExecutionEvidenceProjectionV2Schema.safeParse(projection).success).toBe(true);
   });
 });
 
@@ -546,8 +752,8 @@ describe('two-phase freeze service (PR3 M2)', () => {
     // The content-addressed snapshot row exists; H2 = digest over the payload.
     const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
     expect(snap).not.toBeNull();
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
-    expect(projection.version).toBe('execution-evidence-v1');
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
+    expect(projection.version).toBe('execution-evidence-v2');
     expect(projection.members).toHaveLength(2);
     expect(hashCanonicalJson(projection)).toBe(finalized.evidenceSnapshotHash!);
 
@@ -606,7 +812,7 @@ describe('two-phase freeze service (PR3 M2)', () => {
     const rerun = await freezeCohortForExecution(retried[0], wsPath, workspaceId);
     expect(rerun.status).toBe('running');
     const snap = getCohortSnapshotByHash(workspaceId, rerun.evidenceSnapshotHash!)!;
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
     expect(projection.members[0].extraction.title).toBe('MUTATED IN WINDOW');
   });
 
@@ -644,7 +850,7 @@ describe('two-phase freeze service (PR3 M2)', () => {
 
     // Build the prepared-cohort context from the frozen run + snapshot.
     const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
     const memberProjection = projection.members.find(m => m.onboardingItemId === item.id)!;
     const child = getDb().query(
       'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
@@ -733,7 +939,7 @@ describe('two-phase freeze service (PR3 M2)', () => {
     const rerun = await freezeCohortForExecution(retried[0], wsPath, workspaceId);
     expect(rerun.status).toBe('running');
     const snap = getCohortSnapshotByHash(workspaceId, rerun.evidenceSnapshotHash!)!;
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
     expect(projection.members[0].extraction.brand).toBe('CHANGED BRAND');
   });
 
@@ -876,7 +1082,7 @@ describe('OCR pull-forward exactly-once (PR3 M2)', () => {
     // Frozen-mode evidence stage materializes from the frozen stored OCR with
     // NO model call (the projection ocrInputHash matches its own input set).
     const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
     const memberProjection = projection.members[0];
     const child = getDb().query(
       'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
@@ -978,7 +1184,7 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
     });
     const cohort = cohorts[0];
     const members = getCohortMembers(cohort.id);
-    const sources = new Map(items.map(item => [item.id, item.sourceUrl ?? '']));
+    const sources = new Map(items.map(item => [item.id, { sourceUrl: item.sourceUrl ?? null, sourceType: 'official_page' as const, extractionMethod: 'test', sourcingGenerationId: null, acceptedEvidenceAttemptIds: [], evidenceHash: null }]));
     const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
     const member = projection.members[0];
 
@@ -1070,7 +1276,7 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
     const siblingItem = items.find(i => i.upc === '100000000002')!;
     getDb().run('UPDATE onboarding_items SET brand_hint = ? WHERE id = ?', ['Spreadsheet Brand', siblingItem.id]);
     const updatedItems = items.map(item => findItemById(item.id)!);
-    const sources = new Map(updatedItems.map(item => [item.id, item.sourceUrl ?? '']));
+    const sources = new Map(updatedItems.map(item => [item.id, { sourceUrl: item.sourceUrl ?? null, sourceType: 'official_page' as const, extractionMethod: 'test', sourcingGenerationId: null, acceptedEvidenceAttemptIds: [], evidenceHash: null }]));
     const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, updatedItems, sources);
 
     const ctx = buildFrozenProductLineContext(cohort, members, projection.members);
@@ -1295,7 +1501,7 @@ describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
       // (stored digest === snapshot B's plan/rule digest) materializes through
       // the frozen evidence stage with NO additional model call.
       const snapB = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-      const projectionB = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snapB.payloadJson));
+      const projectionB = parseExecutionEvidenceProjection(JSON.parse(snapB.payloadJson));
       const memberProjectionB = projectionB.members[0];
       const { evidenceExtractionStage } = await import('../../classification/stages/evidence-extraction');
       const stageContext = {
@@ -1440,7 +1646,7 @@ describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
       expect(storedB.ocrExecutionDigest).toBe(computeOcrExecutionDigest(snapshotB));
       // The frozen projection reflects B's terminal outcome — A's OCR is gone.
       const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-      const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+      const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
       expect(projection.members[0].extraction.ocr.packagingOcrData).toBeNull();
       expect(projection.members[0].extraction.ocr.ocrExecutionDigest).toBe(storedB.ocrExecutionDigest);
     } finally {
@@ -1606,7 +1812,7 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
     // The persisted projection carries the same 2-member membership.
     const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
     expect(projection.members).toHaveLength(2);
   });
 
@@ -2468,7 +2674,7 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     // reconstruct the freeze-time resolution from the persisted projection +
     // the freeze-persisted member runtime snapshots.
     const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
     const resolution = resolveCohortProductType({
       confidenceFloor: 0.7,
       members: projection.members.map(mp => {

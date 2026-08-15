@@ -82,13 +82,13 @@ export function collectNextActionEvidence(workspaceId: string): NextActionEviden
       action: `Audit ${fieldIssues.length} product field issue(s) flagged in catalog health.`,
     });
   }
-  const fieldAudit = getProductFieldAudit('ProductField24', 100);
-  if (fieldAudit.uniqueValueCount > 0 && fieldAudit.duplicateGroups.length > 0) {
+  const brandAudit = getProductFieldAudit('ProductField16', 100);
+  if (brandAudit.uniqueValueCount > 0 && brandAudit.duplicateGroups.length > 0) {
     evidence.push({
       focus: 'product_fields',
       priority: 3,
-      evidenceKey: `product_field.ProductField24.duplicate_groups.${fieldAudit.duplicateGroups.length}`,
-      action: `Normalize ${fieldAudit.duplicateGroups.length} casing/whitespace duplicate group(s) in ProductField24.`,
+      evidenceKey: `product_field.ProductField16.duplicate_groups.${brandAudit.duplicateGroups.length}`,
+      action: `Normalize ${brandAudit.duplicateGroups.length} casing/whitespace duplicate group(s) in Brand (ProductField16).`,
     });
   }
 

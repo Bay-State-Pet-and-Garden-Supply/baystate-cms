@@ -6,7 +6,7 @@ import { resolveBrand } from '../brand-resolution';
 import { CanonicalBrandEvidenceValueSchema } from '../../shared/schemas/classification';
 import { hashCanonicalJson } from '../../shared/stable-id';
 import { computeOcrExecutionDigest } from '../runtime-snapshot';
-import type { ExecutionEvidenceProjectionMemberV1 } from '../../shared/schemas/cohorts';
+import type { ExecutionEvidenceProjectionMemberV2 } from '../../shared/schemas/cohorts';
 import type { ClassificationEvidence } from '../../shared/types';
 import * as crypto from 'node:crypto';
 
@@ -28,7 +28,7 @@ const now = () => new Date().toISOString();
 function executeFrozenEvidenceExtraction(
   input: StageInput,
   context: StageContext,
-  frozen: ExecutionEvidenceProjectionMemberV1,
+  frozen: ExecutionEvidenceProjectionMemberV2,
 ): StageResult {
   const evidence: ClassificationEvidence[] = [];
   const sku = input.sku;
@@ -56,7 +56,46 @@ function executeFrozenEvidenceExtraction(
     push({ attributeId: null, source: 'spreadsheet', reliability: 'medium', sourceUrl: null, sourceField: 'brand', snippet: identity.brandHint.slice(0, 300), value: identity.brandHint, metadata: { provenance: 'spreadsheet_import' } });
   }
 
-  // ── Normalized extraction fields (official product page) ───────────────
+  // ── Normalized extraction fields (source-aware, Amendment A) ───────────
+  // Distributor-record sources emit ONLY identity fields (title/name, brand,
+  // weight, distributor SKU, MPN, whitelisted variant attributes) with source
+  // `distributor_record`, a NULL classification URL, and metadata carrying the
+  // sorted attempt/provider ids, generation, evidence hash, and per-field
+  // provenance. Description/bullets/search-keywords/copy are NEVER emitted
+  // for distributor sources, and nothing is ever labeled
+  // `official_product_page` for them.
+  const isDistributor = frozen.itemSourceType === 'distributor_record' || frozen.extractionSourceType === 'distributor_record';
+  if (isDistributor) {
+    const distributorMetadata = {
+      provenance: 'distributor_record',
+      sourcingGenerationId: frozen.sourcingGenerationId ?? null,
+      acceptedEvidenceAttemptIds: frozen.acceptedEvidenceAttemptIds,
+      acceptedProviderIds: frozen.acceptedProviderIds,
+      distributorEvidenceHash: frozen.distributorEvidenceHash ?? null,
+      fieldProvenance: ext.fieldProvenance ?? {},
+    };
+    const distributorSource: ClassificationEvidence['source'] = 'distributor_record';
+    if (ext.title && ext.title.trim()) {
+      push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: 'name', snippet: ext.title.slice(0, 300), value: ext.title, metadata: distributorMetadata });
+    }
+    if (ext.brand && ext.brand.trim()) {
+      push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: 'brand', snippet: ext.brand.slice(0, 300), value: ext.brand, metadata: distributorMetadata });
+    }
+    if (ext.weight && ext.weight.trim()) {
+      push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: 'weight', snippet: ext.weight.slice(0, 300), value: ext.weight, metadata: distributorMetadata });
+    }
+    if (ext.distributorSku && ext.distributorSku.trim()) {
+      push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: 'distributor_sku', snippet: ext.distributorSku.slice(0, 300), value: ext.distributorSku, metadata: distributorMetadata });
+    }
+    if (ext.manufacturerPartNumber && ext.manufacturerPartNumber.trim()) {
+      push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: 'manufacturer_part_number', snippet: ext.manufacturerPartNumber.slice(0, 300), value: ext.manufacturerPartNumber, metadata: distributorMetadata });
+    }
+    for (const [key, rawVal] of Object.entries(ext.variantAttributes ?? {})) {
+      const value = String(rawVal ?? '').trim();
+      if (!value) continue;
+      push({ attributeId: null, source: distributorSource, reliability: 'medium', sourceUrl: null, sourceField: key, snippet: value.slice(0, 300), value, metadata: distributorMetadata });
+    }
+  } else {
   const pageSource: ClassificationEvidence['source'] = 'official_product_page';
   if (ext.title && ext.title.trim()) {
     push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'name', snippet: ext.title.slice(0, 300), value: ext.title, metadata: { provenance: 'official_product_page' } });
@@ -82,6 +121,7 @@ function executeFrozenEvidenceExtraction(
     if (!value) continue;
     push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: key, snippet: value.slice(0, 300), value, metadata: { provenance: 'product_data' } });
   }
+  }  // end official-page branch (distributor branch above)
 
   // ── Canonical brand resolution from the FROZEN snapshot brands (parity
   //    with the non-cohort path; never a DB read). ────────────────────────
@@ -192,7 +232,7 @@ export const evidenceExtractionStage: StageDefinition = {
     }
 
     const itemRow = db.query(
-      'SELECT extraction_data_json, source_url, name, expected_name, brand_hint FROM onboarding_items WHERE id = ?'
+      'SELECT extraction_data_json, source_url, source_type, name, expected_name, brand_hint FROM onboarding_items WHERE id = ?'
     ).get(input.onboardingItemId) as Record<string, any> | undefined;
 
     if (!itemRow) {
@@ -203,6 +243,69 @@ export const evidenceExtractionStage: StageDefinition = {
       ? JSON.parse(String(itemRow.extraction_data_json))
       : {};
     const sourceUrl = itemRow.source_url ? String(itemRow.source_url) : null;
+    const itemSourceType: 'official_page' | 'distributor_record' =
+      itemRow.source_type === 'distributor_record' ? 'distributor_record' : 'official_page';
+
+    // Amendment A distributor-record source: identity-only evidence labeled
+    // `distributor_record` with a NULL classification URL. Description,
+    // bullets, keywords, and images are NEVER emitted for distributor sources
+    // (the materializer keeps them empty anyway — this is defense in depth).
+    if (itemSourceType === 'distributor_record') {
+      const distributorProvenance =
+        (extData as { distributorRecordProvenance?: { sourcingGenerationId?: string; evidenceHash?: string; acceptedEvidenceAttemptIds?: string[]; providerIds?: string[]; catalogVersions?: string[] } | null })
+          .distributorRecordProvenance ?? null;
+      const distributorMetadata = {
+        provenance: 'distributor_record',
+        sourcingGenerationId: distributorProvenance?.sourcingGenerationId ?? null,
+        acceptedEvidenceAttemptIds: distributorProvenance?.acceptedEvidenceAttemptIds ?? [],
+        acceptedProviderIds: distributorProvenance?.providerIds ?? [],
+        distributorEvidenceHash: distributorProvenance?.evidenceHash ?? null,
+        fieldProvenance: extData.fieldProvenance ?? {},
+      };
+      const distributorInput: NormalizedEvidenceInput = {
+        title: { value: extData.title ?? null, source: 'distributor_record' as const, sourceUrl: null, metadata: distributorMetadata },
+        description: null,
+        brand: { value: extData.brand ?? null, source: 'distributor_record' as const, sourceUrl: null, metadata: distributorMetadata },
+        weight: { value: extData.weight ?? null, source: 'distributor_record' as const, sourceUrl: null, metadata: distributorMetadata },
+        bulletPoints: [],
+        searchKeywords: null,
+        customFields: {},
+        primaryImage: null,
+        additionalImages: [],
+        sourceUrl: null,
+        existingPageNames: [],
+        workspacePath: context.workspacePath,
+        evidenceSourceOverride: 'distributor_record',
+      };
+      const result = await extractProductEvidence(distributorInput, input, context);
+      const evidence = result.evidence;
+
+      // ── Distributor identity facts (SKU / MPN / variants) with provenance ──
+      const pushDistributor = (sourceField: string, value: unknown): void => {
+        if (value == null || String(value).trim().length === 0) return;
+        evidence.push({
+          id: crypto.randomUUID(),
+          runId: context.runId,
+          stageName: 'evidence_extraction',
+          productSku: input.sku,
+          attributeId: null,
+          source: 'distributor_record' as const,
+          reliability: 'medium',
+          sourceUrl: null,
+          sourceField,
+          snippet: String(value).slice(0, 300),
+          value,
+          metadata: distributorMetadata,
+          capturedAt: now(),
+        } as ClassificationEvidence);
+      };
+      pushDistributor('distributor_sku', extData.distributorSku ?? null);
+      pushDistributor('manufacturer_part_number', extData.manufacturerPartNumber ?? null);
+      for (const [key, rawVal] of Object.entries(extData.variantAttributes ?? {})) {
+        pushDistributor(key, rawVal);
+      }
+      return { status: 'succeeded', output: { evidence, proposals: [], abstained: false } };
+    }
 
     // Build per-field inputs with explicit source provenance
     const titleField = extData.title

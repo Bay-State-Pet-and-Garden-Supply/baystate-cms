@@ -73,6 +73,17 @@ export interface NormalizedEvidenceInput {
   distributorProviderId?: string | null;
 }
 
+/**
+ * Canonical provenance label for a text-evidence source (Amendment A).
+ * Distributor-record evidence is labeled `distributor_record` — it must never
+ * fall through to the `official_product_page` metadata label.
+ */
+export function sourceProvenanceLabel(source: ClassificationEvidence['source']): string {
+  if (source === 'catalog_product') return 'catalog_product';
+  if (source === 'spreadsheet') return 'spreadsheet_import';
+  if (source === 'distributor_record') return 'distributor_record';
+  return 'official_product_page';
+}
 
 
 export interface EvidenceExtractionResult {
@@ -479,7 +490,7 @@ export async function extractProductEvidence(
       sourceField: 'name',
       snippet: titleInfo.value.slice(0, 300),
       value: titleInfo.value,
-      metadata: { provenance: titleInfo.source === 'catalog_product' ? 'catalog_product' : titleInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', ...titleInfo.metadata },
+      metadata: { provenance: sourceProvenanceLabel(titleInfo.source), ...titleInfo.metadata },
       capturedAt: now(),
     });
   }
@@ -499,7 +510,7 @@ export async function extractProductEvidence(
       sourceField: 'brand',
       snippet: brandInfo.value.slice(0, 300),
       value: brandInfo.value,
-      metadata: { provenance: brandInfo.source === 'catalog_product' ? 'catalog_product' : brandInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', ...brandInfo.metadata },
+      metadata: { provenance: sourceProvenanceLabel(brandInfo.source), ...brandInfo.metadata },
       capturedAt: now(),
     });
   }
@@ -519,7 +530,7 @@ export async function extractProductEvidence(
       sourceField: 'weight',
       snippet: weightInfo.value.slice(0, 300),
       value: weightInfo.value,
-      metadata: { provenance: weightInfo.source === 'catalog_product' ? 'catalog_product' : weightInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', ...weightInfo.metadata },
+      metadata: { provenance: sourceProvenanceLabel(weightInfo.source), ...weightInfo.metadata },
       capturedAt: now(),
     });
   }
@@ -539,7 +550,7 @@ export async function extractProductEvidence(
       sourceField: 'description',
       snippet: descInfo.value.slice(0, 500),
       value: descInfo.value,
-      metadata: { provenance: descInfo.source === 'catalog_product' ? 'catalog_product' : descInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', extractedAt: now(), ...descInfo.metadata },
+      metadata: { provenance: sourceProvenanceLabel(descInfo.source), extractedAt: now(), ...descInfo.metadata },
       capturedAt: now(),
     });
   }
@@ -561,7 +572,7 @@ export async function extractProductEvidence(
         sourceField: 'bullet_point',
         snippet: String(bullet).slice(0, 300),
         value: String(bullet),
-        metadata: { provenance: bulletInfo.source === 'catalog_product' ? 'catalog_product' : bulletInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', extractedAt: now(), ...bulletInfo.metadata },
+        metadata: { provenance: sourceProvenanceLabel(bulletInfo.source), extractedAt: now(), ...bulletInfo.metadata },
         capturedAt: now(),
       });
     }

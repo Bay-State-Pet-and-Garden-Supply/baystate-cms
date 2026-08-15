@@ -67,8 +67,17 @@ import { listChangeSetItems } from '../../db/repositories/change-set-repo';
 import type { ClassificationConfig } from '../../shared/schemas/classification';
 import type { InsertItemData } from '../../db/repositories/onboarding-item-repo';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
-import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
-import type { CurationCohort, CohortRun, ExecutionEvidenceProjectionV1 } from '../../shared/schemas/cohorts';
+import {
+  ExecutionEvidenceProjectionV1Schema,
+  parseExecutionEvidenceProjection,
+} from '../../shared/schemas/cohorts';
+import type {
+  CurationCohort,
+  CohortRun,
+  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjectionV2,
+  ExecutionEvidenceProjection,
+} from '../../shared/schemas/cohorts';
 import { CurationCohortViewSchema } from '../../shared/schemas/cohorts';
 import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
 import {
@@ -120,9 +129,10 @@ afterEach(() => resetCohortCurationFlagsOverride());
 // ZERO transport. Seeded titles mirror the deterministic cohort fallback
 // (frozen spreadsheet identity) the v1 legacy coordinator produced.
 
-function loadFrozenProjectionForRun(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
+function loadFrozenProjectionForRun(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV2 {
   const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-  return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  // Central adapter: V2-first; historical V1 normalizes to official-page provenance.
+  return parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
 }
 
 /** Resolve the frozen Execution Product Type authority exactly as the parent
@@ -131,7 +141,7 @@ function loadFrozenProjectionForRun(workspaceId: string, run: CohortRun): Execut
 function resolvedExecutionTypeAuthority(
   workspaceId: string,
   run: CohortRun,
-  projection: ExecutionEvidenceProjectionV1,
+  projection: ExecutionEvidenceProjection,
 ): ReturnType<typeof titleExecutionTypeAuthorityFromRun> {
   const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const child = getDb().query(
@@ -1078,7 +1088,7 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity, end-to-end)', 
     // The frozen projection captured the linked attempt id (the gate has a
     // real attempt to consume — the test is NOT vacuous).
     const snapA = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-    const projectionA = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snapA.payloadJson));
+    const projectionA = parseExecutionEvidenceProjection(JSON.parse(snapA.payloadJson));
     const memberA = projectionA.members.find(m => m.onboardingItemId === items[0].id)!;
     expect(memberA.sourcingDecision?.acceptedEvidenceAttemptIds).toContain(attemptId);
 
@@ -2295,7 +2305,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
    *  parent op hashes with `modelPolicyDigest: null` + registry-const plan
    *  versions — exactly what the seeded output rows must hash to. PR6 hardening
    *  C (P1-3): the label participates, resolved via the shared builder. */
-  function expectedTitleInputHash(workspaceId: string, run: CohortRun, projection: ExecutionEvidenceProjectionV1): string {
+  function expectedTitleInputHash(workspaceId: string, run: CohortRun, projection: ExecutionEvidenceProjection): string {
     return computeCohortTitleInputHash({
       run,
       projection,
@@ -2303,9 +2313,9 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     });
   }
 
-  function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
+  function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV2 {
     const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-    return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+    return parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
   }
 
   const SEEDED_TITLES = [
@@ -2355,7 +2365,9 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     coordinatedTitles?: Map<string, { title: string; source: 'llm_cohort' | 'cohort_fallback' }>,
   ): PreparedCohortContext {
     const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+    // Milestone E: the persisted snapshot may be v1 (historical) or v2;
+    // `parseExecutionEvidenceProjection` normalizes v1 to official-page v2.
+    const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
     const memberProjection = projection.members.find(m => m.onboardingItemId === item.id)!;
     const child = getDb().query(
       'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
@@ -2395,7 +2407,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     workspacePath: string;
     run: CohortRun;
     items: OnboardingItem[];
-    projection: ExecutionEvidenceProjectionV1;
+    projection: ExecutionEvidenceProjectionV2;
     frozenLineContext: ReturnType<typeof buildFrozenProductLineContext>;
   }> {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
@@ -2842,7 +2854,7 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
     wsId: string,
     wsPath: string,
     run: CohortRun,
-    projection: ExecutionEvidenceProjectionV1,
+    projection: ExecutionEvidenceProjection,
   ): string {
     const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
     const child = getDb().query(
@@ -2881,7 +2893,7 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
    *  Returns the durable call id. */
   function seedAuditedPageCallRow(
     run: CohortRun,
-    projection: ExecutionEvidenceProjectionV1,
+    projection: ExecutionEvidenceProjection,
   ): string {
     const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
     const childRun = getDb().query(

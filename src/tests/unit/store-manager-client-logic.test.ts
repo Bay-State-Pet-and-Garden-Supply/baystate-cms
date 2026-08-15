@@ -36,7 +36,7 @@ describe('Store Manager client logic (epic #42, #34)', () => {
   });
 
   it('approval card copy names the exact action, risk, scope, and transition', () => {
-    const stage = approvalCardCopy('applyNormalizationProposal', {
+    const stage = approvalCardCopy('stage_stored_proposal_in_change_set', {
       proposalId: 'prop-123',
     });
     expect(stage.title).toContain('Stage a stored proposal');
@@ -46,7 +46,7 @@ describe('Store Manager client logic (epic #42, #34)', () => {
     expect(stage.transition).toContain('not approved');
     expect(stage.transition).toContain('not synced');
 
-    const repair = approvalCardCopy('repairChangeSetImages', {
+    const repair = approvalCardCopy('repair_approved_change_set_images', {
       changeSetId: 'cs-9',
     });
     expect(repair.title).toContain('Repair Change Set images');
@@ -61,13 +61,13 @@ describe('Store Manager client logic (epic #42, #34)', () => {
   });
 
   it('denial outcome never claims execution happened', () => {
-    expect(deniedOutcomeText('applyNormalizationProposal')).toContain('Not executed');
-    expect(deniedOutcomeText('applyNormalizationProposal')).not.toContain('staged');
-    expect(deniedOutcomeText('applyNormalizationProposal')).not.toContain('Success');
+    expect(deniedOutcomeText('stage_stored_proposal_in_change_set')).toContain('Not executed');
+    expect(deniedOutcomeText('stage_stored_proposal_in_change_set')).not.toContain('staged');
+    expect(deniedOutcomeText('stage_stored_proposal_in_change_set')).not.toContain('Success');
   });
 
   it('approval outcome never claims catalog state changed before a result', () => {
-    const text = approvedAwaitingExecutionText('generateNormalizationProposals');
+    const text = approvedAwaitingExecutionText('store_product_field_normalization_proposals');
     expect(text).toContain('Approved');
     expect(text).toContain('unchanged until the tool result confirms it');
   });

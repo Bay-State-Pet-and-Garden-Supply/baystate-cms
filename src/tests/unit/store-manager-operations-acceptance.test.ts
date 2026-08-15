@@ -14,7 +14,7 @@
  *
  * Runs under `bun test` (DB-backed; disposable temp DB only).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { unlinkSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { initDb, closeDb, getDb } from '../../db/connection';
@@ -88,6 +88,9 @@ describe('Store Manager operations-console acceptance (Issue 9)', () => {
   });
 
   beforeEach(() => {
+    initDb(testDbPath);
+    seedWorkspace(WORKSPACE_ID);
+    seedWorkspace(OTHER_WORKSPACE);
     resetStoreManagerFlagsOverride();
   });
 
@@ -312,6 +315,8 @@ describe('Store Manager operations-console acceptance (Issue 9)', () => {
   });
 
   it('retention route refuses under the kill switch (history stays inspectable) and works normally otherwise', async () => {
+    initDb(testDbPath);
+    seedWorkspace(WORKSPACE_ID);
     const { default: consoleRoutes } = await import('../../server/routes/store-manager-routes');
     // Works when enabled.
     const ok = await consoleRoutes.request('/store-manager/retention/prune', {
@@ -319,11 +324,8 @@ describe('Store Manager operations-console acceptance (Issue 9)', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ maxSessions: 10 }),
     });
-    expect(ok.status).toBe(200);
     const okBody = (await ok.json()) as { ok: boolean; result?: { workspaceId: string } };
-    expect(okBody.ok).toBe(true);
-    expect(okBody.result?.workspaceId).toBe(WORKSPACE_ID);
-
+    
     // Refused under kill switch.
     overrideStoreManagerFlags({ killSwitch: true });
     const denied = await consoleRoutes.request('/store-manager/retention/prune', {
@@ -331,8 +333,11 @@ describe('Store Manager operations-console acceptance (Issue 9)', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     });
-    expect(denied.status).toBe(409);
     const deniedBody = (await denied.json()) as { errorCode?: string };
+    expect(ok.status).toBe(200);
+    expect(okBody.ok).toBe(true);
+    expect(okBody.result?.workspaceId).toBe(WORKSPACE_ID);
+    expect(denied.status).toBe(409);
     expect(deniedBody.errorCode).toBe('not_configured');
     resetStoreManagerFlagsOverride();
   });

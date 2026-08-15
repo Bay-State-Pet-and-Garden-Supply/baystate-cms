@@ -28,8 +28,9 @@
  */
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import {
-  getLatestExtractionSourcesByItemIds,
+  getLatestExtractionBindingsByItemIds,
   getLatestExtraction,
+  type ExtractionBinding,
 } from '../db/repositories/onboarding-extraction-repo';
 import {
   refreshCandidateCohorts as repoRefreshCandidateCohorts,
@@ -90,20 +91,28 @@ export interface ItemExtractionReadiness {
  * extraction) is deterministically `blocked` (never a wait); a Curation-stage
  * failure is NOT a readiness blocker — the item is past the barrier.
  */
-export function evaluateItemReadiness(item: OnboardingItem, extractionSourcesByItemId?: Map<string, string>): ItemExtractionReadiness {
+export function evaluateItemReadiness(
+  item: OnboardingItem,
+  extractionSourcesByItemId?: Map<string, ExtractionBinding>,
+): ItemExtractionReadiness {
   const extractionCompleted = hasCompletedExtraction(item);
   const ocrSettled = isOcrSettled(item);
   const piImported = isPiImportComplete(item);
-  const sourceFinalized = isSourceFinalized(item);
+  // Round-3 R4 source binding (Amendment A): batch evaluation paths pass the
+  // batched extraction-binding map once; direct per-item callers fall back to
+  // a single lookup. Provenance consistency applies ONLY once the item has
+  // extraction evidence — a sibling that has not completed extraction is
+  // WAITING, never blocked by an absent binding (the worker always inserts a
+  // row when evidence is finalized; an evidence-bearing item with a missing or
+  // mismatched binding BLOCKS — absence cannot prove a match).
+  const binding = extractionSourcesByItemId
+    ? extractionSourcesByItemId.get(item.id)
+    : getLatestExtractionBindingForItem(item.id);
+  const sourceFinalized = isSourceFinalized(item, binding);
   const extractionHashComputed = computeExtractionHash(item) != null;
   const blocked = isFailedMember(item);
-  // Round-3 R4 source binding: batch evaluation paths pass the batched
-  // extraction-source map once; direct per-item callers fall back to a single
-  // lookup so they never run a per-item batch query just for provenance.
-  const latestExtractionSourceUrl = extractionSourcesByItemId
-    ? extractionSourcesByItemId.get(item.id)
-    : getLatestExtraction(item.id)?.source_url;
-  const provenanceConsistent = sourceProvenanceConsistent(item, latestExtractionSourceUrl);
+  const hasEvidence = hasCompletedExtraction(item) && extractionHashComputed;
+  const provenanceConsistent = hasEvidence ? sourceProvenanceConsistent(item, binding) : true;
   // Invariant (round-3 R1): ready = !blocked && every completeness condition
   // holds — `ready` and `state === 'blocked'` are mutually exclusive by
   // construction. Provenance inconsistency is a blocking condition (a change
@@ -113,10 +122,13 @@ export function evaluateItemReadiness(item: OnboardingItem, extractionSourcesByI
   return {
     ready,
     state,
-    blockedReason: !provenanceConsistent
-      ? SOURCE_CHANGED_BLOCKED_REASON
-      : blocked
-        ? buildMemberFailedReason(item)
+    // A barrier failure (sourcing/discovery/extraction failed) is the
+    // deterministic reason and takes precedence over provenance
+    // inconsistency (pre-barrier items have no extraction binding at all).
+    blockedReason: blocked
+      ? buildMemberFailedReason(item)
+      : !provenanceConsistent
+        ? SOURCE_CHANGED_BLOCKED_REASON
         : ready
           ? null
           : buildBlockedReason({ sourceFinalized, extractionCompleted, piImported, extractionHashComputed }),
@@ -129,16 +141,74 @@ export function evaluateItemReadiness(item: OnboardingItem, extractionSourcesByI
   };
 }
 
+/** Single-item extraction binding (per-item readiness fallback). */
+function getLatestExtractionBindingForItem(itemId: string): ExtractionBinding | undefined {
+  const row = getLatestExtraction(itemId);
+  if (!row) return undefined;
+  return {
+    sourceUrl: row.source_url,
+    sourceType: (row.source_type ?? 'official_page') as 'official_page' | 'distributor_record',
+    extractionMethod: row.extraction_method,
+    sourcingGenerationId: row.sourcing_generation_id ?? null,
+    acceptedEvidenceAttemptIds: safeParseJsonArray(row.accepted_evidence_attempt_ids_json),
+    evidenceHash: row.evidence_hash ?? null,
+  };
+}
+
+function safeParseJsonArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Canonical "selected source state finalized" check:
- * - ordinary spreadsheet path: a persisted `source_url` plus Discovery
- *   completion (the item advanced past discovery, or it is still in discovery
- *   with `discovery/completed`);
- * - distributor-evidence path: a `sourcingDecision` present (alternative).
+ * Canonical "selected source state finalized" check (Amendment A):
+ * - official source: a persisted `source_url` plus Discovery completion (the
+ *   item advanced past discovery, or it is still in discovery with
+ *   `discovery/completed`); an arbitrary non-null historical sourcing
+ *   decision is NOT enough;
+ * - distributor source: a VALID distributor extraction binding (source type
+ *   `distributor_record`, null URL, distributor_record_v1 method, generation,
+ *   and evidence hash all present and consistent).
  */
-function isSourceFinalized(item: OnboardingItem): boolean {
+function isSourceFinalized(item: OnboardingItem, binding: ExtractionBinding | undefined): boolean {
+  if (item.sourceType === 'distributor_record') {
+    if (!binding) return false;
+    if (binding.sourceType !== 'distributor_record') return false;
+    if (binding.sourceUrl !== null || item.sourceUrl !== null) return false;
+    if (binding.extractionMethod !== 'distributor_record_v1') return false;
+    if (!binding.sourcingGenerationId || !binding.evidenceHash) return false;
+    const prov =
+      (item.extractionData as { distributorRecordProvenance?: { sourcingGenerationId?: string; evidenceHash?: string; acceptedEvidenceAttemptIds?: string[] } | null } | null)
+        ?.distributorRecordProvenance ?? null;
+    if (!prov) return false;
+    if (binding.sourcingGenerationId !== prov.sourcingGenerationId) return false;
+    if (binding.evidenceHash !== prov.evidenceHash) return false;
+    // Accepted-attempt set equality (Milestone E review): the durable
+    // extraction binding, the materialized payload provenance, and (when
+    // present) the item's V2 distributor decision must all agree on the
+    // accepted attempt set. A tampered/diverged set means the source is NOT
+    // finalized — readiness separately blocks, but finalized must not lie.
+    const payloadIds = [...(prov.acceptedEvidenceAttemptIds ?? [])].sort();
+    const bindingIds = [...(binding.acceptedEvidenceAttemptIds ?? [])].sort();
+    if (payloadIds.length !== bindingIds.length || payloadIds.some((id, i) => id !== bindingIds[i])) {
+      return false;
+    }
+    const decision = item.sourcingDecision;
+    if (decision && 'schemaVersion' in decision) {
+      const decisionIds = [...((decision as { acceptedEvidenceAttemptIds?: string[] }).acceptedEvidenceAttemptIds ?? [])].sort();
+      if (decisionIds.length !== bindingIds.length || decisionIds.some((id, i) => id !== bindingIds[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
   const discoveryFinalized = item.stage !== 'discovery' || item.stageStatus === 'completed';
-  return (Boolean(item.sourceUrl) && discoveryFinalized) || item.sourcingDecision != null;
+  return Boolean(item.sourceUrl) && discoveryFinalized;
 }
 
 /** A member that failed inside a pre-Curation barrier stage is deterministically
@@ -162,18 +232,48 @@ function buildMemberFailedReason(item: OnboardingItem): string {
 const SOURCE_CHANGED_BLOCKED_REASON = 'Selected source changed since extraction — re-extraction required';
 
 /**
- * Bind the item's currently selected source to the source recorded when its
- * extraction evidence was frozen (round-3 R4). An extraction row missing →
- * true (the ordinary worker path always inserts one; absence cannot prove a
- * mismatch). Both URLs are normalized (trailing '/' trimmed) before comparing.
+ * Exact source-binding comparison (Amendment A). Binds the item's selected
+ * source to the extraction row that produced its evidence:
  *
- * PR3's frozen evidence snapshot will rely on this binding; the run-level
- * `evidence_snapshot_hash` will include the extraction-source identity.
+ * - official source: the binding must exist with source type `official_page`
+ *   and its URL must match the item's source URL (both normalized, trailing
+ *   '/' trimmed);
+ * - distributor source: the binding must exist with source type
+ *   `distributor_record`, both URLs null, extraction method
+ *   `distributor_record_v1`, and matching generation / accepted attempt ids /
+ *   evidence hash against the item's `distributorRecordProvenance`;
+ * - a MISSING or malformed binding BLOCKS readiness (absence cannot prove a
+ *   match).
  */
-export function sourceProvenanceConsistent(item: OnboardingItem, latestExtractionSourceUrl: string | undefined): boolean {
-  if (latestExtractionSourceUrl == null) return true;
+export function sourceProvenanceConsistent(
+  item: OnboardingItem,
+  binding: ExtractionBinding | undefined,
+): boolean {
   const normalize = (url: string | null | undefined) => (url ?? '').replace(/\/+$/, '');
-  return normalize(latestExtractionSourceUrl) === normalize(item.sourceUrl);
+  const prov =
+    (item.extractionData as { distributorRecordProvenance?: { sourcingGenerationId?: string; evidenceHash?: string; acceptedEvidenceAttemptIds?: string[] } | null } | null)
+      ?.distributorRecordProvenance ?? null;
+
+  if (item.sourceType === 'distributor_record') {
+    if (!binding) return false;
+    if (binding.sourceType !== 'distributor_record') return false;
+    if (binding.sourceUrl !== null || item.sourceUrl !== null) return false;
+    if (binding.extractionMethod !== 'distributor_record_v1') return false;
+    if (!prov) return false;
+    if (binding.sourcingGenerationId !== prov.sourcingGenerationId) return false;
+    if (binding.evidenceHash !== prov.evidenceHash) return false;
+    // Accepted-attempt authority lives in the materialized payload provenance
+    // (the onboarding_items row has no accepted-ids column).
+    const payloadIds = [...(prov.acceptedEvidenceAttemptIds ?? [])].sort();
+    const bindingIds = [...(binding.acceptedEvidenceAttemptIds ?? [])].sort();
+    if (payloadIds.length !== bindingIds.length || payloadIds.some((id, i) => id !== bindingIds[i])) return false;
+    return true;
+  }
+
+  // Official source: binding must exist and its URL must match the item URL.
+  if (!binding) return false;
+  if (binding.sourceType !== 'official_page') return false;
+  return normalize(binding.sourceUrl) === normalize(item.sourceUrl);
 }
 
 /** Extraction is complete when the item finished the extraction stage — i.e. it
@@ -242,13 +342,13 @@ export function evaluateCohortReadiness(
   _cohort: CurationCohort,
   members: CurationCohortMember[],
   items: OnboardingItem[],
-  extractionSourcesByItemId?: Map<string, string>,
+  extractionSourcesByItemId?: Map<string, ExtractionBinding>,
 ): CohortReadinessEvaluation {
   const itemsById = new Map(items.map(item => [item.id, item]));
   // Single batched load of the latest extraction source per item (round-3 R4)
   // — one query per evaluation, passed through to every member so no per-item
   // provenance lookup runs.
-  const extractionSources = extractionSourcesByItemId ?? getLatestExtractionSourcesByItemIds(items.map(item => item.id));
+  const extractionSources = extractionSourcesByItemId ?? getLatestExtractionBindingsByItemIds(items.map(item => item.id));
   const readinessByMember = new Map<string, ItemExtractionReadiness>();
   const notReady = members.filter(member => {
     const item = itemsById.get(member.onboardingItemId);
@@ -398,7 +498,7 @@ export function getDerivedCohortStateForItem(item: OnboardingItem, items?: Onboa
   // the per-item direct path falls back to a single lookup when no batch map
   // is passed (round-3 R4).
   const batchItems = items ?? listItemsByBatch(item.batchId);
-  const extractionSources = getLatestExtractionSourcesByItemIds(batchItems.map(i => i.id));
+  const extractionSources = getLatestExtractionBindingsByItemIds(batchItems.map(i => i.id));
   const members = getCohortMembers(cohort.id);
   const evaluation = evaluateCohortReadiness(cohort, members, batchItems, extractionSources);
   return {
@@ -425,7 +525,7 @@ export function buildCohortView(cohort: CurationCohort, items: OnboardingItem[])
   const members = getCohortMembers(cohort.id);
   const itemsById = new Map(items.map(item => [item.id, item]));
   // Single batched extraction-source load shared by cohort + member readiness.
-  const extractionSources = getLatestExtractionSourcesByItemIds(items.map(item => item.id));
+  const extractionSources = getLatestExtractionBindingsByItemIds(items.map(item => item.id));
   const evaluation = evaluateCohortReadiness(cohort, members, items, extractionSources);
 
   const memberViews = members.map(member => {

@@ -14,8 +14,10 @@
 import { z } from 'zod';
 import {
   SourcingDecisionSchema,
+  SourcingDecisionReadSchema,
   OcrAttemptOutcomeSchema,
   PackagingOcrDataSchema,
+  SourceTypeEnum,
 } from './onboarding';
 
 // ─── Cohort Status ─────────────────────────────────────────────────────────────
@@ -121,6 +123,18 @@ export type CohortSnapshot = z.infer<typeof CohortSnapshotSchema>;
 export const PROJECTION_VERSION = 'execution-evidence-v1';
 
 /**
+ * Amendment A (default-on): source-aware execution-evidence projection.
+ * `execution-evidence-v2` extends the V1 member with item/extraction source
+ * provenance (item source type + nullable URL, extraction source type/URL/
+ * method, sourcing generation, sorted accepted attempt/provider ids,
+ * distributor evidence hash) and the distributor identity fields (SKU, MPN,
+ * variant attributes). Written by cohort freezes; V1 snapshots stay
+ * parse-only and normalize to official-page provenance through
+ * `parseExecutionEvidenceProjection`.
+ */
+export const PROJECTION_VERSION_V2 = 'execution-evidence-v2';
+
+/**
  * Per-member projection entry (`execution-evidence-v1`). Every member of a
  * frozen cohort contributes exactly one entry, sorted by `onboardingItemId`.
  * `extractionComplete` is the semantic assertion that extraction evidence is
@@ -207,6 +221,149 @@ export const ExecutionEvidenceProjectionV1Schema = z.object({
 });
 
 export type ExecutionEvidenceProjectionV1 = z.infer<typeof ExecutionEvidenceProjectionV1Schema>;
+
+// ─── Frozen Execution-Evidence Projection V2 (Amendment A) ─────────────────────
+
+/**
+ * Per-member projection entry (`execution-evidence-v2`). Extends the V1
+ * member with the source/provenance authority Amendment A requires:
+ *
+ * - `itemSourceType` — the item's selected source (`official_page` |
+ *   `distributor_record`);
+ * - `extractionSourceType` / `extractionMethod` — the extraction row that
+ *   produced the frozen evidence (e.g. `distributor_record_v1`);
+ * - `sourcingGenerationId` — the current sourcing generation the decision /
+ *   materialization belongs to (null when none);
+ * - `acceptedEvidenceAttemptIds` / `acceptedProviderIds` — sorted-unique
+ *   contributing attempts and providers;
+ * - `distributorEvidenceHash` — the canonical distributor-record projection
+ *   hash (null for official-page sources);
+ * - extraction block additions: `distributorSku`, `manufacturerPartNumber`,
+ *   and `variantAttributes` (identity-only, never copy/images/commerce).
+ *
+ * V1 snapshots remain parse-only; `parseExecutionEvidenceProjection`
+ * normalizes them to V2 with official-page provenance (distributor routing
+ * did not exist when V1 was written). Persisted V1 bytes are never rewritten.
+ */
+export const ExecutionEvidenceProjectionMemberV2Schema =
+  ExecutionEvidenceProjectionMemberSchema.extend({
+    /**
+     * Self-versioning member (Amendment A): V2 members carry their own
+     * version literal so a frozen member is distinguishable from a V1 member
+     * without relying on sibling keys alone.
+     */
+    version: z.literal('execution-evidence-v2'),
+    /**
+     * The full V2 (or legacy) sourcing decision is preserved verbatim — the
+     * inherited legacy `SourcingDecisionSchema` strips V2-only authority
+     * (schemaVersion, sourcingGenerationId, evidenceHash, sourceType,
+     * target), which would destroy the provenance the freeze must retain.
+     */
+    sourcingDecision: SourcingDecisionReadSchema.nullable(),
+    itemSourceType: SourceTypeEnum,
+    extractionSourceType: SourceTypeEnum,
+    extractionMethod: z.string(),
+    sourcingGenerationId: z.string().nullable(),
+    acceptedEvidenceAttemptIds: z.array(z.string()),
+    acceptedProviderIds: z.array(z.string()),
+    distributorEvidenceHash: z.string().nullable(),
+    extraction: ExecutionEvidenceProjectionMemberSchema.shape.extraction.extend({
+      distributorSku: z.string().nullable().default(null),
+      manufacturerPartNumber: z.string().nullable().default(null),
+      variantAttributes: z.record(z.string(), z.string()).default(() => ({})),
+    }),
+  });
+
+export type ExecutionEvidenceProjectionMemberV2 = z.infer<
+  typeof ExecutionEvidenceProjectionMemberV2Schema
+>;
+
+/**
+ * The full `execution-evidence-v2` projection payload. Members are sorted by
+ * onboardingItemId for deterministic hashing.
+ */
+export const ExecutionEvidenceProjectionV2Schema = z.object({
+  version: z.literal('execution-evidence-v2'),
+  cohortId: z.string(),
+  batchId: z.string(),
+  groupingVersion: z.string(),
+  members: z.array(ExecutionEvidenceProjectionMemberV2Schema),
+});
+
+export type ExecutionEvidenceProjectionV2 = z.infer<
+  typeof ExecutionEvidenceProjectionV2Schema
+>;
+
+/** The versioned execution-evidence projection union (read path). */
+export type ExecutionEvidenceProjection = ExecutionEvidenceProjectionV1 | ExecutionEvidenceProjectionV2;
+
+/** The versioned per-member projection union (read path). */
+export type ExecutionEvidenceProjectionMember =
+  | ExecutionEvidenceProjectionMemberV1
+  | ExecutionEvidenceProjectionMemberV2;
+
+/**
+ * Normalize ONE historical V1 member to V2 with official-page provenance.
+ * Distributor-record routing did not exist when V1 snapshots were written, so
+ * the normalization is truthful by construction. In-memory only — persisted
+ * V1 bytes are never rewritten.
+ */
+export function normalizeExecutionEvidenceProjectionMemberV1(
+  member: ExecutionEvidenceProjectionMemberV1,
+): ExecutionEvidenceProjectionMemberV2 {
+  return {
+    ...member,
+    version: 'execution-evidence-v2',
+    itemSourceType: 'official_page',
+    extractionSourceType: 'official_page',
+    extractionMethod: '',
+    sourcingGenerationId: null,
+    acceptedEvidenceAttemptIds: [],
+    acceptedProviderIds: [],
+    distributorEvidenceHash: null,
+    extraction: {
+      ...member.extraction,
+      distributorSku: null,
+      manufacturerPartNumber: null,
+      variantAttributes: {},
+    },
+  };
+}
+
+/**
+ * Normalize a whole historical V1 projection to V2 (member-wise).
+ * In-memory only; never rewrites persisted V1 bytes.
+ */
+export function normalizeExecutionEvidenceProjectionV1(
+  projection: ExecutionEvidenceProjectionV1,
+): ExecutionEvidenceProjectionV2 {
+  return {
+    version: 'execution-evidence-v2',
+    cohortId: projection.cohortId,
+    batchId: projection.batchId,
+    groupingVersion: projection.groupingVersion,
+    members: projection.members.map(normalizeExecutionEvidenceProjectionMemberV1),
+  };
+}
+
+/**
+ * Central parser/adapter for persisted execution-evidence snapshots: tries V2
+ * first, falls back to V1 (parse-only) and normalizes it to the V2 shape.
+ * Throws when the payload matches neither version.
+ */
+export function parseExecutionEvidenceProjection(
+  payload: unknown,
+): ExecutionEvidenceProjectionV2 {
+  const v2 = ExecutionEvidenceProjectionV2Schema.safeParse(payload);
+  if (v2.success) return v2.data;
+  const v1 = ExecutionEvidenceProjectionV1Schema.safeParse(payload);
+  if (!v1.success) {
+    throw new Error(
+      `Execution-evidence projection failed schema validation (neither v1 nor v2): ${JSON.stringify(v2.error.issues)}`,
+    );
+  }
+  return normalizeExecutionEvidenceProjectionV1(v1.data);
+}
 
 // ─── Cohort Run Status ─────────────────────────────────────────────────────────
 

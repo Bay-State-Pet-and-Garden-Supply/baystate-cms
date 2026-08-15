@@ -29,6 +29,7 @@ storage/
 
 # ── Agent tooling artifacts & working docs ────────────────────────────────────
 .pi-subagents/
+.pi/
 .fallow/
 .agents/skills/impeccable/
 .codex/

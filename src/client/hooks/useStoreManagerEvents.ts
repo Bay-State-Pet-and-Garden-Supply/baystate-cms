@@ -19,6 +19,7 @@ export interface UseStoreManagerEventsResult {
   notifications: StoreManagerNotification[];
   status: EventStreamStatus;
   stop: () => void;
+  markRead: (id: string) => Promise<void>;
 }
 
 const BACKOFF_SCHEDULE = [1000, 2000, 4000, 8000];
@@ -32,6 +33,18 @@ export function useStoreManagerEvents(opts?: { pollMs?: number }): UseStoreManag
   const esRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const knownIdsRef = useRef<Set<string>>(new Set());
+
+  const markRead = async (id: string) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, readAt: new Date().toISOString() } : n))
+    );
+    try {
+      const { markStoreManagerNotificationRead } = await import('../store-manager-api');
+      await markStoreManagerNotificationRead(id);
+    } catch (err) {
+      console.error('Failed to mark notification as read:', err);
+    }
+  };
 
   const stop = useRef(() => {
     stoppedRef.current = true;
@@ -120,5 +133,5 @@ export function useStoreManagerEvents(opts?: { pollMs?: number }): UseStoreManag
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { notifications, status, stop };
+  return { notifications, status, stop, markRead };
 }

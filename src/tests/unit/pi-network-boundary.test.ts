@@ -480,7 +480,7 @@ describe('P0-1 discovery tools fail closed through the policy', () => {
     const tool = defaultToolRegistry.get('search_upc');
     const result = await tool!.execute(
       { gtin: '745801105447' },
-      makeCtx({ policy: makePolicy({ dataSharingPolicy: 'cloud_models_and_sources' }) }),
+      makeCtx({ gateway: stubGateway(), policy: makePolicy({ dataSharingPolicy: 'cloud_models_and_sources' }) }),
     );
     expect(result.status).not.toBe('policy_denied');
     expect(result.status === 'no_result' || result.status === 'error').toBe(true);

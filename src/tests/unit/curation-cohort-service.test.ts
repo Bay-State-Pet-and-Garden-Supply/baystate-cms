@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { randomUUID } from 'node:crypto';
-import { initDb } from '../../db/connection';
+import { initDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
@@ -12,7 +12,6 @@ import {
   updateItemExtractionData,
   updateItemStageStatus,
   advanceItemsToNextStage,
-  updateSourcingDecision,
   setDiscoverySourceUrl,
   listItemsByBatch,
 } from '../../db/repositories/onboarding-item-repo';
@@ -45,18 +44,37 @@ function makeExtractionData(overrides: Record<string, unknown> = {}): Record<str
 
 /** Move an item to `extraction / completed` with complete evidence. */
 function makeItemExtractionReady(itemId: string, extractionData: unknown): void {
+  // Amendment A: official-path source finalization requires the Discovery URL
+  // (an arbitrary non-null decision alone no longer finalizes). Mirror the
+  // worker's real path: persist source_url + discovery/completed, then
+  // advance to extraction.
+  setDiscoverySourceUrl(itemId, `https://brand.example.com/products/${itemId}`);
   updateItemStageStatus(itemId, 'completed');
   advanceItemsToNextStage([itemId]);
   updateItemExtractionData(itemId, JSON.stringify(extractionData));
-  updateSourcingDecision(itemId, {
-    route: 'bundle_to_curation',
-    origin: 'automatic_policy',
-    acceptedEvidenceAttemptIds: [],
-    providerIds: [],
-    conflicts: [],
-    warnings: [],
-    decidedAt: FIXED_DECIDED_AT,
+  // Amendment A source-binding contract: readiness requires a durable
+  // extraction row (a missing binding blocks). Insert the official row the
+  // worker path always creates.
+  insertExtraction({
+    itemId,
+    sourceUrl: `https://brand.example.com/products/${itemId}`,
+    extractionDataJson: JSON.stringify(extractionData),
+    extractionMethod: 'test',
+    confidence: 0.9,
   });
+  // Keep the historical audited sourcing decision row (legacy repair fixture;
+  // audit only under Amendment A — it does not finalize source by itself).
+  getDb()
+    .query('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?')
+    .run(JSON.stringify({
+      route: 'fallback_to_discovery',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: [],
+      providerIds: [],
+      conflicts: [],
+      warnings: [],
+      decidedAt: FIXED_DECIDED_AT,
+    }), itemId);
   updateItemStageStatus(itemId, 'completed');
 }
 
@@ -123,6 +141,15 @@ describe('curation cohort service (issue #30, PR2)', () => {
     for (const item of items) {
       updateItemExtractionData(item.id, JSON.stringify({ title: `Product ${item.upc}`, brand: 'Purina' }));
       updateItemStageStatus(item.id, 'completed');
+      // Amendment A source-binding contract: a durable extraction row is
+      // required for readiness (the worker always inserts one).
+      insertExtraction({
+        itemId: item.id,
+        sourceUrl: `https://brand.example.com/products/${item.id}`,
+        extractionDataJson: JSON.stringify({ title: `Product ${item.upc}`, brand: 'Purina' }),
+        extractionMethod: 'test',
+        confidence: 0.9,
+      });
     }
 
     const readyItems = listItemsByBatch(batchId);
@@ -464,14 +491,15 @@ describe('curation cohort service (issue #30, PR2)', () => {
     const [itemA, itemB] = items;
     for (const item of items) makeItemExtractionReady(item.id, makeExtractionData());
 
-    // No extraction row → cannot prove a mismatch → consistent + ready.
+    // Missing extraction row → missing binding → BLOCKS readiness (Amendment
+    // A: absence cannot prove a match; the worker path always inserts a row).
+    getDb().query('DELETE FROM onboarding_extractions WHERE item_id = ?').run(itemA.id);
     const noRow = listItemsByBatch(batchId).find(i => i.id === itemA.id)!;
-    expect(noRow.sourceUrl).toBeNull();
-    expect(sourceProvenanceConsistent(noRow, undefined)).toBe(true);
+    expect(sourceProvenanceConsistent(noRow, undefined)).toBe(false);
     const noRowReadiness = evaluateItemReadiness(noRow);
-    expect(noRowReadiness.sourceProvenanceConsistent).toBe(true);
-    expect(noRowReadiness.ready).toBe(true);
-    expect(noRowReadiness.state).toBe('ready');
+    expect(noRowReadiness.sourceProvenanceConsistent).toBe(false);
+    expect(noRowReadiness.ready).toBe(false);
+    expect(noRowReadiness.state).toBe('blocked');
 
     // Extraction row source matches the item's selected source → consistent + ready.
     // (Trailing '/' is normalized on both sides.)
@@ -484,8 +512,15 @@ describe('curation cohort service (issue #30, PR2)', () => {
       confidence: 0.9,
     });
     const matching = listItemsByBatch(batchId).find(i => i.id === itemB.id)!;
-    expect(sourceProvenanceConsistent(matching, 'https://brand.example.com/products/beef/')).toBe(true);
-    expect(sourceProvenanceConsistent(matching, 'https://brand.example.com/products/beef')).toBe(true);
+    const matchingBinding = {
+      sourceUrl: 'https://brand.example.com/products/beef/',
+      sourceType: 'official_page' as const,
+      extractionMethod: 'test',
+      sourcingGenerationId: null,
+      acceptedEvidenceAttemptIds: [],
+      evidenceHash: null,
+    };
+    expect(sourceProvenanceConsistent(matching, matchingBinding)).toBe(true);
     const matchingReadiness = evaluateItemReadiness(matching);
     expect(matchingReadiness.sourceProvenanceConsistent).toBe(true);
     expect(matchingReadiness.ready).toBe(true);
@@ -502,7 +537,15 @@ describe('curation cohort service (issue #30, PR2)', () => {
     });
     setDiscoverySourceUrl(itemA.id, 'https://brand.example.com/products/changed');
     const changed = listItemsByBatch(batchId).find(i => i.id === itemA.id)!;
-    expect(sourceProvenanceConsistent(changed, 'https://brand.example.com/products/original')).toBe(false);
+    const changedBinding = {
+      sourceUrl: 'https://brand.example.com/products/original',
+      sourceType: 'official_page' as const,
+      extractionMethod: 'test',
+      sourcingGenerationId: null,
+      acceptedEvidenceAttemptIds: [],
+      evidenceHash: null,
+    };
+    expect(sourceProvenanceConsistent(changed, changedBinding)).toBe(false);
     const changedReadiness = evaluateItemReadiness(changed);
     expect(changedReadiness.sourceProvenanceConsistent).toBe(false);
     expect(changedReadiness.ready).toBe(false);
@@ -510,4 +553,230 @@ describe('curation cohort service (issue #30, PR2)', () => {
     expect(changedReadiness.blockedReason).toContain('Selected source changed since extraction');
     expect(changedReadiness.blockedReason).toContain('re-extraction');
   });
+
+  // ── Amendment A: distributor-source readiness (null URL, source binding) ──
+
+  const DIST_HASH = 'a'.repeat(64);
+  const DIST_GEN = 'gen-dist-1';
+
+  function makeDistributorExtractionData(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      title: 'Distributor Dog Food Chicken 20 lb',
+      brand: 'Distributor Brand',
+      weight: '20 lb',
+      distributorSku: 'DSKU-123',
+      manufacturerPartNumber: 'MPN-456',
+      variantAttributes: { flavor: 'Chicken' },
+      sourceType: 'distributor_record',
+      sourceUrl: null,
+      distributorRecordProvenance: {
+        sourcingGenerationId: DIST_GEN,
+        evidenceHash: DIST_HASH,
+        acceptedEvidenceAttemptIds: ['a1'],
+        providerIds: ['phillips'],
+        catalogVersions: ['v2026.3'],
+      },
+      ...overrides,
+    };
+  }
+
+  function makeDistributorItem(overrides: { hash?: string; generation?: string; acceptedIds?: string[] } = {}): {
+    itemId: string;
+    batchId: string;
+    generation: string;
+  } {
+    const batchId = newBatch();
+    const [item] = insertItems(batchId, [
+      { upc: '300000000001', name: 'Distributor Dog Food Chicken 20 lb', brandHint: 'Distributor Brand', rowNumber: 1 },
+    ]);
+    const hash = overrides.hash ?? DIST_HASH;
+    // A unique generation per item (a fixed id would collide across tests).
+    const generation = overrides.generation ?? randomUUID();
+    const acceptedIds = overrides.acceptedIds ?? ['a1'];
+    const prov = {
+      sourcingGenerationId: generation,
+      evidenceHash: hash,
+      acceptedEvidenceAttemptIds: acceptedIds,
+      providerIds: ['phillips'],
+      catalogVersions: ['v2026.3'],
+    };
+    getDb().query('UPDATE onboarding_items SET source_type = ? WHERE id = ?').run('distributor_record', item.id);
+    // The distributor extraction row is generation-gated: create the item's
+    // current sourcing generation so `insertExtraction` accepts the binding.
+    getDb().query(
+      `INSERT INTO sourcing_generations (id, item_id, status, supersedes_id, reason, started_at, created_at)
+       VALUES (?, ?, 'completed', NULL, 'test', ?, ?)`,
+    ).run(generation, item.id, new Date().toISOString(), new Date().toISOString());
+    updateItemStageStatus(item.id, 'completed');
+    advanceItemsToNextStage([item.id]);
+    updateItemExtractionData(item.id, JSON.stringify(makeDistributorExtractionData({
+      distributorRecordProvenance: prov,
+      ...(overrides.hash ? { evidenceHash: hash } : {}),
+    })));
+    updateItemStageStatus(item.id, 'completed');
+    return { itemId: item.id, batchId, generation };
+  }
+
+  function insertDistributorExtraction(itemId: string, overrides: Partial<{ hash: string; generation: string; acceptedIds: string[] }> = {}): void {
+    insertExtraction({
+      itemId,
+      sourceType: 'distributor_record',
+      sourceUrl: null,
+      extractionDataJson: JSON.stringify(makeDistributorExtractionData()),
+      extractionMethod: 'distributor_record_v1',
+      confidence: 0,
+      sourcingGenerationId: overrides.generation ?? DIST_GEN,
+      acceptedEvidenceAttemptIds: overrides.acceptedIds ?? ['a1'],
+      evidenceHash: overrides.hash ?? DIST_HASH,
+    });
+  }
+
+  it('readies a distributor-source item only with a fully consistent null-URL binding', () => {
+    const { itemId, generation } = makeDistributorItem();
+    insertDistributorExtraction(itemId, { generation });
+    const item = listItemsByBatch(getActiveItemBatchId(itemId)).find(i => i.id === itemId)!;
+    const readiness = evaluateItemReadiness(item);
+    expect(readiness.sourceFinalized).toBe(true);
+    expect(readiness.sourceProvenanceConsistent).toBe(true);
+    expect(readiness.ready).toBe(true);
+    expect(readiness.state).toBe('ready');
+  });
+
+  it('blocks distributor readiness when the binding is missing', () => {
+    const { itemId } = makeDistributorItem();
+    // No extraction row → no binding → blocked (absence cannot prove a match).
+    const item = listItemsByBatch(getActiveItemBatchId(itemId)).find(i => i.id === itemId)!;
+    const readiness = evaluateItemReadiness(item);
+    expect(readiness.sourceProvenanceConsistent).toBe(false);
+    expect(readiness.ready).toBe(false);
+    expect(readiness.state).toBe('blocked');
+  });
+
+  it('blocks distributor readiness on generation / hash / accepted-id mismatch', () => {
+    const stale = makeDistributorItem();
+    insertDistributorExtraction(stale.itemId, { generation: stale.generation });
+    // Tamper the materialized payload provenance generation to simulate drift
+    // (the extraction row stays valid for the item's current generation).
+    const staleRow = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(stale.itemId) as { extraction_data_json: string };
+    const stalePayload = JSON.parse(staleRow.extraction_data_json);
+    stalePayload.distributorRecordProvenance.sourcingGenerationId = 'gen-STALE';
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(stalePayload), stale.itemId);
+    const staleGen = listItemsByBatch(getActiveItemBatchId(stale.itemId)).find(i => i.id === stale.itemId)!;
+    expect(evaluateItemReadiness(staleGen).sourceProvenanceConsistent).toBe(false);
+
+    const item2 = makeDistributorItem({ hash: 'b'.repeat(64) });
+    insertDistributorExtraction(item2.itemId, { generation: item2.generation }); // binding hash aaaa…, item provenance bbbb…
+    const hashMismatch = listItemsByBatch(getActiveItemBatchId(item2.itemId)).find(i => i.id === item2.itemId)!;
+    expect(evaluateItemReadiness(hashMismatch).sourceProvenanceConsistent).toBe(false);
+
+    const item3 = makeDistributorItem({ acceptedIds: ['a1'] });
+    insertDistributorExtraction(item3.itemId, { generation: item3.generation, acceptedIds: ['a1', 'a2'] });
+    const idsMismatch = listItemsByBatch(getActiveItemBatchId(item3.itemId)).find(i => i.id === item3.itemId)!;
+    expect(evaluateItemReadiness(idsMismatch).sourceProvenanceConsistent).toBe(false);
+  });
+
+  it('isSourceFinalized is false when the accepted-attempt set diverges (Milestone E review)', () => {
+    // (1) Binding vs materialized payload divergence: payload says ['a1'], the
+    // durable extraction row says ['a1','a2'] → sourceFinalized MUST be false
+    // (previously only sourceProvenanceConsistent caught it; finalized lied).
+    const item1 = makeDistributorItem({ acceptedIds: ['a1'] });
+    insertDistributorExtraction(item1.itemId, { generation: item1.generation, acceptedIds: ['a1', 'a2'] });
+    const idDrift = listItemsByBatch(getActiveItemBatchId(item1.itemId)).find(i => i.id === item1.itemId)!;
+    expect(evaluateItemReadiness(idDrift).sourceFinalized).toBe(false);
+
+    // (2) V2 distributor decision accepted-set divergence: the decision says
+    // ['a1','a2'] while the payload+binding agree on ['a1'] → finalized false.
+    const item2 = makeDistributorItem({ acceptedIds: ['a1'] });
+    insertDistributorExtraction(item2.itemId, { generation: item2.generation });
+    getDb().query('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?').run(JSON.stringify({
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: ['a1', 'a2'],
+      providerIds: ['phillips'],
+      sourcingGenerationId: item2.generation,
+      evidenceHash: DIST_HASH,
+      sourceType: 'distributor_record',
+      target: 'extraction',
+      conflicts: [],
+      warnings: [],
+      decidedAt: '2026-08-14T00:00:00.000Z',
+    }), item2.itemId);
+    const decisionDrift = listItemsByBatch(getActiveItemBatchId(item2.itemId)).find(i => i.id === item2.itemId)!;
+    expect(evaluateItemReadiness(decisionDrift).sourceFinalized).toBe(false);
+
+    // (3) A fully consistent distributor item (binding = payload = decision on
+    // ['a1']) IS finalized.
+    const item3 = makeDistributorItem({ acceptedIds: ['a1'] });
+    insertDistributorExtraction(item3.itemId, { generation: item3.generation });
+    getDb().query('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?').run(JSON.stringify({
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction',
+      origin: 'automatic_policy',
+      acceptedEvidenceAttemptIds: ['a1'],
+      providerIds: ['phillips'],
+      sourcingGenerationId: item3.generation,
+      evidenceHash: DIST_HASH,
+      sourceType: 'distributor_record',
+      target: 'extraction',
+      conflicts: [],
+      warnings: [],
+      decidedAt: '2026-08-14T00:00:00.000Z',
+    }), item3.itemId);
+    const consistent = listItemsByBatch(getActiveItemBatchId(item3.itemId)).find(i => i.id === item3.itemId)!;
+    const ready = evaluateItemReadiness(consistent);
+    expect(ready.sourceFinalized).toBe(true);
+    expect(ready.ready).toBe(true);
+  });
+
+  it('an arbitrary historical sourcing decision does NOT finalize source (Amendment A)', () => {
+    const batchId = newBatch();
+    const [item] = insertItems(batchId, [
+      { upc: '300000000002', name: 'Legacy Decision Item', brandHint: 'X', rowNumber: 1 },
+    ]);
+    // Historical decision + extraction data, but NO discovery URL and NO
+    // distributor binding → official source is NOT finalized.
+    getDb().query('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?').run(JSON.stringify({
+      schemaVersion: 2,
+      route: 'evidence_to_discovery',
+      origin: 'automatic',
+      acceptedEvidenceAttemptIds: ['a1'],
+      providerIds: ['phillips'],
+      sourcingGenerationId: DIST_GEN,
+      sourceType: 'official_page',
+      target: 'discovery',
+      conflicts: [],
+      warnings: [],
+      decidedAt: '2026-08-14T00:00:00.000Z',
+    }), item.id);
+    // Real discovery path: persist the item source URL + discovery completion.
+    setDiscoverySourceUrl(item.id, 'https://brand.example.com/products/legacy');
+    updateItemStageStatus(item.id, 'completed');
+    advanceItemsToNextStage([item.id]);
+    updateItemExtractionData(item.id, JSON.stringify({ title: 'Legacy Title', brand: 'X' }));
+    updateItemStageStatus(item.id, 'completed');
+    insertExtraction({
+      itemId: item.id,
+      sourceUrl: 'https://brand.example.com/products/legacy',
+      extractionDataJson: JSON.stringify({ title: 'Legacy Title', brand: 'X' }),
+      extractionMethod: 'test',
+      confidence: 0.9,
+    });
+    // URL matches the binding, so it IS finalized — but ONLY because the URL
+    // path completed; the decision alone is inert. Remove the URL + extraction
+    // evidence + row: the still-present decision must NOT finalize → waiting.
+    const withUrl = listItemsByBatch(batchId).find(i => i.id === item.id)!;
+    expect(evaluateItemReadiness(withUrl).sourceFinalized).toBe(true);
+    getDb().query('UPDATE onboarding_items SET source_url = NULL WHERE id = ?').run(item.id);
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = NULL WHERE id = ?').run(item.id);
+    getDb().query('DELETE FROM onboarding_extractions WHERE item_id = ?').run(item.id);
+    const withoutUrl = listItemsByBatch(batchId).find(i => i.id === item.id)!;
+    expect(evaluateItemReadiness(withoutUrl).sourceFinalized).toBe(false);
+    expect(evaluateItemReadiness(withoutUrl).state).toBe('waiting');
+  });
+
+  function getActiveItemBatchId(itemId: string): string {
+    const row = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(itemId) as { batch_id: string };
+    return row.batch_id;
+  }
 });

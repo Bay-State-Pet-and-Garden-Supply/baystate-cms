@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "id": "ph-1001",
+      "upc": "012345678905",
+      "gtin": "012345678905",
+      "name": "Endless Aisles Dog Food Chicken 12 lb",
+      "description": "Chicken recipe dry dog food, 12 lb bag.",
+      "brand": "Endless Aisles",
+      "category": "Dog Food",
+      "price": 21.99,
+      "cost": 16.5,
+      "msrp": 24.99,
+      "quantity": 142,
+      "weight": 12,
+      "images": ["https://cdn.example.com/ph/012345678905-front.jpg"]
+    },
+    {
+      "id": "ph-1002",
+      "upc": "012345678999",
+      "name": "Endless Aisles Cat Food Salmon 5 lb",
+      "brand": "Endless Aisles",
+      "price": 12.49,
+      "cost": 9.2,
+      "quantity": 88,
+      "weight": 5
+    }
+  ]
+}

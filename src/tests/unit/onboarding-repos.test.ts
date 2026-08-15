@@ -38,8 +38,11 @@ import {
 import {
   insertExtraction,
   getLatestExtraction,
-  getLatestExtractionSourcesByItemIds,
+  getLatestExtractionBindingsByItemIds,
 } from '../../db/repositories/onboarding-extraction-repo';
+import { startSourcingGeneration, insertEvidenceAttempt, getEvidenceAttemptsByItemAndGeneration } from '../../db/repositories/onboarding-evidence-repo';
+import { computeExtractionHash } from '../../db/repositories/curation-cohort-repo';
+import { SOURCING_ENTRY_POLICY_VERSION } from '../../onboarding/sourcing/entry-policy';
 import {
   upsertApiKey,
   getApiKey,
@@ -95,8 +98,9 @@ describe('Onboarding Repositories CRUD', () => {
 
     expect(items.length).toBe(2);
     expect(items[0].upc).toBe('111111111111');
-    // New items start in sourcing stage with pending status
-    expect(items[0].stage).toBe('sourcing');
+    // New items start in the caller-selected entry stage (Discovery while the
+    // Sourcing engine capability is disabled) with pending status
+    expect(items[0].stage).toBe('discovery');
     expect(items[0].stageStatus).toBe('pending');
 
     const batchItems = listItemsByBatch(batch.id);
@@ -106,7 +110,7 @@ describe('Onboarding Repositories CRUD', () => {
     updateItemStageStatus(items[0].id, 'in_progress');
     const updatedItem = findItemById(items[0].id);
     expect(updatedItem?.stageStatus).toBe('in_progress');
-    expect(updatedItem?.stage).toBe('sourcing');
+    expect(updatedItem?.stage).toBe('discovery');
 
     const batchDetails = findBatchById(batch.id);
     expect(batchDetails).toBeDefined();
@@ -174,7 +178,7 @@ describe('Onboarding Repositories CRUD', () => {
     expect(JSON.parse(latest!.extraction_data_json).title).toBe('Scraped Product 4');
   });
 
-  it('returns the latest extraction source per item in one batched query (round-3 R4)', () => {
+  it('returns the latest extraction binding per item in one batched query (Amendment A)', () => {
     const batch = createBatch({ workspaceId: wsId, name: 'Batch Sources', fileName: 'sources.xlsx', totalItems: 2 });
     const items = insertItems(batch.id, [
       { upc: '777000000001', name: 'Source Item 1', rowNumber: 1 },
@@ -192,17 +196,51 @@ describe('Onboarding Repositories CRUD', () => {
     // Item B: one row.
     insertExtraction({ itemId: itemB.id, sourceUrl: 'https://b.example.com/product', extractionDataJson: '{"title":"B"}', extractionMethod: 'test', confidence: 0.8 });
 
-    const sources = getLatestExtractionSourcesByItemIds([itemA.id, itemB.id]);
-    expect(sources.get(itemA.id)).toBe('https://a.example.com/latest');
-    expect(sources.get(itemB.id)).toBe('https://b.example.com/product');
-    expect(sources.size).toBe(2);
+    const bindings = getLatestExtractionBindingsByItemIds([itemA.id, itemB.id]);
+    expect(bindings.get(itemA.id)).toEqual({
+      sourceUrl: 'https://a.example.com/latest',
+      sourceType: 'official_page',
+      extractionMethod: 'test',
+      sourcingGenerationId: null,
+      acceptedEvidenceAttemptIds: [],
+      evidenceHash: null,
+    });
+    expect(bindings.get(itemB.id)?.sourceUrl).toBe('https://b.example.com/product');
+    expect(bindings.size).toBe(2);
 
     // Items without extraction rows are absent from the map; empty input is empty.
     const ghostId = randomUUID();
-    const partial = getLatestExtractionSourcesByItemIds([itemA.id, ghostId]);
+    const partial = getLatestExtractionBindingsByItemIds([itemA.id, ghostId]);
     expect(partial.has(ghostId)).toBe(false);
-    expect(partial.get(itemA.id)).toBe('https://a.example.com/latest');
-    expect(getLatestExtractionSourcesByItemIds([]).size).toBe(0);
+    expect(partial.get(itemA.id)?.sourceUrl).toBe('https://a.example.com/latest');
+    expect(getLatestExtractionBindingsByItemIds([]).size).toBe(0);
+  });
+
+  it('resolves equal created_at extraction rows deterministically by rowid (tiebreaker)', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Batch Tie', fileName: 'tie.xlsx', totalItems: 1 });
+    const [item] = insertItems(batch.id, [
+      { upc: '777000000003', name: 'Tie Item', rowNumber: 1 },
+    ]);
+    const db = getDb();
+
+    // Two rows with IDENTICAL created_at: the rowid-DESC row must win.
+    insertExtraction({ itemId: item.id, sourceUrl: 'https://t.example.com/first', extractionDataJson: '{"title":"First"}', extractionMethod: 'test', confidence: 0.5 });
+    insertExtraction({ itemId: item.id, sourceUrl: 'https://t.example.com/second', extractionDataJson: '{"title":"Second"}', extractionMethod: 'test', confidence: 0.9 });
+    db.run("UPDATE onboarding_extractions SET created_at = '2024-03-01T00:00:00.000Z' WHERE item_id = ?", [item.id]);
+
+    const bindings = getLatestExtractionBindingsByItemIds([item.id]);
+    expect(bindings.get(item.id)?.sourceUrl).toBe('https://t.example.com/second');
+    expect(getLatestExtraction(item.id)?.source_url).toBe('https://t.example.com/second');
+
+    // Reverse insert order (rowid ordering flips) → still the rowid-DESC row.
+    db.run('DELETE FROM onboarding_extractions WHERE item_id = ?', [item.id]);
+    insertExtraction({ itemId: item.id, sourceUrl: 'https://t.example.com/second', extractionDataJson: '{"title":"Second"}', extractionMethod: 'test', confidence: 0.9 });
+    insertExtraction({ itemId: item.id, sourceUrl: 'https://t.example.com/first', extractionDataJson: '{"title":"First"}', extractionMethod: 'test', confidence: 0.5 });
+    db.run("UPDATE onboarding_extractions SET created_at = '2024-03-01T00:00:00.000Z' WHERE item_id = ?", [item.id]);
+
+    const bindings2 = getLatestExtractionBindingsByItemIds([item.id]);
+    expect(bindings2.get(item.id)?.sourceUrl).toBe('https://t.example.com/first');
+    expect(getLatestExtraction(item.id)?.source_url).toBe('https://t.example.com/first');
   });
 
   it('should implement stage-based listing (listItemsByBatchStaged)', () => {
@@ -559,6 +597,47 @@ describe('Onboarding Repositories CRUD', () => {
     db.run('DELETE FROM onboarding_items WHERE batch_id = ?', [batch.id]);
     db.run('DELETE FROM onboarding_batches WHERE id = ?', [batch.id]);
   });
+
+  it('insertEvidenceAttempt persists and hydrates connector-declared variant axes (Milestone E)', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Axes Batch', fileName: 'axes.xlsx', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '444444444444', name: 'Axes Product', rowNumber: 1 }], 'sourcing', SOURCING_ENTRY_POLICY_VERSION);
+    const gen = startSourcingGeneration(item.id, 'automatic');
+    const declarations = [
+      { rawField: 'PackCount', normalizedAxis: 'packCount' },
+      { rawField: 'Flavour', normalizedAxis: 'flavor' },
+      { rawField: 'Scent', normalizedAxis: 'scent' },
+    ];
+    // InsertEvidenceAttempt (shared schema) does not yet carry the field; the
+    // repo reads it tolerantly via the extended shape (Milestone E seam).
+    const attempt = {
+      itemId: item.id,
+      providerId: 'phillips',
+      lookupUpc: '444444444444',
+      outcome: 'found' as const,
+      confidence: 0.9,
+      evidenceUrl: null,
+      matchedFields: ['upc'],
+      identityJson: JSON.stringify({ upc: '444444444444', name: 'Axes Product' }),
+      warningsJson: null,
+      errorCode: null,
+      errorMessage: null,
+      catalogVersion: 'v2026.3',
+      observedAt: '2026-08-14T00:00:00.000Z',
+      sourcingGenerationId: gen.id,
+      durationMs: 12,
+      variantAxisDeclarations: declarations,
+    } as unknown as Parameters<typeof insertEvidenceAttempt>[0] & { variantAxisDeclarations?: unknown };
+
+    const inserted = insertEvidenceAttempt(attempt);
+    // Hydrated from the durable row (tolerant column read).
+    expect(inserted.variantAxisDeclarations).toEqual(declarations);
+
+    // Read back through the generation-scoped reader — the declarations
+    // survive the round-trip and feed the materializer's declared-axis set.
+    const reloaded = getEvidenceAttemptsByItemAndGeneration(item.id, gen.id);
+    expect(reloaded).toHaveLength(1);
+    expect(reloaded[0].variantAxisDeclarations).toEqual(declarations);
+  });
 });
 
 describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
@@ -677,7 +756,7 @@ describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
     const now = new Date().toISOString();
     db.run('INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)', [claimWsId, 'Claim WS 1', '/tmp/claim1', '/tmp/claim1/.git', now, now, 'complete']);
     const batch = createBatch({ workspaceId: claimWsId, name: 'Claim Test Batch', fileName: 'claim.xlsx', totalItems: 4 });
-    const items = insertItems(batch.id, [
+    insertItems(batch.id, [
       { upc: 'CLAIM-001', name: 'Claim 1', rowNumber: 1 },
       { upc: 'CLAIM-002', name: 'Claim 2', rowNumber: 2 },
       { upc: 'CLAIM-003', name: 'Claim 3', rowNumber: 3 },
@@ -708,7 +787,7 @@ describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
     const now = new Date().toISOString();
     db.run('INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)', [claimWsId, 'Claim WS 2', '/tmp/claim2', '/tmp/claim2/.git', now, now, 'complete']);
     const batch = createBatch({ workspaceId: claimWsId, name: 'Inprog Claim Test Batch', fileName: 'inprog.xlsx', totalItems: 2 });
-    const items = insertItems(batch.id, [
+    insertItems(batch.id, [
       { upc: 'INPROG-001', name: 'Inprog 1', rowNumber: 1 },
       { upc: 'INPROG-002', name: 'Inprog 2', rowNumber: 2 },
     ]);
@@ -961,5 +1040,223 @@ describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
     expect(dynamicBatch?.completedItems).toBe(1);
     expect(dynamicBatch?.failedItems).toBe(1);
     expect(dynamicBatch?.skippedItems).toBe(1);
+  });
+
+
+  it('advanceItemsToNextStage never advances needs_input or unresolved-conflict sourcing items', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Guard Batch', fileName: 'guard.csv', totalItems: 1 });
+    const [item] = insertItems(batch.id, [
+      { upc: '012345678999', name: 'Guarded', rowNumber: 1, stage: 'sourcing' },
+    ]);
+    updateItemStageStatus(item.id, 'needs_input', 'Identity conflict detected');
+
+    // needs_input items are excluded by the completed-only filter.
+    const res = advanceItemsToNextStage([item.id]);
+    expect(res.advanced).toBe(0);
+    expect(res.skipped).toBe(1);
+    expect(findItemById(item.id)?.stage).toBe('sourcing');
+
+    // An open hard conflict blocks even a completed-marked sourcing item.
+    updateItemStageStatus(item.id, 'completed', null);
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.query(
+      `INSERT INTO onboarding_evidence_conflicts (id, item_id, field, severity, status, created_at)
+       VALUES ('guard-conflict', ?, 'brand', 'hard', 'open', ?)`,
+    ).run(item.id, now);
+
+    const res2 = advanceItemsToNextStage([item.id]);
+    expect(res2.advanced).toBe(0);
+    expect(res2.skipped).toBe(1);
+    expect(findItemById(item.id)?.stage).toBe('sourcing');
+  });
+
+  it('hydrates the sourcing entry-policy version (omitted=0, explicit=1)', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Policy Batch', fileName: 'policy.xlsx', totalItems: 2 });
+    const [legacyItem] = insertItems(batch.id, [{ upc: 'POLICY-000001', name: 'Legacy', rowNumber: 1 }]);
+    const [amendedItem] = insertItems(batch.id, [{ upc: 'POLICY-000002', name: 'Amended', rowNumber: 2 }], 'discovery', 1);
+
+    // The default (omitted) version is 0 (fail closed); production callers
+    // pass the current version explicitly (seam contract for routes/imports).
+    expect(SOURCING_ENTRY_POLICY_VERSION).toBe(1);
+    expect(legacyItem.sourcingEntryPolicyVersion).toBe(0);
+    expect(amendedItem.sourcingEntryPolicyVersion).toBe(1);
+    expect(findItemById(legacyItem.id)?.sourcingEntryPolicyVersion).toBe(0);
+    expect(findItemById(amendedItem.id)?.sourcingEntryPolicyVersion).toBe(1);
+  });
+
+  it('sourcing claims require the exact current entry-policy version (148-row isolation)', () => {
+    const claimWsId = 'ws-policy-claim'; // brand-new workspace, no leakage
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      'INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)',
+      [claimWsId, 'Policy Claim WS', '/tmp/policy-claim', '/tmp/policy-claim/.git', now, now, 'complete'],
+    );
+    const batch = createBatch({ workspaceId: claimWsId, name: 'Stranded Batch', fileName: 'stranded.csv', totalItems: 150 });
+
+    // 148 pre-amendment sourcing rows (policy 0, explicit sourcing stage) — the
+    // legacy stranded cohort must NEVER be claimable by the engine.
+    const stranded: Array<{ upc: string; name: string; rowNumber: number; stage: 'sourcing' }> = [];
+    for (let i = 0; i < 148; i++) {
+      stranded.push({ upc: `STRAND-${String(i).padStart(5, '0')}`, name: `Stranded ${i}`, rowNumber: i + 1, stage: 'sourcing' });
+    }
+    insertItems(batch.id, stranded);
+    // Two post-amendment rows (policy 1, sourcing stage).
+    insertItems(batch.id, [
+      { upc: 'STRAND-99998', name: 'Amended Sourcing 1', rowNumber: 149, stage: 'sourcing' as const },
+      { upc: 'STRAND-99999', name: 'Amended Sourcing 2', rowNumber: 150, stage: 'sourcing' as const },
+    ], 'sourcing', 1);
+
+    // Only the policy-1 rows are claimable; every claimed row hydrates version 1.
+    const claimed = claimItemsForProcessing('sourcing', 200, claimWsId, 'worker-policy');
+    expect(claimed).toHaveLength(2);
+    expect(claimed.every((c) => c.sourcingEntryPolicyVersion === 1)).toBe(true);
+    expect(claimed.map((c) => c.upc).sort()).toEqual(['STRAND-99998', 'STRAND-99999']);
+
+    // No policy-0 row is ever claimed by a second pass either.
+    const second = claimItemsForProcessing('sourcing', 200, claimWsId, 'worker-policy-2');
+    expect(second).toHaveLength(0);
+
+    db.run('DELETE FROM onboarding_items WHERE batch_id = ?', [batch.id]);
+    db.run('DELETE FROM onboarding_batches WHERE id = ?', [batch.id]);
+    db.run('DELETE FROM workspace WHERE id = ?', [claimWsId]);
+  });
+
+  it('non-sourcing claims are unaffected by the entry-policy version', () => {
+    const claimWsId = 'ws-policy-discovery';
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      'INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)',
+      [claimWsId, 'Discovery Claim WS', '/tmp/policy-disc', '/tmp/policy-disc/.git', now, now, 'complete'],
+    );
+    const batch = createBatch({ workspaceId: claimWsId, name: 'Discovery Batch', fileName: 'disc.xlsx', totalItems: 2 });
+    // One policy-0 and one policy-1 discovery row: discovery claims have NO
+    // version filter, so both are claimable (entry policy gates Sourcing only).
+    insertItems(batch.id, [{ upc: 'DISC-000001', name: 'D1', rowNumber: 1 }]);
+    insertItems(batch.id, [{ upc: 'DISC-000002', name: 'D2', rowNumber: 2 }], 'discovery', 1);
+
+    const claimed = claimItemsForProcessing('discovery', 5, claimWsId, 'worker-disc');
+    expect(claimed).toHaveLength(2);
+    expect(new Set(claimed.map((c) => c.sourcingEntryPolicyVersion))).toEqual(new Set([0, 1]));
+
+    db.run('DELETE FROM onboarding_items WHERE batch_id = ?', [batch.id]);
+    db.run('DELETE FROM onboarding_batches WHERE id = ?', [batch.id]);
+    db.run('DELETE FROM workspace WHERE id = ?', [claimWsId]);
+  });
+
+  it('insertExtraction rejects an official_page extraction without a real URL', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Ext URL', fileName: 'exturl.xlsx', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: 'EXTURL-001', name: 'Ext URL', rowNumber: 1 }]);
+
+    expect(() =>
+      insertExtraction({ itemId: item.id, sourceUrl: '', extractionDataJson: '{}', extractionMethod: 'test', confidence: 0.5 }),
+    ).toThrow(/source URL/i);
+    expect(() =>
+      insertExtraction({ itemId: item.id, sourceUrl: '   ', extractionDataJson: '{}', extractionMethod: 'test', confidence: 0.5 }),
+    ).toThrow(/source URL/i);
+    expect(() =>
+      insertExtraction({ itemId: item.id, sourceUrl: null as unknown as string, extractionDataJson: '{}', extractionMethod: 'test', confidence: 0.5 }),
+    ).toThrow(/source URL/i);
+  });
+
+  it('insertExtraction persists distributor_record provenance and fails closed on mismatches', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Ext Dist', fileName: 'extdist.xlsx', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: 'EXTDIST-001', name: 'Ext Dist', rowNumber: 1 }]);
+    const generation = startSourcingGeneration(item.id);
+    const hash = 'a'.repeat(64);
+
+    const row = insertExtraction({
+      itemId: item.id,
+      sourceType: 'distributor_record',
+      sourceUrl: null,
+      extractionDataJson: JSON.stringify({ name: 'Dist' }),
+      extractionMethod: 'distributor_record_v1',
+      confidence: 0.9,
+      sourcingGenerationId: generation.id,
+      acceptedEvidenceAttemptIds: ['att-b', 'att-a'],
+      evidenceHash: hash,
+    });
+
+    expect(row.source_type).toBe('distributor_record');
+    expect(row.source_url).toBeNull();
+    expect(row.sourcing_generation_id).toBe(generation.id);
+    // Canonical sorted accepted ids (order-insensitive provenance).
+    expect(JSON.parse(row.accepted_evidence_attempt_ids_json!)).toEqual(['att-a', 'att-b']);
+    expect(row.evidence_hash).toBe(hash);
+
+    // Fail-closed mismatches (cast: the discriminated input type already
+    // prevents these at compile time; the casts exercise the runtime guards).
+    const badDistributor = (o: Record<string, unknown>) => o as unknown as Parameters<typeof insertExtraction>[0];
+    expect(() =>
+      insertExtraction(badDistributor({
+        itemId: item.id, sourceType: 'distributor_record', sourceUrl: 'https://fake.example',
+        extractionDataJson: '{}', extractionMethod: 'distributor_record_v1', confidence: 0.5,
+        sourcingGenerationId: generation.id, acceptedEvidenceAttemptIds: ['a'], evidenceHash: hash,
+      })),
+    ).toThrow(/NULL source URL/i);
+    expect(() =>
+      insertExtraction(badDistributor({
+        itemId: item.id, sourceType: 'distributor_record', sourceUrl: null,
+        extractionDataJson: '{}', extractionMethod: 'distributor_record_v1', confidence: 0.5,
+        acceptedEvidenceAttemptIds: ['a'], evidenceHash: hash,
+      })),
+    ).toThrow(/sourcing generation/i);
+    expect(() =>
+      insertExtraction(badDistributor({
+        itemId: item.id, sourceType: 'distributor_record', sourceUrl: null,
+        extractionDataJson: '{}', extractionMethod: 'distributor_record_v1', confidence: 0.5,
+        sourcingGenerationId: generation.id, acceptedEvidenceAttemptIds: [], evidenceHash: hash,
+      })),
+    ).toThrow(/accepted evidence/i);
+    expect(() =>
+      insertExtraction(badDistributor({
+        itemId: item.id, sourceType: 'distributor_record', sourceUrl: null,
+        extractionDataJson: '{}', extractionMethod: 'distributor_record_v1', confidence: 0.5,
+        sourcingGenerationId: generation.id, acceptedEvidenceAttemptIds: ['a'], evidenceHash: 'not-a-hash',
+      })),
+    ).toThrow(/evidence hash/i);
+    expect(() =>
+      insertExtraction(badDistributor({
+        itemId: item.id, sourceType: 'distributor_record', sourceUrl: null,
+        extractionDataJson: '{}', extractionMethod: 'legacy_method', confidence: 0.5,
+        sourcingGenerationId: generation.id, acceptedEvidenceAttemptIds: ['a'], evidenceHash: hash,
+      })),
+    ).toThrow(/distributor_record_v1/i);
+    // Duplicate accepted ids are rejected.
+    expect(() =>
+      insertExtraction(badDistributor({
+        itemId: item.id, sourceType: 'distributor_record', sourceUrl: null,
+        extractionDataJson: '{}', extractionMethod: 'distributor_record_v1', confidence: 0.5,
+        sourcingGenerationId: generation.id, acceptedEvidenceAttemptIds: ['a', 'a'], evidenceHash: hash,
+      })),
+    ).toThrow(/unique/i);
+  });
+
+  it('computeExtractionHash binds source type and sorted distributor provenance', () => {
+    const base = {
+      id: 'h1', batchId: 'b1', upc: 'HASH-001', name: 'Hash', price: null, quantity: null,
+      brandHint: null, departmentHint: null, sourceUrl: null, expectedName: null,
+      coordinatedTitle: null, acceptedEvidenceAttemptId: null, stage: 'extraction' as const,
+      stageStatus: 'pending' as const, status: 'imported' as const, errorMessage: null,
+      retryCount: 0, isDuplicate: false, existingSku: null, curationData: null,
+      rowNumber: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      extractionData: { title: 'Hash Product' },
+    };
+
+    // Identical provenance, differing ONLY in source type → hashes differ.
+    const official = { ...base, sourceType: 'official_page' as const, acceptedEvidenceAttemptIds: ['att-1'] as string[] };
+    const distributor = { ...base, sourceType: 'distributor_record' as const, acceptedEvidenceAttemptIds: ['att-1'] as string[] };
+    const hOfficial = computeExtractionHash(official as any);
+    const hDistributor = computeExtractionHash(distributor as any);
+    expect(hOfficial).not.toBeNull();
+    expect(hDistributor).not.toBeNull();
+    expect(hOfficial).not.toBe(hDistributor);
+
+    // Order-insensitive provenance: ['b','a'] vs ['a','b'] → same hash.
+    const orderedA = { ...distributor, acceptedEvidenceAttemptIds: ['a', 'b'] };
+    const orderedB = { ...distributor, acceptedEvidenceAttemptIds: ['b', 'a'] };
+    expect(computeExtractionHash(orderedA as any)).toBe(computeExtractionHash(orderedB as any));
   });
 });

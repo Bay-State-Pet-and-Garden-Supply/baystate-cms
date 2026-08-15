@@ -21,6 +21,11 @@ import { getDb } from '../db/connection';
 import { createBatch } from '../db/repositories/onboarding-batch-repo';
 import { findBatchById } from '../db/repositories/onboarding-batch-repo';
 import { findItemById, insertItems } from '../db/repositories/onboarding-item-repo';
+import { getSourcingFlags } from '../onboarding/flags';
+import {
+  deriveSourcingEntryStage,
+  SOURCING_ENTRY_POLICY_VERSION,
+} from '../onboarding/sourcing/entry-policy';
 import {
   getPiImportByRunAndItem,
   getPiResult,
@@ -479,17 +484,26 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
         totalItems: 1,
         columnMappingJson: '{}',
       });
-      const items = insertItems(batch.id, [
-        {
-          upc: gtinDigits,
-          name: registerName,
-          price: opts.price ?? null,
-          quantity: opts.quantity ?? null,
-          rowNumber: 1,
-          isDuplicate: false,
-          existingSku: null,
-        },
-      ]);
+      // Entry stage mirrors the spreadsheet import policy (single-sourced
+      // from the effective sourcing capability, ADR 0014 Amendment A).
+      // Production create-imports also carry the current entry-policy version.
+      const entryStage = deriveSourcingEntryStage(getSourcingFlags());
+      const items = insertItems(
+        batch.id,
+        [
+          {
+            upc: gtinDigits,
+            name: registerName,
+            price: opts.price ?? null,
+            quantity: opts.quantity ?? null,
+            rowNumber: 1,
+            isDuplicate: false,
+            existingSku: null,
+          },
+        ],
+        entryStage,
+        SOURCING_ENTRY_POLICY_VERSION,
+      );
       item = items[0];
       created = true;
     }

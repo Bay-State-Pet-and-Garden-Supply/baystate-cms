@@ -9,6 +9,7 @@ const ONBOARDING_MIGRATION_PATH = path.resolve(import.meta.dirname, 'onboarding-
 const CLASSIFICATION_MIGRATION_PATH = path.resolve(import.meta.dirname, 'classification-migration.sql');
 const STAGE_PIPELINE_MIGRATION_PATH = path.resolve(import.meta.dirname, 'stage-pipeline-migration.sql');
 const COHORT_MIGRATION_PATH = path.resolve(import.meta.dirname, 'cohort-migration.sql');
+const DISTRIBUTOR_V2_MIGRATION_PATH = path.resolve(import.meta.dirname, 'distributor-v2-migration.sql');
 
 export function runMigrations(): void {
   const db = getDb();
@@ -3069,6 +3070,324 @@ export function runMigrations(): void {
     `);
     db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('onboarding_evidence_attempts_schema_version', '1');");
     console.log('[Migrations] Onboarding evidence attempts table migration complete.');
+  }
+
+  // ── Multi-Distributor Sourcing V2 schema (ADR 0014) ──────────────────────
+  //
+  // Gated by `distributor_v2_schema_version`. Runs AFTER the 13-column
+  // evidence-attempts table exists: creates the new tables idempotently from
+  // distributor-v2-migration.sql, extends pre-existing tables with
+  // PRAGMA-guarded ALTERs (five recovered columns + `sourcing_generation_id`),
+  // backfills `observed_at`, binds historical attempts to deterministic
+  // legacy connections (never an arbitrary "first connection" fallback),
+  // builds the idempotency indexes, and ONLY THEN writes the marker. A
+  // failure mid-block aborts BEFORE the marker, so the next startup re-runs
+  // the whole block (idempotent).
+  const distributorV2Version = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('distributor_v2_schema_version') as { value: string } | undefined;
+  if (!distributorV2Version) {
+    // The whole block runs in ONE transaction: a failure rolls back every
+    // DDL/data change and leaves the marker absent, so the next startup
+    // re-runs the entire block cleanly.
+    db.transaction(() => {
+      const v2Sql = fs.readFileSync(DISTRIBUTOR_V2_MIGRATION_PATH, 'utf-8');
+      db.exec(v2Sql);
+
+    const v2Now = new Date().toISOString();
+
+    // PRAGMA-guarded ALTERs on the pre-existing 13-column evidence table.
+    const evidenceCols = db.query('PRAGMA table_info(onboarding_evidence_attempts)').all() as Array<{ name: string }>;
+    const hasEvidenceColumn = (name: string) => evidenceCols.some((c) => c.name === name);
+    if (!hasEvidenceColumn('distributor_connection_id')) {
+      db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN distributor_connection_id TEXT REFERENCES distributor_connections(id) ON DELETE SET NULL;');
+    }
+    if (!hasEvidenceColumn('catalog_snapshot_id')) {
+      db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN catalog_snapshot_id TEXT REFERENCES distributor_catalog_snapshots(id) ON DELETE SET NULL;');
+    }
+    if (!hasEvidenceColumn('catalog_version')) {
+      db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN catalog_version TEXT;');
+    }
+    if (!hasEvidenceColumn('observed_at')) {
+      db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN observed_at TEXT;');
+    }
+    if (!hasEvidenceColumn('expires_at')) {
+      db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN expires_at TEXT;');
+    }
+    if (!hasEvidenceColumn('sourcing_generation_id')) {
+      db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN sourcing_generation_id TEXT REFERENCES sourcing_generations(id) ON DELETE SET NULL;');
+    }
+    // Backfill observed_at for pre-existing rows (ADR 0014 retention).
+    db.exec('UPDATE onboarding_evidence_attempts SET observed_at = created_at WHERE observed_at IS NULL;');
+
+    // Generation column on conflicts + acceptances (nullable; legacy rows stay NULL).
+    const conflictCols = db.query('PRAGMA table_info(onboarding_evidence_conflicts)').all() as Array<{ name: string }>;
+    if (!conflictCols.some((c) => c.name === 'sourcing_generation_id')) {
+      db.exec('ALTER TABLE onboarding_evidence_conflicts ADD COLUMN sourcing_generation_id TEXT REFERENCES sourcing_generations(id) ON DELETE SET NULL;');
+    }
+    const acceptanceCols = db.query('PRAGMA table_info(onboarding_item_evidence_acceptances)').all() as Array<{ name: string }>;
+    if (!acceptanceCols.some((c) => c.name === 'sourcing_generation_id')) {
+      db.exec('ALTER TABLE onboarding_item_evidence_acceptances ADD COLUMN sourcing_generation_id TEXT REFERENCES sourcing_generations(id) ON DELETE SET NULL;');
+    }
+
+    // Idempotency indexes (ADR 0014: one attempt per item+CONNECTION+
+    // generation — two connections may share a provider; one OPEN conflict
+    // per item+field+generation).
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_attempts_generation_conn
+      ON onboarding_evidence_attempts(item_id, distributor_connection_id, sourcing_generation_id)
+      WHERE distributor_connection_id IS NOT NULL AND sourcing_generation_id IS NOT NULL;`);
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_conflicts_open_unique
+      ON onboarding_evidence_conflicts(item_id, field, sourcing_generation_id)
+      WHERE status = 'open';`);
+
+    // Deterministic legacy backfill: one distributor + connection per
+    // (workspace, provider) pair, bound by the attempt→item→batch→workspace
+    // chain (always unambiguous). Ambiguous rows stay NULL; there is NO
+    // "first connection in the database" fallback.
+    const legacyRows = db
+      .query(`SELECT w.id AS workspace_id, a.provider_id
+              FROM onboarding_evidence_attempts a
+              JOIN onboarding_items i ON i.id = a.item_id
+              JOIN onboarding_batches b ON b.id = i.batch_id
+              JOIN workspace w ON w.id = b.workspace_id
+              GROUP BY w.id, a.provider_id`)
+      .all() as Array<{ workspace_id: string; provider_id: string }>;
+    for (const legacy of legacyRows) {
+      const distributorId = `legacy_${legacy.provider_id}`;
+      db.query(
+        "INSERT OR IGNORE INTO distributors (id, name, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      ).run(distributorId, legacy.provider_id, v2Now, v2Now);
+      const connectionId = `legacy_${sha256Hex(`${legacy.workspace_id}:${legacy.provider_id}`).slice(0, 12)}`;
+      db.query(
+        `INSERT OR IGNORE INTO distributor_connections
+          (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, 'legacy_adapter', NULL, '{}', '{}', 1, ?, ?)`,
+      ).run(connectionId, legacy.workspace_id, distributorId, v2Now, v2Now);
+      db.query(
+        `UPDATE onboarding_evidence_attempts SET distributor_connection_id = ?
+         WHERE provider_id = ? AND item_id IN (
+           SELECT i.id FROM onboarding_items i
+           JOIN onboarding_batches b ON b.id = i.batch_id
+           WHERE b.workspace_id = ?
+         )`,
+      ).run(connectionId, legacy.provider_id, legacy.workspace_id);
+    }
+
+      const v2FkViolations = db.query('PRAGMA foreign_key_check').all() as Array<{ table: string }>;
+      if (v2FkViolations.length > 0) {
+        throw new Error(`[Migrations] distributor_v2 foreign_key_check failed: ${JSON.stringify(v2FkViolations.slice(0, 5))}`);
+      }
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('distributor_v2_schema_version', '1');");
+    })();
+    console.log('[Migrations] Distributor V2 schema migration complete.');
+  }
+
+  // ── Default-On Sourcing schema (Amendment A) ───────────────────────────────
+  //
+  // Gated by `default_on_sourcing_schema_version` (written LAST inside one
+  // transaction). Runs AFTER the distributor-v2 block. Adds:
+  // - onboarding_items.source_type (CHECK official_page|distributor_record)
+  //   + sourcing_entry_policy_version (default 0 — existing rows stay 0;
+  //   only post-amendment import call sites may write 1);
+  // - onboarding_extractions: nullable source_url + source_type +
+  //   sourcing_generation_id + accepted_evidence_attempt_ids_json +
+  //   evidence_hash (distributor-record provenance is representable WITHOUT a
+  //   URL; official extraction still fails closed without one);
+  // - onboarding_evidence_attempts.duration_ms (measured p95/source-error
+  //   gates);
+  // - classification_evidence.source CHECK gains 'distributor_record'.
+  //
+  // `onboarding_extractions` is REBUILT when PRAGMA reports a non-null URL or
+  // missing provenance columns (SQLite cannot relax NOT NULL or add a CHECK
+  // in place); `classification_evidence` is rebuilt when its stored CHECK
+  // lacks distributor_record. Both swaps preserve every row id/count inside
+  // ONE transaction with `PRAGMA defer_foreign_keys = ON` (delays FK
+  // enforcement to COMMIT so the drop/rename swap is legal; any violation
+  // fails the commit, rolls back ALL DDL/data, and leaves the marker absent).
+  const defaultOnSourcingVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('default_on_sourcing_schema_version') as { value: string } | undefined;
+  if (!defaultOnSourcingVersion) {
+    db.transaction(() => {
+      db.exec('PRAGMA defer_foreign_keys = ON');
+
+      // 1) onboarding_items: source_type + entry-policy version.
+      const itemsCols = db.query('PRAGMA table_info(onboarding_items)').all() as Array<{ name: string }>;
+      if (!itemsCols.some((c) => c.name === 'source_type')) {
+        db.exec("ALTER TABLE onboarding_items ADD COLUMN source_type TEXT NOT NULL DEFAULT 'official_page' CHECK (source_type IN ('official_page','distributor_record'));");
+      }
+      if (!itemsCols.some((c) => c.name === 'sourcing_entry_policy_version')) {
+        db.exec('ALTER TABLE onboarding_items ADD COLUMN sourcing_entry_policy_version INTEGER NOT NULL DEFAULT 0;');
+      }
+
+      // 2) Evidence attempts: duration_ms for measured p95/source-error gates.
+      //    (variant_axis_declarations is added by its OWN marker-gated block
+      //    below so pre-marked installations still converge.)
+      const attemptCols = db.query('PRAGMA table_info(onboarding_evidence_attempts)').all() as Array<{ name: string }>;
+      if (!attemptCols.some((c) => c.name === 'duration_ms')) {
+        db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN duration_ms INTEGER;');
+      }
+
+      // 3) Rebuild onboarding_extractions when the stored shape is pre-Amendment-A
+      //    (non-null source_url or missing distributor provenance columns).
+      const extCols = db.query('PRAGMA table_info(onboarding_extractions)').all() as Array<{ name: string; notnull: number }>;
+      const extNames = new Set(extCols.map((c) => c.name));
+      const urlCol = extCols.find((c) => c.name === 'source_url');
+      const urlNotNull = urlCol ? urlCol.notnull === 1 : false;
+      const missingExtProv =
+        !extNames.has('source_type') ||
+        !extNames.has('sourcing_generation_id') ||
+        !extNames.has('accepted_evidence_attempt_ids_json') ||
+        !extNames.has('evidence_hash');
+      if (urlNotNull || missingExtProv) {
+        const before = db.query('SELECT COUNT(*) AS cnt FROM onboarding_extractions').get() as { cnt: number };
+        const beforeIds = (db.query('SELECT id FROM onboarding_extractions ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        db.exec(`
+          CREATE TABLE onboarding_extractions_new (
+            id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+            source_url TEXT,
+            extraction_data_json TEXT NOT NULL,
+            extraction_method TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0.0,
+            images_json TEXT,
+            raw_structured_data_json TEXT,
+            source_type TEXT NOT NULL DEFAULT 'official_page' CHECK (source_type IN ('official_page','distributor_record')),
+            sourcing_generation_id TEXT,
+            accepted_evidence_attempt_ids_json TEXT,
+            evidence_hash TEXT,
+            created_at TEXT NOT NULL
+          );
+        `);
+        db.exec(`
+          INSERT INTO onboarding_extractions_new
+            (id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json, raw_structured_data_json, created_at)
+          SELECT id, item_id, source_url, extraction_data_json, extraction_method, confidence, images_json, raw_structured_data_json, created_at
+          FROM onboarding_extractions;
+        `);
+        db.exec('DROP TABLE onboarding_extractions;');
+        db.exec('ALTER TABLE onboarding_extractions_new RENAME TO onboarding_extractions;');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_onboarding_extractions_item ON onboarding_extractions(item_id);');
+        const after = db.query('SELECT COUNT(*) AS cnt FROM onboarding_extractions').get() as { cnt: number };
+        const afterIds = (db.query('SELECT id FROM onboarding_extractions ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        if (after.cnt !== before.cnt || JSON.stringify(afterIds) !== JSON.stringify(beforeIds)) {
+          throw new Error('[Migrations] onboarding_extractions rebuild row/ID mismatch');
+        }
+      }
+
+      // 4) Rebuild classification_evidence when its stored source CHECK lacks
+      //    'distributor_record'. Same swap discipline; NO row deletion.
+      const ceDdl = db
+        .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_evidence'")
+        .get() as { sql?: string } | undefined;
+      if (ceDdl?.sql && !ceDdl.sql.includes('distributor_record')) {
+        const before = db.query('SELECT COUNT(*) AS cnt FROM classification_evidence').get() as { cnt: number };
+        const beforeIds = (db.query('SELECT id FROM classification_evidence ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        db.exec(`
+          CREATE TABLE classification_evidence_new (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+            onboarding_item_id TEXT,
+            product_sku TEXT NOT NULL,
+            stage_name TEXT NOT NULL,
+            source TEXT NOT NULL CHECK (source IN ('spreadsheet', 'official_product_page', 'distributor_record', 'third_party_page', 'visual_product_evidence', 'page_context', 'approved_product_example', 'catalog_manager_guidance', 'catalog_product')),
+            reliability TEXT NOT NULL DEFAULT 'unknown' CHECK (reliability IN ('high', 'medium', 'low', 'conflicting', 'unknown')),
+            attribute_id TEXT,
+            source_url TEXT,
+            source_field TEXT,
+            snippet TEXT,
+            value_json TEXT,
+            metadata_json TEXT,
+            snapshot_json TEXT,
+            retention_expires_at TEXT,
+            created_at TEXT NOT NULL
+          );
+        `);
+        db.exec('INSERT INTO classification_evidence_new SELECT * FROM classification_evidence;');
+        db.exec('DROP TABLE classification_evidence;');
+        db.exec('ALTER TABLE classification_evidence_new RENAME TO classification_evidence;');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_run ON classification_evidence(run_id);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_product_source ON classification_evidence(product_sku, source);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_product ON classification_evidence(product_sku);');
+        const after = db.query('SELECT COUNT(*) AS cnt FROM classification_evidence').get() as { cnt: number };
+        const afterIds = (db.query('SELECT id FROM classification_evidence ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        if (after.cnt !== before.cnt || JSON.stringify(afterIds) !== JSON.stringify(beforeIds)) {
+          throw new Error('[Migrations] classification_evidence rebuild row/ID mismatch');
+        }
+      }
+
+      // 5) Rebuild distributor_connections when its stored `enabled` default is
+      //    the pre-Amendment-A fail-open DEFAULT 1 (SQLite cannot change a
+      //    column default in place). Existing row VALUES are preserved exactly
+      //    (operator-controlled connection states are never rewritten); only
+      //    the DEFAULT for FUTURE inserts changes to 0.
+      const connCols = db.query('PRAGMA table_info(distributor_connections)').all() as Array<{ name: string; dflt_value: string | null }>;
+      const enabledCol = connCols.find((c) => c.name === 'enabled');
+      if (enabledCol && enabledCol.dflt_value !== '0') {
+        const connBefore = db.query('SELECT COUNT(*) AS cnt FROM distributor_connections').get() as { cnt: number };
+        const connBeforeIds = (db.query('SELECT id FROM distributor_connections ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        db.exec(`
+          CREATE TABLE distributor_connections_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            distributor_id TEXT NOT NULL REFERENCES distributors(id) ON DELETE CASCADE,
+            connector_type TEXT NOT NULL CHECK (connector_type IN ('api', 'ftp_catalog', 'csv', 'legacy_adapter')),
+            secret_ref TEXT,
+            configuration_json TEXT DEFAULT '{}',
+            authority_policy_json TEXT DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        db.exec(`
+          INSERT INTO distributor_connections_new
+            (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+          SELECT id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at
+          FROM distributor_connections;
+        `);
+        db.exec('DROP TABLE distributor_connections;');
+        db.exec('ALTER TABLE distributor_connections_new RENAME TO distributor_connections;');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_workspace ON distributor_connections(workspace_id);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_distributor ON distributor_connections(distributor_id);');
+        const connAfter = db.query('SELECT COUNT(*) AS cnt FROM distributor_connections').get() as { cnt: number };
+        const connAfterIds = (db.query('SELECT id FROM distributor_connections ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        if (connAfter.cnt !== connBefore.cnt || JSON.stringify(connAfterIds) !== JSON.stringify(connBeforeIds)) {
+          throw new Error('[Migrations] distributor_connections rebuild row/ID mismatch');
+        }
+      }
+
+      const fkViolations = db.query('PRAGMA foreign_key_check').all() as Array<{ table: string }>;
+      if (fkViolations.length > 0) {
+        throw new Error(`[Migrations] default_on_sourcing foreign_key_check failed: ${JSON.stringify(fkViolations.slice(0, 5))}`);
+      }
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('default_on_sourcing_schema_version', '1');");
+    })();
+    console.log('[Migrations] Default-On Sourcing schema migration complete.');
+  }
+
+  // ── Milestone E: connector-declared variant-axis registry ────────────────
+  //
+  // Own marker-gated block so installations that already recorded
+  // `default_on_sourcing_schema_version` before Milestone E still converge
+  // (the previous location inside the default_on_sourcing block would have
+  // skipped them forever). Guarded ALTER, idempotent, marker written last.
+  const variantAxesVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('sourcing_variant_axes_schema_version') as { value: string } | undefined;
+  if (!variantAxesVersion) {
+    db.transaction(() => {
+      const axisCols = db.query('PRAGMA table_info(onboarding_evidence_attempts)').all() as Array<{ name: string }>;
+      if (!axisCols.some((c) => c.name === 'variant_axis_declarations')) {
+        db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN variant_axis_declarations TEXT;');
+      }
+      const axisFk = db.query('PRAGMA foreign_key_check').all() as Array<{ table: string }>;
+      if (axisFk.length > 0) {
+        throw new Error(`[Migrations] sourcing_variant_axes foreign_key_check failed: ${JSON.stringify(axisFk.slice(0, 5))}`);
+      }
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('sourcing_variant_axes_schema_version', '1');");
+    })();
+    console.log('[Migrations] Sourcing variant-axes schema migration complete.');
   }
 
   // ── Store Manager runtime audit tables (epic #42, #40) ────────────────────

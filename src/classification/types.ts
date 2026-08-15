@@ -155,12 +155,15 @@ export interface StageContext {
   preComputedTitleSource?: 'llm_cohort' | 'cohort_fallback';
   /**
    * Frozen member execution-evidence projection (issue #30 PR3 M2, cohort
-   * mode). When present, the evidence-extraction stage builds its evidence
-   * from the projection's spreadsheetIdentity + extraction fields and MUST
+   * mode; Amendment A V2 with source provenance). When present, the
+   * evidence-extraction stage builds its evidence from the projection's
+   * spreadsheetIdentity + extraction fields + source provenance and MUST
    * NOT read onboarding_items for semantic evidence — a cohort member runs
-   * against the frozen snapshot only (frozen-means-frozen).
+   * against the frozen snapshot only (frozen-means-frozen). Historical V1
+   * snapshots are normalized to V2 (official-page provenance) by
+   * `parseExecutionEvidenceProjection` before reaching the stage.
    */
-  cohortFrozenEvidence?: import('../shared/schemas/cohorts').ExecutionEvidenceProjectionMemberV1;
+  cohortFrozenEvidence?: import('../shared/schemas/cohorts').ExecutionEvidenceProjectionMemberV2;
   /**
    * Cohort-level Execution Product Type resolved at freeze (issue #30 PR4
    * C4b). Present ONLY in prepared-cohort mode when the parent run row carries

@@ -66,12 +66,16 @@ CREATE TABLE IF NOT EXISTS onboarding_sources (
 CREATE TABLE IF NOT EXISTS onboarding_extractions (
   id TEXT PRIMARY KEY,
   item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
-  source_url TEXT NOT NULL,
+  source_url TEXT,
   extraction_data_json TEXT NOT NULL,
   extraction_method TEXT NOT NULL,
   confidence REAL NOT NULL DEFAULT 0.0,
   images_json TEXT,
   raw_structured_data_json TEXT,
+  source_type TEXT NOT NULL DEFAULT 'official_page' CHECK (source_type IN ('official_page', 'distributor_record')),
+  sourcing_generation_id TEXT,
+  accepted_evidence_attempt_ids_json TEXT,
+  evidence_hash TEXT,
   created_at TEXT NOT NULL
 );
 

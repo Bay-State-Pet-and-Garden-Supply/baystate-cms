@@ -48,8 +48,46 @@ import { insertExtraction } from '../db/repositories/onboarding-extraction-repo'
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
 import type { OnboardingSource, PipelineStage } from '../shared/schemas/onboarding';
+import { getSourcingFlags } from './flags';
+import { normalizeGtin } from './sourcing/contracts';
+import type { SourcingEngine } from './sourcing/contracts';
+import { DefaultSourcingEngine } from './sourcing/engine';
+import { reconcileDistributorEvidence } from './sourcing-reconciler';
+import { buildDistributorRecordProjection } from './sourcing/distributor-record-projection';
+import {
+  materializeDistributorRecordExtraction,
+  DISTRIBUTOR_MATERIALIZATION_ERROR_CODES,
+  type DistributorMaterializationResult,
+} from './sourcing/distributor-record-materializer';
+import { observeSourcingCandidates } from './sourcing/observation';
+import { isAutomaticMode, isManualMode, isObserveMode, isCurrentSourcingEntryPolicy } from './sourcing/entry-policy';
+import {
+  startSourcingGeneration,
+  getCurrentSourcingGeneration,
+  getCurrentGenerationAttempts,
+  completeSourcingGeneration,
+} from '../db/repositories/onboarding-evidence-repo';
+import { recordAcceptances } from '../db/repositories/onboarding-acceptance-repo';
+import { completeSourcingWithDecision } from '../db/repositories/onboarding-item-repo';
+import { listConnectionsByWorkspace } from '../db/repositories/distributor-repo';
+import type { SourcingDecision, SourcingDecisionV2 } from '../shared/schemas/onboarding';
 
-const AUTO_STAGES: PipelineStage[] = ['curation', 'extraction', 'discovery'];
+/**
+ * Automatic per-item processing stages (ADR 0014 Amendment A). Sourcing
+ * joins the list ONLY for valid manual/automatic rollout modes with the
+ * capability effective-enabled; observe mode never claims Sourcing (imports
+ * enter Discovery and are shadow-observed from there), and OFF/invalid modes
+ * never include it. Curation's cohort-exclusivity logic inside poll() is
+ * unaffected by the stage list.
+ */
+function buildAutoStages(): PipelineStage[] {
+  const flags = getSourcingFlags();
+  const includeSourcing =
+    flags.effectiveEnabled && (flags.mode === 'manual' || flags.mode === 'automatic');
+  return includeSourcing
+    ? ['sourcing', 'curation', 'extraction', 'discovery']
+    : ['curation', 'extraction', 'discovery'];
+}
 
 // ─── Cohort-centric Curation V2 (issue #30, PR3 M3) ───────────────────────────
 
@@ -125,13 +163,16 @@ export class OnboardingWorker {
   // log line is emitted only when the outcome detail CHANGES so shadow mode
   // never floods the worker log.
   private shadowObservedOutcomes = new Map<string, string>();
+  /** Test seam: inject the sourcing engine factory (defaults to the real engine). */
+  private engineFactory: (() => SourcingEngine) | null;
 
-  constructor(workspaceId: string, workspacePath: string, maxConcurrency = 10, maxExtractionConcurrency = 3) {
+  constructor(workspaceId: string, workspacePath: string, maxConcurrency = 10, maxExtractionConcurrency = 3, engineFactory?: () => SourcingEngine) {
     this.workspaceId = workspaceId;
     this.workspacePath = workspacePath;
     this.maxConcurrency = maxConcurrency;
     this.maxExtractionConcurrency = maxExtractionConcurrency;
     this.workerId = randomUUID();
+    this.engineFactory = engineFactory ?? null;
   }
 
   start(): void {
@@ -203,7 +244,7 @@ export class OnboardingWorker {
       const inFlightBatches = new Set<string>();
 
       // Process stages in priority order: discovery first, then extraction, then curation
-      for (const stage of AUTO_STAGES) {
+      for (const stage of buildAutoStages()) {
         if (this.running.size >= this.maxConcurrency) break;
 
         // Extraction has a separate concurrency limit to avoid bot detection
@@ -239,7 +280,22 @@ export class OnboardingWorker {
         const claimedItems = claimItemsForProcessing(stage, available, this.workspaceId, this.workerId);
 
         for (const item of claimedItems) {
-          if (this.running.has(item.id)) continue;
+          if (this.running.has(item.id)) {
+            // Claim race resolution: `claimItemsForProcessing` already wrote
+            // stage_status='in_progress' for this row, but the item is still
+            // being processed by a PREVIOUS stage's task in the SAME poll
+            // (e.g. sourcing just advanced it to discovery/pending). No task
+            // will be dispatched for this claim, so restore the status it had
+            // (pending) instead of leaving the item stranded in_progress
+            // until a worker restart requeues it.
+            getDb()
+              .query(
+                `UPDATE onboarding_items SET stage_status = 'pending', claimed_by = NULL, claimed_at = NULL
+                 WHERE id = ? AND stage_status = 'in_progress'`,
+              )
+              .run(item.id);
+            continue;
+          }
 
           // Re-check extraction concurrency limit in loop since processItem increments it synchronously
           if (stage === 'extraction' && this.extractionRunning >= this.maxExtractionConcurrency) {
@@ -432,6 +488,9 @@ export class OnboardingWorker {
 
     try {
       switch (stage) {
+        case 'sourcing':
+          await this.processSourcing(item);
+          break;
         case 'discovery':
           await this.processDiscovery(item);
           break;
@@ -449,8 +508,382 @@ export class OnboardingWorker {
     }
   }
 
+  /**
+   * Sourcing worker leg (ADR 0014 Amendment A, flag-gated by `buildAutoStages`).
+   *
+   * Runs distributor lookups for the item's current sourcing generation,
+   * reconciles the resulting evidence, computes the deterministic
+   * distributor-record projection (the qualification authority), and routes:
+   * qualified found evidence -> `distributor_record_to_extraction` (target
+   * Extraction, source_type='distributor_record', null URL); accepted but
+   * below the qualification floor -> `evidence_to_discovery`; only provider
+   * errors -> `degraded_fallback_to_discovery`; no identifier / no enabled
+   * connections / all `not_stocked` -> `fallback_to_discovery`; hard identity
+   * conflicts -> `needs_input_conflict` (sourcing/needs_input). `bundle_to_curation`
+   * is never written. MANUAL mode holds every non-conflict outcome at
+   * sourcing/needs_input (server-derived qualification view; the operator
+   * chooses the route); automatic mode applies the route table directly.
+   * Marker-v0 (legacy) rows never receive distributor routing — they keep the
+   * operator-controlled Continue-to-Discovery path.
+   *
+   * Deterministic re-run: when the current generation already has attempts
+   * (a retried/partial run or a test seed), the engine is SKIPPED and the
+   * existing attempts are reconciled (cache-before-lookup semantics).
+   */
+  private async processSourcing(item: any): Promise<void> {
+    console.log(`[OnboardingWorker] Sourcing for ${item.name} (${item.upc})`);
+
+    let generation: ReturnType<typeof getCurrentSourcingGeneration> | null = null;
+    let decidedAt: string;
+
+    const flags = getSourcingFlags();
+    const automatic = isAutomaticMode(flags);
+    const manual = isManualMode(flags);
+
+    const complete = (
+      route: SourcingDecision['route'],
+      decision: SourcingDecision | SourcingDecisionV2,
+      targetStage: 'discovery' | 'extraction' | 'sourcing',
+    ): boolean => {
+      if (!generation) return false;
+      const res = completeSourcingWithDecision(item.id, decision, targetStage);
+      if (!res.ok) {
+        updateItemStageStatus(item.id, 'failed', `Sourcing completion failed: ${res.reason}`);
+        onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', { stage: 'sourcing', error: res.reason });
+        return false;
+      }
+      // Finalize the generation BEFORE the single terminal event: a failure
+      // here falls into the outer catch and emits exactly ONE 'failed' event
+      // (the 'completed' event below never fires).
+      completeSourcingGeneration(generation.id, 'completed');
+      onboardingEvents.emitItemStatus(item.batchId, item.id, route === 'needs_input_conflict' ? 'needs_input' : 'completed', {
+        stage: 'sourcing',
+        route,
+      });
+      return true;
+    };
+
+    /** Manual mode hold: every non-conflict outcome waits at needs_input. */
+    const manualHold = (warnings: string[], providerIds: string[] = []): void => {
+      updateItemStageStatus(item.id, 'needs_input', 'Manual mode: awaiting operator route selection');
+      complete(
+        'needs_input_conflict',
+        {
+          schemaVersion: 2,
+          route: 'needs_input_conflict',
+          origin: 'automatic_policy',
+          acceptedEvidenceAttemptIds: [],
+          providerIds,
+          conflicts: [],
+          warnings: [...warnings, 'Manual mode: operator must choose the route (Use distributor record / Continue to Discovery)'],
+          decidedAt,
+        },
+        'sourcing',
+      );
+    };
+
+    /**
+     * Per-provider source-error warnings for the decision audit (MC review
+     * fix): a qualified record WITH a provider error must retain the error.
+     * `not_stocked` is NOT an error and stays silent.
+     */
+    const sourceErrorWarnings = (attemptsList: Array<{
+      outcome: string;
+      providerId: string;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }>): string[] =>
+      attemptsList
+        .filter((a) => a.outcome === 'source_error')
+        .map((a) => {
+          const code = a.errorCode ?? 'source_error';
+          const detail = a.errorMessage ? `: ${a.errorMessage}` : '';
+          return `Distributor ${a.providerId} lookup failed (${code}${detail})`;
+        });
+
+    try {
+      // Marker-v0 rows are excluded by the claim filter; belt-and-suspenders:
+      // they never receive automatic distributor routing or decisions.
+      if (!isCurrentSourcingEntryPolicy(item.sourcingEntryPolicyVersion)) {
+        complete(
+          'fallback_to_discovery',
+          {
+            schemaVersion: 2,
+            route: 'fallback_to_discovery',
+            origin: 'automatic_policy',
+            acceptedEvidenceAttemptIds: [],
+            providerIds: [],
+            conflicts: [],
+            warnings: ['Legacy item excluded from automatic distributor routing (entry policy 0)'],
+            decidedAt: new Date().toISOString(),
+          },
+          'discovery',
+        );
+        return;
+      }
+
+      // Everything that can fail lives inside the failure boundary: engine
+      // construction and generation load/create included.
+      const engine = this.engineFactory ? this.engineFactory() : new DefaultSourcingEngine();
+      generation = getCurrentSourcingGeneration(item.id) ?? startSourcingGeneration(item.id, 'automatic');
+      decidedAt = new Date().toISOString();
+
+      // Deterministic re-run: reuse existing current-generation attempts.
+      if (getCurrentGenerationAttempts(item.id).length === 0) {
+        if (normalizeGtin(item.upc) === null) {
+          // No usable identifier -> audited pass-through (never a brand-only
+          // lookup). Checked BEFORE connections so the warning is truthful.
+          if (manual) {
+            manualHold(['Item has no UPC/GTIN for distributor lookup']);
+          } else {
+            complete(
+              'fallback_to_discovery',
+              {
+                schemaVersion: 2,
+                route: 'fallback_to_discovery',
+                origin: 'automatic_policy',
+                acceptedEvidenceAttemptIds: [],
+                providerIds: [],
+                conflicts: [],
+                warnings: ['Item has no UPC/GTIN for distributor lookup'],
+                decidedAt,
+              },
+              'discovery',
+            );
+          }
+          return;
+        }
+
+        const enabledConnections = listConnectionsByWorkspace(this.workspaceId, true);
+        if (enabledConnections.length === 0) {
+          // Zero enabled connections -> audited automatic pass-through.
+          if (manual) {
+            manualHold(['No enabled distributor connections']);
+          } else {
+            complete(
+              'fallback_to_discovery',
+              {
+                schemaVersion: 2,
+                route: 'fallback_to_discovery',
+                origin: 'automatic_policy',
+                acceptedEvidenceAttemptIds: [],
+                providerIds: [],
+                conflicts: [],
+                warnings: ['No enabled distributor connections'],
+                decidedAt,
+              },
+              'discovery',
+            );
+          }
+          return;
+        }
+
+        await engine.runGeneration({
+          itemId: item.id,
+          generationId: generation.id,
+          workspaceId: this.workspaceId,
+          upc: String(item.upc),
+          gtin: null,
+          brandHint: item.brandHint ?? null,
+          signal: AbortSignal.timeout(60_000),
+          deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+        });
+      }
+
+      // CURRENT-GENERATION CAS (ADR 0014): a retry that superseded this
+      // generation while the engine ran must not let this (stale) worker
+      // route the item. Abort quietly — the item stays sourcing/pending for
+      // the NEW generation's worker.
+      if (getCurrentSourcingGeneration(item.id)?.id !== generation.id) {
+        console.log(`[OnboardingWorker] Sourcing generation ${generation.id} superseded during run for ${item.id} — abandoning stale routing`);
+        // Release the claim: the item returns to pending so the NEW
+        // generation's worker can claim and route it.
+        updateItemStageStatus(item.id, 'pending', null);
+        return;
+      }
+
+      const attempts = getCurrentGenerationAttempts(item.id);
+
+      // Connector-declared variant axes (Amendment A): collected from the
+      // persisted attempts' declarations so custom axes are hard identity
+      // fields for this generation.
+      const declaredVariantAxes = Array.from(
+        new Set(attempts.flatMap((a) => (a.variantAxisDeclarations ?? []).map((d) => d.normalizedAxis))),
+      );
+
+      const reconcile = await reconcileDistributorEvidence(item.id, attempts, generation.id, declaredVariantAxes);
+
+      // Second CAS check after reconcile: supersede during reconciliation
+      // also aborts stale routing.
+      if (getCurrentSourcingGeneration(item.id)?.id !== generation.id) {
+        console.log(`[OnboardingWorker] Sourcing generation ${generation.id} superseded during reconcile for ${item.id} — abandoning stale routing`);
+        updateItemStageStatus(item.id, 'pending', null);
+        return;
+      }
+
+      // Deterministic qualification authority (Amendment A): the projection
+      // floor (exact identifier, current-generation accepted evidence, ≥1
+      // nonblank name, complete provenance, no open hard conflict) decides
+      // whether Discovery may be skipped.
+      const projection = buildDistributorRecordProjection({
+        itemId: item.id,
+        itemUpc: String(item.upc),
+        sourcingGenerationId: generation.id,
+        attempts,
+        acceptedAttemptIds: reconcile.acceptedAttemptIds,
+        declaredVariantAxes,
+        resolutions: [],
+      });
+
+      if (reconcile.hasHardIdentityConflict) {
+        updateItemStageStatus(item.id, 'needs_input', 'Identity conflict detected');
+        complete(
+          'needs_input_conflict',
+          {
+            schemaVersion: 2,
+            route: 'needs_input_conflict',
+            origin: 'automatic_policy',
+            acceptedEvidenceAttemptIds: [],
+            providerIds: reconcile.providerIds,
+            conflicts: [],
+            warnings: reconcile.warnings,
+            decidedAt,
+          },
+          'sourcing',
+        );
+        return;
+      }
+
+      if (!automatic) {
+        // MANUAL mode: hold every non-conflict outcome for the operator. The
+        // server-derived qualification view (qualified? ids/hash/providers)
+        // is computed by the item-detail projection, not the decision.
+        // Persist relational acceptances FIRST (MC review fix) so
+        // completeSourcingViaProjection can recompute qualification when the
+        // operator chooses "Use distributor record" (the V2 needs_input
+        // decision schema forbids accepted ids — the acceptances table is
+        // the authority).
+        if (projection.qualified) {
+          recordAcceptances(item.id, projection.acceptedAttemptIds, 'system', 'qualified distributor record (manual review)');
+        } else if (reconcile.acceptedAttemptIds.length > 0) {
+          recordAcceptances(item.id, reconcile.acceptedAttemptIds, 'system', 'coherent distributor evidence (manual review)');
+        }
+        manualHold([...reconcile.warnings, ...sourceErrorWarnings(attempts)], reconcile.providerIds);
+        return;
+      }
+
+      // AUTOMATIC mode route table (Amendment A).
+      if (projection.qualified) {
+        recordAcceptances(item.id, projection.acceptedAttemptIds, 'system', 'qualified distributor record');
+        complete(
+          'distributor_record_to_extraction',
+          {
+            schemaVersion: 2,
+            route: 'distributor_record_to_extraction',
+            origin: 'automatic_policy',
+            acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
+            providerIds: projection.providerIds,
+            sourcingGenerationId: generation.id,
+            conflicts: [],
+            warnings: [...reconcile.warnings, ...sourceErrorWarnings(attempts)],
+            decidedAt,
+            evidenceHash: projection.evidenceHash,
+            sourceType: 'distributor_record',
+            target: 'extraction',
+          },
+          'extraction',
+        );
+        return;
+      }
+
+      if (reconcile.acceptedAttemptIds.length > 0) {
+        recordAcceptances(item.id, reconcile.acceptedAttemptIds, 'system', 'coherent distributor evidence');
+        complete(
+          'evidence_to_discovery',
+          {
+            schemaVersion: 2,
+            route: 'evidence_to_discovery',
+            origin: 'automatic_policy',
+            acceptedEvidenceAttemptIds: reconcile.acceptedAttemptIds,
+            providerIds: reconcile.providerIds,
+            conflicts: [],
+            warnings: [...reconcile.warnings, ...sourceErrorWarnings(attempts)],
+            decidedAt,
+          },
+          'discovery',
+        );
+        return;
+      }
+
+      if (attempts.some((a) => a.outcome === 'source_error')) {
+        complete(
+          'degraded_fallback_to_discovery',
+          {
+            schemaVersion: 2,
+            route: 'degraded_fallback_to_discovery',
+            origin: 'automatic_policy',
+            acceptedEvidenceAttemptIds: [],
+            providerIds: reconcile.providerIds,
+            conflicts: [],
+            warnings: [...reconcile.warnings, 'Distributor lookups failed; continuing to Discovery'],
+            decidedAt,
+          },
+          'discovery',
+        );
+        return;
+      }
+
+      // No found evidence / all not_stocked.
+      complete(
+        'fallback_to_discovery',
+        {
+          schemaVersion: 2,
+          route: 'fallback_to_discovery',
+          origin: 'automatic_policy',
+          acceptedEvidenceAttemptIds: [],
+          providerIds: reconcile.providerIds,
+          conflicts: [],
+          warnings: reconcile.warnings,
+          decidedAt,
+        },
+        'discovery',
+      );
+    } catch (err) {
+      console.error(`[OnboardingWorker] Sourcing error for ${item.id}:`, err);
+      updateItemStageStatus(item.id, 'failed', String(err));
+      // Mark the generation failed when one exists (a setup failure before
+      // generation creation leaves none).
+      if (generation) {
+        try {
+          completeSourcingGeneration(generation.id, 'failed');
+        } catch {
+          // best effort — the item status + event are the contract
+        }
+      }
+      onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
+        stage: 'sourcing',
+        error: String(err),
+      });
+    }
+  }
+
+
   private async processDiscovery(item: any): Promise<void> {
     console.log(`[OnboardingWorker] Discovery for ${item.name} (${item.upc})`);
+
+    // Observe mode (Amendment A, MC): shadow distributor data collection for
+    // current-policy imports. Observation NEVER writes conflicts/acceptances/
+    // decisions/transitions, and an observation failure NEVER becomes a
+    // Discovery failure (Discovery proceeds normally).
+    const sourcingFlags = getSourcingFlags();
+    if (isObserveMode(sourcingFlags) && isCurrentSourcingEntryPolicy(item.sourcingEntryPolicyVersion)) {
+      try {
+        const engine = this.engineFactory ? this.engineFactory() : new DefaultSourcingEngine();
+        await observeSourcingCandidates({ item, workspaceId: this.workspaceId, engine });
+      } catch (err) {
+        console.error(`[OnboardingWorker] Observation failed for ${item.id}:`, err);
+      }
+    }
 
     // Protected discovery calls route through the frozen classification
     // model policy (issue #17 item A). No valid policy ⇒ disabled ⇒ the
@@ -709,6 +1142,17 @@ export class OnboardingWorker {
     this.extractionRunning++;
     const done = () => { this.extractionRunning = Math.max(0, this.extractionRunning - 1); };
     try {
+      // Amendment A (Milestone D): a distributor-record source item has NO
+      // official page — the extraction is the deterministic structured
+      // materialization of the qualified distributor evidence (no URL, no
+      // profile, no fetch/OCR/model calls). Integrity failures are stable
+      // codes; the item is NOT blindly retried (unchanged evidence cannot
+      // heal an integrity error).
+      if (item.sourceType === 'distributor_record') {
+        await this.processDistributorRecordExtraction(item);
+        return;
+      }
+
       if (!item.sourceUrl) {
         updateItemStageStatus(item.id, 'failed', 'No confirmed source URL');
         onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
@@ -805,6 +1249,72 @@ export class OnboardingWorker {
     } finally {
       done();
     }
+  }
+
+  /**
+   * Deterministic distributor-record extraction (Amendment A, Milestone D).
+   *
+   * Branched BEFORE the URL/profile checks in `processExtraction`: a
+   * `distributor_record` source item has no official page to scrape. The
+   * materializer rechecks every authority inside one transaction and writes
+   * the identity-only extraction atomically (row + item payload + completed
+   * status). Integrity failures surface a stable error code and leave the
+   * item `extraction/failed` — never retried as an official-page extraction
+   * and never blindly retried (unchanged evidence cannot heal them).
+   */
+  private async processDistributorRecordExtraction(item: any): Promise<void> {
+    // Defense in depth (Milestone D round-8): the materializer must never
+    // throw on malformed authority data — every parse is guarded and failures
+    // return stable codes. If it still throws unexpectedly, map to a stable
+    // internal_error code so the item ALWAYS reaches extraction/failed
+    // instead of staying in_progress in the log-only generic catch.
+    let result: DistributorMaterializationResult;
+    try {
+      result = materializeDistributorRecordExtraction(item.id, this.workspaceId);
+    } catch (err) {
+      console.error(
+        `[OnboardingWorker] Distributor-record extraction threw for ${item.id} (mapped to internal_error):`,
+        err,
+      );
+      const errorMsg = `distributor_materialization:${DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.internal_error}`;
+      updateItemStageStatus(item.id, 'failed', errorMsg);
+      onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
+        stage: 'extraction',
+        error: errorMsg,
+      });
+      return;
+    }
+    if (result.ok) {
+      onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
+        stage: 'extraction',
+        extractedData: result.extractionData,
+      });
+      console.log(
+        `[OnboardingWorker] ✓ Distributor-record extraction complete for "${item.name}" (${item.upc}): ` +
+          `title="${String(result.extractionData.title ?? 'N/A')}", ` +
+          `brand="${String(result.extractionData.brand ?? 'N/A')}", ` +
+          `distributor record (no official page)${result.idempotent ? ' [idempotent retry]' : ''}`,
+      );
+
+      // Issue #30 PR2: refresh candidate cohorts so family readiness reflects
+      // the new evidence. Refresh failure must never fail extraction.
+      try {
+        await refreshCandidateCohorts(this.workspaceId, item.batchId);
+      } catch (err) {
+        console.warn(`[OnboardingWorker] Candidate cohort refresh failed for batch ${item.batchId} (non-blocking):`, err);
+      }
+      return;
+    }
+
+    // Deterministic integrity failure: stable code, extraction/failed, no
+    // partial writes (the materializer transaction performed none).
+    const errorMsg = `distributor_materialization:${result.code}`;
+    console.error(`[OnboardingWorker] Distributor-record extraction integrity failure for ${item.id}: ${result.code}`);
+    updateItemStageStatus(item.id, 'failed', errorMsg);
+    onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
+      stage: 'extraction',
+      error: errorMsg,
+    });
   }
 
   private async processCuration(item: any): Promise<void> {

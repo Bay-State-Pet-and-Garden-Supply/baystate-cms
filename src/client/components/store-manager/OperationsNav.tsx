@@ -70,7 +70,10 @@ export function OperationsNav({ views, activeView, onNavigate, killSwitch = fals
       const next = (base + delta + enabled.length) % enabled.length;
       targetIndex = enabled[next]?.i ?? -1;
     }
-    buttonRefs.current[VIEW_IDS[targetIndex]]?.focus();
+    const targetView = views[targetIndex];
+    if (targetView) {
+      buttonRefs.current[targetView.id]?.focus();
+    }
   };
 
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
@@ -106,6 +109,8 @@ export function OperationsNav({ views, activeView, onNavigate, killSwitch = fals
                 buttonRefs.current[view.id] = el;
               }}
               type="button"
+              disabled={disabled}
+              tabIndex={active ? 0 : -1}
               aria-current={active ? 'page' : undefined}
               aria-disabled={disabled ? true : undefined}
               aria-label={disabled && view.disabledReason ? `${view.label} — ${view.disabledReason}` : view.label}
