@@ -99,7 +99,6 @@ import {
 import {
   upsertProviderConnection,
   getProviderConnection,
-  listProviderConnections,
   deleteProviderConnection,
   upsertWorkloadRoute,
   saveAiRoutingDefaults,
