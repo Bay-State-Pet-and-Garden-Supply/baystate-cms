@@ -59,6 +59,28 @@ describe('normalizeWeightToLbs — canonical pounds, two decimals', () => {
       expect(normalizeWeightToLbs(input)).toBe(expected);
     });
   }
+
+  test('accepts every observed live-batch decimal-pound shape (GPT review NIT)', () => {
+    const liveBatch = [
+      '0.0600 lb', '0.06 lb', '0.1700 lb', '0.17 lb', '0.3771 lb', '0.25',
+      '0.01 lb', '0.1000 lb', '0.2080 lb', '0.2800 lb', '0.4330 lb', '0.5116 lb',
+      '0.4380 lb', '0.1100 lb', '0.4100 lb', '0.4200 lb', '0.3900 lb', '0.3600 lb',
+      '0.4400 lb', '0.3100 lb', '0.21 lb', '0.27 lb', '0.3 lb', '0.31 lb',
+      '0.36 lb', '0.38 lb', '0.39 lb', '0.4 lb', '0.41 lb', '0.42 lb',
+      '0.43 lb', '0.44 lb', '0.51 lb', '0.5116 lb', '0.01 lb', '0.06 lb',
+      '0.17 lb', '0.25',
+    ];
+    const expected = [
+      '0.06', '0.06', '0.17', '0.17', '0.38', '0.25', '0.01', '0.10', '0.21',
+      '0.28', '0.43', '0.51', '0.44', '0.11', '0.41', '0.42', '0.39', '0.36',
+      '0.44', '0.31', '0.21', '0.27', '0.30', '0.31', '0.36', '0.38', '0.39',
+      '0.40', '0.41', '0.42', '0.43', '0.44', '0.51', '0.51', '0.01', '0.06',
+      '0.17', '0.25',
+    ];
+    for (let i = 0; i < liveBatch.length; i++) {
+      expect(normalizeWeightToLbs(liveBatch[i]), liveBatch[i]).toBe(expected[i]);
+    }
+  });
 });
 
 describe('normalizeWeightToLbs — fail closed on unparseable values', () => {

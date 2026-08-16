@@ -27,13 +27,14 @@ import { normalizeWeightToLbs } from '../normalization/weight';
 
 /**
  * Canonical structured weight for materialization (epic #46 follow-up,
- * operator rule): pounds, exactly two decimals. The product name/title is
- * NEVER normalized. Unparseable weights fail closed → the raw value is
- * preserved (audit) and the caller's validation surfaces the warning.
+ * operator rule): pounds, exactly two decimals — NEVER raw provider text.
+ * The product name/title is NEVER normalized. Unparseable weights yield
+ * null (the field is absent, not silently filled with a non-canonical
+ * string); the raw value stays in the provider evidence for audit.
  */
 export function canonicalMaterializedWeight(rawWeight: string | null): string | null {
   if (rawWeight === null || rawWeight === '') return rawWeight;
-  return normalizeWeightToLbs(rawWeight) ?? rawWeight;
+  return normalizeWeightToLbs(rawWeight);
 }
 
 /**

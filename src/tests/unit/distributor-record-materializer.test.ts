@@ -970,10 +970,10 @@ describe('canonical structured weight (epic #46 follow-up, operator rule)', () =
     expect(canonicalMaterializedWeight('10 lbs')).toBe('10.00');
     expect(canonicalMaterializedWeight('0.25')).toBe('0.25');
   });
-  test('null/empty pass through; malformed fails closed to the raw value (never silent bad canonical)', () => {
+  test('null/empty pass through; malformed yields null (never raw text in the canonical field)', () => {
     expect(canonicalMaterializedWeight(null)).toBeNull();
     expect(canonicalMaterializedWeight('')).toBe('');
-    expect(canonicalMaterializedWeight('approx 1 lb')).toBe('approx 1 lb');
+    expect(canonicalMaterializedWeight('approx 1 lb')).toBeNull();
   });
   test('payloadsEquivalentAfterWeightNormalization accepts legacy raw weight formats only', () => {
     const expected = { title: 'Pet Kibble', weight: '1.00', brand: 'Brand A' };

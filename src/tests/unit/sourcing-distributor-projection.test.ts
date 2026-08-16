@@ -404,6 +404,29 @@ describe('Distributor record projection — conflicts and operator resolutions',
     expect(result.reasonCodes).toContain('open_hard_conflict');
   });
 
+  // Epic #46 follow-up (operator weight rule): the projection is the
+  // qualification authority — equivalent weight formats must NOT resurrect
+  // a raw-format conflict after the reconciler suppresses it.
+  test('equivalent weight formats (16 oz vs 1.0000 lb) do NOT block qualification', () => {
+    const eq1 = makeFound('e1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', weight: '16 oz' });
+    const eq2 = makeFound('e2', 'bci', { upc: ITEM_UPC, name: 'Dog Food', weight: '1.0000 lb' });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [eq1, eq2], acceptedAttemptIds: ['e1', 'e2'] });
+    expect(result.qualified).toBe(true);
+    if (result.qualified) {
+      expect(result.warnings.some((w) => w.includes('weight'))).toBe(false);
+    }
+  });
+
+  test('true weight mismatch (0.25 lb vs 0.50 lb) still blocks qualification', () => {
+    const m1 = makeFound('m1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', weight: '0.25 lb' });
+    const m2 = makeFound('m2', 'bci', { upc: ITEM_UPC, name: 'Dog Food', weight: '0.50 lb' });
+    const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [m1, m2], acceptedAttemptIds: ['m1', 'm2'] });
+    expect(result.qualified).toBe(false);
+    if (!result.qualified) {
+      expect(result.reasonCodes).toContain('open_hard_conflict');
+    }
+  });
+
   test('custom_override resolves the disputed field', () => {
     const result = buildDistributorRecordProjectionV1({
       ...baseInput,
