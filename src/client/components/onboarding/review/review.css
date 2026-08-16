@@ -161,12 +161,16 @@
 .rv-queue-list {
   flex: 1;
   overflow-y: auto;
+  /* Epic #46 refinement: wide row content (long curated titles, family
+     labels) must never produce a horizontal scrollbar — clip/ellipsis
+     instead. */
+  overflow-x: hidden;
   outline: none;
 }
 
 .rv-queue-row {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) minmax(0, auto);
   gap: var(--spacing-sm);
   align-items: center;
   padding: 0.5rem 0.625rem;
@@ -225,6 +229,24 @@
   margin-top: 0.1875rem;
   font-size: 0.75rem;
   color: var(--color-mulch-brown);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rv-row-checks {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  overflow: hidden;
+}
+
+/* Badges inside the queue row (family label, source, warnings) must truncate
+   instead of widening the row (epic #46 refinement — no horizontal scroll). */
+.rv-row-checks .rv-badge,
+.rv-row-checks .rv-row-meta {
+  max-width: 9rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

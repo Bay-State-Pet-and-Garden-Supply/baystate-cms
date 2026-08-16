@@ -39,6 +39,7 @@ import type {
 } from '../shared/schemas/classification';
 import type { GenerateSelectorsResponse, GenerateSelectorsRequest } from '../shared/schemas/selector-generation';
 import type { CohortListResponse } from '../shared/schemas/cohorts';
+import type { WorkStateCounts } from '../shared/schemas/onboarding-work-state';
 
 const API_BASE = '/api/onboarding';
 
@@ -117,8 +118,8 @@ export async function resolveBrandDomains(brands: string[]): Promise<{ mappings:
   });
 }
 
-export async function getBatches(): Promise<{ batches: OnboardingBatch[] }> {
-  return request<{ batches: OnboardingBatch[] }>('/batches');
+export async function getBatches(): Promise<{ batches: OnboardingBatch[]; workStateCounts: Record<string, WorkStateCounts> }> {
+  return request<{ batches: OnboardingBatch[]; workStateCounts: Record<string, WorkStateCounts> }>('/batches');
 }
 
 export async function getBatch(id: string): Promise<{ batch: OnboardingBatch }> {

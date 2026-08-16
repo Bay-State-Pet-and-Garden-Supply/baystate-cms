@@ -186,6 +186,7 @@ import { HTTP_EXTRACTION_HEADERS } from '../../onboarding/page-extractor';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { listCandidateCohortViews } from '../../onboarding/curation-cohort-service';
 import { CohortListResponseSchema } from '../../shared/schemas/cohorts';
+import type { WorkStateCounts } from '../../shared/schemas/onboarding-work-state';
 import {
   getBatchWorkStateCounts,
   getBatchWorkStateForItems,
@@ -534,7 +535,16 @@ route.get('/onboarding/batches', async (c) => {
   getWorker(workspace.id, workspace.workspacePath);
 
   const batches = listBatches(workspace.id);
-  return c.json({ batches });
+
+  // Epic #46 refinement: per-batch operator work-state counts so the batch
+  // table shows the SAME metrics as the Batch Workspace tabs (the legacy
+  // promotion-stage completed/failed columns no longer describe the
+  // operating model). Additive — clients without the map still work.
+  const workStateCounts: Record<string, WorkStateCounts> = {};
+  for (const batch of batches) {
+    workStateCounts[batch.id] = getBatchWorkStateCounts(batch.id);
+  }
+  return c.json({ batches, workStateCounts });
 });
 
 /**

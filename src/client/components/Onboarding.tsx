@@ -17,6 +17,8 @@ import { BatchWorkspace } from './onboarding/BatchWorkspace';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { WeeklyReportModal } from './WeeklyReportModal';
 import type { OnboardingBatch, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
+import type { WorkStateCounts } from '../../shared/schemas/onboarding-work-state';
+import { formatCount, totalItemCount } from './onboarding/batch-workspace-logic';
 import { matchExistingBrand } from '../../shared/brand-matcher';
 import { getOnboardingFeatureFlags } from '../onboarding-feature-flags';
 export function Onboarding() {
@@ -41,6 +43,7 @@ export function Onboarding() {
   }, [settingsDeepLinkTab]);
   const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
   const [batches, setBatches] = useState<OnboardingBatch[]>([]);
+  const [batchCounts, setBatchCounts] = useState<Record<string, WorkStateCounts>>({});
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [selectedBatch, setSelectedBatch] = useState<OnboardingBatch | null>(null);
   const [loading, setLoading] = useState(false);
@@ -93,6 +96,9 @@ export function Onboarding() {
     try {
       const res = await getBatches();
       setBatches(res.batches);
+      // Server-owned per-batch operator work-state counts (epic #46
+      // refinement): the table shows the same metrics as the workspace tabs.
+      setBatchCounts(res.workStateCounts ?? {});
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -275,29 +281,64 @@ export function Onboarding() {
   // ─── LAYOUTS AND RENDERING ───────────────────────────────────────────────────
 
   const renderBatchProgress = (batch: OnboardingBatch) => {
-    const total = batch.totalItems || 1;
+    const counts = batchCounts[batch.id];
+    if (!counts) {
+      // Legacy fallback (no work-state data yet): keep the old bar.
+      const total = batch.totalItems || 1;
+      const completed = batch.completedItems;
+      const failed = batch.failedItems;
+      const skipped = batch.skippedItems ?? 0;
+      const completedPercent = Math.round((completed / total) * 100);
+      const failedPercent = Math.round((failed / total) * 100);
+      const skippedPercent = Math.round((skipped / total) * 100);
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#6b7280' }}>
+            <span>
+              {completed} completed / {failed} failed
+              {skipped > 0 && ` / ${skipped} skipped`} ({total} total)
+            </span>
+            <span>{completedPercent + failedPercent}%</span>
+          </div>
+          <div style={{ height: 6, width: '100%', background: '#e5e7eb', borderRadius: 3, overflow: 'hidden', display: 'flex' }}>
+            <div style={{ height: '100%', width: `${completedPercent}%`, background: '#16a34a' }} />
+            <div style={{ height: '100%', width: `${failedPercent}%`, background: '#dc2626' }} />
+            <div style={{ height: '100%', width: `${skippedPercent}%`, background: '#9ca3af' }} />
+          </div>
+        </div>
+      );
+    }
 
-    const completed = batch.completedItems;
-    const failed = batch.failedItems;
-    const skipped = batch.skippedItems ?? 0;
-    
-    const completedPercent = Math.round((completed / total) * 100);
-    const failedPercent = Math.round((failed / total) * 100);
-    const skippedPercent = Math.round((skipped / total) * 100);
-
+    // Epic #46 refinement: the operator work-state metrics — the same
+    // numbers the Batch Workspace tabs show. Needs Attention is emphasized
+    // when non-zero.
+    const total = Math.max(totalItemCount(counts), 1);
+    const approvedTotal = counts.approved + counts.ready_to_export + counts.completed;
+    const pct = (v: number) => Math.round((v / total) * 100);
+    const barStyle = { height: '100%' } as const;
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#6b7280' }}>
-          <span>
-            {completed} completed / {failed} failed
-            {skipped > 0 && ` / ${skipped} skipped`} ({total} total)
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 230 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.125rem 0.625rem', fontSize: 12, color: '#6b7280' }}>
+          <span title="Processing — automation is working">⚙ {formatCount(counts.processing)}</span>
+          <span
+            title="Needs Attention — products that need your judgment"
+            style={counts.needs_attention > 0 ? { color: '#dc2626', fontWeight: 700 } : undefined}
+          >
+            ⚠ {formatCount(counts.needs_attention)}
           </span>
-          <span>{completedPercent + failedPercent}%</span>
+          <span title="Waiting on Family — blocked on sibling readiness">⏳ {formatCount(counts.waiting_on_family)}</span>
+          <span title="Ready for Review — awaiting inspection">👁 {formatCount(counts.ready_for_review)}</span>
+          <span title="Approved / Ready to Export / Completed" style={{ color: '#16a34a' }}>✓ {formatCount(approvedTotal)}</span>
+          {counts.skipped > 0 && <span title="Skipped">⊘ {formatCount(counts.skipped)}</span>}
+          <span>({formatCount(total)} total)</span>
         </div>
         <div style={{ height: 6, width: '100%', background: '#e5e7eb', borderRadius: 3, overflow: 'hidden', display: 'flex' }}>
-          <div style={{ height: '100%', width: `${completedPercent}%`, background: '#16a34a' }} />
-          <div style={{ height: '100%', width: `${failedPercent}%`, background: '#dc2626' }} />
-          <div style={{ height: '100%', width: `${skippedPercent}%`, background: '#9ca3af' }} />
+          <div style={{ ...barStyle, width: `${pct(counts.needs_attention)}%`, background: '#dc2626' }} />
+          <div style={{ ...barStyle, width: `${pct(counts.processing)}%`, background: '#9ca3af' }} />
+          <div style={{ ...barStyle, width: `${pct(counts.waiting_on_family)}%`, background: '#f59e0b' }} />
+          <div style={{ ...barStyle, width: `${pct(counts.ready_for_review)}%`, background: '#3b82f6' }} />
+          <div style={{ ...barStyle, width: `${pct(approvedTotal)}%`, background: '#16a34a' }} />
+          {counts.skipped > 0 && <div style={{ ...barStyle, width: `${pct(counts.skipped)}%`, background: '#d1d5db' }} />}
         </div>
       </div>
     );
