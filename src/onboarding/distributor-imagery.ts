@@ -209,11 +209,9 @@ export async function verifyDistributorImage(
       addOcrFact('gtin', ocrData.upc);
       addOcrFact('brand', ocrData.brand);
       addOcrFact('name', ocrData.productName);
-    } else {
-      skippedVlmOcr = true;
     }
   } catch {
-    skippedVlmOcr = true;
+    // No OCR → display-only path (identity from catalog evidence only).
   }
 
   const attemptFactsForUrl = attemptFacts(item, imageUrl);
