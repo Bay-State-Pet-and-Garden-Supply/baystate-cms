@@ -27,6 +27,7 @@ import { validateReviewCompletionGate } from '../../classification/review-comple
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
 import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
 import { getOnboardingMetrics } from '../../onboarding/onboarding-telemetry';
+import { getExtractorProfileDomainBlockers } from '../../onboarding/extraction/profile-blockers';
 import { getWorker } from './onboarding-routes';import {
   ApproveItemsRequestSchema,
   WorkStateCategoryEnum,
@@ -132,6 +133,26 @@ route.get('/onboarding/items/:id/work-state', async (c) => {
   }
   const workState = getItemWorkState(itemId);
   return c.json({ workState });
+});
+
+/**
+ * GET /api/onboarding/batches/:id/extractor-profile-blockers
+ * Domain-level extractor setup queue (epic #46 follow-up, GPT plan phase 5):
+ * missing-profile extraction failures grouped by source domain, sorted by
+ * blocked-product count, with per-domain sample items and profile status.
+ * Workspace-scoped like every batch projection.
+ */
+route.get('/onboarding/batches/:id/extractor-profile-blockers', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const workspace = findWorkspace();
+  if (!workspace || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  return c.json({ blockers: getExtractorProfileDomainBlockers(batchId) });
 });
 
 /**

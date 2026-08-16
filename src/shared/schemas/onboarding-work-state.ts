@@ -240,6 +240,32 @@ export const ApproveItemsResponseSchema = z.object({
 
 export type ApproveItemsResponse = z.infer<typeof ApproveItemsResponseSchema>;
 
+// ─── Extractor-profile domain blockers (epic #46 follow-up, phase 5) ──────────
+
+export const ExtractorProfileBlockerSampleSchema = z.object({
+  itemId: z.string(),
+  upc: z.string().optional(),
+  name: z.string(),
+  sourceUrl: z.string().nullable(),
+  errorMessage: z.string(),
+});
+
+export const ExtractorProfileDomainBlockerSchema = z.object({
+  domain: z.string(),
+  blockedItemCount: z.number().int(),
+  batchId: z.string(),
+  itemIds: z.array(z.string()),
+  sampleItems: z.array(ExtractorProfileBlockerSampleSchema),
+  profileExists: z.boolean(),
+});
+
+export const ExtractorProfileBlockersResponseSchema = z.object({
+  blockers: z.array(ExtractorProfileDomainBlockerSchema),
+});
+
+export type ExtractorProfileDomainBlocker = z.infer<typeof ExtractorProfileDomainBlockerSchema>;
+export type ExtractorProfileBlockersResponse = z.infer<typeof ExtractorProfileBlockersResponseSchema>;
+
 // ─── Domain release response ───────────────────────────────────────────────────
 
 export const DomainReleaseResponseSchema = z.object({

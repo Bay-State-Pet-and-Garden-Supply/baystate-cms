@@ -40,6 +40,8 @@ import { getCachedSitemapUrls, insertSitemapCache } from '../db/repositories/sit
 import { fetchAndParseSitemap } from './sitemap-fetcher';
 import { matchSitemapUrls, type SitemapMatchResult } from './sitemap-matcher';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
+import { isKnownRetailerOrDistributorDomain } from './discovery/retailer-domain-list';
+import { scoreBrandDomainMatch } from './discovery/official-domain';
 import { resolveVariantsForCandidates } from './variant-url-resolver';
 import { isOfficialDomainMatch } from './domain-utils';
 import { inferBrandFromSearchResults, type BrandInferenceResult } from './brand-inferrer';
@@ -203,6 +205,7 @@ export async function discoverSources(
 
     const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
 
+    const rankSignals = buildRankSignals(activeBrandHint, resultDomain);
     candidates.push({
       url: result.link,
       title: result.title,
@@ -210,6 +213,7 @@ export async function discoverSources(
       domain: resultDomain,
       confidence,
       sourceMethod: 'serper_upc',
+      ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
     });
   }
 
@@ -356,6 +360,7 @@ export async function discoverSources(
 
             const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
 
+            const rankSignals = buildRankSignals(activeBrandHint, resultDomain);
             candidates.push({
               url: result.link,
               title: result.title,
@@ -363,6 +368,7 @@ export async function discoverSources(
               domain: resultDomain,
               confidence,
               sourceMethod: 'serper_name',
+              ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
             });
           }
         } catch (err) {
@@ -485,6 +491,27 @@ async function searchSerper(apiKey: string, query: string, networkFetch?: Networ
  * - Marketplaces are lightly penalized (valid fallback but not preferred)
  * - Social media, review, and irrelevant sites are heavily penalized
  */
+
+/**
+ * Rank-signal metadata for a candidate (epic #46 follow-up, phase 6):
+ * why this candidate was promoted/demoted — explainable discovery.
+ */
+function buildRankSignals(
+  brandHint: string | null | undefined,
+  domain: string,
+): { rankSignals: { strongBrandDomainMatch: boolean; brandDomainMatchScore: number; knownRetailerDomain: boolean } } | null {
+  const brandDomainMatchScore = scoreBrandDomainMatch(brandHint, domain);
+  const knownRetailerDomain = isKnownRetailerOrDistributorDomain(domain);
+  if (brandDomainMatchScore < 0.5 && !knownRetailerDomain) return null;
+  return {
+    rankSignals: {
+      strongBrandDomainMatch: brandDomainMatchScore >= 0.5,
+      brandDomainMatchScore,
+      knownRetailerDomain,
+    },
+  };
+}
+
 // fallow-ignore-next-line unused-export
 export function scoreResult(
   result: SerperSearchResult,
@@ -522,6 +549,19 @@ export function scoreResult(
     if (segments.some(s => s.includes(brandSlug))) {
       score += 0.15;
     }
+  }
+
+  // Epic #46 follow-up (GPT plan phase 6): official-domain-aware ranking.
+  // A strong brand↔domain match earns an extra bias; known retailer or
+  // distributor domains are demoted (never discarded). Both signals are
+  // recorded so the candidate's rank is explainable.
+  const brandDomainMatch = scoreBrandDomainMatch(brandHint, domain);
+  if (brandDomainMatch >= 0.5) {
+    score += 0.1;
+  }
+  const retailerDomain = isKnownRetailerOrDistributorDomain(domain);
+  if (retailerDomain) {
+    score -= 0.2;
   }
 
   // UPC appears in snippet or title: strong relevance signal

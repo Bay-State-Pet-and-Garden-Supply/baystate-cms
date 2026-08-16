@@ -276,3 +276,35 @@ export function isReviewed(workState: OnboardingWorkState): boolean {
   const state = workState.reviewState ?? 'unreviewed';
   return state === 'reviewed' || state === 'approved';
 }
+// ─── Bulk review selection (epic #46 follow-up, GPT plan phase 4) ─────────────
+
+/** Toggle one item in the bulk-review selection (order-stable). */
+export function toggleQueueSelection(selectedIds: string[], itemId: string): string[] {
+  return selectedIds.includes(itemId)
+    ? selectedIds.filter(id => id !== itemId)
+    : [...selectedIds, itemId];
+}
+
+/** Select every visible (filtered) item. */
+export function selectAllVisible(visibleIds: string[]): string[] {
+  return Array.from(new Set(visibleIds));
+}
+
+/** Drop ids that are no longer in the queue (prune after reload). */
+export function pruneQueueSelection(selectedIds: string[], validIds: string[]): string[] {
+  if (selectedIds.length === 0) return selectedIds;
+  const valid = new Set(validIds);
+  return selectedIds.filter(id => valid.has(id));
+}
+
+/** Count of selected items still eligible for bulk review (unreviewed). */
+export function countReviewableSelection(
+  selectedIds: string[],
+  items: OnboardingWorkState[],
+): number {
+  const byId = new Map(items.map(i => [i.itemId, i]));
+  return selectedIds.filter(id => {
+    const item = byId.get(id);
+    return item ? !isReviewed(item) : false;
+  }).length;
+}

@@ -157,6 +157,66 @@
   border-radius: var(--rounded-lg);
 }
 
+.rv-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  border-bottom: 1px solid var(--color-card-border);
+  background: color-mix(in srgb, var(--color-feed-bag-cream) 55%, var(--color-white-surface));
+  flex-wrap: wrap;
+}
+
+.rv-bulk-count {
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+  margin-right: auto;
+}
+
+.rv-bulk-notice {
+  padding: 0.5rem 0.625rem;
+  font-size: 0.8125rem;
+  color: var(--color-success-text);
+  background: var(--color-success-bg);
+  border-bottom: 1px solid var(--color-card-border);
+}
+
+.rv-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.rv-modal {
+  width: min(28rem, calc(100vw - 2rem));
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  padding: 1.25rem;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.2);
+}
+
+.rv-modal-title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.rv-modal-body {
+  margin: 0 0 1rem;
+  font-size: 0.8125rem;
+  color: var(--color-ledger-charcoal);
+}
+
+.rv-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 /* ── Queue table ─────────────────────────────────────────────────────────── */
 .rv-queue-list {
   flex: 1;
@@ -180,6 +240,26 @@
   font-family: var(--font-body);
   background: var(--color-white-surface);
   transition: background var(--transition-fast);
+}
+
+/* Bulk-review selection (epic #46 follow-up, phase 4): rows with a
+   checkbox gain a leading 24px column. */
+.rv-queue-row:has(.rv-row-checkbox) {
+  grid-template-columns: 24px 44px minmax(0, 1fr) minmax(0, auto);
+}
+
+.rv-row-checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rv-queue-row.rv-row-selected {
+  background: color-mix(in srgb, var(--color-uniform-green) 5%, var(--color-white-surface));
+}
+
+.rv-queue-row.rv-row-selected:hover {
+  background: color-mix(in srgb, var(--color-uniform-green) 9%, var(--color-white-surface));
 }
 
 .rv-queue-row:hover,

@@ -35,8 +35,12 @@ import {
   findPreviousReviewTarget,
   formatReviewProgress,
   hasActiveQueueFilters,
+  countReviewableSelection,
+  pruneQueueSelection,
   reviewProgress,
+  selectAllVisible,
   sortForReview,
+  toggleQueueSelection,
   warningInfoFromDetail,
   type ReviewQueueFilters,
 } from './review-logic';
@@ -70,6 +74,13 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
 
   // ── Filters / facets ────────────────────────────────────────────────────
   const [filters, setFilters] = useState<ReviewQueueFilters>({});
+
+  // ── Bulk review selection (epic #46 follow-up, phase 4) ─────────────────
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   // ── Session tracking ────────────────────────────────────────────────────
   const [editedIds, setEditedIds] = useState<Set<string>>(() => new Set());
@@ -276,6 +287,40 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     () => applyQueueFilters(sortedAll, filters, { editedIds, warnedIds }),
     [sortedAll, filters, editedIds, warnedIds],
   );
+
+  // Prune the bulk-review selection whenever the queue reloads.
+  useEffect(() => {
+    setSelectedIds(prev => pruneQueueSelection(prev, items.map(i => i.itemId)));
+  }, [items]);
+
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const reviewableSelected = useMemo(
+    () => countReviewableSelection(selectedIds, filteredItems),
+    [selectedIds, filteredItems],
+  );
+
+  const handleBulkReview = useCallback(async () => {
+    if (selectedIds.length === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkError(null);
+    setBulkNotice(null);
+    try {
+      const res = await completeReviewStage(selectedIds);
+      setBulkNotice(
+        `${res.count} product${res.count === 1 ? '' : 's'} marked reviewed` +
+          (res.classifiedCount !== undefined && res.legacyCount !== undefined
+            ? ` (${res.classifiedCount} classified, ${res.legacyCount} legacy)`
+            : ''),
+      );
+      setSelectedIds([]);
+      await loadQueue();
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBulkBusy(false);
+      setBulkConfirmOpen(false);
+    }
+  }, [selectedIds, bulkBusy, loadQueue]);
 
   const progress = useMemo(() => {
     const base = reviewProgress(items, { total, reviewedTotal: reviewedTotal + optimisticReviewed });
@@ -512,6 +557,75 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
 
       <div className="rv-body">
         <div className="rv-queue-pane">
+          {(selectedIds.length > 0 || filters.sourceType === 'distributor_record') && (
+            <div className="rv-bulk-bar" role="region" aria-label="Bulk review">
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={bulkBusy || filteredItems.length === 0}
+                onClick={() =>
+                  setSelectedIds(prev =>
+                    prev.length === filteredItems.length ? [] : selectAllVisible(filteredItems.map(i => i.itemId)),
+                  )
+                }
+              >
+                {selectedIds.length === filteredItems.length && filteredItems.length > 0
+                  ? 'Clear selection'
+                  : `Select all shown (${filteredItems.length})`}
+              </button>
+              <span className="rv-bulk-count">
+                {selectedIds.length} selected · {reviewableSelected} reviewable
+              </span>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={bulkBusy || reviewableSelected === 0}
+                onClick={() => setBulkConfirmOpen(true)}
+              >
+                Mark reviewed ({reviewableSelected})
+              </button>
+            </div>
+          )}
+          {bulkNotice && (
+            <div className="rv-bulk-notice" role="status">
+              ✓ {bulkNotice}
+            </div>
+          )}
+          {bulkError && (
+            <div className="rv-error-banner" role="alert">
+              {bulkError}
+            </div>
+          )}
+          {bulkConfirmOpen && (
+            <div className="rv-modal-backdrop" role="presentation" onMouseDown={() => setBulkConfirmOpen(false)}>
+              <div
+                className="rv-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Confirm bulk review"
+                onMouseDown={e => e.stopPropagation()}
+              >
+                <h3 className="rv-modal-title">Mark {reviewableSelected} product{reviewableSelected === 1 ? '' : 's'} reviewed?</h3>
+                <p className="rv-modal-body">
+                  These products will be durably marked reviewed and moved to the approval
+                  queue. Approving never exports anything — export stays a separate step.
+                </p>
+                <div className="rv-modal-actions">
+                  <button type="button" className="btn btn-outline" onClick={() => setBulkConfirmOpen(false)}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={bulkBusy}
+                    onClick={() => void handleBulkReview()}
+                  >
+                    {bulkBusy ? 'Reviewing…' : `Mark reviewed (${reviewableSelected})`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {queueState === 'error' ? (
             <div className="rv-state-note" role="alert">
               Could not load the review queue: {queueError}
@@ -523,6 +637,10 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
               details={details}
               warnedIds={warnedIds}
               editedIds={editedIds}
+              selectedIds={selectedSet}
+              onToggleSelected={itemId =>
+                setSelectedIds(prev => toggleQueueSelection(prev, itemId))
+              }
               emptyMessage={queueEmptyMessage}
               onSelect={setCurrentItemId}
             />

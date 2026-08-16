@@ -91,7 +91,9 @@ describe('Source Discovery URL Scoring', () => {
     };
 
     const score = scoreResult(result, upc, name, brandHint, 'support.mywoof.com', knownBrandDomains);
-    expect(score).toBeLessThan(0.6);
+    // Phase 6 (epic #46 follow-up) adds a +0.1 strong brand-domain boost
+    // ("woof" in "mywoof"); the support-subdomain penalty still dominates.
+    expect(score).toBeLessThan(0.7);
   });
 
   it('should ignore variant keywords in base matching and use them as tie-breakers', () => {

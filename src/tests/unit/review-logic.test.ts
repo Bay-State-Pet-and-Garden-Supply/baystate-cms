@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyQueueFilters,
+  countReviewableSelection,
   distinctBrands,
   distinctFamilies,
   findNextQueuedItem,
@@ -14,8 +15,11 @@ import {
   hasActiveQueueFilters,
   isReviewed,
   itemDisplayName,
+  pruneQueueSelection,
   reviewProgress,
+  selectAllVisible,
   sortForReview,
+  toggleQueueSelection,
   warningInfoFromDetail,
   type ReviewQueueFilters,
 } from '../../client/components/onboarding/review/review-logic';
@@ -288,5 +292,28 @@ describe('display helpers', () => {
     expect(isReviewed(a)).toBe(false);
     expect(isReviewed(b)).toBe(true);
     expect(isReviewed(d)).toBe(true);
+  });
+});
+describe('bulk review selection (epic #46 follow-up, phase 4)', () => {
+  it('toggleQueueSelection adds and removes order-stably', () => {
+    expect(toggleQueueSelection([], 'x')).toEqual(['x']);
+    expect(toggleQueueSelection(['x', 'y'], 'z')).toEqual(['x', 'y', 'z']);
+    expect(toggleQueueSelection(['x', 'y'], 'x')).toEqual(['y']);
+  });
+
+  it('selectAllVisible dedupes and prunes to the visible set', () => {
+    expect(selectAllVisible(['a', 'b', 'a'])).toEqual(['a', 'b']);
+  });
+
+  it('pruneQueueSelection drops ids that left the queue', () => {
+    expect(pruneQueueSelection(['a', 'b', 'c'], ['a', 'c'])).toEqual(['a', 'c']);
+    expect(pruneQueueSelection([], ['a'])).toEqual([]);
+  });
+
+  it('countReviewableSelection counts only unreviewed selected items', () => {
+    // a = unreviewed, b = reviewed, d = approved (from the shared fixtures)
+    expect(countReviewableSelection(['a', 'b', 'd'], [a, b, d])).toBe(1);
+    expect(countReviewableSelection(['b'], [a, b, d])).toBe(0);
+    expect(countReviewableSelection(['a', 'missing'], [a, b, d])).toBe(1);
   });
 });

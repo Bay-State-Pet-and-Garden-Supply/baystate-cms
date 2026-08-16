@@ -19,6 +19,9 @@ export interface ReviewQueueProps {
   warnedIds: Set<string>;
   /** Item ids edited during this session. */
   editedIds: Set<string>;
+  /** Bulk-review selection (epic #46 follow-up, phase 4). */
+  selectedIds?: Set<string>;
+  onToggleSelected?: (itemId: string) => void;
   emptyMessage: string;
   onSelect: (itemId: string) => void;
 }
@@ -29,6 +32,8 @@ export function ReviewQueue({
   details,
   warnedIds,
   editedIds,
+  selectedIds = new Set(),
+  onToggleSelected,
   emptyMessage,
   onSelect,
 }: ReviewQueueProps) {
@@ -46,7 +51,9 @@ export function ReviewQueue({
           detail={details.get(item.itemId) ?? null}
           warned={warnedIds.has(item.itemId)}
           edited={editedIds.has(item.itemId)}
+          selected={onToggleSelected ? selectedIds.has(item.itemId) : false}
           onSelect={onSelect}
+          onToggleSelected={onToggleSelected}
         />
       ))}
     </ul>
@@ -59,14 +66,18 @@ function ReviewQueueRow({
   detail,
   warned,
   edited,
+  selected,
   onSelect,
+  onToggleSelected,
 }: {
   item: OnboardingWorkState;
   active: boolean;
   detail: ItemDetailResponse | null;
   warned: boolean;
   edited: boolean;
+  selected: boolean;
   onSelect: (itemId: string) => void;
+  onToggleSelected?: (itemId: string) => void;
 }) {
   const ext = detail?.extraction ?? detail?.item.extractionData ?? null;
   const image = ext?.primaryImage ?? null;
@@ -80,7 +91,7 @@ function ReviewQueueRow({
       id={item.itemId}
       role="option"
       aria-selected={active}
-      className={`rv-queue-row${active ? ' rv-row-active' : ''}`}
+      className={`rv-queue-row${active ? ' rv-row-active' : ''}${selected ? ' rv-row-selected' : ''}`}
       onClick={() => onSelect(item.itemId)}
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -90,6 +101,16 @@ function ReviewQueueRow({
       }}
       tabIndex={-1}
     >
+      {onToggleSelected && (
+        <span className="rv-row-checkbox" onClick={e => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            aria-label={`Select ${title} for bulk review`}
+            checked={selected}
+            onChange={() => onToggleSelected(item.itemId)}
+          />
+        </span>
+      )}
       <span className={image ? undefined : 'rv-row-thumb rv-no-thumb'}>
         {image ? (
           <img className="rv-row-thumb" src={image} alt="" aria-hidden="true" loading="lazy" />

@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { AttentionRow } from './AttentionRow';
+import { DomainBlockerPanel } from './DomainBlockerPanel';
 import { groupAttentionItems, getAttentionGroupChip } from './attention-logic';
 import './attention.css';
 
@@ -145,8 +146,8 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
 
   return (
     <div className="attn-queue">
-      <div className="attn-chips" role="group" aria-label="Filter by attention type">
-        <button
+      <DomainBlockerPanel batchId={batchId} />
+      <div className="attn-chips" role="group" aria-label="Filter by attention type">        <button
           type="button"
           className={`attn-chip ${activeFilter === 'all' ? 'attn-chip-active' : ''}`}
           onClick={() => setActiveFilter('all')}

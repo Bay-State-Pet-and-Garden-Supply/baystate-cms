@@ -20,6 +20,7 @@ import type {
   WorkStateFilters,
   ApproveItemsResponse,
   DomainReleaseResponse,
+  ExtractorProfileBlockersResponse,
 } from '../shared/schemas/onboarding-work-state';
 
 const API_BASE = '/api/onboarding';
@@ -105,6 +106,15 @@ export async function releaseDomainItems(domain: string): Promise<DomainReleaseR
   return request<DomainReleaseResponse>(`/domains/${encodeURIComponent(domain)}/release`, {
     method: 'POST',
   });
+}
+
+/**
+ * Domain-level extractor setup queue (epic #46 follow-up, phase 5):
+ * missing-profile extraction failures grouped by domain, sorted by
+ * blocked-product count.
+ */
+export async function getExtractorProfileBlockers(batchId: string): Promise<ExtractorProfileBlockersResponse> {
+  return request<ExtractorProfileBlockersResponse>(`/batches/${batchId}/extractor-profile-blockers`);
 }
 
 // ─── Live events ───────────────────────────────────────────────────────────────
