@@ -33,6 +33,15 @@ import { HeartbeatLostError } from './heartbeat-errors';
  */
 export const LLM_PROPOSE_MIN_CONFIDENCE = 0.5;
 
+/**
+ * Minimum spread between the top-ranked candidate and the runner-up for an
+ * ungrounded model pick to be proposed (epic #46 review round, Package C).
+ * When the model returns per-candidate scores and the top is barely ahead
+ * of the second option, the "winner" is noise — abstain instead. Absent
+ * scores skip this gate entirely.
+ */
+export const LLM_PROPOSE_MARGIN_MIN = 0.1;
+
 export interface LlmRankOptionsParams {
   /** Human-readable label for the target kind (e.g. "product type", "flavor", "category page") */
   targetLabel: string;
@@ -170,7 +179,7 @@ ${JSON.stringify(optionList)}
 Product evidence:
 ${evidenceText.slice(0, 3000)}
 
-Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`;
+Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"scores":[0.0],"confidence":0.0}. The optional "scores" array (same order and length as values, 0..1, higher = better fit) helps us judge how much better the top pick is than the alternatives. If none fit, return {"values":[],"confidence":0}. Do not invent options.`;
 
   try {
     const auditedCall = params.modelCall
@@ -223,7 +232,7 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
         assertHeld?.();
         const retryResponse = await callLlmForTaskWithProvenance(
           taskName as any,
-          `The previous response was not valid JSON. Fix the JSON format:\n\n${response.content.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
+          `The previous response was not valid JSON. Fix the JSON format:\n\n${response.content.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"scores":[0.0],"confidence":0.0} (scores optional). If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
           'You are a precise JSON fixer. Return only valid JSON matching the requested shape.',
           {
             allowFallback: true,
@@ -263,15 +272,32 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     const confidence = Math.max(0.35, Math.min(0.85, parsed.confidence ?? 0.55));
     // PR (epic #46 review round): a model pick with NO keyword grounding is
     // only proposed when the model's own confidence clears the propose gate
-    // (0.5). This path is only reached when deterministic keyword matching
-    // already failed, so the pick rests entirely on the model's judgment — a
-    // weak guess (e.g. "Poultry Feed" for a beehive feeder at the 0.35 floor)
-    // is noise, not a decision. Below the gate the ranker abstains and the
-    // stage emits a reviewable abstention with a clear reason instead of a
-    // garbage accept/reject row. (The 0.35 floor remains the documented
-    // `abstainBelow` calibration; this gate is a stricter honesty rule for
-    // ungrounded model output.)
+    // (0.5) AND the margin gate (Package C). This path is only reached when
+    // deterministic keyword matching already failed, so the pick rests
+    // entirely on the model's judgment — a weak guess (e.g. "Poultry Feed"
+    // for a beehive feeder at the 0.35 floor) is noise, not a decision.
+    // Below the gates the ranker abstains and the stage emits a reviewable
+    // abstention with a clear reason instead of a garbage accept/reject row.
+    // (The 0.35 floor remains the documented `abstainBelow` calibration;
+    // these gates are stricter honesty rules for ungrounded model output.)
     if (confidence < LLM_PROPOSE_MIN_CONFIDENCE) return null;
+
+    // Margin gate (Package C): when per-candidate scores came back, the top
+    // raw score must lead the runner-up by a meaningful spread — otherwise
+    // the pick is a coin flip. Computed over the RAW scores (the single-mode
+    // slice would otherwise hide the runner-up); absent or malformed scores
+    // skip this gate entirely.
+    if (Array.isArray(parsed.scores) && Array.isArray(parsed.values)) {
+      const clamped = parsed.scores
+        .map(s => (typeof s === 'number' ? Math.max(0, Math.min(1, s)) : null))
+        .filter((s): s is number => s !== null);
+      if (clamped.length >= 2 && clamped.length === parsed.scores.length) {
+        const sorted = [...clamped].sort((a, b) => b - a);
+        const margin = sorted[0] - sorted[1];
+        if (margin < LLM_PROPOSE_MARGIN_MIN) return null;
+      }
+    }
+
     // Link EVERY call that influenced the accepted parse (the primary call and
     // any retry whose response was embedded in the accepted output).
     return { values, confidence, modelCallIds: influencingCallIds };
@@ -292,6 +318,8 @@ interface RawRankerResponse {
   value?: unknown;
   pages?: unknown[];
   confidence?: number;
+  /** Per-candidate scores aligned with values (0..1, higher = better fit). */
+  scores?: unknown;
 }
 
 /**
@@ -329,6 +357,11 @@ function parseRankerResponse(raw: string): RawRankerResponse | null {
     return {
       values,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.55,
+      scores: Array.isArray(parsed.scores)
+        ? parsed.scores
+            .map(s => (typeof s === 'number' ? Math.max(0, Math.min(1, s)) : null))
+            .filter((s): s is number => s !== null)
+        : undefined,
     };
   } catch {
     // Try to extract a value from free-text response

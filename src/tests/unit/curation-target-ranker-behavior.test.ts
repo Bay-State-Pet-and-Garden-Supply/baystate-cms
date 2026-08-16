@@ -217,3 +217,77 @@ describe('LLM propose gate (epic #46 review round)', () => {
     });
   });
 });
+
+describe('LLM margin gate (epic #46 Package C)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('abstains when the top pick is barely ahead of the runner-up (margin < 0.1)', async () => {
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken","Salmon"],"scores":[0.55,0.5],"confidence":0.55}', callId: 'c-m1', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toBeNull();
+    expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+  });
+
+  it('proposes when the top pick leads by a clear margin', async () => {
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken","Salmon"],"scores":[0.8,0.3],"confidence":0.8}', callId: 'c-m2', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toEqual({
+      values: ['Chicken'],
+      confidence: 0.8,
+      modelCallIds: ['c-m2'],
+    });
+  });
+
+  it('skips the margin gate when scores are absent', async () => {
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken"],"confidence":0.6}', callId: 'c-m3', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toEqual({
+      values: ['Chicken'],
+      confidence: 0.6,
+      modelCallIds: ['c-m3'],
+    });
+  });
+
+  it('applies only the confidence gate for a single value even with scores', async () => {
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken"],"scores":[0.45],"confidence":0.45}', callId: 'c-m4', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toBeNull();
+  });
+
+  it('ignores malformed scores (length mismatch with values)', async () => {
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken","Salmon"],"scores":[0.9],"confidence":0.8}', callId: 'c-m5', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toEqual({
+      values: ['Chicken'],
+      confidence: 0.8,
+      modelCallIds: ['c-m5'],
+    });
+  });
+
+  it('uses the raw-score spread even when a non-option value sits in the list', async () => {
+    // Scores [0.55, 0.9, 0.3]: top raw score 0.9 leads 0.55 by 0.35 — the
+    // margin gate passes and the accepted option (Chicken, single mode) is
+    // proposed even though "made-up" isn't an allowed option.
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken","made-up","Salmon"],"scores":[0.55,0.9,0.3],"confidence":0.7}', callId: 'c-m6', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toEqual({
+      values: ['Chicken'],
+      confidence: 0.7,
+      modelCallIds: ['c-m6'],
+    });
+  });
+});

@@ -60,6 +60,7 @@ export const BayStatePetGardenSeed: BayStateSeed = {
 
     // Department 2: Livestock & Farm Animals
     { id: 'poultry-feed', name: 'Poultry Feed', description: 'Chicken layer crumbles, starter mash, duck, and game bird feed.' },
+    { id: 'bee-supplies', name: 'Bee Supplies & Apiary', description: 'Hive boxes, frames, feeders, smokers, protective gear, and honey extraction equipment.' },
     { id: 'poultry-coops-equipment', name: 'Poultry Coops & Equipment', description: 'Chicken coops, brooders, chick waterers, and nesting boxes.' },
     { id: 'cattle-feed', name: 'Cattle Feed', description: 'Beef and dairy feed, mineral blocks, and calf milk replacer.' },
     { id: 'goat-sheep-feed', name: 'Goat & Sheep Feed', description: 'Goat feed, sheep feed, sweet feed, and mineral tubs.' },
