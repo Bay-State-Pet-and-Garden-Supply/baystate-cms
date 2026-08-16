@@ -11,6 +11,7 @@ import {
   completeSourcingWithDecision,
 } from '../../db/repositories/onboarding-item-repo';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { markReviewed, markApproved } from '../../db/repositories/onboarding-review-repo';
 import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
 import { listChangeSets, listChangeSetItems } from '../../db/repositories/change-set-repo';
@@ -27,6 +28,15 @@ describe('Draft Promoter Service', () => {
   const testDbPath = path.resolve(import.meta.dirname, 'promoter-test.db');
   const tempWorkspaceDir = path.resolve(import.meta.dirname, 'temp-workspace');
   const wsId = 'ws-promoter-id';
+
+  /** Seed a durable approval (reviewed + approved) so promoteItems' final
+   *  durable-approval authority gate (epic #46 review round 2) passes and the
+   *  test exercises the downstream draft/change-set logic it intends. */
+  function seedApproved(itemId: string, batchId: string): void {
+    markReviewed({ itemId, batchId, reviewedBy: 'promoter-test' });
+    markApproved({ itemId, batchId, approvedBy: 'promoter-test' });
+  }
+
 
   beforeAll(() => {
     try { resetDb(); } catch { /* ok */ }
@@ -256,7 +266,8 @@ describe('Draft Promoter Service', () => {
 
     seedAcceptedCategoryProposal(db, '123456123456', 'Shoes');
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.changeSetId).toBeDefined();
 
@@ -356,7 +367,8 @@ describe('Draft Promoter Service', () => {
 
     seedAcceptedCategoryProposal(db2, '987654321098', 'Dog Food');
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
 
     const csItems = listChangeSetItems(promoteRes.changeSetId!);
@@ -422,7 +434,8 @@ describe('Draft Promoter Service', () => {
 
     seedAcceptedCategoryProposal(db, '888888888888', 'Cat Food');
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
 
@@ -486,7 +499,8 @@ describe('Draft Promoter Service', () => {
 
     seedAcceptedCategoryProposal(db, '777777777777', 'Dog Treats');
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
 
@@ -549,7 +563,8 @@ describe('Draft Promoter Service', () => {
 
     seedAcceptedCategoryProposal(db, '555555555555', 'Some Page');
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].itemId).toBe(item.id);
@@ -616,7 +631,8 @@ describe('Draft Promoter Service', () => {
 
     seedAcceptedCategoryProposal(db, '444444444444', 'Toys');
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
 
@@ -689,7 +705,8 @@ describe('Draft Promoter Service', () => {
     const initialCsCount = listChangeSets(wsId).length;
 
     // We do NOT seed any accepted category proposals here.
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].itemId).toBe(item.id);
@@ -770,7 +787,8 @@ describe('Draft Promoter Service', () => {
       item.id,
     ]);
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.count).toBe(0);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].error).toContain('No accepted product page proposals');
@@ -832,7 +850,8 @@ describe('Draft Promoter Service', () => {
       item.id
     );
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('No accepted product page proposals');
@@ -886,7 +905,8 @@ describe('Draft Promoter Service', () => {
       [now],
     );
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const history = db.query(
@@ -991,7 +1011,8 @@ describe('Draft Promoter Service', () => {
         ],
       );
 
-      const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+            seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
       expect(result.failures).toHaveLength(0);
       expect(result.count).toBe(1);
       const history = db.query(
@@ -1039,7 +1060,8 @@ describe('Draft Promoter Service', () => {
 
     // A present run pointer that fails ownership validation blocks promotion
     // entirely — it never downgrades to a legacy branch.
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.count).toBe(0);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].error).toContain('Invalid classification run pointer');
@@ -1086,12 +1108,13 @@ describe('Draft Promoter Service', () => {
 
     db.run(
       'UPDATE onboarding_items SET stage = ?, stage_status = ?, extraction_data_json = ? WHERE id = ?',
-      ['review', 'completed', JSON.stringify(extractionData), item.id],
+      ['promotion', 'pending', JSON.stringify(extractionData), item.id],
     );
 
     seedAcceptedCategoryProposal(db, item.upc, 'Cat Treats');
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
 
@@ -1139,7 +1162,8 @@ describe('Draft Promoter Service', () => {
     seedAcceptedCategoryProposal(db, item.upc, 'Dog Food', runId);
     seedAttributeMapping(db, 'flavor', 'ProductField23');
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
@@ -1199,7 +1223,8 @@ describe('Draft Promoter Service', () => {
     seedAcceptedCategoryProposal(db, item.upc, 'Cat Food', runId);
     seedAttributeMapping(db, 'flavor', 'ProductField23');
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
@@ -1239,7 +1264,8 @@ describe('Draft Promoter Service', () => {
     seedAcceptedCategoryProposal(db, item.upc, 'Dog Treats', runId);
     seedAttributeMapping(db, 'flavor', 'ProductField23');
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
@@ -1314,7 +1340,8 @@ describe('Draft Promoter Service', () => {
     ]);
     seedAttributeMapping(db, 'flavor', 'ProductField23');
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
@@ -1400,7 +1427,8 @@ describe('Draft Promoter Service', () => {
       [`decision-${proposalId}`, proposalId, `decision-token-${proposalId}`, now],
     );
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
@@ -1467,7 +1495,8 @@ describe('Draft Promoter Service', () => {
       [`decision-${proposalId}`, proposalId, `decision-token-${proposalId}`, now],
     );
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     // Fail closed: an unverified page identity can NEVER satisfy the mandatory
     // Pages gate — the product must not promote with zero verified page
     // assignments.
@@ -1516,7 +1545,8 @@ describe('Draft Promoter Service', () => {
       [item.upc, 'Legacy Name-Only Row', new Date().toISOString()],
     );
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(1);
     expect(result.count).toBe(0);
     expect(result.failures[0].error).toContain('No verified page assignments exist');
@@ -1568,7 +1598,8 @@ describe('Draft Promoter Service', () => {
       ['decision-mixed-bogus', 'prop-mixed-bogus', 'mixed-bogus-token', now],
     );
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
@@ -1655,7 +1686,8 @@ describe('Draft Promoter Service', () => {
       [`decision-${proposalId}`, proposalId, `decision-token-${proposalId}`, now],
     );
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     // A verified Page ID is a real assignment: the verified catalog is the
     // display-name authority, so the proposal resolves to the catalog name
     // even though the proposal value carried no pageName.
@@ -1768,7 +1800,9 @@ describe('Draft Promoter Service', () => {
       healthy.id,
     ]);
 
-    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [healthy.id, blocked.id]);
+        seedApproved(healthy.id, batch.id);
+    seedApproved(blocked.id, batch.id);
+const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [healthy.id, blocked.id]);
 
     // Sibling promotes; the blocked member is refused per-item with the first
     // finding as the reason (200-shape failures list, sibling not aborted).
@@ -1912,7 +1946,8 @@ describe('Milestone E — promotion image boundary (BLOCKER #1 closure)', () => 
 
     seedAcceptedCategoryProposal(db, item.upc, 'Toys', `run-${item.upc}-${randomUUID().slice(0, 4)}`);
 
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.changeSetId).toBeDefined();
 
@@ -2047,7 +2082,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
   it('a valid distributor materialization passes the promotion gate (identity-only drafts still block on the mandatory primary image)', async () => {
     const { item, decision } = seedQualifiedDistributorItem();
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     // The provenance gate PASSES (no 'Distributor promotion blocked' reason):
     // the item only fails the DRAFT builder's mandatory-image rule because
     // distributor extraction is identity-only (no commerce images yet — PI-6).
@@ -2062,7 +2098,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     const { item } = seedQualifiedDistributorItem();
     getDb().query(`UPDATE onboarding_extractions SET evidence_hash = ? WHERE item_id = ?`).run('b'.repeat(64), item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('hash mismatch');
@@ -2072,7 +2109,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     const { item } = seedQualifiedDistributorItem();
     getDb().query(`UPDATE sourcing_generations SET status = 'superseded' WHERE item_id = ?`).run(item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('superseded');
@@ -2085,7 +2123,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     // generation + hash still match.
     getDb().query(`UPDATE onboarding_extractions SET source_type = 'official_page' WHERE item_id = ?`).run(item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('source type mismatch');
@@ -2100,7 +2139,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
       item.id,
     );
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('accepted-evidence mismatch');
@@ -2119,7 +2159,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     payload.additionalImages = ['https://evidence.example/alt1.jpg', 'https://evidence.example/alt2.jpg'];
     getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(payload), item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('Distributor promotion blocked');
@@ -2141,7 +2182,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     expect(payload.description).toBe('Verified v2 description copy.');
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
     seedAcceptedCategoryProposal(getDb(), item.upc, 'Dog Food', `run-v2-${randomUUID().slice(0, 6)}`);
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     // The provenance + deep-compare gate PASSES; with no image evidence in
@@ -2162,7 +2204,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     payload.description = 'Post-materialization tampered description.';
     getDb().query('UPDATE onboarding_extractions SET extraction_data_json = ? WHERE item_id = ?').run(JSON.stringify(payload), item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('Distributor promotion blocked');
@@ -2179,7 +2222,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     payload.description = 'Item-payload tampered description.';
     getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(payload), item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('Distributor promotion blocked');
@@ -2193,7 +2237,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     payload.price = '9.99';
     getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(JSON.stringify(payload), item.id);
     const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+        seedApproved(item.id, batch.batch_id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].error).toContain('item payload tampered');
@@ -2253,7 +2298,8 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     };
     writeFileSync(path.join(productFileDir, '599999999999.json'), JSON.stringify(existingProduct));
     seedAcceptedCategoryProposal(db, '599999999999', 'Toys');
-    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+        seedApproved(item.id, batch.id);
+const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     // The drafted product uses the REVIEWED Curation description, not the
     // extraction copy.

@@ -64,6 +64,7 @@ import {
   resetCohortCurationFlagsOverride,
 } from '../../classification/flags';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { seedPromotionApproval } from './helpers/seed-promotion-approval';
 import { listChangeSetItems } from '../../db/repositories/change-set-repo';
 import { canonicalJsonFileString, sha256Hex, hashCanonicalJson } from '../../shared/stable-id';
 import { getRuntimeSnapshotByHash, requireModelCallContext } from '../../classification/runtime-snapshot';
@@ -490,6 +491,10 @@ function placeInPromotion(items: OnboardingItem[]): void {
       [item.id],
     );
   }
+  // Epic #46 review round-2: durable review + approval now required before an
+  // export draft (final transactional authority). Seed so these gate tests hit
+  // their INTENDED gate, not the approval gate.
+  seedPromotionApproval(items);
 }
 
 /** Run the coherent cohort end-to-end to a promotion-ready state. */

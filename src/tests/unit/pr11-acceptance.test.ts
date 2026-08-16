@@ -54,6 +54,8 @@ import {
   resetCohortCurationFlagsOverride,
 } from '../../classification/flags';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { seedPromotionApproval } from './helpers/seed-promotion-approval';
+import { markReviewed } from '../../db/repositories/onboarding-review-repo';
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { listChangeSetItems } from '../../db/repositories/change-set-repo';
 import { canonicalJsonFileString, sha256Hex, hashCanonicalJson } from '../../shared/stable-id';
@@ -251,6 +253,10 @@ function insertReviewItem(
     "UPDATE onboarding_items SET stage = 'review', stage_status = 'completed', curation_data_json = ? WHERE id = ?",
     [JSON.stringify(curation), item.id],
   );
+  // Epic #46 review round-2: a review/completed item being advanced must have
+  // durable review state (the advance guard refuses review→promotion without
+  // it). Seed it so these C3 tests hit their intended semantic guard.
+  markReviewed({ itemId: item.id, batchId, reviewedBy: 'test' });
   return { id: item.id, upc: item.upc };
 }
 
@@ -662,6 +668,10 @@ function placeInPromotion(items: OnboardingItem[]): void {
       [item.id],
     );
   }
+  // Epic #46 review round-2: promotion now requires durable review + approval
+  // (final transactional authority). Seed it so these gate tests exercise
+  // their INTENDED gate (semantic/PR11), not the approval gate.
+  seedPromotionApproval(items);
 }
 
 function fieldAssignmentsByTarget(curationData: CurationData): Map<string, CurationData['classificationProposals'][number]> {
@@ -1150,6 +1160,7 @@ describe('PR11 C4 — legacy / flag-OFF / shadow promotion is byte-identical (no
       }), item.id],
     );
 
+    seedPromotionApproval([item]);
     const result = await promoteItems(workspaceId, wsPath, batchId, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
