@@ -17,6 +17,8 @@ export default defineConfig({
       'src/tests/unit/distributor-scrapers-acceptance.test.ts',
       // M6 live-smoke DB suite — uses bun:sqlite, run under bun test instead of vitest
       'src/tests/unit/sourcing-live-smoke-db.test.ts',
+      // Brand authority gate — bun:sqlite/bun:test, run under bun test (test:db)
+      'src/tests/unit/brand-authority-gate.test.ts',
       // DB-backed tests — use bun:sqlite, run under bun test instead of vitest
       'src/tests/unit/db-migration.test.ts',
       'src/tests/unit/catalog-health.test.ts',
