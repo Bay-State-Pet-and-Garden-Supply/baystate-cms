@@ -136,6 +136,7 @@ describe('FamilyWaitingView (contract export)', () => {
       total: 1,
     };
     const cohorts: CohortListResponse = {
+      shadowObservations: [],
       cohorts: [{
         cohort: {
           id: 'c1', workspaceId: 'ws', batchId: 'batch-1', groupKey: 'k', groupLabel: 'Blue Buffalo Life Protection Chicken',
@@ -220,6 +221,7 @@ describe('FamilyWaitingView (contract export)', () => {
       total: 1,
     };
     const cohorts: CohortListResponse = {
+      shadowObservations: [],
       cohorts: [{
         cohort: {
           id: 'c1', workspaceId: 'ws', batchId: 'batch-1', groupKey: 'k', groupLabel: 'Blue Buffalo Life Protection Chicken',
@@ -271,7 +273,7 @@ describe('FamilyWaitingView (contract export)', () => {
       total: 0,
     };
     vi.mocked(getBatchWorkState).mockResolvedValue(payload);
-    vi.mocked(getBatchCohorts).mockResolvedValue({ cohorts: [] });
+    vi.mocked(getBatchCohorts).mockResolvedValue({ cohorts: [], shadowObservations: [] });
     const { container, unmount } = await renderAsync(<FamilyWaitingView batchId="batch-1" />);
     expect(container.textContent).toContain('No families are waiting right now');
     unmount();

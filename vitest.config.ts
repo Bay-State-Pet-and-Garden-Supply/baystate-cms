@@ -203,6 +203,7 @@ export default defineConfig({
       'src/tests/unit/curation-cohort-service.test.ts',
       'src/tests/unit/cohort-freeze.test.ts',
       'src/tests/unit/cohort-worker.test.ts',
+      'src/tests/unit/cohort-shadow-observations.test.ts',
       'src/tests/unit/classification-cohort-run-repo.test.ts',
       'src/tests/unit/cohort-v6-migration.test.ts',
       // PR6 C1/C2/C4/C6 Bun-only suites (bun:test imports — vitest cannot collect them)

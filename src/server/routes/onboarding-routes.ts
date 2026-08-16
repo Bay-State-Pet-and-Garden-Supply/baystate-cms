@@ -210,7 +210,7 @@ import { validateReviewCompletionGate } from '../../classification/review-comple
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { SubmitProposalDecisionsRequestSchema } from '../../shared/schemas/classification';
 import { getDb } from '../../db/connection';
-import { getCohortById } from '../../db/repositories/curation-cohort-repo';
+import { getCohortById, listCohortShadowObservations } from '../../db/repositories/curation-cohort-repo';
 import {
   getCurrentCohortRun,
   rerunIdleCohortRevision,
@@ -715,7 +715,10 @@ route.get('/onboarding/batches/:id/cohorts', async (c) => {
   if (!workspace || !batch || batch.workspaceId !== workspace.id) {
     return c.json({ error: 'Batch not found' }, 404);
   }
-  const payload = CohortListResponseSchema.parse({ cohorts: listCandidateCohortViews(batchId) });
+  const payload = CohortListResponseSchema.parse({
+    cohorts: listCandidateCohortViews(batchId),
+    shadowObservations: listCohortShadowObservations(workspace.id, 50),
+  });
   return c.json(payload);
 });
 

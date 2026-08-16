@@ -37,6 +37,22 @@ import {
   observeCohortShadowTypeResolution,
 } from './cohort-curator';
 import type { CohortShadowObservation } from './cohort-curator';
+
+/** Most frequent value (used for the shadow observation's aggregate type). */
+function modeOf(values: string[]): string | null {
+  if (values.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const [value, count] of counts) {
+    if (count > bestCount) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
 import { getCohortCurationFlags } from '../classification/flags';
 import type { CohortCurationFlags } from '../classification/flags';
 import {
@@ -46,7 +62,7 @@ import {
   supersedeCohortRun,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
-import { getCohortById, listCohortsByWorkspace, listWaitingCohortMemberIdsByWorkspace } from '../db/repositories/curation-cohort-repo';
+import { getCohortById, listCohortsByWorkspace, listWaitingCohortMemberIdsByWorkspace, insertCohortShadowObservationIfChanged } from '../db/repositories/curation-cohort-repo';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import { determineProductGroup } from './product-line-grouper';
 import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../classification/consistency-validator';
@@ -601,7 +617,56 @@ export class OnboardingWorker {
       if (this.shadowObservedOutcomes.get(observation.cohortId) === line) continue;
       this.shadowObservedOutcomes.set(observation.cohortId, line);
       console.log(line);
+
+      // PR4 C5 + Package B: persist the changed observation (durable
+      // shadow — one row per cohort per state CHANGE; the repo dedupes
+      // against the latest row, so this is restart-safe). Best-effort:
+      // a failed insert never breaks the per-item curation poll leg.
+      try {
+        this.persistShadowObservation(observation);
+      } catch (err) {
+        console.warn(`[OnboardingWorker] Shadow observation persist failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
+  }
+
+  /** Package B: write one durable `cohort_shadow_observations` row. */
+  private persistShadowObservation(observation: CohortShadowObservation): void {
+    const cohort = getCohortById(observation.cohortId);
+    const nonNullTypes = observation.perMember
+      .map(member => member.productTypeId)
+      .filter((id): id is string => id !== null && id !== undefined);
+    // The deterministic aggregated Execution Product Type for coherent
+    // outcomes = the most common non-null member type (the resolver does not
+    // expose a single aggregate id; the mode is faithful for the observation).
+    const executionTypeId =
+      observation.outcome === 'coherent' || observation.outcome === 'coherent_with_abstentions'
+        ? modeOf(nonNullTypes)
+        : null;
+    insertCohortShadowObservationIfChanged({
+      workspaceId: this.workspaceId,
+      cohortId: observation.cohortId,
+      groupKey: cohort?.groupKey ?? null,
+      groupLabel: cohort?.groupLabel ?? null,
+      status: cohort?.status ?? null,
+      memberCount: observation.perMember.length,
+      // The observer only processes READY, non-superseded cohorts — every
+      // observed member is ready by construction.
+      readyCount: observation.perMember.length,
+      executionTypeId,
+      productTypeConfidence: null, // shadow never computes a single confidence
+      outcome: observation.outcome,
+      membersJson: JSON.stringify(
+        observation.perMember.map(member => ({
+          onboardingItemId: member.onboardingItemId,
+          productSku: member.productSku,
+          productTypeId: member.productTypeId,
+          source: member.source,
+        })),
+      ),
+      groupingVersion: cohort?.groupingVersion ?? null,
+      observedAt: new Date().toISOString(),
+    });
   }
 
   /** Dispatch a claimed/resumed cohort run to the freeze + execute path. */

@@ -796,8 +796,33 @@ export const CurationCohortViewSchema = z.object({
 
 export type CurationCohortView = z.infer<typeof CurationCohortViewSchema>;
 
+/**
+ * Durable shadow observation row (epic #46 review round, Package B). One row
+ * per cohort per state CHANGE while cohort shadow mode is enabled — the
+ * measurable artifact of `BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY`.
+ */
+export const CohortShadowObservationRecordSchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  cohortId: z.string(),
+  groupKey: z.string().nullable(),
+  groupLabel: z.string().nullable(),
+  status: z.string().nullable(),
+  memberCount: z.number(),
+  readyCount: z.number(),
+  executionTypeId: z.string().nullable(),
+  productTypeConfidence: z.number().nullable(),
+  outcome: z.string().nullable(),
+  membersJson: z.string().nullable(),
+  groupingVersion: z.string().nullable(),
+  observedAt: z.string(),
+});
+
+export type CohortShadowObservationRecord = z.infer<typeof CohortShadowObservationRecordSchema>;
+
 export const CohortListResponseSchema = z.object({
   cohorts: z.array(CurationCohortViewSchema),
+  shadowObservations: z.array(CohortShadowObservationRecordSchema).default([]),
 });
 
 export type CohortListResponse = z.infer<typeof CohortListResponseSchema>;

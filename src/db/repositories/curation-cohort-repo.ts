@@ -517,3 +517,141 @@ export function markCohortSuperseded(id: string): void {
     `UPDATE curation_cohorts SET status = 'superseded', superseded_at = ?, updated_at = ? WHERE id = ? AND status != 'superseded'`,
   ).run(now(), now(), id);
 }
+
+// ─── Cohort shadow observations (epic #46 review round, Package B) ──────────
+// PR4 C5 shadow mode is currently log-only; these functions make the
+// deterministic cohort Execution Product Type observations DURABLE (one row
+// per cohort per state CHANGE) so a shadow-enabled live batch is measurable.
+// The repo owns the change-dedup: `insertCohortShadowObservationIfChanged`
+// compares against the LATEST row for the cohort and skips an identical
+// state — idempotent across worker restarts, not just within one poll loop.
+
+export interface CohortShadowObservationRecord {
+  id: string;
+  workspaceId: string;
+  cohortId: string;
+  groupKey: string | null;
+  groupLabel: string | null;
+  status: string | null;
+  memberCount: number;
+  readyCount: number;
+  executionTypeId: string | null;
+  productTypeConfidence: number | null;
+  outcome: string | null;
+  membersJson: string | null;
+  groupingVersion: string | null;
+  observedAt: string;
+}
+
+export interface CohortShadowObservationInput {
+  workspaceId: string;
+  cohortId: string;
+  groupKey: string | null;
+  groupLabel: string | null;
+  status: string | null;
+  memberCount: number;
+  readyCount: number;
+  executionTypeId: string | null;
+  productTypeConfidence: number | null;
+  outcome: string | null;
+  membersJson: string | null;
+  groupingVersion: string | null;
+  observedAt: string;
+}
+
+function mapShadowObservationRow(row: Record<string, unknown>): CohortShadowObservationRecord {
+  return {
+    id: String(row.id),
+    workspaceId: String(row.workspace_id),
+    cohortId: String(row.cohort_id),
+    groupKey: row.group_key as string | null,
+    groupLabel: row.group_label as string | null,
+    status: row.status as string | null,
+    memberCount: Number(row.member_count ?? 0),
+    readyCount: Number(row.ready_count ?? 0),
+    executionTypeId: row.execution_type_id as string | null,
+    productTypeConfidence: row.product_type_confidence === null || row.product_type_confidence === undefined
+      ? null
+      : Number(row.product_type_confidence),
+    outcome: row.outcome as string | null,
+    membersJson: row.members_json as string | null,
+    groupingVersion: row.grouping_version as string | null,
+    observedAt: String(row.observed_at),
+  };
+}
+
+/** The latest shadow observation for a cohort (null when none exists yet). */
+function latestShadowObservationForCohort(cohortId: string): CohortShadowObservationRecord | null {
+  const row = getDb()
+    .query(
+      `SELECT * FROM cohort_shadow_observations
+       WHERE cohort_id = ?
+       ORDER BY observed_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .get(cohortId) as Record<string, unknown> | null;
+  return row ? mapShadowObservationRow(row) : null;
+}
+
+/**
+ * Persist a shadow observation ONLY when it differs from the latest row for
+ * the same cohort (state-change semantics — mirrors the log-on-change
+ * behavior of the worker's `shadowObservedOutcomes` map, made durable and
+ * restart-safe). Returns true when a row was inserted.
+ */
+export function insertCohortShadowObservationIfChanged(
+  input: CohortShadowObservationInput,
+): boolean {
+  const db = getDb();
+  const latest = latestShadowObservationForCohort(input.cohortId);
+  if (latest) {
+    const unchanged =
+      latest.outcome === input.outcome &&
+      latest.executionTypeId === input.executionTypeId &&
+      latest.memberCount === input.memberCount &&
+      latest.membersJson === input.membersJson &&
+      latest.groupKey === input.groupKey &&
+      latest.groupingVersion === input.groupingVersion;
+    if (unchanged) return false;
+  }
+  const id = randomUUID();
+  db.query(
+    `INSERT INTO cohort_shadow_observations
+     (id, workspace_id, cohort_id, group_key, group_label, status, member_count,
+      ready_count, execution_type_id, product_type_confidence, outcome,
+      members_json, grouping_version, observed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.workspaceId,
+    input.cohortId,
+    input.groupKey,
+    input.groupLabel,
+    input.status,
+    input.memberCount,
+    input.readyCount,
+    input.executionTypeId,
+    input.productTypeConfidence,
+    input.outcome,
+    input.membersJson,
+    input.groupingVersion,
+    input.observedAt,
+  );
+  return true;
+}
+
+/** Newest-first shadow observations for a workspace (cap = limit). */
+export function listCohortShadowObservations(
+  workspaceId: string,
+  limit = 50,
+): CohortShadowObservationRecord[] {
+  const rows = getDb()
+    .query(
+      `SELECT * FROM cohort_shadow_observations
+       WHERE workspace_id = ?
+       ORDER BY observed_at DESC, id DESC
+       LIMIT ?`,
+    )
+    .all(workspaceId, limit) as Record<string, unknown>[];
+  return rows.map(mapShadowObservationRow);
+}

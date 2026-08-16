@@ -4140,6 +4140,41 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Cohort-curation shadow observations (epic #46 review round, Package B) ─
+  // PR4 C5 shadow mode currently logs the deterministic cohort Execution
+  // Product Type resolution and writes NOTHING — no durable artifact to
+  // evaluate family grouping / type quality after a live batch. This table
+  // persists one row per cohort per state CHANGE (caller dedupes), so the
+  // next shadow-enabled batch is measurable. Additive + idempotent.
+  const cohortShadowVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('onboarding_cohort_shadow_schema_version') as { value: string } | undefined;
+  if (!cohortShadowVersion) {
+    console.log('[Migrations] Running onboarding cohort shadow observations schema migration...');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS cohort_shadow_observations (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        cohort_id TEXT NOT NULL,
+        group_key TEXT,
+        group_label TEXT,
+        status TEXT,
+        member_count INTEGER NOT NULL DEFAULT 0,
+        ready_count INTEGER NOT NULL DEFAULT 0,
+        execution_type_id TEXT,
+        product_type_confidence REAL,
+        outcome TEXT,
+        members_json TEXT,
+        grouping_version TEXT,
+        observed_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cohort_shadow_obs_ws_time
+        ON cohort_shadow_observations(workspace_id, observed_at DESC);
+    `);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_cohort_shadow_schema_version', '1');");
+    console.log('[Migrations] Cohort shadow observations schema migration complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;
