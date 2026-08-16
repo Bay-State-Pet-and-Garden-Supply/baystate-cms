@@ -24,6 +24,12 @@ describe('getAttentionActions — retry-first resolution (audit HIGH 4)', () => 
     expect(getAttentionActions('choose_official_url')).toEqual(['choose_official_url']);
   });
 
+  it('maps a Curation semantic conflict to the findings-resolution action', () => {
+    expect(getAttentionActions('semantic_validation_blocked')).toEqual([
+      'resolve_semantic_conflict',
+    ]);
+  });
+
   it('is deterministic for every known reason and never empty', () => {
     const reasons = [
       'verify_official_url',
@@ -33,6 +39,7 @@ describe('getAttentionActions — retry-first resolution (audit HIGH 4)', () => 
       'extraction_profile_failed',
       'source_conflict',
       'processing_failed',
+      'semantic_validation_blocked',
     ] as const;
     for (const reason of reasons) {
       expect(getAttentionActions(reason).length).toBeGreaterThan(0);
@@ -65,10 +72,20 @@ describe('getAttentionActionConsequence — plain-language outcomes', () => {
       'retry_extraction',
       'resolve_source_conflict',
       'retry_processing',
+      'resolve_semantic_conflict',
     ] as const;
     for (const action of actions) {
       const text = getAttentionActionConsequence(action);
       expect(text.length).toBeGreaterThan(0);
     }
+  });
+
+  it('explains that resolving the findings re-runs the family Curation', () => {
+    expect(getAttentionActionConsequence('resolve_semantic_conflict')).toMatch(
+      /re-runs Curation/,
+    );
+    expect(getAttentionActionConsequence('resolve_semantic_conflict')).toContain(
+      'returns to Review',
+    );
   });
 });

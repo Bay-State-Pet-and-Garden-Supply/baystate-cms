@@ -85,6 +85,8 @@ export function getAttentionActions(
       return ['resolve_source_conflict'];
     case 'processing_failed':
       return ['retry_processing'];
+    case 'semantic_validation_blocked':
+      return ['resolve_semantic_conflict'];
     default:
       return [];
   }
@@ -105,6 +107,8 @@ export function getAttentionActionConsequence(action: AttentionAction | null | u
       return 'Choose the correct value and sourcing continues automatically.';
     case 'retry_processing':
       return 'Retry the processing step for this product.';
+    case 'resolve_semantic_conflict':
+      return 'After the findings are resolved, this family re-runs Curation automatically and the product returns to Review.';
     default:
       return 'Resolve the blocker and processing continues automatically.';
   }
@@ -137,6 +141,8 @@ export function getAttentionConsequence(
       return 'Choose the correct distributor value; sourcing continues automatically.';
     case 'processing_failed':
       return 'Retry processing for this product.';
+    case 'semantic_validation_blocked':
+      return 'Resolve the findings and re-run Curation for this family; the product returns to Review automatically.';
     default:
       return 'Resolve the blocker and processing continues automatically.';
   }

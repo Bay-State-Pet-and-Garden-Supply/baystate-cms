@@ -130,6 +130,7 @@ describe('labels', () => {
     expect(getAttentionActionLabel('retry_extraction')).toBe('Retry extraction');
     expect(getAttentionActionLabel('resolve_source_conflict')).toBe('Resolve conflict');
     expect(getAttentionActionLabel('retry_processing')).toBe('Retry');
+    expect(getAttentionActionLabel('resolve_semantic_conflict')).toBe('Review curation findings');
     expect(getAttentionActionLabel(null)).toBe('Resolve');
   });
 
@@ -148,6 +149,8 @@ describe('getAttentionConsequence', () => {
     expect(getAttentionConsequence('extraction_profile_failed')).toContain('released together');
     expect(getAttentionConsequence('source_conflict')).toContain('sourcing continues automatically');
     expect(getAttentionConsequence('processing_failed')).toBe('Retry processing for this product.');
+    expect(getAttentionConsequence('semantic_validation_blocked')).toContain('re-run Curation');
+    expect(getAttentionConsequence('semantic_validation_blocked')).toContain('returns to Review');
     expect(getAttentionConsequence(null, 'some detail')).toBe(
       'Resolve the blocker and processing continues automatically.',
     );

@@ -412,6 +412,51 @@
   color: var(--color-ledger-charcoal);
 }
 
+/* Curation semantic-conflict findings (epic #46 remediation) */
+.attn-findings {
+  list-style: none;
+  margin: 0 0 var(--spacing-sm);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.attn-finding {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
+  padding: var(--spacing-sm);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--rounded-md);
+  background: var(--color-danger-bg);
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-ledger-charcoal);
+}
+
+.attn-finding-code {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-signet-burgundy);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.attn-finding-sku {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-mulch-brown);
+}
+
+.attn-finding-message {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+
 /* Consequence bar (bottom of the workspace) */
 .attn-consequence {
   display: flex;

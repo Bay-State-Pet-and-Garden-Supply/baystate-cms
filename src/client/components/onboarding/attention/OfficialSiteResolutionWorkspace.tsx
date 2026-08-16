@@ -46,6 +46,7 @@ type Phase =
   | 'url' // candidate decision / manual URL
   | 'extractor' // extractor status after URL confirmation (or directly)
   | 'conflicts' // distributor evidence conflict decision
+  | 'semantic' // Curation blocked by semantic validation findings
   | 'retry' // processing failure
   | 'done'; // blocker resolved — close when ready
 
@@ -83,9 +84,11 @@ export function OfficialSiteResolutionWorkspace({
   const [evidenceAttemptCount, setEvidenceAttemptCount] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [confirmedUrl, setConfirmedUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState<'select-source' | 'set-url' | 'retry' | 'conflict' | 'sourcing-route' | null>(null);
+  const [busy, setBusy] = useState<'select-source' | 'set-url' | 'retry' | 'conflict' | 'sourcing-route' | 'rerun-cohort' | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [releaseResult, setReleaseResult] = useState<DomainReleaseResponse | null>(null);
+  /** Honest resolution note rendered in the done phase (semantic re-run etc.). */
+  const [resolutionNote, setResolutionNote] = useState<string | null>(null);
 
   // Conflict state (source_conflict flow)
   const [conflicts, setConflicts] = useState<OnboardingEvidenceConflict[] | null>(null);
@@ -103,9 +106,12 @@ export function OfficialSiteResolutionWorkspace({
       setWorkState(ws.workState);
       setQualificationView(detail.sourcingQualificationView ?? null);
       setEvidenceAttemptCount(detail.evidenceAttempts?.length ?? 0);
+      setResolutionNote(null);
       const reason = ws.workState.attentionReason;
       if (reason === 'source_conflict') {
         setPhase('conflicts');
+      } else if (reason === 'semantic_validation_blocked') {
+        setPhase('semantic');
       } else if (reason === 'processing_failed') {
         setPhase('retry');
       } else if (
@@ -227,6 +233,11 @@ export function OfficialSiteResolutionWorkspace({
     setMutationError(null);
     try {
       await retryItem(itemId);
+      setResolutionNote(
+        reason === 'semantic_validation_blocked'
+          ? 'Curation re-queued — this product re-runs automatically; it returns to Review once the findings are resolved.'
+          : null,
+      );
       setPhase('done');
     } catch (err) {
       setMutationError(err instanceof Error ? err.message : 'Retry failed');
@@ -248,6 +259,43 @@ export function OfficialSiteResolutionWorkspace({
     }
   };
 
+  // ── Semantic conflict (Curation blocked) ────────────────────────────────
+
+  /**
+   * Re-run the whole family's Curation via the canonical cohort re-run
+   * endpoint (POST /api/onboarding/cohorts/:id/re-run). Cohort-owned
+   * resolution: members reset to curation/pending in one cohort-atomic
+   * transaction, then the cohort claims and re-freezes automatically.
+   */
+  const handleReRunCohort = async () => {
+    if (!family?.cohortId) return;
+    setBusy('rerun-cohort');
+    setMutationError(null);
+    try {
+      const res = await fetch(
+        `/api/onboarding/cohorts/${encodeURIComponent(family.cohortId)}/re-run`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      );
+      const data = (await res.json().catch(() => ({}))) as { error?: unknown };
+      if (!res.ok) {
+        const errMsg =
+          typeof data.error === 'string' ? data.error : 'Could not re-run family curation';
+        throw new Error(errMsg);
+      }
+      // The cohort re-run supersedes the old run and resets the members; the
+      // worker claims the cohort automatically. Stay honest: resolution is
+      // pending re-curation, not a guaranteed pass.
+      setResolutionNote(
+        'Family Curation re-queued — all members re-run automatically, and this product returns to Review once the findings are resolved.',
+      );
+      setPhase('done');
+    } catch (err) {
+      setMutationError(err instanceof Error ? err.message : 'Could not re-run family curation');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // ── Derived context ──────────────────────────────────────────────────────
 
   const domain = workState?.domain ?? domainFromUrl(item?.sourceUrl) ?? domainFromUrl(confirmedUrl);
@@ -255,6 +303,14 @@ export function OfficialSiteResolutionWorkspace({
   const reason = workState?.attentionReason ?? null;
   const consequence = getAttentionConsequence(reason, workState?.detail);
   const family = workState?.family ?? null;
+  // Curation-semantic findings from the committed curation payload. The
+  // projection only maps to semantic_validation_blocked when status is
+  // 'blocked', so findings are authoritative here (deterministic messages).
+  const semanticValidation = item?.curationData?.semanticValidation ?? null;
+  const semanticFindings =
+    semanticValidation && semanticValidation.status === 'blocked'
+      ? semanticValidation.findings
+      : [];
 
   if (phase === 'loading') {
     return (
@@ -459,6 +515,52 @@ export function OfficialSiteResolutionWorkspace({
           </section>
         ) : null}
 
+        {phase === 'semantic' ? (
+          <section className="attn-section" aria-label="Curation semantic conflict">
+            <h3 className="attn-section-title">Curation blocked by semantic validation</h3>
+            <div className="attn-section-body">
+              {semanticFindings.length > 0 ? (
+                <ul className="attn-findings">
+                  {semanticFindings.map((finding, i) => (
+                    <li className="attn-finding" key={`${finding.code}-${i}`}>
+                      <span className="attn-finding-code">{finding.code.replace(/_/g, ' ')}</span>
+                      {finding.memberSku ? (
+                        <span className="attn-finding-sku">SKU {finding.memberSku}</span>
+                      ) : null}
+                      <span className="attn-finding-message">{finding.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p style={{ margin: 0, fontFamily: 'var(--font-body)', fontSize: '0.8125rem', color: 'var(--color-ledger-charcoal)' }}>
+                  {workState?.detail ?? 'Semantic validation found conflicts in this product family.'}
+                </p>
+              )}
+              <div className="attn-candidate-actions">
+                {family?.cohortId ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => void handleReRunCohort()}
+                    disabled={busy !== null}
+                  >
+                    {busy === 'rerun-cohort' ? 'Re-running…' : 'Re-run family curation'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => void handleRetry()}
+                    disabled={busy !== null}
+                  >
+                    {busy === 'retry' ? 'Retrying…' : 'Retry curation'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
+        ) : null}
+
         {phase === 'retry' ? (
           <section className="attn-section" aria-label="Processing failure">
             <h3 className="attn-section-title">Processing failure</h3>
@@ -493,11 +595,13 @@ export function OfficialSiteResolutionWorkspace({
         {phase === 'done' ? (
           <div className="attn-profile-banner attn-profile-ready" role="status">
             ✓ Resolved.{' '}
-            {releaseResult
-              ? releaseResult.count === 0
-                ? 'No blocked products on this domain needed a release (they may already be running, or none were blocked).'
-                : `Released ${releaseResult.count} blocked product${releaseResult.count === 1 ? '' : 's'} on ${releaseResult.domain}.`
-              : 'Extraction resumes automatically.'}
+            {resolutionNote
+              ? resolutionNote
+              : releaseResult
+                ? releaseResult.count === 0
+                  ? 'No blocked products on this domain needed a release (they may already be running, or none were blocked).'
+                  : `Released ${releaseResult.count} blocked product${releaseResult.count === 1 ? '' : 's'} on ${releaseResult.domain}.`
+                : 'Extraction resumes automatically.'}
           </div>
         ) : null}
 
