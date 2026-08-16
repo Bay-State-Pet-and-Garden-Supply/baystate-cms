@@ -17,7 +17,13 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
 import { hashCanonicalJson } from '../../shared/stable-id';
-import { normalizeBrand, extractNameStem } from '../../onboarding/product-line-grouper';
+import {
+  normalizeBrand,
+  extractNameStem,
+  effectiveBrandFor,
+  knownBrandsForBatch,
+} from '../../onboarding/product-line-grouper';
+import { stemsWithinTypoTolerance } from '../../onboarding/product-line-token-normalizer';
 import { GROUPING_VERSION } from '../../shared/schemas/cohorts';
 import type { CurationCohort, CurationCohortMember } from '../../shared/schemas/cohorts';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
@@ -174,14 +180,20 @@ interface FamilyGroup {
  * membership revision (issue #30 round-2 F5).
  */
 export function groupItemsByFamily(items: OnboardingItem[]): FamilyGroup[] {
+  const knownBrands = knownBrandsForBatch(items);
   const byKey = new Map<string, FamilyGroup>();
   const sorted = [...items].sort((a, b) => a.rowNumber - b.rowNumber);
   for (const item of sorted) {
     if (item.stageStatus === 'skipped') continue; // skipped → not a candidate member
-    const normalizedBrand = normalizeBrand(item.brandHint);
+    // Epic #46 Package A: brandHint OR name-embedded known-brand prefix
+    // ("BETTER BONE HARD VNSN SM" with an empty brandHint still belongs to
+    // the Better Bone family); the key uses the COMPACT brand so
+    // "BetterBone" and "Better Bone" are one family.
+    const normalizedBrand = normalizeBrand(effectiveBrandFor(item, knownBrands));
     const normalizedNameStem = extractNameStem(item.name || '');
     if (!normalizedNameStem) continue; // no stable name stem → not groupable
-    const groupKey = `${normalizedBrand || 'no-brand'}::${normalizedNameStem}`;
+    const brandKey = normalizedBrand.replace(/\s+/g, '') || 'no-brand';
+    const groupKey = `${brandKey}::${normalizedNameStem}`;
     let group = byKey.get(groupKey);
     if (!group) {
       group = {
@@ -195,7 +207,42 @@ export function groupItemsByFamily(items: OnboardingItem[]): FamilyGroup[] {
     }
     group.members.push({ item, extractionHash: computeExtractionHash(item) });
   }
-  return [...byKey.values()];
+
+  // Epic #46 Package A (typo tolerance): merge stems within the same brand
+  // that differ in exactly one token of length >= 4 with edit distance <= 1
+  // ("soft classic veggie" vs "soft classic vegggie"). Deterministic: the
+  // more-populous stem wins, ties break to the lexicographically first key.
+  const groups = [...byKey.values()];
+  const merged = new Set<FamilyGroup>();
+  const result: FamilyGroup[] = [];
+  for (const group of groups) {
+    if (merged.has(group)) continue;
+    const brand = group.groupKey.slice(0, group.groupKey.indexOf('::'));
+    const candidates = groups.filter(
+      g =>
+        !merged.has(g) &&
+        g.groupKey.startsWith(`${brand}::`) &&
+        g !== group &&
+        stemsWithinTypoTolerance(group.normalizedNameStem, g.normalizedNameStem),
+    );
+    if (candidates.length === 0) {
+      merged.add(group);
+      result.push(group);
+      continue;
+    }
+    // Canonical stem: most members, ties → lexicographically first key.
+    const canonical = [group, ...candidates].sort(
+      (a, b) =>
+        b.members.length - a.members.length ||
+        a.groupKey.localeCompare(b.groupKey),
+    )[0];
+    const absorb = [group, ...candidates].filter(g => g !== canonical);
+    canonical.members.push(...absorb.flatMap(g => g.members));
+    merged.add(group);
+    for (const g of candidates) merged.add(g);
+    result.push(canonical);
+  }
+  return result;
 }
 
 // ─── Cohort CRUD ───────────────────────────────────────────────────────────────

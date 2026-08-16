@@ -4,6 +4,7 @@ import {
   normalizeBrand,
   extractNameStem,
 } from '../../onboarding/product-line-grouper';
+import { levenshtein, stemsWithinTypoTolerance } from '../../onboarding/product-line-token-normalizer';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 
 const makeItem = (overrides: Partial<OnboardingItem> & { id: string; upc: string; name: string }): OnboardingItem => ({
@@ -206,7 +207,7 @@ describe('determineProductGroup', () => {
     // And items should group together when same brand+stem
     const base = makeItem({ id: '1', upc: 'SKU001', name: 'DR MARTY YAK DNTL SM5CT BARK STOPPER', brandHint: 'dr marty' });
     const sibling = makeItem({ id: '2', upc: 'SKU002', name: 'DR MARTY YAK CHW MD2CT DIGEST BARK STOP', brandHint: 'dr marty' });
-    const result = determineProductGroup(base, [base, sibling]);
+    const _result = determineProductGroup(base, [base, sibling]);
     // These may or may not group depending on the stem (the generic name stem
     // after stripping focuses on the product identity — 'bark stopper' vs 'bark stop')
     // At minimum verify the size forms are stripped
@@ -228,5 +229,74 @@ describe('determineProductGroup', () => {
     expect(stemFlake).toBe('flake');
     expect(stemStix).toBe('stix');
     expect(stemChew).toBe('chew');
+  });
+});
+
+describe('family grouping normalization (epic #46 review round, Package A)', () => {
+  it('collapses attached size tokens: MD VNSNLG vs MD VNSNSM share a stem', () => {
+    const lg = extractNameStem('BETTER BONE MD VNSNLG');
+    const sm = extractNameStem('BETTER BONE MD VNSNSM');
+    expect(lg).toBe('better bone');
+    expect(sm).toBe(lg);
+  });
+
+  it('expands abbreviations so flavor variants share a stem (frzn/chkn)', () => {
+    const chkn = extractNameStem('BUTCHERS PUP FRZN DINNER CHKN 3LB');
+    const pork = extractNameStem('BUTCHERS PUP FRZN DINNER PORK 6LB');
+    expect(chkn).toBe(pork);
+    expect(chkn).toBe('butchers pup frozen dinner');
+    expect(chkn).not.toContain('chkn');
+  });
+
+  it('keeps size variants of the same flavor in one stem (SLMN 18LB vs 4LB)', () => {
+    const big = extractNameStem('WELLNESS CORE+ SENSITIVE SLMN 18LB');
+    const small = extractNameStem('WELLNESS CORE+ SENSITIVE SLMN 4LB');
+    expect(big).toBe(small);
+  });
+
+  it('still strips SM5CT/MD2CT attached size/count forms', () => {
+    expect(extractNameStem('DR MARTY YAK DNTL SM5CT BARK STOPPER')).not.toMatch(/sm5ct/);
+    expect(extractNameStem('DR MARTY YAK CHW MD2CT DIGEST BARK STOP')).not.toMatch(/md2ct/);
+  });
+
+  it('does not split mixed-case words that merely end in size letters', () => {
+    // "Prism" (mixed case) is not "pris m" — the split only applies to
+    // all-caps distributor-style tokens and vowel-free abbreviation runs.
+    expect(extractNameStem('Woof Prism')).toBe('woof prism');
+  });
+
+  it('groups an unbranded item with a branded sibling when the name embeds the brand', () => {
+    const unbranded = makeItem({ id: '1', upc: 'SKU001', name: 'BETTER BONE HARD VNSN SM', brandHint: null });
+    const branded = makeItem({ id: '2', upc: 'SKU002', name: 'BETTER BONE HARD VNSN LG', brandHint: 'BetterBone' });
+    const result = determineProductGroup(unbranded, [unbranded, branded]);
+    expect(result).not.toBeNull();
+    expect(result!.siblingSkus).toHaveLength(2);
+  });
+
+  it('treats "BetterBone" and "Better Bone" as the same brand for grouping', () => {
+    const a = makeItem({ id: '1', upc: 'SKU001', name: 'BETTER BONE HARD BEEF LG', brandHint: 'BetterBone' });
+    const b = makeItem({ id: '2', upc: 'SKU002', name: 'BETTER BONE HARD BEEF SM', brandHint: 'Better Bone' });
+    const result = determineProductGroup(a, [a, b]);
+    expect(result).not.toBeNull();
+    expect(result!.siblingSkus).toHaveLength(2);
+  });
+});
+
+describe('typo tolerance helpers (epic #46 review round, Package A)', () => {
+  it('levenshtein computes edit distance', () => {
+    expect(levenshtein('veggie', 'vegggie')).toBe(1);
+    expect(levenshtein('soft', 'softer')).toBe(2);
+    expect(levenshtein('duck', 'duckling')).toBe(4);
+    expect(levenshtein('same', 'same')).toBe(0);
+  });
+
+  it('merges single-token distance-1 stems', () => {
+    expect(stemsWithinTypoTolerance('soft classic veggie', 'soft classic vegggie')).toBe(true);
+  });
+
+  it('rejects distance-2 and extra-token differences', () => {
+    expect(stemsWithinTypoTolerance('soft', 'softer')).toBe(false);
+    expect(stemsWithinTypoTolerance('hard', 'hard beef')).toBe(false);
+    expect(stemsWithinTypoTolerance('duck', 'duckling')).toBe(false);
   });
 });

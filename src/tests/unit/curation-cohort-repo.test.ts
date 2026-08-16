@@ -396,3 +396,73 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(activeAfter[0].groupKey).not.toContain('purina');
   });
 });
+
+describe('family grouping normalization (epic #46 review round, Package A)', () => {
+  let wId: string;
+
+  beforeAll(() => {
+    wId = randomUUID();
+    const wPath = path.join(os.tmpdir(), `baystate-cms-cohorts-normalize-${wId.slice(0, 8)}`);
+    fs.mkdirSync(path.join(wPath, '.baystate-cms'), { recursive: true });
+    initDb(path.join(wPath, '.baystate-cms', 'app.db'));
+    runMigrations();
+    insertWorkspace({
+      id: wId,
+      name: 'test',
+      workspacePath: wPath,
+      gitPath: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    workspaceId = wId;
+  });
+
+  it('merges unbranded + branded siblings via name-embedded brand (BetterBone)', () => {
+    const batchId = createBatch({ workspaceId, name: 'BetterBone Batch', fileName: 'bb.xlsx', totalItems: 2 }).id;
+    insertItems(batchId, [
+      { upc: '200000000001', name: 'BETTER BONE HARD VNSN SM', brandHint: null, rowNumber: 1 },
+      { upc: '200000000002', name: 'BETTER BONE HARD VNSN LG', brandHint: 'BetterBone', rowNumber: 2 },
+    ], 'review', 1);
+
+    const cohorts = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    // One family for the pair (plus no others).
+    expect(cohorts.length).toBe(1);
+    const family = cohorts[0];
+    expect(family.groupKey.startsWith('betterbone::')).toBe(true);
+    const members = getCohortMembers(family.id);
+    expect(members.length).toBe(2);
+    // vnsn → venison is a flavor word → stripped; both members share the stem.
+    expect(members.every(m => m.normalizedNameStem === 'better bone hard')).toBe(true);
+  });
+
+  it('merges typo stems within a brand (VEGGGIE vs VEGGIE)', () => {
+    const batchId = createBatch({ workspaceId, name: 'Veggie Batch', fileName: 'vg.xlsx', totalItems: 2 }).id;
+    insertItems(batchId, [
+      { upc: '200000000003', name: 'BETTER BONE SOFT CLASSIC VEGGGIE SM', brandHint: 'BetterBone', rowNumber: 1 },
+      { upc: '200000000004', name: 'BETTER BONE SOFT CLASSIC VEGGIE LG', brandHint: 'BetterBone', rowNumber: 2 },
+    ], 'review', 1);
+
+    const cohorts = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    expect(cohorts.length).toBe(1);
+    const family = cohorts[0];
+    const members = getCohortMembers(family.id);
+    expect(members.length).toBe(2);
+    // Canonical stem = the more frequent spelling; ties break to the
+    // lexicographically first group key — both members share one stem.
+    expect(members[0].normalizedNameStem).toBe(members[1].normalizedNameStem);
+  });
+
+  it('does not merge different brands that share a stem', () => {
+    const batchId = createBatch({ workspaceId, name: 'Mixed Batch', fileName: 'mx.xlsx', totalItems: 2 }).id;
+    insertItems(batchId, [
+      { upc: '200000000005', name: 'ACME SOFT CLASSIC VEGGIE SM', brandHint: 'Acme', rowNumber: 1 },
+      { upc: '200000000006', name: 'BETTER BONE SOFT CLASSIC VEGGIE LG', brandHint: 'BetterBone', rowNumber: 2 },
+    ], 'review', 1);
+
+    const cohorts = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    expect(cohorts.length).toBe(2);
+    expect(cohorts.map(c => c.groupKey.split('::')[0]).sort()).toEqual(['acme', 'betterbone']);
+  });
+});
