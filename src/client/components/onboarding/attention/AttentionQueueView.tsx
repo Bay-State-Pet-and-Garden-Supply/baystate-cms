@@ -147,7 +147,8 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
   return (
     <div className="attn-queue">
       <DomainBlockerPanel batchId={batchId} />
-      <div className="attn-chips" role="group" aria-label="Filter by attention type">        <button
+      <div className="attn-chips" role="group" aria-label="Filter by attention type">
+        <button
           type="button"
           className={`attn-chip ${activeFilter === 'all' ? 'attn-chip-active' : ''}`}
           onClick={() => setActiveFilter('all')}

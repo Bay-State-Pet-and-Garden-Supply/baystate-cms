@@ -33,9 +33,13 @@ describe('scoreBrandDomainMatch', () => {
     expect(scoreBrandDomainMatch('Wholesomes', 'wholesomespetfood.com')).toBe(1);
   });
 
-  test('multi-word brands match word-wise at 0.5', () => {
+  test('full brand slug matches at 1.0 (multi-word slugs included)', () => {
     expect(scoreBrandDomainMatch('Blue Buffalo', 'bluebuffalofamily.com')).toBe(1);
     expect(scoreBrandDomainMatch('Lazy Dog', 'lazydog.com')).toBe(1);
+  });
+
+  test('word-wise-only matches score 0.5 (order-insensitive, no full slug)', () => {
+    expect(scoreBrandDomainMatch('Blue Buffalo', 'buffalobluepet.com')).toBe(0.5);
   });
 
   test('generic pet-store words never count as brand matches', () => {

@@ -302,9 +302,21 @@ export function countReviewableSelection(
   selectedIds: string[],
   items: OnboardingWorkState[],
 ): number {
+  return reviewableSelectionIds(selectedIds, items).length;
+}
+
+/**
+ * The EXACT selected ids that are currently reviewable (unreviewed AND in
+ * the visible/filtered set). The bulk-review modal count and the submitted
+ * payload must refer to the same set (GPT review, MEDIUM).
+ */
+export function reviewableSelectionIds(
+  selectedIds: string[],
+  items: OnboardingWorkState[],
+): string[] {
   const byId = new Map(items.map(i => [i.itemId, i]));
   return selectedIds.filter(id => {
     const item = byId.get(id);
     return item ? !isReviewed(item) : false;
-  }).length;
+  });
 }

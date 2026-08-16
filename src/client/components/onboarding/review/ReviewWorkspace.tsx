@@ -35,9 +35,9 @@ import {
   findPreviousReviewTarget,
   formatReviewProgress,
   hasActiveQueueFilters,
-  countReviewableSelection,
   pruneQueueSelection,
   reviewProgress,
+  reviewableSelectionIds,
   selectAllVisible,
   sortForReview,
   toggleQueueSelection,
@@ -294,18 +294,22 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   }, [items]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const reviewableSelected = useMemo(
-    () => countReviewableSelection(selectedIds, filteredItems),
+  // GPT review (MEDIUM): the modal count and the submitted payload must be
+  // the SAME set — only selected ids that are unreviewed AND in the visible
+  // (filtered) queue are submitted.
+  const reviewableSelectedIds = useMemo(
+    () => reviewableSelectionIds(selectedIds, filteredItems),
     [selectedIds, filteredItems],
   );
+  const reviewableSelected = reviewableSelectedIds.length;
 
   const handleBulkReview = useCallback(async () => {
-    if (selectedIds.length === 0 || bulkBusy) return;
+    if (reviewableSelectedIds.length === 0 || bulkBusy) return;
     setBulkBusy(true);
     setBulkError(null);
     setBulkNotice(null);
     try {
-      const res = await completeReviewStage(selectedIds);
+      const res = await completeReviewStage(reviewableSelectedIds);
       setBulkNotice(
         `${res.count} product${res.count === 1 ? '' : 's'} marked reviewed` +
           (res.classifiedCount !== undefined && res.legacyCount !== undefined
@@ -320,7 +324,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       setBulkBusy(false);
       setBulkConfirmOpen(false);
     }
-  }, [selectedIds, bulkBusy, loadQueue]);
+  }, [reviewableSelectedIds, bulkBusy, loadQueue]);
 
   const progress = useMemo(() => {
     const base = reviewProgress(items, { total, reviewedTotal: reviewedTotal + optimisticReviewed });

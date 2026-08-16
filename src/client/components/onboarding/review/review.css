@@ -243,8 +243,9 @@
 }
 
 /* Bulk-review selection (epic #46 follow-up, phase 4): rows with a
-   checkbox gain a leading 24px column. */
-.rv-queue-row:has(.rv-row-checkbox) {
+   checkbox gain a leading 24px column (explicit class — no :has()
+   dependency, per GPT review). */
+.rv-queue-row.rv-row-selectable {
   grid-template-columns: 24px 44px minmax(0, 1fr) minmax(0, auto);
 }
 

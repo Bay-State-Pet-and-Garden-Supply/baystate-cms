@@ -1158,6 +1158,14 @@ route.post('/onboarding/items/review-complete', async (c) => {
     }
     batchIdByItemId.set(id, item.batchId);
 
+    // Workspace-ownership guard (epic #46 review round 2 + GPT review):
+    // items from foreign workspaces are never reviewable through this route.
+    const itemBatch = findBatchById(item.batchId);
+    if (!itemBatch || itemBatch.workspaceId !== workspace.id) {
+      failures.push({ itemId: id, reason: 'Item not in this workspace' });
+      continue;
+    }
+
     // Must be in review stage
     if (item.stage !== 'review') {
       failures.push({ itemId: id, reason: `Item is in stage "${item.stage}", not "review"` });

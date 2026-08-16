@@ -45,6 +45,15 @@ export function DomainBlockerPanel({ batchId }: DomainBlockerPanelProps): React.
     };
   }, [load]);
 
+  // GPT review (LOW): if the blocker for the open builder resolves while the
+  // builder is open (or on reload), drop the stale domain so a future blocker
+  // for the same domain can't reopen the overlay unexpectedly.
+  useEffect(() => {
+    if (builderDomain && blockers && !blockers.some(b => b.domain === builderDomain)) {
+      setBuilderDomain(null);
+    }
+  }, [builderDomain, blockers]);
+
   if (error) {
     return (
       <div className="attn-error" role="alert" style={{ margin: '0 0 12px' }}>

@@ -29,7 +29,32 @@ export interface ExtractorProfileDomainBlocker {
 }
 
 /** The worker's stable failure signature (page-extractor). */
-const MISSING_PROFILE_RE = /^No extractor profile for\s+([^\s—–-]+)/i;
+const MISSING_PROFILE_RE = /^No extractor profile for\s+(\S+)/i;
+
+/**
+ * Normalize the extracted domain token (GPT review, LOW): tolerate
+ * URL-shaped tokens ("https://frommfamily.com/products/x"), strip any
+ * leading scheme/www, and drop path fragments. Returns null when nothing
+ * usable remains.
+ */
+function normalizeBlockerDomain(raw: string): string | null {
+  let token = raw.trim();
+  if (!token) return null;
+  if (token.includes('://')) {
+    try {
+      token = new URL(token).hostname;
+    } catch {
+      // Fall through to the string-based cleanup.
+    }
+  }
+  const cleaned = token
+    .toLowerCase()
+    .replace(/^www\./, '')
+    .split('/')[0]
+    .split(':')[0]
+    .trim();
+  return cleaned.length > 0 ? cleaned : null;
+}
 
 /** Group a batch's missing-profile extraction failures by source domain. */
 export function getExtractorProfileDomainBlockers(batchId: string): ExtractorProfileDomainBlocker[] {
@@ -52,7 +77,8 @@ export function getExtractorProfileDomainBlockers(batchId: string): ExtractorPro
   for (const row of rows) {
     const match = MISSING_PROFILE_RE.exec(row.error_message ?? '');
     if (!match) continue; // not a missing-profile failure (HTTP/parse/timeout)
-    const domain = match[1].trim().toLowerCase();
+    const domain = normalizeBlockerDomain(match[1]);
+    if (!domain) continue;
     let blocker = byDomain.get(domain);
     if (!blocker) {
       blocker = {

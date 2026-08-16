@@ -17,6 +17,7 @@ import {
   itemDisplayName,
   pruneQueueSelection,
   reviewProgress,
+  reviewableSelectionIds,
   selectAllVisible,
   sortForReview,
   toggleQueueSelection,
@@ -315,5 +316,14 @@ describe('bulk review selection (epic #46 follow-up, phase 4)', () => {
     expect(countReviewableSelection(['a', 'b', 'd'], [a, b, d])).toBe(1);
     expect(countReviewableSelection(['b'], [a, b, d])).toBe(0);
     expect(countReviewableSelection(['a', 'missing'], [a, b, d])).toBe(1);
+  });
+
+  it('reviewableSelectionIds returns EXACTLY the ids the modal count shows (GPT review, MEDIUM)', () => {
+    // Hidden/filtered selections are excluded: 'a' is visible+unreviewed,
+    // 'b' is visible but reviewed, 'c' is selected but NOT in the visible
+    // (filtered) set, 'd' is approved.
+    expect(reviewableSelectionIds(['a', 'b', 'c', 'd'], [a, b, d])).toEqual(['a']);
+    expect(reviewableSelectionIds(['c'], [a, b, d])).toEqual([]);
+    expect(reviewableSelectionIds([], [a, b, d])).toEqual([]);
   });
 });

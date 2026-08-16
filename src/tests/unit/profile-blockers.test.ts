@@ -88,4 +88,19 @@ describe('extractor-profile domain blockers (phase 5)', () => {
     expect(blockers.length).toBe(1);
     expect(blockers[0].domain).toBe('frommfamily.com');
   });
+
+  test('www-prefixed and URL-shaped tokens normalize to the bare domain (GPT review, LOW)', () => {
+    failExtraction('5001', 'Www A', 'No extractor profile for www.frommfamily.com — profile required');
+    failExtraction('5002', 'Url A', 'No extractor profile for https://primalpetfoods.com/products/x — profile required');
+    const blockers = getExtractorProfileDomainBlockers(batchId);
+    expect(blockers.length).toBe(2);
+    const fromm = blockers.find(b => b.domain === 'frommfamily.com');
+    const primal = blockers.find(b => b.domain === 'primalpetfoods.com');
+    expect(fromm?.blockedItemCount).toBe(1);
+    expect(primal?.blockedItemCount).toBe(1);
+    // www.frommfamily.com and frommfamily.com group under the SAME domain.
+    failExtraction('5003', 'Www B', 'No extractor profile for frommfamily.com — profile required');
+    const regrouped = getExtractorProfileDomainBlockers(batchId);
+    expect(regrouped.find(b => b.domain === 'frommfamily.com')?.blockedItemCount).toBe(2);
+  });
 });

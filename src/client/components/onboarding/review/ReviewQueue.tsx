@@ -91,7 +91,7 @@ function ReviewQueueRow({
       id={item.itemId}
       role="option"
       aria-selected={active}
-      className={`rv-queue-row${active ? ' rv-row-active' : ''}${selected ? ' rv-row-selected' : ''}`}
+      className={`rv-queue-row${active ? ' rv-row-active' : ''}${selected ? ' rv-row-selected' : ''}${onToggleSelected ? ' rv-row-selectable' : ''}`}
       onClick={() => onSelect(item.itemId)}
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') {
