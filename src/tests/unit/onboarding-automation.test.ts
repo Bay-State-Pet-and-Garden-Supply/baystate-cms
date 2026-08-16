@@ -61,6 +61,8 @@ import {
   releaseDomainExtractionItems,
   sweepDomainReleases,
 } from '../../onboarding/domain-release';
+import { refreshCandidateCohorts } from '../../onboarding/curation-cohort-service';
+import { listWaitingCohortMemberIdsByWorkspace } from '../../db/repositories/curation-cohort-repo';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import type { Workspace } from '../../shared/types';
 import type { OnboardingEvent } from '../../onboarding/sse-emitter';
@@ -563,6 +565,97 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
       expect(after.stage).toBe('curation');
       expect(after.stageStatus).toBe('pending');
     }
+  });
+
+  /** Live (non-superseded) cohort containing a member (regroup-stable); null when the family is dead/superseded. */
+  function liveCohortForMember(batchId: string, memberId: string): { id: string; status: string; blocked_reason: string | null } | null {
+    const row = getDb().query(
+      `SELECT c.id, c.status, c.blocked_reason
+       FROM curation_cohorts c
+       JOIN curation_cohort_members m ON m.cohort_id = c.id
+       WHERE c.batch_id = ? AND c.status != 'superseded' AND m.onboarding_item_id = ?
+       LIMIT 1`,
+    ).get(batchId, memberId) as { id: string; status: string; blocked_reason: string | null } | null;
+    return row ?? null;
+  }
+
+  /** One product family (identical brand+name stem) of extraction items. */
+  function makeFamily(batchId: string, upcs: string[]): string[] {
+    const inserted = insertItems(
+      batchId,
+      upcs.map((upc, i) => ({ upc, name: 'Family A', brandHint: 'BrandA', rowNumber: i + 1, stage: 'extraction' })),
+      'extraction',
+      1,
+    );
+    return inserted.map(i => i.id);
+  }
+
+  test('all-members-failed families reach the terminal superseded state (no eternal waiting)', async () => {
+    const batch = makeBatch();
+    const members = makeFamily(batch.id, ['100060', '100061']);
+
+    // Phase 1: members still in progress → the family exists as an active
+    // (waiting) cohort.
+    refreshCandidateCohorts(workspaceId, batch.id);
+    expect(liveCohortForMember(batch.id, members[0])?.status).toBe('waiting');
+
+    // Phase 2: every member terminally fails (missing profile) → the family
+    // is dead: superseded (not eternal 'waiting'), reason preserved for
+    // audit, and never re-created by subsequent refreshes.
+    for (const id of members) failAsProfileBlocked(id, 'frommfamily.com');
+    await settle(makeWorker());
+    refreshCandidateCohorts(workspaceId, batch.id);
+    refreshCandidateCohorts(workspaceId, batch.id); // idempotent: no churn
+
+    for (const id of members) {
+      const live = liveCohortForMember(batch.id, id);
+      expect(live).toBeNull();
+    }
+    const dead = getDb().query(
+      `SELECT c.status, c.blocked_reason
+       FROM curation_cohorts c
+       JOIN curation_cohort_members m ON m.cohort_id = c.id
+       WHERE c.batch_id = ? AND m.onboarding_item_id = ?
+       LIMIT 1`,
+    ).get(batch.id, members[0]) as { status: string; blocked_reason: string | null };
+    expect(dead.status).toBe('superseded');
+    expect(dead.blocked_reason).toContain('terminally failed');
+
+    // The dead family is NOT a barrier hold: nothing waits on it.
+    expect(listWaitingCohortMemberIdsByWorkspace(workspaceId)).toHaveLength(0);
+  });
+
+  test('superseded families re-form when a member becomes extractable again', async () => {
+    const batch = makeBatch();
+    const members = makeFamily(batch.id, ['100070', '100071']);
+    for (const id of members) failAsProfileBlocked(id, 'frommfamily.com');
+    refreshCandidateCohorts(workspaceId, batch.id);
+    expect(liveCohortForMember(batch.id, members[0])).toBeNull();
+
+    // Profile built → one member is back in progress; the family re-forms
+    // as a waiting cohort (not stuck superseded).
+    getDb().query(
+      "UPDATE onboarding_items SET stage_status = 'pending', error_message = NULL WHERE id = ?",
+    ).run(members[0]);
+    refreshCandidateCohorts(workspaceId, batch.id);
+
+    const recovered = liveCohortForMember(batch.id, members[0]);
+    expect(recovered).toBeDefined();
+    expect(recovered.status).toBe('waiting');
+    expect(recovered.blocked_reason).toContain('Member failed');
+  });
+
+  test('mixed family (one failed, one in progress) stays waiting with the blocked reason', async () => {
+    const batch = makeBatch();
+    const members = makeFamily(batch.id, ['100080', '100081']);
+    failAsProfileBlocked(members[0], 'frommfamily.com');
+    // Second member still producing evidence (extraction/pending).
+
+    refreshCandidateCohorts(workspaceId, batch.id);
+
+    const live = liveCohortForMember(batch.id, members[0]);
+    expect(live.status).toBe('waiting');
+    expect(live.blocked_reason).toContain('Member failed');
   });
 
   test('family barrier never holds singletons or ready-cohort members', async () => {

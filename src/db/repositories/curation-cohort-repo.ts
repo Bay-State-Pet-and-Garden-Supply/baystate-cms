@@ -298,7 +298,17 @@ export function refreshCandidateCohorts(
   batchId: string,
   items: OnboardingItem[],
 ): CurationCohort[] {
-  const groups = groupItemsByFamily(items);
+  // Epic #46 batch-analysis follow-up (GPT finding): a family whose members
+  // ALL terminally failed (every item at stage_status 'failed') is DEAD — it
+  // must not sit in 'waiting' forever and must not be re-created on every
+  // refresh (insert/supersede churn). Dead groups are excluded from the
+  // grouping entirely: their orphaned active cohort is superseded below
+  // (blocked_reason preserved for audit), and recovery still works — when a
+  // member is re-extracted (e.g. profile built), the group re-forms and a
+  // fresh cohort is created and readiness-evaluated normally.
+  const groups = groupItemsByFamily(items).filter(
+    g => !g.members.every(m => m.item.stageStatus === 'failed'),
+  );
   const activeKeys = new Set(groups.map(g => g.groupKey));
 
   const run = (): CurationCohort[] => {
@@ -306,15 +316,29 @@ export function refreshCandidateCohorts(
     const touched: CurationCohort[] = [];
     db.transaction(() => {
       // Supersede orphaned active cohorts (group no longer formed by grouping).
+      // Epic #46 follow-up: an orphan whose members ALL terminally failed is
+      // recorded with the deterministic terminal reason (audit trail) instead
+      // of a stale "Waiting for N…" text.
       const activeRows = db.query(
         `SELECT * FROM curation_cohorts
          WHERE batch_id = ? AND grouping_version = ? AND status != 'superseded'`,
       ).all(batchId, GROUPING_VERSION) as Record<string, any>[];
       for (const row of activeRows) {
         if (!activeKeys.has(row.group_key)) {
+          const failedMembers = db.query(
+            `SELECT i.upc FROM curation_cohort_members m
+             JOIN onboarding_items i ON i.id = m.onboarding_item_id
+             WHERE m.cohort_id = ? AND i.stage_status = 'failed'
+             ORDER BY m.ordinal`,
+          ).all(row.id) as Array<{ upc: string }>;
+          const terminalReason = failedMembers.length > 0
+            ? `All ${failedMembers.length} family member(s) terminally failed (SKU: ${failedMembers.map(f => f.upc).join(', ')}) — family superseded`
+            : null;
           db.query(
-            `UPDATE curation_cohorts SET status = 'superseded', superseded_at = ?, updated_at = ? WHERE id = ?`,
-          ).run(now(), now(), row.id);
+            `UPDATE curation_cohorts SET status = 'superseded', superseded_at = ?, updated_at = ?,
+               blocked_reason = COALESCE(?, blocked_reason)
+             WHERE id = ?`,
+          ).run(now(), now(), terminalReason, row.id);
         }
       }
 

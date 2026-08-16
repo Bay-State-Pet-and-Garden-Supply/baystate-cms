@@ -2,6 +2,130 @@ import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
 import type { OnboardingSource } from '../../shared/schemas/onboarding';
 
+/**
+ * Discovery run traceability (epic #46 batch-analysis follow-up).
+ *
+ * The current discovery path (source-discovery + the worker's
+ * processDiscovery) persisted candidate sources but never a run-level trace:
+ * the `onboarding_discovery_runs` table existed only in legacy live databases
+ * (no migration created it, no code wrote it). Every discovery execution now
+ * records one run row (trigger/status/steps/outcome) and stamps each
+ * candidate source with `discovery_run_id` so provenance is auditable.
+ */
+export interface DiscoveryRunRow {
+  id: string;
+  item_id: string;
+  trigger: string;
+  status: string;
+  request_json: string;
+  current_step: string | null;
+  outcome: string | null;
+  outcome_message: string | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  retry_count: number;
+  retry_request_json: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export type DiscoveryRunStep =
+  | 'preflight'
+  | 'sitemap_fetch'
+  | 'sitemap_match'
+  | 'official_search'
+  | 'identifier_search'
+  | 'name_consolidation'
+  | 'name_search'
+  | 'variant_resolution'
+  | 'page_verification'
+  | 'ranking'
+  | 'applying_outcome';
+
+export type DiscoveryRunOutcome =
+  | 'auto_selected'
+  | 'needs_input_candidates'
+  | 'needs_input_no_candidates'
+  | 'needs_input_ambiguous'
+  | 'needs_input_setup'
+  | 'failed';
+
+/** Create a discovery run row for an item (status 'running'). Returns the run id. */
+export function createDiscoveryRun(itemId: string, request: {
+  trigger: 'automatic' | 'refinement' | 'direct_url';
+  upc: string;
+  name: string;
+  brandHint?: string | null;
+}): string {
+  const db = getDb();
+  const id = `dr_${randomUUID().slice(0, 12)}`;
+  const now = new Date().toISOString();
+  db.query(
+    `INSERT INTO onboarding_discovery_runs
+      (id, item_id, trigger, status, request_json, current_step, created_at, started_at)
+     VALUES (?, ?, ?, 'running', ?, 'preflight', ?, ?)`,
+  ).run(id, itemId, request.trigger, JSON.stringify(request), now, now);
+  return id;
+}
+
+/** Record the current pipeline step of a run (no-op when the run is not running). */
+export function updateDiscoveryRunStep(runId: string, step: DiscoveryRunStep): void {
+  const db = getDb();
+  db.query("UPDATE onboarding_discovery_runs SET current_step = ? WHERE id = ? AND status = 'running'").run(step, runId);
+}
+
+/** Complete a run with a terminal outcome. */
+export function completeDiscoveryRun(runId: string, outcome: DiscoveryRunOutcome, message: string | null = null): void {
+  const db = getDb();
+  db.query(
+    `UPDATE onboarding_discovery_runs
+     SET status = 'completed', outcome = ?, outcome_message = ?, completed_at = ?
+     WHERE id = ? AND status = 'running'`,
+  ).run(outcome, message, new Date().toISOString(), runId);
+}
+
+/** Fail a run (status 'failed', outcome 'failed'). */
+export function failDiscoveryRun(runId: string, message: string | null = null): void {
+  const db = getDb();
+  db.query(
+    `UPDATE onboarding_discovery_runs
+     SET status = 'failed', outcome = 'failed', outcome_message = ?, completed_at = ?
+     WHERE id = ? AND status = 'running'`,
+  ).run(message, new Date().toISOString(), runId);
+}
+
+/** Stamp every candidate source of an item with the discovery run that produced it. */
+export function stampSourcesWithDiscoveryRun(itemId: string, runId: string): void {
+  const db = getDb();
+  db.query('UPDATE onboarding_sources SET discovery_run_id = ? WHERE item_id = ? AND discovery_run_id IS NULL').run(
+    runId,
+    itemId,
+  );
+}
+
+/** Latest run for an item (most recently created), or null. */
+export function getLatestDiscoveryRunForItem(itemId: string): DiscoveryRunRow | null {
+  const db = getDb();
+  const row = db
+    .query('SELECT * FROM onboarding_discovery_runs WHERE item_id = ? ORDER BY created_at DESC LIMIT 1')
+    .get(itemId) as DiscoveryRunRow | undefined;
+  return row ?? null;
+}
+
+/** All runs for a batch (join via onboarding_items), newest first. */
+export function listDiscoveryRunsForBatch(batchId: string): DiscoveryRunRow[] {
+  const db = getDb();
+  return db
+    .query(
+      `SELECT r.* FROM onboarding_discovery_runs r
+       JOIN onboarding_items i ON i.id = r.item_id
+       WHERE i.batch_id = ?
+       ORDER BY r.created_at DESC`,
+    )
+    .all(batchId) as DiscoveryRunRow[];
+}
+
 export interface OnboardingSourceRow {
   id: string;
   item_id: string;

@@ -35,11 +35,14 @@ export const TelemetryMetricSchema = z.object({
 export type TelemetryMetric = z.infer<typeof TelemetryMetricSchema>;
 
 export const METRIC_KEYS = [
-  'automationCompletionRate',
+  // Epic #46 batch-analysis follow-up (GPT review): renamed to say what they
+  // actually measure — "automationCompletionRate" implied approved/exported
+  // products; it is the automation-to-review delivery rate.
+  'automationToReviewRate',
   'attentionVolume',
   'attentionRateByReason',
   'attentionResolutionTime',
-  'productsCompletedFromDistributorOnly',
+  'distributorRecordShareOfReviewReady',
   'productsRequiringOfficialSite',
   'extractorProfileBlockRate',
   'extractorProfileDomainUnblockCount',
@@ -49,7 +52,7 @@ export const METRIC_KEYS = [
   'productsReadyForReview',
   'reviewThroughputProductsPerMinute',
   'reviewEditRate',
-  'bulkApprovalSuccessRate',
+  'approvalRate',
   'exportSuccessRate',
 ] as const;
 
@@ -60,11 +63,11 @@ export const OnboardingTelemetrySchema = z.object({
   batchId: z.string().nullable().default(null),
   generatedAt: z.string(),
   metrics: z.object({
-    automationCompletionRate: TelemetryMetricSchema,
+    automationToReviewRate: TelemetryMetricSchema,
     attentionVolume: TelemetryMetricSchema,
     attentionRateByReason: TelemetryMetricSchema,
     attentionResolutionTime: TelemetryMetricSchema,
-    productsCompletedFromDistributorOnly: TelemetryMetricSchema,
+    distributorRecordShareOfReviewReady: TelemetryMetricSchema,
     productsRequiringOfficialSite: TelemetryMetricSchema,
     extractorProfileBlockRate: TelemetryMetricSchema,
     extractorProfileDomainUnblockCount: TelemetryMetricSchema,
@@ -74,7 +77,7 @@ export const OnboardingTelemetrySchema = z.object({
     productsReadyForReview: TelemetryMetricSchema,
     reviewThroughputProductsPerMinute: TelemetryMetricSchema,
     reviewEditRate: TelemetryMetricSchema,
-    bulkApprovalSuccessRate: TelemetryMetricSchema,
+    approvalRate: TelemetryMetricSchema,
     exportSuccessRate: TelemetryMetricSchema,
   }),
 });

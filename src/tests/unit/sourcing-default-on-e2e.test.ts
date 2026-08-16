@@ -19,7 +19,6 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
 import { initDb, closeDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
@@ -35,7 +34,6 @@ import {
   startSourcingGeneration,
   supersedeCurrentSourcingGeneration,
   getCurrentGenerationAttempts,
-  getCurrentSourcingGeneration,
   insertEvidenceAttempt,
 } from '../../db/repositories/onboarding-evidence-repo';
 import {
@@ -507,6 +505,12 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
       "SELECT field FROM onboarding_evidence_conflicts WHERE item_id = ? AND severity = 'hard' AND status = 'open'",
     ).all(item.id) as Array<{ field: string }>;
     expect(hard.some((c) => c.field === 'flavor')).toBe(true);
+    // Epic #46 follow-up (GPT finding): the decision payload must reference
+    // the durable conflicts instead of a contradictory empty array.
+    expect(after?.sourcingDecision?.conflicts?.length).toBeGreaterThan(0);
+    const flavorConflict = after?.sourcingDecision?.conflicts?.find(c => c.field === 'flavor');
+    expect(flavorConflict?.severity).toBe('hard');
+    expect(Object.keys(flavorConflict?.providerValues ?? {}).length).toBeGreaterThanOrEqual(2);
   });
 
   // 8b. Formula disagreement → needs_input (formula is identity-critical).

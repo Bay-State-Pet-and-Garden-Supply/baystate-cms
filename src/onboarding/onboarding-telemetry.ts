@@ -260,7 +260,9 @@ function buildMetrics(
 ): OnboardingTelemetry['metrics'] {
   const activeItems = agg.totalItems - agg.skippedCount;
 
-  // automationCompletionRate: the automation-finished pool over active items.
+  // automationToReviewRate: the automation-finished pool over active items.
+  // (Epic #46 follow-up rename: "automationCompletionRate" read like
+  // approved/exported products; this is delivery-to-review.)
   const automation = metric(
     divide(agg.completionPool, activeItems),
     'ratio',
@@ -291,12 +293,15 @@ function buildMetrics(
     'No durable needs_input entry timestamp exists; requires explicit event capture (future phase)',
   );
 
-  // Distributor-only vs official-site completion.
+  // Distributor-only vs official-site completion (epic #46 follow-up
+  // rename: "productsCompletedFromDistributorOnly" sounded like promoted
+  // products; this is the share of review-ready products that came from the
+  // distributor-record path).
   const distributorOnly = metric(
     divide(agg.distributorCompleted, agg.completionPool),
     'ratio',
     'exact',
-    'Share of automation-finished items sourced purely from distributor records (no official-site visit)',
+    'Share of review-ready (automation-finished) items sourced purely from distributor records (no official-site visit)',
   );
   const officialSite = metric(
     divide(agg.officialCompleted, agg.completionPool),
@@ -368,12 +373,22 @@ function buildMetrics(
     'CURRENT invalidated-over-reviewed ratio — a re-review clears the invalidation marker, so historical edits disappear from this ratio; not a historical edit rate',
   );
 
-  const approvalSuccessRate = metric(
-    divide(agg.approvedCount, agg.reviewedCount),
-    'ratio',
-    'approximation',
-    'Approved over reviewed; rejected-at-attempt items are indistinguishable from still-pending reviewed items in durable state',
-  );
+  // Approval rate (epic #46 follow-up: renamed from bulkApprovalSuccessRate,
+  // which read as "bulk approvals failed" when zero attempts existed). With
+  // no reviewed items there is no measured rate — not_available, not 0.
+  const approvalSuccessRate = agg.reviewedCount > 0
+    ? metric(
+        divide(agg.approvedCount, agg.reviewedCount),
+        'ratio',
+        'approximation',
+        'Approved over reviewed; rejected-at-attempt items are indistinguishable from still-pending reviewed items in durable state',
+      )
+    : metric(
+        null,
+        'ratio',
+        'not_available',
+        'No items reviewed yet — the rate is undefined until at least one review exists',
+      );
 
   // Export.
   let exportSuccessRate: TelemetryMetric;
@@ -404,11 +419,11 @@ function buildMetrics(
   }
 
   return {
-    automationCompletionRate: automation,
+    automationToReviewRate: automation,
     attentionVolume: attention,
     attentionRateByReason: attentionByReason,
     attentionResolutionTime: resolutionTime,
-    productsCompletedFromDistributorOnly: distributorOnly,
+    distributorRecordShareOfReviewReady: distributorOnly,
     productsRequiringOfficialSite: officialSite,
     extractorProfileBlockRate: profileBlockRate,
     extractorProfileDomainUnblockCount: domainUnblockCount,
@@ -418,7 +433,7 @@ function buildMetrics(
     productsReadyForReview: productsReadyForReview,
     reviewThroughputProductsPerMinute: throughput,
     reviewEditRate: reviewEditRate,
-    bulkApprovalSuccessRate: approvalSuccessRate,
+    approvalRate: approvalSuccessRate,
     exportSuccessRate: exportSuccessRate,
   };
 }

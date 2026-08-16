@@ -41,6 +41,54 @@ export function runMigrations(): void {
     db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_schema_version', '1');");
   }
 
+  // ── Discovery run traceability (epic #46 batch-analysis follow-up) ──
+  // The `onboarding_discovery_runs` table + `onboarding_sources.discovery_run_id`
+  // existed in older live databases but were NEVER created by any migration
+  // in this codebase and never written by code — an unfinished design from a
+  // superseded discovery path (fresh installs lacked the table entirely;
+  // every source row had a NULL run id). This migration recreates the
+  // original schema (same columns/CHECKs as the legacy live-DB shape) so
+  // the current discovery flow can persist run-level traces. Additive +
+  // idempotent: `CREATE TABLE IF NOT EXISTS` + guarded `ALTER TABLE`.
+  const discoveryRunsVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('onboarding_discovery_runs_schema_version') as { value: string } | undefined;
+  if (!discoveryRunsVersion) {
+    console.log('[Migrations] Running onboarding discovery-runs traceability migration...');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS onboarding_discovery_runs (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+        trigger TEXT NOT NULL CHECK(trigger IN ('automatic', 'refinement', 'direct_url')),
+        status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'running', 'completed', 'failed')),
+        request_json TEXT NOT NULL,
+        current_step TEXT CHECK(current_step IN (
+          'preflight', 'sitemap_fetch', 'sitemap_match', 'official_search',
+          'identifier_search', 'name_consolidation', 'name_search',
+          'variant_resolution', 'page_verification', 'ranking', 'applying_outcome'
+        )),
+        outcome TEXT CHECK(outcome IN (
+          'auto_selected', 'needs_input_candidates', 'needs_input_no_candidates',
+          'needs_input_ambiguous', 'needs_input_setup', 'failed'
+        )),
+        outcome_message TEXT,
+        claim_token TEXT,
+        claimed_at TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        retry_request_json TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT
+      );
+    `);
+    const sourceCols = db.query('PRAGMA table_info(onboarding_sources)').all() as Array<{ name: string }>;
+    if (!sourceCols.some(col => col.name === 'discovery_run_id')) {
+      db.exec('ALTER TABLE onboarding_sources ADD COLUMN discovery_run_id TEXT NULL;');
+    }
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_discovery_runs_schema_version', '1');");
+    console.log('[Migrations] Onboarding discovery-runs traceability migration complete.');
+  }
+
   // ── Epic #46 operator work-state: durable review/approval/export state ──
   // New table `onboarding_review_state` (version-gated marker
   // `operator_state_schema_version`). Runs AFTER the onboarding migration

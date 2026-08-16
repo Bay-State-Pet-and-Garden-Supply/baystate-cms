@@ -17,6 +17,11 @@ import {
   deleteSourcesByItem,
   selectSource,
   listSourcesByItem,
+  createDiscoveryRun,
+  updateDiscoveryRunStep,
+  completeDiscoveryRun,
+  failDiscoveryRun,
+  stampSourcesWithDiscoveryRun,
   type InsertSourceData,
 } from '../db/repositories/onboarding-source-repo';
 import { verifyTopCandidates, type VerificationResult } from './page-verifier';
@@ -51,6 +56,8 @@ import { getDb } from '../db/connection';
 import type { OnboardingSource, PipelineStage } from '../shared/schemas/onboarding';
 import { getSourcingFlags } from './flags';
 import { normalizeGtin } from './sourcing/contracts';
+import { listCurrentGenerationConflictsForItem } from '../db/repositories/onboarding-conflict-repo';
+import type { SourcingConflict } from '../shared/schemas/onboarding';
 import type { SourcingEngine } from './sourcing/contracts';
 import { DefaultSourcingEngine } from './sourcing/engine';
 import { reconcileDistributorEvidence } from './sourcing-reconciler';
@@ -177,6 +184,11 @@ export class OnboardingWorker {
   private shadowObservedOutcomes = new Map<string, string>();
   /** Test seam: inject the sourcing engine factory (defaults to the real engine). */
   private engineFactory: (() => SourcingEngine) | null;
+  /** Discovery/verification overrides (test/embedding seam, default null → real impls). */
+  private deps: {
+    discoverSources?: typeof discoverSources;
+    verifyTopCandidates?: typeof verifyTopCandidates;
+  } | null;
 
   /**
    * @param maxConcurrency Items processed in parallel per poll. Default 3:
@@ -185,13 +197,26 @@ export class OnboardingWorker {
    *   concurrent logins bounded while still saturating the per-connection
    *   rate limits (each item walks its connections sequentially).
    */
-  constructor(workspaceId: string, workspacePath: string, maxConcurrency = 3, maxExtractionConcurrency = 3, engineFactory?: () => SourcingEngine) {
+  constructor(
+    workspaceId: string,
+    workspacePath: string,
+    maxConcurrency = 3,
+    maxExtractionConcurrency = 3,
+    engineFactory?: () => SourcingEngine,
+    deps?: {
+      /** Test/embedding seam: discovery provider override (default: real). */
+      discoverSources?: typeof discoverSources;
+      /** Test/embedding seam: candidate verification override (default: real). */
+      verifyTopCandidates?: typeof verifyTopCandidates;
+    },
+  ) {
     this.workspaceId = workspaceId;
     this.workspacePath = workspacePath;
     this.maxConcurrency = maxConcurrency;
     this.maxExtractionConcurrency = maxExtractionConcurrency;
     this.workerId = randomUUID();
     this.engineFactory = engineFactory ?? null;
+    this.deps = deps ?? null;
   }
 
   start(): void {
@@ -712,12 +737,45 @@ export class OnboardingWorker {
           origin: 'automatic_policy',
           acceptedEvidenceAttemptIds: [],
           providerIds,
-          conflicts: [],
+          // Durable conflicts (epic #46 follow-up): the decision payload must
+          // reference the persisted conflicts instead of an empty array — the
+          // V2 schema requires ≥1 hard conflict on this route and the empty
+          // array contradicted the durable evidence-conflict table.
+          conflicts: durableConflictsForDecision(item.id),
           warnings: [...warnings, 'Manual mode: operator must choose the route (Use distributor record / Continue to Discovery)'],
           decidedAt,
         },
         'sourcing',
       );
+    };
+
+    /**
+     * Durable conflicts → decision-payload shape (epic #46 follow-up). The
+     * authoritative conflict set lives in `onboarding_evidence_conflicts`
+     * (written by reconciliation); the decision JSON now carries the same
+     * field/severity/provider-value mapping instead of a contradictory
+     * empty array. Unresolvable provider ids fall back to the evidence
+     * attempt id (never a blank key).
+     */
+    const durableConflictsForDecision = (itemId: string): SourcingConflict[] => {
+      const attempts = getCurrentGenerationAttempts(itemId);
+      const providerByAttempt = new Map(attempts.map(a => [a.id, a.providerId]));
+      return listCurrentGenerationConflictsForItem(itemId).map(c => ({
+        field: c.field,
+        severity: c.severity,
+        providerValues: Object.fromEntries(
+          c.candidates.map(cand => {
+            let value: string;
+            try {
+              const parsed = JSON.parse(cand.valueJson) as unknown;
+              value = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+            } catch {
+              value = cand.valueJson;
+            }
+            return [providerByAttempt.get(cand.evidenceAttemptId) ?? cand.evidenceAttemptId, value];
+          }),
+        ),
+      }));
     };
 
     /**
@@ -883,7 +941,10 @@ export class OnboardingWorker {
             origin: 'automatic_policy',
             acceptedEvidenceAttemptIds: [],
             providerIds: reconcile.providerIds,
-            conflicts: [],
+            // Epic #46 follow-up: reference the durable conflicts (the V2
+            // schema requires ≥1 hard conflict; the old empty array
+            // contradicted the persisted evidence-conflict rows).
+            conflicts: durableConflictsForDecision(item.id),
             warnings: reconcile.warnings,
             decidedAt,
           },
@@ -1028,17 +1089,31 @@ export class OnboardingWorker {
     // discovery helpers use deterministic fallbacks.
     const policySnapshot = captureModelPolicySnapshot(this.workspacePath, undefined, this.workspaceId);
 
+    // Discovery run traceability (epic #46 batch-analysis follow-up): one run
+    // row per discovery execution, stamped onto every candidate source, so
+    // the pipeline is auditable end-to-end (what was searched, which step
+    // failed, which outcome was applied).
+    let discoveryRunId: string | null = null;
+
     try {
+      discoveryRunId = createDiscoveryRun(item.id, {
+        trigger: 'automatic',
+        upc: String(item.upc ?? ''),
+        name: item.name ?? '',
+        brandHint: item.brandHint ?? null,
+      });
+      const discover = this.deps?.discoverSources ?? discoverSources;
       const existingSources = listSourcesByItem(item.id);
       const upcSources = existingSources.filter(s => s.sourceMethod === 'serper_upc');
 
-      const discovery = await discoverSources(item.upc, item.name, item.brandHint, {
+      const discovery = await discover(item.upc, item.name, item.brandHint, {
         price: item.price ? parseFloat(item.price) : null,
         existingExpectedName: item.expectedName,
         existingUpcCandidates: upcSources.length > 0 ? upcSources : null,
         modelPolicy: policySnapshot.state === 'configured' ? policySnapshot.view : null,
       });
       const sources = discovery.candidates;
+      updateDiscoveryRunStep(discoveryRunId, 'official_search');
       const consolidatedName = discovery.consolidatedName;
       const inferredBrand = discovery.inferredBrand;
 
@@ -1057,6 +1132,11 @@ export class OnboardingWorker {
         if (sources.length > 0) {
           insertSources(item.id, sources);
         }
+        completeDiscoveryRun(
+          discoveryRunId,
+          'needs_input_setup',
+          `No official domain mapped for brand "${activeBrandHint}" — map a domain in Settings to complete discovery`,
+        );
 
         const reviewReason = `needs_review: no domain mapped for brand "${activeBrandHint}" — map a domain in Settings to complete discovery`;
         updateItemStageStatus(item.id, 'completed', reviewReason);
@@ -1094,9 +1174,11 @@ export class OnboardingWorker {
       });
       const sitemapCandidateCount = sitemapCandidates.length;
       const sitemapMatched = sitemapCandidateCount > 0;
+      if (sitemapMatched) updateDiscoveryRunStep(discoveryRunId, 'sitemap_match');
 
       // ── Log & persist the consolidated name ──────────────────────────
       if (consolidatedName) {
+        updateDiscoveryRunStep(discoveryRunId, 'name_consolidation');
         console.log(`[OnboardingWorker] ✓ Consolidated name for ${item.upc}: "${consolidatedName}"`);
         updateItemExpectedName(item.id, consolidatedName);
       } else {
@@ -1118,6 +1200,7 @@ export class OnboardingWorker {
 
       if (sources.length > 0) {
         const insertedSources: OnboardingSource[] = insertSources(item.id, sources);
+        stampSourcesWithDiscoveryRun(item.id, discoveryRunId);
         const bestSource = sources[0];
 
         // ── Candidate verification pass ──────────────────────────────
@@ -1126,8 +1209,10 @@ export class OnboardingWorker {
         // confidently saving the wrong URL just because its slug looked
         // tasty on a high-confidence domain.
         const officialDomains = getOfficialDomainsForBrand(activeBrandHint);
+        updateDiscoveryRunStep(discoveryRunId, 'page_verification');
+        const verify = this.deps?.verifyTopCandidates ?? verifyTopCandidates;
         const verificationResults: VerificationResult[] = sources.length > 0
-          ? await verifyTopCandidates(sources, {
+          ? await verify(sources, {
               upc: item.upc,
               expectedName: consolidatedName || item.name,
               brandHint: activeBrandHint,
@@ -1135,6 +1220,7 @@ export class OnboardingWorker {
               officialDomains,
             })
           : [];
+        updateDiscoveryRunStep(discoveryRunId, 'ranking');
 
         // Log verification outcomes for diagnostics.
         for (const vr of verificationResults) {
@@ -1182,10 +1268,16 @@ export class OnboardingWorker {
           : (verifiedStrong.length > 0 ? verifiedStrong[0] : null);
         const autoSelectedSource = autoSelectedResult?.candidate ?? null;
         const shouldAutoSelect = autoSelectedSource !== null;
+        updateDiscoveryRunStep(discoveryRunId, 'applying_outcome');
 
         if (shouldAutoSelect && autoSelectedSource) {
           const resolvedUrl = autoSelectedSource.url;
           setDiscoverySourceUrl(item.id, resolvedUrl);
+          completeDiscoveryRun(
+            discoveryRunId,
+            'auto_selected',
+            `Auto-selected verified source: ${resolvedUrl} (${autoSelectedResult?.decisionReason ?? 'verified'})`,
+          );
 
           // Find the inserted counterpart of the auto-selected source
           // by URL.
@@ -1207,6 +1299,11 @@ export class OnboardingWorker {
           const verificationDetail = topVerification
             ? ` | verification: ${topVerification.decisionReason}`
             : '';
+          completeDiscoveryRun(
+            discoveryRunId,
+            'needs_input_candidates',
+            `No candidate passed verification — needs manual URL review${verificationDetail}`,
+          );
           const manualReviewReason =
             `needs_review: no candidate passed verification${verificationDetail}`;
           updateItemStageStatus(item.id, 'completed', manualReviewReason);
@@ -1245,6 +1342,7 @@ export class OnboardingWorker {
           })),
         });
       } else {
+        completeDiscoveryRun(discoveryRunId, 'needs_input_no_candidates', 'No matching product pages found');
         updateItemStageStatus(item.id, 'completed', 'No matching product pages found');
         onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
           stage: 'discovery',
@@ -1259,6 +1357,9 @@ export class OnboardingWorker {
       }
     } catch (err) {
       console.error(`[OnboardingWorker] Discovery error for ${item.id}:`, err);
+      if (discoveryRunId) {
+        failDiscoveryRun(discoveryRunId, err instanceof Error ? err.message : String(err));
+      }
       const retry = incrementRetryCount(item.id);
       if (retry < 2) {
         updateItemStageStatus(item.id, 'pending');

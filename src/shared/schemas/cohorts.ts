@@ -40,6 +40,13 @@ import {
  * the DB CHECK to these four values and deterministically maps any legacy
  * execution status to `ready`.
  */
+/**
+ * Cohort status. The operator-facing "candidate" statuses are
+ * forming/waiting/ready, with superseded for replaced groupings — execution
+ * states (running/completed/failed/conflicted) deliberately live on cohort
+ * RUNS, not candidate rows (issue #31 F3 / v7). All-failed families are
+ * superseded (terminal) rather than waiting forever (epic #46 follow-up).
+ */
 export const CohortStatusEnum = z.enum([
   'forming',
   'waiting',

@@ -132,7 +132,7 @@ function insertCohortWithRuns(batchId: string, runStatuses: string[], createdHou
 describe('telemetry — automation completion + distributor/official-source split', () => {
   beforeAll(makeWorkspace);
 
-  it('computes automationCompletionRate over active (non-skipped) items', () => {
+  it('computes automationToReviewRate over active (non-skipped) items', () => {
     const batchId = makeBatch();
     // 2 curation-completed → ready_for_review; 1 promotion-completed → ready_to_export;
     // 1 skipped; 2 extraction-pending → processing.
@@ -146,8 +146,8 @@ describe('telemetry — automation completion + distributor/official-source spli
     const metrics = getOnboardingMetrics({ workspaceId, batchId });
     expect(metrics.scope).toBe('batch');
     expect(metrics.batchId).toBe(batchId);
-    expect(metrics.metrics.automationCompletionRate.value).toBeCloseTo(3 / 5, 5);
-    expect(metrics.metrics.automationCompletionRate.derivation).toBe('exact');
+    expect(metrics.metrics.automationToReviewRate.value).toBeCloseTo(3 / 5, 5);
+    expect(metrics.metrics.automationToReviewRate.derivation).toBe('exact');
     expect(metrics.metrics.productsReadyForReview.value).toBe(2);
   });
 
@@ -158,7 +158,7 @@ describe('telemetry — automation completion + distributor/official-source spli
     createItem(batchId, { upc: 'D3', name: 'X', stage: 'extraction', stageStatus: 'pending', sourceType: 'official_page' });
 
     const metrics = getOnboardingMetrics({ workspaceId, batchId });
-    expect(metrics.metrics.productsCompletedFromDistributorOnly.value).toBeCloseTo(0.5, 5);
+    expect(metrics.metrics.distributorRecordShareOfReviewReady.value).toBeCloseTo(0.5, 5);
     expect(metrics.metrics.productsRequiringOfficialSite.value).toBeCloseTo(0.5, 5);
     // Breakdown lists both source categories.
     const breakdown = metrics.metrics.productsRequiringOfficialSite.breakdown ?? [];
@@ -263,17 +263,20 @@ describe('telemetry — review state, edits, approval', () => {
     // Epic #46 fix 6: the invalidation ratio is CURRENT state (re-review
     // clears the marker), so it is an approximation, not a historical rate.
     expect(metrics.metrics.reviewEditRate.derivation).toBe('approximation');
-    expect(metrics.metrics.bulkApprovalSuccessRate.value).toBeCloseTo(0.5, 5);
-    expect(metrics.metrics.bulkApprovalSuccessRate.derivation).toBe('approximation');
+    expect(metrics.metrics.approvalRate.value).toBeCloseTo(0.5, 5);
+    expect(metrics.metrics.approvalRate.derivation).toBe('approximation');
     expect(metrics.metrics.productsReadyForReview.value).toBe(4);
   });
 
-  it('returns zero edit rate when nothing was reviewed', () => {
+  it('reports approvalRate as not_available when nothing was reviewed', () => {
     const batchId = makeBatch();
     createItem(batchId, { upc: 'V9', name: 'X', stage: 'curation', stageStatus: 'completed' });
     const metrics = getOnboardingMetrics({ workspaceId, batchId });
     expect(metrics.metrics.reviewEditRate.value).toBe(0);
-    expect(metrics.metrics.bulkApprovalSuccessRate.value).toBe(0);
+    // Epic #46 follow-up: with zero reviews the rate is undefined — a 0
+    // value read like "approvals failed" (GPT review finding).
+    expect(metrics.metrics.approvalRate.value).toBeNull();
+    expect(metrics.metrics.approvalRate.derivation).toBe('not_available');
   });
 });
 
@@ -357,11 +360,11 @@ describe('telemetry — batch vs global scoping on a fresh workspace', () => {
     const b2 = getOnboardingMetrics({ workspaceId, batchId: batch2 });
     const global = getOnboardingMetrics({ workspaceId });
 
-    expect(b1.metrics.automationCompletionRate.value).toBeCloseTo(1 / 2, 5);
-    expect(b2.metrics.automationCompletionRate.value).toBeCloseTo(1, 5);
+    expect(b1.metrics.automationToReviewRate.value).toBeCloseTo(1 / 2, 5);
+    expect(b2.metrics.automationToReviewRate.value).toBeCloseTo(1, 5);
     expect(global.scope).toBe('global');
     expect(global.batchId).toBeNull();
-    expect(global.metrics.automationCompletionRate.value).toBeCloseTo(2 / 3, 5);
+    expect(global.metrics.automationToReviewRate.value).toBeCloseTo(2 / 3, 5);
   });
 
   it('workspace guard: cross-workspace batchId fails closed', () => {
@@ -403,8 +406,8 @@ describe('telemetry — empty states and derivation markers', () => {
   it('empty batch yields zero honest metrics and null unavailable ones', () => {
     const batchId = makeBatch();
     const metrics = getOnboardingMetrics({ workspaceId, batchId });
-    expect(metrics.metrics.automationCompletionRate.value).toBe(0);
-    expect(metrics.metrics.automationCompletionRate.note).toContain('No active items');
+    expect(metrics.metrics.automationToReviewRate.value).toBe(0);
+    expect(metrics.metrics.automationToReviewRate.note).toContain('No active items');
     expect(metrics.metrics.attentionVolume.value).toBe(0);
     expect(metrics.metrics.exportSuccessRate.value).toBeNull();
     expect(metrics.metrics.exportSuccessRate.derivation).toBe('not_available');
