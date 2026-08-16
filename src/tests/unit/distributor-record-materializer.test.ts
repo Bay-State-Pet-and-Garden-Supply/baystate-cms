@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import fs from 'node:fs';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
@@ -26,7 +27,6 @@ import { SOURCING_ENTRY_POLICY_VERSION } from '../../onboarding/sourcing/entry-p
 import {
   buildDistributorRecordProjection,
   buildDistributorRecordProjectionV1,
-  type DistributorRecordProjection,
 } from '../../onboarding/sourcing/distributor-record-projection';
 import {
   buildDistributorExtractionDataV1,
@@ -52,7 +52,6 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
   const WORKSPACE = 'w1';
   const FOREIGN_WS = 'w2';
   const UPC = '012345678901';
-  let batchId: string;
   let itemId: string;
   let generationId: string;
 
@@ -82,7 +81,6 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     } as Workspace);
 
     const batch = createBatch({ workspaceId: WORKSPACE, name: 'B', fileName: 'b.csv', totalItems: 1 });
-    batchId = batch.id;
     const [item] = insertItems(
       batch.id,
       [{ upc: UPC, name: 'Pet Kibble', rowNumber: 1, stage: 'sourcing' }],
@@ -303,7 +301,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
   test('multiple agreeing providers qualify; all appear in provenance', () => {
     const a1 = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
     const a2 = makeFoundAttempt('unfi', { brand: 'Brand A', weight: '10 lbs' });
-    const decision = routeQualified([a1, a2]);
+    routeQualified([a1, a2]);
     claimForExtraction();
 
     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
@@ -319,7 +317,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
   test('found + provider error: qualified record materializes, error attempt is not accepted', () => {
     const att = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
     makeFoundAttempt('unfi', {}, { outcome: 'source_error', errorCode: 'timeout' });
-    const decision = routeQualified([att]);
+    routeQualified([att]);
     claimForExtraction();
 
     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
@@ -338,7 +336,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     });
     // Built-in axes normalize from identity attributes WITHOUT any connector
     // declaration (size/count/packCount/flavor/formula are canonical).
-    const decision = routeQualified([att]);
+    routeQualified([att]);
     claimForExtraction();
 
     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
@@ -355,7 +353,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
 
   test('idempotent retry: same generation/hash reuses the existing row, no divergent insert', () => {
     const att = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
-    const decision = routeQualified([att]);
+    routeQualified([att]);
     claimForExtraction();
 
     const first = materializeDistributorRecordExtraction(itemId, WORKSPACE);
@@ -940,7 +938,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     // SUPPLEMENT — structural guarantee: the module graph itself stays on the
     // allowed import surface (db repos, shared schemas, sourcing/projection),
     // and no network / machine-vision / DOM APIs appear anywhere in the body.
-    const source = require('node:fs').readFileSync(
+    const source = fs.readFileSync(
       'src/onboarding/sourcing/distributor-record-materializer.ts',
       'utf8',
     );
@@ -1139,7 +1137,7 @@ describe('Distributor-record materializer v1/v2 authority dispatch (Amendment B,
       features: ['grain free'],
       images: ['https://cdn.example.com/b.jpg'],
     });
-    const decision = routeQualified([att1, att2]);
+    routeQualified([att1, att2]);
     claimForExtraction();
 
     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);

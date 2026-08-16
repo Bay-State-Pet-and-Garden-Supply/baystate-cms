@@ -300,7 +300,6 @@ function buildProjectionCore(
   input: DistributorRecordProjectionInput,
   merchandising: boolean,
 ): SourcingProjectionResultV2 {
-  const version = merchandising ? PROJECTION_VERSION_V2 : PROJECTION_VERSION;
   const warnings: string[] = [];
   const reasons = new Set<SourcingProjectionReasonCode>();
 
