@@ -61,6 +61,7 @@ import { createHash } from 'node:crypto';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { prepareItemsForPromotion } from './helpers/seed-promotion-approval';
 import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
 import { listChangeSetItems } from '../../db/repositories/change-set-repo';
@@ -2175,6 +2176,10 @@ describe('PR5 C4 — acceptance integration: execution-driven first pass, review
     expect(getRun(childRunIdB)!.status).toBe('completed');
     const pageId = activateVerifiedPage(workspaceId, 'Dog Food', 'pr5-acceptance');
     seedAcceptedPageProposal(workspaceId, childRunIdB, items[1].upc, pageId, 'Dog Food');
+    // Epic #46 review round-2: promotion requires durable approval at the final
+    // authority; move the sibling into the real post-approval state so these
+    // checks hit their intended Reviewed-Product-Type gate.
+    prepareItemsForPromotion([{ id: items[1].id, batchId }]);
     const blockedPromote = await promoteItems(workspaceId, wsPath, batchId, [items[1].id]);
     expect(blockedPromote.failures).toHaveLength(1);
     expect(blockedPromote.failures[0].error).toContain('Reviewed Product Type');
@@ -2191,6 +2196,7 @@ describe('PR5 C4 — acceptance integration: execution-driven first pass, review
     );
     getDb().run("UPDATE classification_proposals SET status = 'accepted' WHERE id = ?", [ptProposalB.id]);
 
+    prepareItemsForPromotion([{ id: items[1].id, batchId }]);
     const promoteResult = await promoteItems(workspaceId, wsPath, batchId, [items[1].id]);
     expect(promoteResult.failures).toEqual([]);
     expect(promoteResult.count).toBe(1);

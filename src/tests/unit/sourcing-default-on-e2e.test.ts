@@ -74,6 +74,7 @@ import { curateItemWithPipeline } from '../../onboarding/product-curator';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import { overrideCohortCurationFlags, resetCohortCurationFlagsOverride } from '../../classification/flags';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { prepareItemsForPromotion } from './helpers/seed-promotion-approval';
 import type { Workspace } from '../../shared/types';
 import type { ClassificationConfig } from '../../shared/schemas/classification';
 
@@ -943,6 +944,10 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
         `UPDATE onboarding_items SET extraction_data_json = json_set(extraction_data_json, '$.primaryImage', ?) WHERE id = ?`,
         ['http://127.0.0.1:9/raw-distributor-image.jpg', item.id],
       );
+      // Epic #46 review round-2: promotion requires durable approval at the
+      // final authority; move the distributor item into the real post-approval
+      // state so the intended provenance gate fires.
+      prepareItemsForPromotion([{ id: item.id, batchId: batch.id }]);
       const promoteTampered = await promoteItems(workspaceId, wsPath, batch.id, [item.id]);
       expect(promoteTampered.failures.length).toBeGreaterThan(0);
       expect(promoteTampered.count).toBe(0);
@@ -955,6 +960,7 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
 
     // Promotion without a reviewed type is blocked (Review stays mandatory —
     // the Execution Product Type is never promotion authority).
+    prepareItemsForPromotion([{ id: item.id, batchId: batch.id }]);
     const promote1 = await promoteItems(workspaceId, wsPath, batch.id, [item.id]);
     expect(promote1.failures.length).toBeGreaterThan(0);
     expect(promote1.count).toBe(0);
@@ -965,6 +971,7 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
       'UPDATE onboarding_extractions SET evidence_hash = ? WHERE item_id = ?',
       ['f'.repeat(64), item.id],
     );
+    prepareItemsForPromotion([{ id: item.id, batchId: batch.id }]);
     const promote2 = await promoteItems(workspaceId, wsPath, batch.id, [item.id]);
     expect(promote2.failures.length).toBeGreaterThan(0);
     expect(promote2.count).toBe(0);

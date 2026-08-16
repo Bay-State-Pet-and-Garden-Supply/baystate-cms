@@ -24,6 +24,7 @@ export default defineConfig({
       'src/tests/integration/phase3-sync-drift.test.ts',
       'src/tests/unit/onboarding-repos.test.ts',
       'src/tests/unit/onboarding-approval-gates.test.ts',
+      'src/tests/unit/durable-approval-promote.test.ts',
       'src/tests/unit/draft-promoter.test.ts',
       'src/tests/unit/onboarding-duplicate-skip.test.ts',
       'src/tests/unit/extractor-profiles.test.ts',
