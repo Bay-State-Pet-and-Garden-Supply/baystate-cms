@@ -23,6 +23,39 @@ import {
   type DistributorRecordProjection,
   type DistributorRecordProjectionV2,
 } from './distributor-record-projection';
+import { normalizeWeightToLbs } from '../normalization/weight';
+
+/**
+ * Canonical structured weight for materialization (epic #46 follow-up,
+ * operator rule): pounds, exactly two decimals. The product name/title is
+ * NEVER normalized. Unparseable weights fail closed → the raw value is
+ * preserved (audit) and the caller's validation surfaces the warning.
+ */
+export function canonicalMaterializedWeight(rawWeight: string | null): string | null {
+  if (rawWeight === null || rawWeight === '') return rawWeight;
+  return normalizeWeightToLbs(rawWeight) ?? rawWeight;
+}
+
+/**
+ * Legacy-format tolerance for the idempotency invariant (epic #46
+ * follow-up): rows materialized BEFORE weight canonicalization stored the
+ * raw provider string ("0.0600 lb"). They must still re-verify against the
+ * canonical builder output ("0.06") — weight-only divergence is accepted
+ * when the stored weight normalizes to the expected canonical pounds. All
+ * other keys must match byte-for-byte. Exported for tests.
+ */
+export function payloadsEquivalentAfterWeightNormalization(
+  stored: Record<string, unknown>,
+  expected: Record<string, unknown>,
+): boolean {
+  if (stored.weight === undefined || expected.weight === undefined) return false;
+  if (stored.weight === expected.weight) return false; // identical payloads take the main equality path
+  const normalized = normalizeWeightToLbs(String(stored.weight));
+  if (normalized === null || normalized !== expected.weight) return false;
+  const { weight: _storedWeight, ...storedRest } = stored;
+  const { weight: _expectedWeight, ...expectedRest } = expected;
+  return JSON.stringify(storedRest) === JSON.stringify(expectedRest);
+}
 import { normalizeGtin } from './contracts';
 import { SourcingDecisionV2Schema } from '../../shared/schemas/onboarding';
 import { EvidenceAttemptSchema } from '../../shared/schemas/distributor-evidence';
@@ -122,7 +155,7 @@ export function buildDistributorExtractionDataV1(
     primaryImage: null,
     additionalImages: [],
     price: null,
-    weight: p.weight,
+    weight: canonicalMaterializedWeight(p.weight),
     dimensions: null,
     seoFileName: null,
     searchKeywords: null,
@@ -202,7 +235,7 @@ function buildDistributorExtractionDataV2(
     primaryImage: null,
     additionalImages: [],
     price: null,
-    weight: p.weight,
+    weight: canonicalMaterializedWeight(p.weight),
     dimensions: p.dimensions,
     seoFileName: null,
     searchKeywords: null,
@@ -501,7 +534,8 @@ export function materializeDistributorRecordExtraction(
         existing.sourcing_generation_id !== generation.id ||
         existing.evidence_hash !== decision.evidenceHash ||
         !sameSet(rowAcceptedIds, decision.acceptedEvidenceAttemptIds) ||
-        JSON.stringify(storedData) !== JSON.stringify(expectedData);
+        (JSON.stringify(storedData) !== JSON.stringify(expectedData) &&
+          !payloadsEquivalentAfterWeightNormalization(storedData, expectedData));
       if (rowDiverged) {
         return {
           ok: false as const,

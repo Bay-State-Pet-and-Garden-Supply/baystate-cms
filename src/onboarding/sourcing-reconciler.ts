@@ -8,6 +8,7 @@ import {
   isUnknownVariantAxis,
   normalizeDeclaredVariantAxis,
 } from './sourcing/contracts';
+import { normalizeIdentityValueForComparison, IDENTITY_NORMALIZATION_VERSION } from './normalization/identity';
 
 /**
  * Lazy DB require (established pattern: `src/classification/catalog-evidence.ts`).
@@ -201,7 +202,15 @@ export function evaluateDistributorEvidence(
   const providerIds = Array.from(new Set(foundAttempts.map((a) => a.providerId)));
 
   for (const [field, candidates] of candidatesByField.entries()) {
-    const distinctValues = Array.from(new Set(candidates.map((c) => c.value.toLowerCase())));
+    // Epic #46 follow-up (operator weight rule + GPT plan): identity fields
+    // compare on CANONICAL values — weight in pounds to two decimals, brand
+    // case-folded, packCount integer-normalized. Raw provider evidence is
+    // untouched; values that fail normalization compare as-is (fail closed).
+    const comparisonValue = (c: EvaluationConflictCandidate): string => {
+      const normalized = normalizeIdentityValueForComparison(field, c.value);
+      return normalized.status === 'normalized' ? normalized.comparisonValue : c.value.toLowerCase();
+    };
+    const distinctValues = Array.from(new Set(candidates.map(comparisonValue)));
 
     if (distinctValues.length > 1) {
       const severity = isHardField(field) ? 'hard' : 'soft';
@@ -222,6 +231,16 @@ export function evaluateDistributorEvidence(
       conflicts.push({ field, severity, candidates });
     } else if (candidates.length > 0) {
       // Coherent value across providers contributes every agreeing attempt.
+      // (Epic #46 follow-up: log when raw values disagreed but canonical
+      // identity agreed — e.g. "0.0600 lb" vs "0.06 lb" — so suppressed
+      // conflicts are explainable.)
+      const rawDistinct = Array.from(new Set(candidates.map((c) => c.value.toLowerCase())));
+      if (rawDistinct.length > 1) {
+        warnings.push(
+          `Identity field '${field}' values agree after normalization (rule v${IDENTITY_NORMALIZATION_VERSION}): ` +
+            `${candidates.map((c) => `${c.providerId}=${c.value}`).join(', ')} → '${distinctValues[0]}'`,
+        );
+      }
       for (const c of candidates) {
         acceptedAttemptIds.add(c.attemptId);
       }

@@ -34,6 +34,8 @@ import {
 import {
   materializeDistributorRecordExtraction,
   DISTRIBUTOR_MATERIALIZATION_ERROR_CODES,
+  canonicalMaterializedWeight,
+  payloadsEquivalentAfterWeightNormalization,
 } from '../../onboarding/sourcing/distributor-record-materializer';
 import type { SourcingDecisionV2 } from '../../shared/schemas/onboarding';
 import type { EvidenceAttempt } from '../../shared/schemas/distributor-evidence';
@@ -215,7 +217,8 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     const data = item?.extractionData as Record<string, unknown>;
     expect(data?.title).toBe('Pet Kibble 5lb');
     expect(data?.brand).toBe('Brand A');
-    expect(data?.weight).toBe('10 lbs');
+    // Epic #46 follow-up (operator weight rule): canonical pounds, 2dp.
+    expect(data?.weight).toBe('10.00');
     expect(data?.distributorSku).toBe('SKU-1');
     expect(data?.manufacturerPartNumber).toBe('MPN-1');
     // Amendment B (M5): merchandising-depth materialization.
@@ -858,7 +861,9 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     if (!result.ok) return;
     const item = findItemById(itemId);
     const data = item?.extractionData as Record<string, unknown>;
-    expect(data?.weight).toBe('11 lbs');
+    // Epic #46 follow-up (operator weight rule): structured weight is
+    // canonical pounds, two decimals — never the raw provider string.
+    expect(data?.weight).toBe('11.00');
     const provenance = data?.distributorRecordProvenance as Record<string, unknown>;
     expect(provenance?.evidenceHash).toBe(decision.evidenceHash);
     expect(findItemById(itemId)?.stageStatus).toBe('completed');
@@ -950,6 +955,9 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
       const allowed =
         from.startsWith('../../db/') ||
         from.startsWith('../../shared/') ||
+        // Pure, dependency-free identity normalization (epic #46 follow-up):
+        // no DB, network, or model machinery — safe for the boundary.
+        from.startsWith('../normalization/') ||
         from.startsWith('./');
       expect(allowed, `disallowed import source in materializer: ${from}`).toBe(true);
     }
@@ -957,6 +965,31 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
       expect(source).not.toContain(needle);
     }
   });
+describe('canonical structured weight (epic #46 follow-up, operator rule)', () => {
+  test('canonicalMaterializedWeight converts to pounds with two decimals', () => {
+    expect(canonicalMaterializedWeight('16 oz')).toBe('1.00');
+    expect(canonicalMaterializedWeight('0.0600 lb')).toBe('0.06');
+    expect(canonicalMaterializedWeight('10 lbs')).toBe('10.00');
+    expect(canonicalMaterializedWeight('0.25')).toBe('0.25');
+  });
+  test('null/empty pass through; malformed fails closed to the raw value (never silent bad canonical)', () => {
+    expect(canonicalMaterializedWeight(null)).toBeNull();
+    expect(canonicalMaterializedWeight('')).toBe('');
+    expect(canonicalMaterializedWeight('approx 1 lb')).toBe('approx 1 lb');
+  });
+  test('payloadsEquivalentAfterWeightNormalization accepts legacy raw weight formats only', () => {
+    const expected = { title: 'Pet Kibble', weight: '1.00', brand: 'Brand A' };
+    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: '1.0000 lb' }, expected)).toBe(true);
+    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: '16 oz' }, expected)).toBe(true);
+    // Identical payloads take the main equality path.
+    expect(payloadsEquivalentAfterWeightNormalization(expected, expected)).toBe(false);
+    // Real divergence anywhere else is NOT tolerated.
+    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: '1.00', brand: 'Brand B' }, expected)).toBe(false);
+    // Unparseable stored weight is never silently equivalent.
+    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: 'approx 1 lb' }, expected)).toBe(false);
+  });
+});
+
 describe('Distributor-record materializer v1/v2 authority dispatch (Amendment B, M5)', () => {
   test('a pre-deployment v1 decision fails closed with projection_version_mismatch (no silent upgrade)', () => {
     const att = makeFoundAttempt('phillips', { brand: 'Brand A', description: 'Copy' });

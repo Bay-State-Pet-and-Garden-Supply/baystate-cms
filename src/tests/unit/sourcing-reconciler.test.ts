@@ -90,6 +90,81 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(conflicts[0].candidates.length).toBe(2);
   });
 
+  // Epic #46 follow-up (operator weight rule): "0.0600 lb" vs "0.06 lb" are
+  // the SAME pounds value — formatting-only disagreement must not create a
+  // hard conflict.
+  test('equivalent weight formatting (0.0600 lb vs 0.06 lb) is NOT a conflict', async () => {
+    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '0.0600 lb' });
+    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '0.06 lb' });
+
+    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.hardConflictCount).toBe(0);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    expect(listConflictsForItem(itemId)).toEqual([]);
+    // Suppression is EXPLAINABLE: the warning records the canonical agreement.
+    expect(result.warnings.some((w) => w.includes('agree after normalization'))).toBe(true);
+  });
+
+  test('equivalent weight units (16 oz vs 1.0000 lb) are NOT a conflict', async () => {
+    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '16 oz' });
+    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '1.0000 lb' });
+
+    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.hardConflictCount).toBe(0);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    expect(listConflictsForItem(itemId)).toEqual([]);
+  });
+
+  test('rounding-equivalent weights (0.3771 lb vs 0.38 lb) are NOT a conflict', async () => {
+    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '0.3771 lb' });
+    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '0.38 lb' });
+
+    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+  });
+
+  test('true weight mismatch still produces a hard conflict', async () => {
+    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '0.25 lb' });
+    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '0.50 lb' });
+
+    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+
+    expect(result.hasHardIdentityConflict).toBe(true);
+    expect(result.hardConflictCount).toBe(1);
+    expect(result.acceptedAttemptIds).toEqual([]);
+  });
+
+  test('malformed weight fails closed: no auto-resolution against a valid value', async () => {
+    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: 'approx 1 lb' });
+    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '1.00 lb' });
+
+    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+
+    // Fail closed: the malformed value compares as its raw form → conflict stands.
+    expect(result.hasHardIdentityConflict).toBe(true);
+    expect(listConflictsForItem(itemId).length).toBe(1);
+  });
+
+  test('brand casing-only disagreement is NOT a conflict; distinct brands still are', async () => {
+    const caseA = makeAttempt('c1', 'phillips', { upc: '012345678905', brand: 'WHOLESOMES', weight: '5 lb' });
+    const caseB = makeAttempt('c2', 'bci', { upc: '012345678905', brand: 'Wholesomes', weight: '5 lb' });
+    const caseResult = await reconcileDistributorEvidence(itemId, [caseA, caseB], generationId);
+    expect(caseResult.hasHardIdentityConflict).toBe(false);
+    expect(caseResult.acceptedAttemptIds.sort()).toEqual(['c1', 'c2']);
+
+    const distinctA = makeAttempt('d1', 'phillips', { upc: '012345678905', brand: 'Wholesomes', weight: '5 lb' });
+    const distinctB = makeAttempt('d2', 'bci', { upc: '012345678905', brand: 'WholesomesFlavor', weight: '5 lb' });
+    const distinctResult = await reconcileDistributorEvidence(itemId, [distinctA, distinctB], generationId);
+    expect(distinctResult.hasHardIdentityConflict).toBe(true);
+    expect(distinctResult.acceptedAttemptIds).toEqual([]);
+  });
+
   test('soft copy disagreement persists a soft conflict but never blocks acceptance', async () => {
     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', description: 'Chicken recipe' });
     const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', description: 'Chicken & rice recipe' });

@@ -9,6 +9,7 @@ import {
   normalizeDeclaredVariantAxis,
   isUnknownVariantAxis,
 } from './contracts';
+import { normalizeIdentityValueForComparison } from '../normalization/identity';
 
 /**
  * Deterministic distributor-record projection (Amendment A).
@@ -626,11 +627,20 @@ function buildProjectionCore(
   }
 
   // Hard-conflict check on identity-critical fields (post-resolution).
+  // Epic #46 follow-up (operator weight rule): identity fields compare on
+  // CANONICAL values — "16 oz" vs "1.0000 lb" agree as pounds "1.00" and
+  // must not block qualification. Values that fail normalization compare
+  // as raw (fail closed).
   for (const field of allFields) {
     const values = fieldValues.get(field) ?? [];
     if (values.length <= 1) continue;
-    const distinct = new Set(values.map((v) => v.toLowerCase()));
-    if (distinct.size > 1 && isHardField(field)) {
+    const comparisonValues = new Set(
+      values.map((v) => {
+        const normalized = normalizeIdentityValueForComparison(field, v);
+        return normalized.status === 'normalized' ? normalized.comparisonValue : v.toLowerCase();
+      }),
+    );
+    if (comparisonValues.size > 1 && isHardField(field)) {
       reasons.add('open_hard_conflict');
       warnings.push(`Open hard conflict on identity field '${field}' — unresolved disagreement blocks qualification`);
     }

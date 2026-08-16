@@ -598,7 +598,6 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     // (waiting) cohort.
     refreshCandidateCohorts(workspaceId, batch.id);
     expect(liveCohortForMember(batch.id, members[0])?.status).toBe('waiting');
-
     // Phase 2: every member terminally fails (missing profile) → the family
     // is dead: superseded (not eternal 'waiting'), reason preserved for
     // audit, and never re-created by subsequent refreshes.
@@ -640,9 +639,9 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     refreshCandidateCohorts(workspaceId, batch.id);
 
     const recovered = liveCohortForMember(batch.id, members[0]);
-    expect(recovered).toBeDefined();
-    expect(recovered.status).toBe('waiting');
-    expect(recovered.blocked_reason).toContain('Member failed');
+    expect(recovered).not.toBeNull();
+    expect(recovered!.status).toBe('waiting');
+    expect(recovered!.blocked_reason).toContain('Member failed');
   });
 
   test('mixed family (one failed, one in progress) stays waiting with the blocked reason', async () => {
@@ -654,8 +653,9 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     refreshCandidateCohorts(workspaceId, batch.id);
 
     const live = liveCohortForMember(batch.id, members[0]);
-    expect(live.status).toBe('waiting');
-    expect(live.blocked_reason).toContain('Member failed');
+    expect(live).not.toBeNull();
+    expect(live!.status).toBe('waiting');
+    expect(live!.blocked_reason).toContain('Member failed');
   });
 
   test('family barrier never holds singletons or ready-cohort members', async () => {

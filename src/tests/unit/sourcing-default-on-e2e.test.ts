@@ -469,6 +469,33 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     expect(findItemById(item.id)?.stageStatus).toBe('completed');
   });
 
+  // 7b. Equivalent weight formatting/units across providers → NO conflict
+  // (operator weight rule + GPT plan): the item qualifies, the structured
+  // weight materializes as canonical pounds (2dp), and the NAME keeps its
+  // original units.
+  test('7b. equivalent weights (16 oz vs 1.0000 lb) → no conflict, canonical weight, name untouched', async () => {
+    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
+    const { item } = makeItem('012345678906', "Butcher's Pup 16 oz");
+    const gen = startSourcingGeneration(item.id, 'automatic_policy');
+    seedQualified(item.id, item.upc, gen.id, 'phillips', { name: "Butcher's Pup 16 oz", weight: '16 oz' });
+    seedQualified(item.id, item.upc, gen.id, 'bci', { name: "Butcher's Pup 16 oz", weight: '1.0000 lb' });
+
+    const worker = fixtureWorker(workspaceId, tempDir);
+    await settle(worker); // Sourcing: qualified — formatting disagreement is NOT a conflict
+    const routed = findItemById(item.id);
+    expect(routed?.stage).toBe('extraction');
+    expect(routed?.stageStatus).toBe('pending');
+    expect(routed?.sourcingDecision?.route).toBe('distributor_record_to_extraction');
+    expect(routed?.sourcingDecision?.conflicts).toEqual([]);
+
+    await settle(worker); // Extraction materializes
+    const done = findItemById(item.id);
+    expect(done?.stageStatus).toBe('completed');
+    expect(done?.extractionData?.weight).toBe('1.00');
+    // The operator rule: NEVER normalize the name/title.
+    expect(done?.extractionData?.title).toBe("Butcher's Pup 16 oz");
+  });
+
   // 7. Two agreeing providers → both accepted → extraction.
   test('7. two agreeing providers: both accepted, qualified, route to Extraction', async () => {
     overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
