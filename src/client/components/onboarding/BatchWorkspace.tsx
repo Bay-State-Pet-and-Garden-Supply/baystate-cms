@@ -23,7 +23,6 @@ import {
   type WorkspaceFilterInput,
   type WorkspaceTabId,
 } from './batch-workspace-logic';
-import { BatchProgressSummary } from './BatchProgressSummary';
 import { WorkStateTabs } from './WorkStateTabs';
 
 // ── Sibling feature views (epic #46 wave 2 contract) ─────────────────────────
@@ -206,8 +205,6 @@ export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings }: B
 
       {counts && (
         <>
-          <BatchProgressSummary counts={counts} />
-
           {/* ── Filter bar (server-owned filtering) ── */}
           <div className="bws-filter-bar" role="search" aria-label="Filter products">
             <input

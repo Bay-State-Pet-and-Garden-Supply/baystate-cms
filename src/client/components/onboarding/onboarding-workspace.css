@@ -7,26 +7,6 @@
  * theme.ts tokens.
  */
 
-/* ── Summary grid: 4 primary cards, collapses to 2×2 below 900px ── */
-.bws-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--spacing-md);
-  margin-bottom: var(--spacing-lg);
-}
-
-@media (max-width: 900px) {
-  .bws-summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 560px) {
-  .bws-summary-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 /* ── Tab bar ── */
 .bws-tabs {
   display: flex;
@@ -141,16 +121,6 @@
 
 .bws-results-table tbody tr:hover {
   background: var(--color-feed-bag-cream);
-}
-
-/* ── Attention accent (Needs Attention summary card) ── */
-.bws-attention-card {
-  border: 1px solid var(--color-danger-border) !important;
-  box-shadow: 0 1px 3px 0 rgba(118, 12, 25, 0.15);
-}
-
-.bws-attention-count {
-  color: var(--color-danger-text);
 }
 
 /* ── Modal overlay / drawer ── */

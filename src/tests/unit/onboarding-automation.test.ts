@@ -529,6 +529,42 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     }
   });
 
+  test('family barrier emits SSE only when the held set changes (no per-poll refresh loop)', async () => {
+    const batch = makeBatch();
+    const members = ['100050', '100051'].map(upc => makeItem(batch.id, upc, `Member ${upc}`, 'curation').id);
+    insertCohort(batch.id, 'cohort-waiting-sse', 'waiting', members);
+
+    const worker = makeWorker();
+
+    // First poll: every waiting member enters the barrier → one SSE event each.
+    const first: OnboardingEvent[] = [];
+    const unsub1 = onboardingEvents.subscribe(batch.id, e => first.push(e));
+    try {
+      await worker.poll();
+    } finally {
+      unsub1();
+    }
+    expect(first.filter(e => e.data.familyBarrier === true)).toHaveLength(members.length);
+
+    // Second poll: the SAME members are still held → ZERO SSE events (the
+    // 2s poll loop must not spam the UI/console while a family waits).
+    const second: OnboardingEvent[] = [];
+    const unsub2 = onboardingEvents.subscribe(batch.id, e => second.push(e));
+    try {
+      await worker.poll();
+    } finally {
+      unsub2();
+    }
+    expect(second.filter(e => e.data.familyBarrier === true)).toHaveLength(0);
+
+    // Still held at curation/pending, never claimed.
+    for (const id of members) {
+      const after = findItemById(id)!;
+      expect(after.stage).toBe('curation');
+      expect(after.stageStatus).toBe('pending');
+    }
+  });
+
   test('family barrier never holds singletons or ready-cohort members', async () => {
     const batch = makeBatch();
     const singleton = makeItem(batch.id, '100044', 'Singleton', 'curation').id;

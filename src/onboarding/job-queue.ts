@@ -160,6 +160,13 @@ export class OnboardingWorker {
   private isProcessing = false;
   /** Reviewer P1: set by stop(), cleared by start() — in-flight polls no-op. */
   private stopped = false;
+  /**
+   * Epic #46 refinement: the family-barrier hold emits SSE + logs ONLY when
+   * the held set CHANGES. The poll loop runs every 2s — emitting per held
+   * member on every poll produced constant console spam and a UI refresh
+   * loop while a family waited. Members that remain held are silent.
+   */
+  private lastHeldFamilyBarrierIds = new Set<string>();
   private workspacePath: string;
   private workspaceId: string;
   private workerId: string;
@@ -415,28 +422,48 @@ export class OnboardingWorker {
     // shadow observation) owns claiming — never hold here.
     if (flags.cohortCurationV2Enabled) return claimedItems;
     const waitingIds = new Set(listWaitingCohortMemberIdsByWorkspace(this.workspaceId));
-    if (waitingIds.size === 0) return claimedItems;
+    if (waitingIds.size === 0) {
+      // Nothing waits right now — sync the tracked set so a future re-hold
+      // of the same members emits again (they left and re-entered).
+      this.lastHeldFamilyBarrierIds.clear();
+      return claimedItems;
+    }
     const dispatchable: Array<{ id: string; batchId: string }> = [];
-    let heldCount = 0;
+    const heldNow = new Map<string, string>(); // itemId → batchId
     for (const item of claimedItems) {
       if (!waitingIds.has(item.id)) {
         dispatchable.push(item);
         continue;
       }
       if (releaseHeldFamilyClaim(item.id, this.workerId)) {
-        heldCount++;
-        onboardingEvents.emitItemStatus(item.batchId, item.id, 'pending', {
-          stage: 'curation',
-          familyBarrier: true,
-        });
+        heldNow.set(item.id, item.batchId);
       } else {
         // Claim lost the race — let the normal dispatch loop handle it.
         dispatchable.push(item);
       }
     }
-    if (heldCount > 0) {
-      console.log(`[OnboardingWorker] Held ${heldCount} family member(s) behind readiness barrier (curation/pending)`);
+    if (heldNow.size === 0) {
+      // Members left the barrier (or the claim race resolved elsewhere):
+      // sync tracking silently — nothing to announce.
+      this.lastHeldFamilyBarrierIds.clear();
+      return dispatchable;
     }
+    // SSE + log only on CHANGE: newly held members emit once; members that
+    // stayed held from a prior poll are silent (no per-poll refresh spam).
+    const newlyHeld = [...heldNow.keys()].filter(id => !this.lastHeldFamilyBarrierIds.has(id));
+    for (const id of newlyHeld) {
+      onboardingEvents.emitItemStatus(heldNow.get(id)!, id, 'pending', {
+        stage: 'curation',
+        familyBarrier: true,
+      });
+    }
+    if (newlyHeld.length > 0 || heldNow.size !== this.lastHeldFamilyBarrierIds.size) {
+      console.log(
+        `[OnboardingWorker] Held ${heldNow.size} family member(s) behind readiness barrier (curation/pending)` +
+          (newlyHeld.length > 0 ? `; ${newlyHeld.length} newly held` : ''),
+      );
+    }
+    this.lastHeldFamilyBarrierIds = new Set(heldNow.keys());
     return dispatchable;
   }
 
