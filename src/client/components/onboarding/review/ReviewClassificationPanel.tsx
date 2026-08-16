@@ -90,9 +90,20 @@ function abstentionReason(proposal: ClassificationProposal): string | null {
   const raw = proposal.proposedValue;
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     const reason = (raw as Record<string, unknown>).reason;
-    if (typeof reason === 'string' && reason) return reason;
+    if (typeof reason === 'string' && reason) return sanitizeReasonText(reason);
   }
   return null;
+}
+
+/**
+ * Abstention reasons are system/model text — never render raw JSON blobs
+ * or unbounded explanations (review round 2, MEDIUM-4).
+ */
+function sanitizeReasonText(reason: string): string {
+  const trimmed = reason.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'No evidence available.';
+  const singleLine = trimmed.replace(/\s+/g, ' ');
+  return singleLine.length > 240 ? `${singleLine.slice(0, 237)}…` : singleLine;
 }
 
 function statusLabel(status: ClassificationProposal['status']): string {
@@ -287,7 +298,12 @@ function ReviewProposalRow({
       <div className="rv-proposal-value">
         {text}
         {typeof proposal.confidence === 'number' && isPending && tier && (
-          <span className={`rv-conf-chip ${tier.cls}`} title="Confidence of the proposal">
+          <span
+            className={`rv-conf-chip ${tier.cls}`}
+            role="status"
+            aria-label={`Proposal confidence: ${Math.round(proposal.confidence * 100)} percent, ${tier.label.toLowerCase()}`}
+            title={`Confidence of the proposal: ${Math.round(proposal.confidence * 100)}% (${tier.label})`}
+          >
             {Math.round(proposal.confidence * 100)}% · {tier.label}
           </span>
         )}
@@ -311,7 +327,7 @@ function ReviewProposalRow({
             type="button"
             className="rv-btn rv-btn-primary"
             disabled={busy === proposal.id}
-            onClick={() => void onDecision(proposal, 'accepted')}
+            onClick={() => void decideAll(onDecision, [proposal, ...siblings], 'accepted')}
           >
             {busy === proposal.id ? 'Saving…' : 'Accept'}
           </button>
@@ -319,7 +335,7 @@ function ReviewProposalRow({
             type="button"
             className="rv-btn rv-btn-danger"
             disabled={busy === proposal.id}
-            onClick={() => void onDecision(proposal, 'rejected')}
+            onClick={() => void decideAll(onDecision, [proposal, ...siblings], 'rejected')}
           >
             {busy === proposal.id ? 'Saving…' : 'Reject'}
           </button>
@@ -327,4 +343,18 @@ function ReviewProposalRow({
       ) : null}
     </div>
   );
+}
+
+/**
+ * Review round 2 (BLOCKER): a merged row represents N proposals — the
+ * decision MUST fan out to every underlying proposal id, never just the
+ * visible representative. Otherwise hidden siblings stay pending and the
+ * review drawer lies about its own state.
+ */
+function decideAll(
+  onDecision: (proposal: ClassificationProposal, decision: 'accepted' | 'rejected') => Promise<void>,
+  proposals: ClassificationProposal[],
+  decision: 'accepted' | 'rejected',
+): Promise<void[]> {
+  return Promise.all(proposals.map(p => onDecision(p, decision)));
 }

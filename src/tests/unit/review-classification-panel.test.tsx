@@ -16,10 +16,14 @@ import { createRoot } from 'react-dom/client';
 import { act } from 'react';
 import type { ClassificationProposal } from '../../shared/schemas/classification';
 import { ReviewClassificationPanel } from '../../client/components/onboarding/review/ReviewClassificationPanel';
+import type { ItemDetailResponse } from '../../client/onboarding-api';
+
+let fixtureSeq = 0;
 
 function proposal(partial: Partial<ClassificationProposal>): ClassificationProposal {
+  fixtureSeq += 1;
   return {
-    id: 'p-' + Math.random().toString(36).slice(2, 8),
+    id: `p-${String(fixtureSeq).padStart(3, '0')}`,
     runId: 'run-1',
     productSku: 'SKU',
     proposalType: 'field_assignment',
@@ -37,25 +41,25 @@ function proposal(partial: Partial<ClassificationProposal>): ClassificationPropo
   };
 }
 
-const detail: any = {
-  item: {
-    curationData: {
-      classificationProposals: [],
-    },
-  },
-};
-
-async function renderWith(proposals: ClassificationProposal[]) {
+async function renderWith(
+  proposals: ClassificationProposal[],
+  onDecision: (p: ClassificationProposal, d: 'accepted' | 'rejected') => Promise<void> = vi.fn(),
+) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  detail.item.curationData = { classificationProposals: proposals, suggestedPages: [] };
+  const detail = {
+    item: {
+      curationData: { classificationProposals: proposals, suggestedPages: [] },
+    },
+  } as unknown as ItemDetailResponse;
   await act(async () => {
     root.render(
-      <ReviewClassificationPanel detail={detail} onDecision={vi.fn()} busyDecisionId={null} />,
+      <ReviewClassificationPanel detail={detail} onDecision={onDecision} busyDecisionId={null} />,
     );
   });
   return {
+    container,
     text: () => container.textContent ?? '',
     buttons: () => Array.from(container.querySelectorAll('button')).map(b => b.textContent ?? ''),
     unmount: () => {
@@ -124,7 +128,7 @@ describe('ReviewClassificationPanel clarity', () => {
     r.unmount();
   });
 
-  it('merges identical pending proposals into a single row', async () => {
+  it('merges identical pending proposals into a single row and fans the decision out to EVERY underlying id', async () => {
     const a = proposal({
       proposalType: 'field_assignment',
       targetId: 'brand',
@@ -137,12 +141,58 @@ describe('ReviewClassificationPanel clarity', () => {
       proposedValue: 'LITTLE GIANT BEEHIVE FRAME FEEDER Feeds your bees',
       confidence: 0.85,
     });
-    const r = await renderWith([a, b]);
+    const onDecision = vi.fn(async (_p: ClassificationProposal, _d: 'accepted' | 'rejected') => {});
+    const r = await renderWith([a, b], onDecision);
     const text = r.text();
     expect(text).toContain('Decisions needed (1)');
     expect(text).toContain('1 duplicate merged');
     expect(text).toContain('Brand & Product Type');
     expect(r.buttons()).toEqual(['Accept', 'Reject']);
+
+    // BLOCKER (review round 2): accepting the merged row must submit a
+    // decision for BOTH underlying proposal ids — never just the visible one.
+    const accept = r.container.querySelector('button.rv-btn-primary') as HTMLButtonElement;
+    await act(async () => { accept.click(); });
+    expect(onDecision).toHaveBeenCalledTimes(2);
+    const calledIds = onDecision.mock.calls.map(c => (c[0] as ClassificationProposal).id).sort();
+    expect(calledIds).toEqual([a.id, b.id].sort());
+    for (const call of onDecision.mock.calls) expect(call[1]).toBe('accepted');
+    r.unmount();
+  });
+
+  it('sanitizes abstention reasons (JSON blobs and unbounded text never render raw)', async () => {
+    const jsonReason = proposal({
+      proposalType: 'reviewable_abstention',
+      targetId: 'category-pages',
+      proposedValue: { reason: '{"internal":"trace-42"}' },
+      confidence: 0,
+    });
+    const longReason = proposal({
+      proposalType: 'reviewable_abstention',
+      targetId: 'attributes',
+      proposedValue: { reason: 'x'.repeat(500) },
+      confidence: 0,
+    });
+    const r = await renderWith([jsonReason, longReason]);
+    const text = r.text();
+    expect(text).toContain('No evidence available.');
+    expect(text).not.toContain('trace-42');
+    expect(text).not.toContain('{');
+    expect(text).toContain('\u2026');
+    r.unmount();
+  });
+
+  it('labels the confidence chip for screen readers', async () => {
+    const ppt = proposal({
+      proposalType: 'primary_product_type',
+      targetId: 'dog-food-dry',
+      proposedValue: { productTypeId: 'dog-food-dry', matchedWords: [] },
+      confidence: 0.35,
+    });
+    const r = await renderWith([ppt]);
+    const chip = r.container.querySelector('[aria-label^="Proposal confidence"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute('aria-label')).toContain('35 percent, low');
     r.unmount();
   });
 

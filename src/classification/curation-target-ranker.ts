@@ -285,13 +285,18 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     // Margin gate (Package C): when per-candidate scores came back, the top
     // raw score must lead the runner-up by a meaningful spread — otherwise
     // the pick is a coin flip. Computed over the RAW scores (the single-mode
-    // slice would otherwise hide the runner-up); absent or malformed scores
-    // skip this gate entirely.
+    // slice would otherwise hide the runner-up). Malformed scores (wrong
+    // length vs values, non-numeric entries) FAIL CLOSED to abstention — a
+    // model that cannot report a reliable ranking signal gets no proposal
+    // (review round 2, MEDIUM-3: fail-closed for ambiguous ranking output).
     if (Array.isArray(parsed.scores) && Array.isArray(parsed.values)) {
       const clamped = parsed.scores
         .map(s => (typeof s === 'number' ? Math.max(0, Math.min(1, s)) : null))
         .filter((s): s is number => s !== null);
-      if (clamped.length >= 2 && clamped.length === parsed.scores.length) {
+      const scoresMalformed =
+        parsed.scores.length !== parsed.values.length || clamped.length !== parsed.scores.length;
+      if (scoresMalformed) return null;
+      if (clamped.length >= 2) {
         const sorted = [...clamped].sort((a, b) => b - a);
         const margin = sorted[0] - sorted[1];
         if (margin < LLM_PROPOSE_MARGIN_MIN) return null;

@@ -154,6 +154,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
         `Verified ${s.verified} of ${s.images} distributor image${s.images === 1 ? '' : 's'} across ${s.items} product${s.items === 1 ? '' : 's'} — ` +
           `${s.commerceApproved} commerce-approved, ${s.displayOnly} display-only` +
           (s.failed > 0 ? `, ${s.failed} failed` : '') +
+          (s.skipped > 0 ? `, ${s.skipped} already verified or display-only` : '') +
           (s.skippedVlmOcr ? ' (no VLM OCR configured — identity from catalog evidence only)' : ''),
       );
       await loadQueue();

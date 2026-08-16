@@ -28,7 +28,7 @@ import { verifyImageCandidate, type ResolvedEvidenceFact } from '../product-inte
 import type { ProductAssetEvidence } from '../product-intelligence/assets/schema';
 import type { ImageVerificationContract } from '../product-intelligence/assets/contract';
 import { buildReuseGrantResolver, upsertReusePolicy } from '../db/repositories/pi-reuse-policy-repo';
-import { insertOnboardingPiAsset } from '../db/repositories/product-intelligence-repo';
+import { insertOnboardingPiAsset, listPiAssetsByOnboardingItem } from '../db/repositories/product-intelligence-repo';
 import { getDb } from '../db/connection';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
@@ -55,6 +55,8 @@ export interface DistributorImagerySummary {
   commerceApproved: number;
   displayOnly: number;
   failed: number;
+  /** URLs skipped: already verified (durable row) or display-only origin. */
+  skipped: number;
   skippedVlmOcr: boolean;
   perItem: Array<{
     itemId: string;
@@ -73,7 +75,12 @@ export interface DistributorImageryDeps {
   contract?: ImageVerificationContract;
 }
 
-/** Distinct image domains across a batch's approved distributor imagery. */
+/** Distinct image domains across a batch's RIGHTS-ATTESTED distributor
+ *  imagery. Only approvals carrying the operator's explicit channel opt-in
+ *  (origin `distributor_channel_opt_in` + `rightsAttested: true`) may seed
+ *  reuse grants — any other approval shape stays display-only (PI-6 review
+ *  round 2, HIGH-1: "the approval record itself is the authorization" must
+ *  be enforced, not assumed). */
 export function distributorImageDomains(batchId: string): string[] {
   const db = getDb();
   const rows = db.query(
@@ -86,6 +93,7 @@ export function distributorImageDomains(batchId: string): string[] {
     try {
       const data = JSON.parse(row.extraction_data_json) as { distributorImageApprovals?: DistributorImageApproval[] };
       for (const approval of data.distributorImageApprovals ?? []) {
+        if (approval.approvalOrigin !== 'distributor_channel_opt_in' || approval.rightsAttested !== true) continue;
         try {
           domains.add(new URL(approval.imageUrl).hostname.toLowerCase());
         } catch {
@@ -265,7 +273,8 @@ export async function verifyDistributorImage(
 /**
  * Verify all approved distributor imagery for a batch: authorize domains,
  * run PI-6 verification per image, persist durable assets. Returns a
- * per-item summary. Idempotent — re-runs skip already-verified URLs.
+ * per-item summary. Idempotent — re-runs skip already-verified URLs (the
+ * durable (item, url) asset row is the verified-state authority).
  */
 export async function verifyDistributorImageryForBatch(
   batchId: string,
@@ -284,14 +293,33 @@ export async function verifyDistributorImageryForBatch(
     commerceApproved: 0,
     displayOnly: 0,
     failed: 0,
+    skipped: 0,
     skippedVlmOcr: false,
     perItem: [],
   };
 
   for (const item of items) {
     let approved = 0;
+    const verifiedUrls = new Set(
+      listPiAssetsByOnboardingItem(item.id).map((a) => a.sourceUrl),
+    );
     for (const approval of approvedImagesOf(item)) {
+      // Display-only approvals (non-opt-in origins) never enter the
+      // verification pipeline (review round 2, HIGH-1).
+      if (approval.approvalOrigin !== 'distributor_channel_opt_in' || approval.rightsAttested !== true) {
+        summary.images += 1;
+        summary.skipped += 1;
+        continue;
+      }
       summary.images += 1;
+      // Already verified in a previous run — the durable row is the
+      // authority; never re-fetch/re-OCR (review round 2, MEDIUM-4).
+      if (verifiedUrls.has(approval.imageUrl)) {
+        summary.skipped += 1;
+        const existing = listPiAssetsByOnboardingItem(item.id).find((a) => a.sourceUrl === approval.imageUrl);
+        if (existing?.commerceApproved) approved += 1;
+        continue;
+      }
       const { record, skippedVlmOcr } = await verifyDistributorImage(item, approval.imageUrl, workspacePath, workspaceId, deps);
       summary.skippedVlmOcr = summary.skippedVlmOcr || skippedVlmOcr;
       if (record.qualityStatus === 'invalid') {

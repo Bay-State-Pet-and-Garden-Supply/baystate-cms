@@ -24,7 +24,10 @@ import type { Workspace } from '../../shared/types';
 const WORKSPACE_ID = 'ws-shadow-test';
 const COHORT_ID = 'cohort-betterbone-vnsn';
 
+let observedSeq = 0;
+
 function observationInput(overrides: Partial<CohortShadowObservationInput> = {}): CohortShadowObservationInput {
+  observedSeq += 1;
   return {
     workspaceId: WORKSPACE_ID,
     cohortId: COHORT_ID,
@@ -41,7 +44,9 @@ function observationInput(overrides: Partial<CohortShadowObservationInput> = {})
       { onboardingItemId: 'i2', productSku: '100000000002', productTypeId: 'dog-toys', source: 'keyword' },
     ]),
     groupingVersion: 'product-family-v1',
-    observedAt: '2026-08-16T09:00:00.000Z',
+    // Monotonic per insert so newest-first ordering is deterministic (the
+    // change-detection tests compare rows[0] against the latest insert).
+    observedAt: `2026-08-16T09:00:${String(observedSeq).padStart(2, '0')}.000Z`,
     ...overrides,
   };
 }
@@ -111,6 +116,18 @@ describe('cohort shadow observations', () => {
     const rows = listCohortShadowObservations(WORKSPACE_ID, 50);
     expect(rows.length).toBe(2);
     expect(rows[0].outcome).toBe('conflicted');
+  });
+
+  test('change detection: a status/readyCount transition with identical members produces a new row (review round 2 MEDIUM-2)', () => {
+    insertCohortShadowObservationIfChanged(observationInput());
+    const inserted = insertCohortShadowObservationIfChanged(
+      observationInput({ status: 'forming', readyCount: 0 }),
+    );
+    expect(inserted).toBe(true);
+    const rows = listCohortShadowObservations(WORKSPACE_ID, 50);
+    expect(rows.length).toBe(2);
+    expect(rows[0].status).toBe('forming');
+    expect(rows[0].readyCount).toBe(0);
   });
 
   test('change detection: member-count change produces a new row', () => {

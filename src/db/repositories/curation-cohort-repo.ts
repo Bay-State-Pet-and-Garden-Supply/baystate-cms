@@ -611,7 +611,13 @@ export function insertCohortShadowObservationIfChanged(
       latest.memberCount === input.memberCount &&
       latest.membersJson === input.membersJson &&
       latest.groupKey === input.groupKey &&
-      latest.groupingVersion === input.groupingVersion;
+      latest.groupingVersion === input.groupingVersion &&
+      // Review round 2 (MEDIUM-2): the full observable state participates in
+      // the fingerprint — status/readyCount/confidence transitions are
+      // rollout-relevant even when members and type are unchanged.
+      latest.status === input.status &&
+      latest.readyCount === input.readyCount &&
+      latest.productTypeConfidence === input.productTypeConfidence;
     if (unchanged) return false;
   }
   const id = randomUUID();

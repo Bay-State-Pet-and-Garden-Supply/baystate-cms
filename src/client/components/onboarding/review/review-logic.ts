@@ -340,9 +340,11 @@ export function distributorApprovedImages(
   extraction: { distributorImageApprovals?: Array<{ imageUrl?: string }> } | null | undefined,
 ): DistributorApprovedImages | null {
   const approvals = extraction?.distributorImageApprovals ?? [];
-  const urls = approvals
-    .map((a) => a?.imageUrl)
-    .filter((u): u is string => typeof u === 'string' && u.length > 0);
+  const urls = [...new Set(
+    approvals
+      .map((a) => a?.imageUrl)
+      .filter((u): u is string => typeof u === 'string' && u.length > 0),
+  )];
   if (urls.length === 0) return null;
   return { primary: urls[0], additional: urls.slice(1) };
 }

@@ -129,6 +129,7 @@ export async function verifyDistributorImagery(batchId: string): Promise<{
     commerceApproved: number;
     displayOnly: number;
     failed: number;
+    skipped: number;
     skippedVlmOcr: boolean;
     perItem: Array<{ itemId: string; upc: string; images: number; commerceApproved: number }>;
   };

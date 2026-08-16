@@ -216,6 +216,42 @@ describe('onboarding distributor imagery verification', () => {
     expect(assets[0].exactProductMatch).toBe(0);
   });
 
+  test('non-opt-in approval origins are display-only — never granted, never verified (review round 2 HIGH-1)', async () => {
+    // Re-stamp the item's approval with a non-opt-in origin.
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(
+      JSON.stringify({
+        title: 'Fromm Gold Adult 4 lb',
+        brand: 'Fromm',
+        sourceType: 'distributor_record',
+        distributorImageApprovals: [
+          {
+            imageUrl: IMAGE_URL,
+            sourceAttemptIds: ['att-1'],
+            approvedAt: '2026-08-16T00:00:00.000Z',
+            rightsAttested: true,
+            approvalOrigin: 'manual_reviewer',
+          },
+        ],
+      }),
+      itemId,
+    );
+
+    const summary = await verifyDistributorImageryForBatch(batchId, workspaceId, wsPath, {
+      fetchFn: fetchStub(),
+      ocr: ocrStub(),
+      contract: contractStub(),
+    });
+
+    // The URL was counted but never fetched/verified and never granted.
+    expect(summary.images).toBe(1);
+    expect(summary.verified).toBe(0);
+    expect(summary.skipped).toBe(1);
+    expect(summary.commerceApproved).toBe(0);
+    const grants = listReusePolicies(workspaceId);
+    expect(grants.some((g) => g.domainPattern === 'd56ygyjv466yj.cloudfront.net')).toBe(false);
+    expect(listPiAssetsByOnboardingItem(itemId)).toEqual([]);
+  });
+
   test('fetch failure → failed outcome, no asset persisted', async () => {
     const summary = await verifyDistributorImageryForBatch(batchId, workspaceId, wsPath, {
       fetchFn: async () => new Response('not found', { status: 404, headers: { 'content-type': 'image/png' } }),
@@ -228,14 +264,15 @@ describe('onboarding distributor imagery verification', () => {
     expect(listPiAssetsByOnboardingItem(itemId)).toEqual([]);
   });
 
-  test('idempotent: re-running does not duplicate assets', async () => {
+  test('idempotent: re-running skips already-verified URLs (no re-fetch, no dup rows)', async () => {
     const deps = { fetchFn: fetchStub(), ocr: ocrStub(), contract: contractStub() };
     await verifyDistributorImageryForBatch(batchId, workspaceId, wsPath, deps);
     const second = await verifyDistributorImageryForBatch(batchId, workspaceId, wsPath, deps);
 
-    // Second run still reports the image (verified again) but the durable
-    // row is INSERT OR IGNORE'd by the (item, url) unique index.
-    expect(second.verified).toBe(1);
+    // The durable (item, url) row is the verified-state authority — the
+    // second run skips the URL entirely (review round 2 MEDIUM-4).
+    expect(second.verified).toBe(0);
+    expect(second.skipped).toBe(1);
     expect(listPiAssetsByOnboardingItem(itemId).length).toBe(1);
   });
 });

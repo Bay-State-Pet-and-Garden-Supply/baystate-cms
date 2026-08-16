@@ -264,16 +264,12 @@ describe('LLM margin gate (epic #46 Package C)', () => {
     await expect(llmRankOptions(baseParams)).resolves.toBeNull();
   });
 
-  it('ignores malformed scores (length mismatch with values)', async () => {
+  it('fails closed on malformed scores (length mismatch with values) — abstains, never proposes (review round 2 MEDIUM-3)', async () => {
     mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
       { content: '{"values":["Chicken","Salmon"],"scores":[0.9],"confidence":0.8}', callId: 'c-m5', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
     );
 
-    await expect(llmRankOptions(baseParams)).resolves.toEqual({
-      values: ['Chicken'],
-      confidence: 0.8,
-      modelCallIds: ['c-m5'],
-    });
+    await expect(llmRankOptions(baseParams)).resolves.toBeNull();
   });
 
   it('uses the raw-score spread even when a non-option value sits in the list', async () => {
