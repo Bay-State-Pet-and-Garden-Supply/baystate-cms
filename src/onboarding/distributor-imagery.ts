@@ -276,6 +276,136 @@ export async function verifyDistributorImage(
  * per-item summary. Idempotent — re-runs skip already-verified URLs (the
  * durable (item, url) asset row is the verified-state authority).
  */
+export interface DistributorItemVerificationResult {
+  itemId: string;
+  upc: string;
+  images: number;
+  verified: number;
+  commerceApproved: number;
+  displayOnly: number;
+  failed: number;
+  skipped: number;
+  skippedVlmOcr: boolean;
+}
+
+/**
+ * Verify ONE item's approved distributor imagery (PI-6 pipeline):
+ * rights-attested opt-in approvals only, already-verified URLs skipped,
+ * durable assets persisted. Pure side effect on the asset table; NEVER
+ * throws for expected outcomes (network/OCR failures degrade counts).
+ * Used by the batch sweep and by automatic promotion-time verification.
+ */
+export async function verifyDistributorImageryForItem(
+  item: OnboardingItem,
+  workspacePath: string,
+  workspaceId: string,
+  deps: DistributorImageryDeps = {},
+): Promise<DistributorItemVerificationResult> {
+  const result: DistributorItemVerificationResult = {
+    itemId: item.id,
+    upc: item.upc ?? '',
+    images: 0,
+    verified: 0,
+    commerceApproved: 0,
+    displayOnly: 0,
+    failed: 0,
+    skipped: 0,
+    skippedVlmOcr: false,
+  };
+  if (item.sourceType !== 'distributor_record') return result;
+  result.images = approvedImagesOf(item).length;
+  if (result.images === 0) return result;
+
+  // Seed supplier-tier reuse grants for this item's opt-in image domains
+  // (idempotent upserts — the batch sweep seeds the same grants). Without
+  // the durable grant, `verifyImageCandidate` resolves rights as denied and
+  // every image would verify display-only.
+  const optInUrls = approvedImagesOf(item)
+    .filter((a) => a.approvalOrigin === 'distributor_channel_opt_in' && a.rightsAttested === true)
+    .map((a) => a.imageUrl);
+  for (const domain of new Set(optInUrls.map((url) => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  }).filter((d): d is string => d !== null))) {
+    upsertReusePolicy({
+      workspaceId,
+      sourceTier: 'supplier',
+      domainPattern: domain,
+      allowed: true,
+      terms: 'Distributor channel opt-in (licensed distributor imagery) — operator-authorized via onboarding batch verification',
+    });
+  }
+
+  const verifiedUrls = new Set(listPiAssetsByOnboardingItem(item.id).map((a) => a.sourceUrl));
+  for (const approval of approvedImagesOf(item)) {
+    // Display-only approvals (non-opt-in origins) never enter the
+    // verification pipeline (review round 2, HIGH-1).
+    if (approval.approvalOrigin !== 'distributor_channel_opt_in' || approval.rightsAttested !== true) {
+      result.skipped += 1;
+      continue;
+    }
+    // Already verified in a previous run — the durable row is the
+    // authority; never re-fetch/re-OCR (review round 2, MEDIUM-4).
+    if (verifiedUrls.has(approval.imageUrl)) {
+      result.skipped += 1;
+      const existing = listPiAssetsByOnboardingItem(item.id).find((a) => a.sourceUrl === approval.imageUrl);
+      if (existing?.commerceApproved) result.commerceApproved += 1;
+      continue;
+    }
+    const { record, skippedVlmOcr } = await verifyDistributorImage(item, approval.imageUrl, workspacePath, workspaceId, deps);
+    result.skippedVlmOcr = result.skippedVlmOcr || skippedVlmOcr;
+    if (record.qualityStatus === 'invalid') {
+      result.failed += 1;
+      continue;
+    }
+    result.verified += 1;
+    insertOnboardingPiAsset({
+      onboardingItemId: item.id,
+      sourceUrl: approval.imageUrl,
+      sourceType: record.sourceType ?? 'supplier',
+      extractionMethod: record.extractionMethod ?? 'image_ocr',
+      retrievedAt: record.retrievedAt,
+      originalContentHash: record.originalContentHash,
+      perceptualHash: record.perceptualHash ?? null,
+      rightsStatus: record.rightsStatus,
+      rightsBasis: record.rightsBasis ?? null,
+      rightsEvidenceRef: record.rightsEvidenceRef ?? null,
+      observedBrand: record.observedBrand ?? null,
+      observedProductName: record.observedProductName ?? null,
+      observedVariant: record.observedVariant ?? null,
+      observedNetContent: record.observedNetContent ?? null,
+      observedPackCount: record.observedPackCount ?? null,
+      observedGtin: record.observedGtin ?? null,
+      exactProductMatch: record.exactProductMatch,
+      exactVariantMatch: record.exactVariantMatch,
+      qualityStatus: record.qualityStatus,
+      commerceApproved: record.commerceApproved,
+      conflicts: record.conflicts,
+      payload: record,
+      verifiedAgainstJson: record.verifiedAgainst ? JSON.stringify(record.verifiedAgainst) : null,
+      verifiedAgainstHash: record.verifiedAgainstHash ?? null,
+      declaredSourceType: record.sourceType ?? 'supplier',
+      brandEvidenceId: record.brandEvidenceId ?? null,
+      brandEvidenceHash: record.brandEvidenceHash ?? null,
+    });
+    if (record.commerceApproved) {
+      result.commerceApproved += 1;
+    } else {
+      result.displayOnly += 1;
+    }
+  }
+  return result;
+}
+
+/**
+ * Verify all approved distributor imagery for a batch: authorize domains,
+ * run PI-6 verification per image, persist durable assets. Returns a
+ * per-item summary. Idempotent — re-runs skip already-verified URLs (the
+ * durable (item, url) asset row is the verified-state authority).
+ */
 export async function verifyDistributorImageryForBatch(
   batchId: string,
   workspaceId: string,
@@ -299,71 +429,15 @@ export async function verifyDistributorImageryForBatch(
   };
 
   for (const item of items) {
-    let approved = 0;
-    const verifiedUrls = new Set(
-      listPiAssetsByOnboardingItem(item.id).map((a) => a.sourceUrl),
-    );
-    for (const approval of approvedImagesOf(item)) {
-      // Display-only approvals (non-opt-in origins) never enter the
-      // verification pipeline (review round 2, HIGH-1).
-      if (approval.approvalOrigin !== 'distributor_channel_opt_in' || approval.rightsAttested !== true) {
-        summary.images += 1;
-        summary.skipped += 1;
-        continue;
-      }
-      summary.images += 1;
-      // Already verified in a previous run — the durable row is the
-      // authority; never re-fetch/re-OCR (review round 2, MEDIUM-4).
-      if (verifiedUrls.has(approval.imageUrl)) {
-        summary.skipped += 1;
-        const existing = listPiAssetsByOnboardingItem(item.id).find((a) => a.sourceUrl === approval.imageUrl);
-        if (existing?.commerceApproved) approved += 1;
-        continue;
-      }
-      const { record, skippedVlmOcr } = await verifyDistributorImage(item, approval.imageUrl, workspacePath, workspaceId, deps);
-      summary.skippedVlmOcr = summary.skippedVlmOcr || skippedVlmOcr;
-      if (record.qualityStatus === 'invalid') {
-        summary.failed += 1;
-        continue;
-      }
-      summary.verified += 1;
-      insertOnboardingPiAsset({
-        onboardingItemId: item.id,
-        sourceUrl: approval.imageUrl,
-        sourceType: record.sourceType ?? 'supplier',
-        extractionMethod: record.extractionMethod ?? 'image_ocr',
-        retrievedAt: record.retrievedAt,
-        originalContentHash: record.originalContentHash,
-        perceptualHash: record.perceptualHash ?? null,
-        rightsStatus: record.rightsStatus,
-        rightsBasis: record.rightsBasis ?? null,
-        rightsEvidenceRef: record.rightsEvidenceRef ?? null,
-        observedBrand: record.observedBrand ?? null,
-        observedProductName: record.observedProductName ?? null,
-        observedVariant: record.observedVariant ?? null,
-        observedNetContent: record.observedNetContent ?? null,
-        observedPackCount: record.observedPackCount ?? null,
-        observedGtin: record.observedGtin ?? null,
-        exactProductMatch: record.exactProductMatch,
-        exactVariantMatch: record.exactVariantMatch,
-        qualityStatus: record.qualityStatus,
-        commerceApproved: record.commerceApproved,
-        conflicts: record.conflicts,
-        payload: record,
-        verifiedAgainstJson: record.verifiedAgainst ? JSON.stringify(record.verifiedAgainst) : null,
-        verifiedAgainstHash: record.verifiedAgainstHash ?? null,
-        declaredSourceType: record.sourceType ?? 'supplier',
-        brandEvidenceId: record.brandEvidenceId ?? null,
-        brandEvidenceHash: record.brandEvidenceHash ?? null,
-      });
-      if (record.commerceApproved) {
-        approved += 1;
-        summary.commerceApproved += 1;
-      } else {
-        summary.displayOnly += 1;
-      }
-    }
-    summary.perItem.push({ itemId: item.id, upc: item.upc ?? '', images: approvedImagesOf(item).length, commerceApproved: approved });
+    const r = await verifyDistributorImageryForItem(item, workspacePath, workspaceId, deps);
+    summary.images += r.images;
+    summary.verified += r.verified;
+    summary.commerceApproved += r.commerceApproved;
+    summary.displayOnly += r.displayOnly;
+    summary.failed += r.failed;
+    summary.skipped += r.skipped;
+    summary.skippedVlmOcr = summary.skippedVlmOcr || r.skippedVlmOcr;
+    summary.perItem.push({ itemId: r.itemId, upc: r.upc, images: r.images, commerceApproved: r.commerceApproved });
   }
   return summary;
 }

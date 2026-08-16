@@ -18,7 +18,6 @@ import {
   subscribeBatchEvents,
 } from '../../../onboarding-work-api';
 import { completeReviewStage, getItemDetail, submitDecisions, updateItem, type ItemDetailResponse } from '../../../onboarding-api';
-import { verifyDistributorImagery } from '../../../onboarding-work-api';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import type { ClassificationProposal } from '../../../../shared/schemas/classification';
 import {
@@ -77,10 +76,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
 
-  // ── Distributor imagery verification (epic #46 follow-up) ──────────────
-  const [imageryBusy, setImageryBusy] = useState(false);
-  const [imageryNotice, setImageryNotice] = useState<string | null>(null);
-  const [imageryError, setImageryError] = useState<string | null>(null);
 
   // ── Session tracking ────────────────────────────────────────────────────
   const [editedIds, setEditedIds] = useState<Set<string>>(() => new Set());
@@ -141,29 +136,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     },
     [batchId],
   );
-
-  const handleVerifyImagery = useCallback(async () => {
-    if (imageryBusy) return;
-    setImageryBusy(true);
-    setImageryError(null);
-    setImageryNotice(null);
-    try {
-      const res = await verifyDistributorImagery(batchId);
-      const s = res.summary;
-      setImageryNotice(
-        `Verified ${s.verified} of ${s.images} distributor image${s.images === 1 ? '' : 's'} across ${s.items} product${s.items === 1 ? '' : 's'} — ` +
-          `${s.commerceApproved} commerce-approved, ${s.displayOnly} display-only` +
-          (s.failed > 0 ? `, ${s.failed} failed` : '') +
-          (s.skipped > 0 ? `, ${s.skipped} already verified or display-only` : '') +
-          (s.skippedVlmOcr ? ' (no VLM OCR configured — identity from catalog evidence only)' : ''),
-      );
-      await loadQueue();
-    } catch (err) {
-      setImageryError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setImageryBusy(false);
-    }
-  }, [imageryBusy, batchId, loadQueue]);
 
   // Load the next page of the server-projection queue and append (audit M7).
   // The base set is all `ready_for_review` items; client-side filters remain
@@ -611,25 +583,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
               >
                 Mark reviewed ({reviewableSelected})
               </button>
-              <button
-                type="button"
-                className="btn btn-outline btn-sm"
-                disabled={imageryBusy}
-                title="Run deterministic PI-6 verification over the approved distributor imagery (rights-attested via the distributor channel opt-in)"
-                onClick={() => void handleVerifyImagery()}
-              >
-                {imageryBusy ? 'Verifying imagery…' : '🖼 Verify distributor imagery'}
-              </button>
-            </div>
-          )}
-          {imageryNotice && (
-            <div className="rv-bulk-notice" role="status">
-              ✓ {imageryNotice}
-            </div>
-          )}
-          {imageryError && (
-            <div className="rv-error-banner" role="alert">
-              {imageryError}
             </div>
           )}
           {bulkNotice && (

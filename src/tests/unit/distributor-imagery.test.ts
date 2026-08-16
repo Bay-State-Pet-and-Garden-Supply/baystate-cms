@@ -16,12 +16,12 @@ import { initDb, closeDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
-import { insertItems, updateItemStageStatus } from '../../db/repositories/onboarding-item-repo';
+import { insertItems, listItemsByBatch, updateItemStageStatus } from '../../db/repositories/onboarding-item-repo';
 import { insertEvidenceAttempt, startSourcingGeneration } from '../../db/repositories/onboarding-evidence-repo';
 import { createConnection } from '../../db/repositories/distributor-repo';
 import { listReusePolicies } from '../../db/repositories/pi-reuse-policy-repo';
 import { listPiAssetsByOnboardingItem } from '../../db/repositories/product-intelligence-repo';
-import { verifyDistributorImageryForBatch } from '../../onboarding/distributor-imagery';
+import { verifyDistributorImageryForBatch, verifyDistributorImageryForItem } from '../../onboarding/distributor-imagery';
 import { sha256Hex } from '../../shared/stable-id';
 import type { ImageVerificationContract } from '../../product-intelligence/assets/contract';
 import type { ExtractPackagingOcrParams } from '../../onboarding/packaging-ocr';
@@ -276,3 +276,107 @@ describe('onboarding distributor imagery verification', () => {
     expect(listPiAssetsByOnboardingItem(itemId).length).toBe(1);
   });
 });
+
+describe('automatic promotion-time verification (per-item)', () => {
+  let tempDir: string;
+  let workspaceId: string;
+  let wsPath: string;
+  let batchId: string;
+  let itemId: string;
+  let pngBytes: Uint8Array;
+  let pngHash: string;
+
+  beforeEach(async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'distributor-imagery-item-test-'));
+    initDb(path.join(tempDir, 'test.db'));
+    runMigrations();
+    wsPath = path.join(tempDir, 'ws');
+    fs.mkdirSync(wsPath, { recursive: true });
+    workspaceId = 'ws-imagery-item';
+    insertWorkspace({
+      id: workspaceId,
+      name: 'W',
+      workspacePath: wsPath,
+      gitPath: tempDir + '/.git',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    batchId = createBatch({ workspaceId, name: 'B', fileName: 'b.csv', totalItems: 1 }).id;
+    pngBytes = new Uint8Array(
+      await sharp({ create: { width: 240, height: 240, channels: 3, background: { r: 60, g: 120, b: 200 } } })
+        .png()
+        .toBuffer(),
+    );
+    pngHash = sha256Hex(Buffer.from(pngBytes));
+    const [item] = insertItems(batchId, [{ upc: '627987480993', name: 'Fromm Gold Adult 4 lb', brandHint: 'Fromm', rowNumber: 1, stage: 'promotion' }], 'review', 1);
+    itemId = item.id;
+    getDb().query("UPDATE onboarding_items SET source_type = 'distributor_record' WHERE id = ?").run(item.id);
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(
+      JSON.stringify({
+        title: 'Fromm Gold Adult 4 lb',
+        brand: 'Fromm',
+        sourceType: 'distributor_record',
+        distributorImageApprovals: [
+          { imageUrl: IMAGE_URL, sourceAttemptIds: ['att-1'], approvedAt: '2026-08-16T00:00:00.000Z', rightsAttested: true, approvalOrigin: 'distributor_channel_opt_in' },
+        ],
+      }),
+      item.id,
+    );
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('promotion-time call verifies the item without a batch sweep', async () => {
+    const item = listItemsByBatch(batchId).find((i) => i.id === itemId)!;
+    const fetchStub = async () =>
+      new Response(Buffer.from(pngBytes), { status: 200, headers: { 'content-type': 'image/png' } });
+    const ocrStub = (async () => ({
+      productName: 'Fromm Gold Adult 4 lb',
+      brand: 'Fromm',
+      upc: '627987480993',
+      contentHash: pngHash,
+    })) as never;
+
+    const r = await verifyDistributorImageryForItem(item, wsPath, workspaceId, {
+      fetchFn: fetchStub,
+      ocr: ocrStub,
+      contract: contractStubFor(pngHash),
+    });
+
+    expect(r.images).toBe(1);
+    expect(r.verified).toBe(1);
+    expect(r.commerceApproved).toBe(1);
+    expect(r.failed).toBe(0);
+    expect(listPiAssetsByOnboardingItem(itemId).length).toBe(1);
+  });
+
+  test('promotion-time call is a no-op for non-distributor items', async () => {
+    getDb().query("UPDATE onboarding_items SET source_type = 'official_page' WHERE id = ?").run(itemId);
+    const item = listItemsByBatch(batchId).find((i) => i.id === itemId)!;
+    const r = await verifyDistributorImageryForItem(item, wsPath, workspaceId);
+    expect(r.images).toBe(0);
+    expect(r.verified).toBe(0);
+    expect(listPiAssetsByOnboardingItem(itemId)).toEqual([]);
+  });
+});
+
+function contractStubFor(contentHash: string) {
+  return {
+    name: 'stub_contract',
+    version: '1.0.0',
+    async verify() {
+      return {
+        verified: true,
+        image: { width: 240, height: 240, aspectRatio: 1, contentHash, perceptualHash: 'ph' },
+        observed: { brand: null, productName: null, variant: null, netContent: null, packCount: null, gtin: null },
+        qualityStatus: 'usable',
+        rejectionReason: null,
+      };
+    },
+  } as never;
+}

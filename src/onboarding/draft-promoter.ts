@@ -29,6 +29,7 @@ import { findDistributorRecordExtraction } from '../db/repositories/onboarding-e
 import { listResolvedConflictResolutions } from '../db/repositories/onboarding-conflict-repo';
 import { buildDistributorRecordProjection, buildDistributorRecordProjectionV1 } from './sourcing/distributor-record-projection';
 import { reconstructDistributorExtractionPayload } from './sourcing/distributor-record-materializer';
+import { verifyDistributorImageryForItem } from './distributor-imagery';
 import { SourcingDecisionV2Schema } from '../shared/schemas/onboarding';
 import { getCohortRunById,
   listDependenciesForProposal,
@@ -590,6 +591,30 @@ export async function promoteItems(
   // (b) ASYNC image downloads ONLY for the passed set.
   const processedImagesMap = new Map<string, ProcessedImageResult>();
   for (const item of passedItems) {
+    // Automatic distributor-imagery verification (epic #46 follow-up):
+    // runs the PI-6 pipeline over the item's rights-attested approved
+    // images BEFORE they are downloaded for commerce. Fire-and-forget and
+    // non-blocking — verification failures never break promotion; the
+    // durable assets record the outcome. Zero API-token cost by default:
+    // OCR (when a VLM is configured) runs against the LOCAL Ollama route
+    // and is audited with cost basis localZero; without a VLM the OCR step
+    // short-circuits and images verify display-only.
+    if (item.sourceType === 'distributor_record') {
+      void verifyDistributorImageryForItem(item, workspacePath, workspaceId)
+        .then((r) => {
+          console.log(
+            `[DraftPromoter] Distributor imagery verified for ${item.upc}: ${r.verified} verified, ` +
+              `${r.commerceApproved} commerce-approved, ${r.displayOnly} display-only, ${r.skipped} skipped` +
+              (r.skippedVlmOcr ? ' (VLM OCR skipped)' : ''),
+          );
+        })
+        .catch((err) => {
+          console.warn(
+            `[DraftPromoter] Distributor imagery verification failed for ${item.upc} (non-blocking): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    }
     const extractionData = item.extractionData;
     // Defensive narrowing: passedItems only ever contains items with
     // extraction data (phase (a) filtered + recorded the rest); never hit.

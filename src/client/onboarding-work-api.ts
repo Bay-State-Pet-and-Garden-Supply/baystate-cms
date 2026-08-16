@@ -21,6 +21,7 @@ import type {
   ApproveItemsResponse,
   DomainReleaseResponse,
   ExtractorProfileBlockersResponse,
+  BrandDomainSetupResponse,
 } from '../shared/schemas/onboarding-work-state';
 
 const API_BASE = '/api/onboarding';
@@ -117,25 +118,30 @@ export async function getExtractorProfileBlockers(batchId: string): Promise<Extr
   return request<ExtractorProfileBlockersResponse>(`/batches/${batchId}/extractor-profile-blockers`);
 }
 
+// ─── Brand-domain setup queue (ADR 0017) ───────────────────────────────────────
+
 /**
- * Run the deterministic PI-6 verification pipeline over the batch's approved
- * distributor imagery (epic #46 follow-up). Idempotent.
+ * Batch-level brand→domain setup queue (ADR 0017): discovery items parked
+ * because their brand has no mapped official domain, grouped by brand and
+ * sorted by blocked-product count.
  */
-export async function verifyDistributorImagery(batchId: string): Promise<{
-  summary: {
-    items: number;
-    images: number;
-    verified: number;
-    commerceApproved: number;
-    displayOnly: number;
-    failed: number;
-    skipped: number;
-    skippedVlmOcr: boolean;
-    perItem: Array<{ itemId: string; upc: string; images: number; commerceApproved: number }>;
-  };
-}> {
-  return request(`/batches/${batchId}/verify-distributor-imagery`, {
+export async function getBrandDomainBlockers(batchId: string): Promise<BrandDomainSetupResponse> {
+  return request<BrandDomainSetupResponse>(`/batches/${batchId}/brand-domain-setup`);
+}
+
+/**
+ * Assign an official brand domain for one of the batch's unmapped brands and
+ * re-queue every blocked discovery item. Returns the refreshed blocker list
+ * (the mapped brand's row disappears once its items leave the park state).
+ */
+export async function assignBatchBrandDomain(
+  batchId: string,
+  brand: string,
+  domain: string,
+): Promise<{ success: boolean; requeued: number; blockers: BrandDomainSetupResponse['blockers'] }> {
+  return request(`/batches/${batchId}/brand-domain-setup/${encodeURIComponent(brand)}`, {
     method: 'POST',
+    body: JSON.stringify({ domain }),
   });
 }
 
