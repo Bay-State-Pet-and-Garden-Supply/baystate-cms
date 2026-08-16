@@ -155,10 +155,11 @@ export function markApproved(input: {
  *
  * The two writes — durable approval (`onboarding_review_state`) and the
  * item stage transition (`onboarding_items` review/completed →
- * promotion/pending) — happen in ONE transaction per item, so a concurrent
- * consequential edit can never interleave between them and leave an item in
- * `promotion` WITHOUT durable approval (a fail-closed dead end: export
- * refuses it but no in-UI path can re-approve it).
+ * promotion/pending) — happen in ONE transaction for the whole batch
+ * operation (a stronger guarantee than per-item transactions: a concurrent
+ * consequential edit can never interleave and leave an item in `promotion`
+ * WITHOUT durable approval). Per-item failures are isolated via `continue`
+ * (no throw), so one rejected item never rolls back the others.
  *
  * Guards mirror the existing single-write primitives: the approval UPDATE
  * requires an existing non-invalidated review and no prior approval; the
@@ -205,9 +206,21 @@ export function approveAndAdvanceItems(input: {
       }
       // Semantic-block parity with the diagnostics advance guard: a blocked
       // member is never a release decision.
-      const curation = itemRow.curation_data_json ? JSON.parse(itemRow.curation_data_json) as {
+      let curation: {
         semanticValidation?: { status?: unknown; findings?: Array<{ message?: unknown }> };
-      } : null;
+      } | null = null;
+      try {
+        curation = itemRow.curation_data_json
+          ? JSON.parse(itemRow.curation_data_json) as {
+              semanticValidation?: { status?: unknown; findings?: Array<{ message?: unknown }> };
+            }
+          : null;
+      } catch {
+        // Corrupt curation payload — fail closed per item, never abort the
+        // whole bulk approval transaction (reviewer P6).
+        rejected.push({ itemId: id, reason: 'invalid_curation_data' });
+        continue;
+      }
       const semanticValidation = curation?.semanticValidation;
       if (
         semanticValidation &&
@@ -262,7 +275,7 @@ export function approveAndAdvanceItems(input: {
       } else {
         db.query(
           `UPDATE onboarding_review_state
-           SET approved_at = NULL, approved_by = NULL, approval_origin = 'bulk', updated_at = ?
+           SET approved_at = NULL, approved_by = NULL, approval_origin = NULL, updated_at = ?
            WHERE item_id = ?`,
         ).run(now, id);
         rejected.push({ itemId: id, reason: 'advance_failed_state_changed' });

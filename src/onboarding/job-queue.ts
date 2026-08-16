@@ -158,6 +158,8 @@ export class OnboardingWorker {
   private maxExtractionConcurrency = 3;
   private extractionRunning = 0;
   private isProcessing = false;
+  /** Reviewer P1: set by stop(), cleared by start() — in-flight polls no-op. */
+  private stopped = false;
   private workspacePath: string;
   private workspaceId: string;
   private workerId: string;
@@ -187,6 +189,7 @@ export class OnboardingWorker {
 
   start(): void {
     if (this.interval) return;
+    this.stopped = false;
 
     // Requeue only items whose claim has gone stale (older than 5 minutes).
     // A live worker's in_progress items are left alone.
@@ -233,6 +236,11 @@ export class OnboardingWorker {
   }
 
   stop(): void {
+    // Reviewer P1 (epic #46 remediation): a `stopped` flag is set BEFORE the
+    // interval is cleared so a poll already in flight when stop() is called
+    // (e.g. a workspace switch in getWorker) refuses to keep mutating the old
+    // workspace. Idempotent: safe to call multiple times.
+    this.stopped = true;
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
@@ -246,7 +254,7 @@ export class OnboardingWorker {
   }
 
   async poll(): Promise<void> {
-    if (this.isProcessing) return;
+    if (this.stopped || this.isProcessing) return;
     this.isProcessing = true;
 
     try {

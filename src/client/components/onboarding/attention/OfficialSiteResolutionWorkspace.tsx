@@ -308,7 +308,7 @@ export function OfficialSiteResolutionWorkspace({
   // 'blocked', so findings are authoritative here (deterministic messages).
   const semanticValidation = item?.curationData?.semanticValidation ?? null;
   const semanticFindings =
-    semanticValidation && semanticValidation.status === 'blocked'
+    semanticValidation && semanticValidation.status === 'blocked' && Array.isArray(semanticValidation.findings)
       ? semanticValidation.findings
       : [];
 

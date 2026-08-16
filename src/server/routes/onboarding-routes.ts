@@ -313,8 +313,12 @@ let activeWorker: ActiveWorkerEntry | null = null;
  */
 export function getWorker(workspaceId: string, workspacePath: string): OnboardingWorker {
   if (activeWorker?.workspaceId !== workspaceId) {
-    // Stop the previous workspace's poll loop before replacing it.
+    // Stop the previous workspace's poll loop before replacing it. Clear the
+    // slot BEFORE constructing the new worker so a construction/start failure
+    // never leaves `activeWorker` pointing at a stopped instance (reviewer
+    // P7) — the next call then recreates cleanly.
     activeWorker?.worker.stop();
+    activeWorker = null;
     const worker = new OnboardingWorker(workspaceId, workspacePath);
     worker.start();
     activeWorker = { workspaceId, worker };

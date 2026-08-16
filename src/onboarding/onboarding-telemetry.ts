@@ -319,7 +319,7 @@ function buildMetrics(
   const domainUnblockCount = scope === 'global'
     ? metric(countAuditLogsByAction(workspaceId, 'domain_release'), 'operations', 'exact',
       'Count of domain-release audit OPERATIONS (operator-triggered releases after profile setup); items released per operation are not recorded')
-    : metric(null, 'items', 'not_available',
+    : metric(null, 'operations', 'not_available',
       'Domain-release operations are recorded per workspace/domain, not per batch');
 
   // Family waits.

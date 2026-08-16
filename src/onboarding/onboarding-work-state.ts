@@ -299,8 +299,11 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
         const semanticValidation = item.curationData?.semanticValidation;
         if (semanticValidation?.status === 'blocked') {
           const firstMessage =
-            semanticValidation.findings[0]?.message ??
-            'A hard cohort semantic validation finding blocks this item.';
+            Array.isArray(semanticValidation.findings) &&
+            semanticValidation.findings.length > 0 &&
+            typeof semanticValidation.findings[0]?.message === 'string'
+              ? (semanticValidation.findings[0]!.message as string)
+              : 'A hard cohort semantic validation finding blocks this item.';
           return attention(
             'semantic_validation_blocked',
             'resolve_semantic_conflict',
