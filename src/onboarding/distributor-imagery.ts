@@ -33,6 +33,8 @@ import { getDb } from '../db/connection';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 import { extractPackagingOcr } from './packaging-ocr';
+import { getVlmConfig } from './vlm-client';
+import { isLoopbackBaseUrl } from '../classification/model-policy-gateway';
 import type { DistributorImageApproval } from '../shared/schemas/onboarding';
 
 /** Frozen onboarding verification policy: public network (CDN fetches),
@@ -186,15 +188,37 @@ export async function verifyDistributorImage(
   workspaceId: string,
   deps: DistributorImageryDeps = {},
 ): Promise<{ record: ProductAssetEvidence; skippedVlmOcr: boolean }> {
-  const gateway = new PolicyGateway(deps.fetchFn ? { fetchFn: deps.fetchFn } : {});
+  const gateway = new PolicyGateway(deps.fetchFn ? { fetchFn: deps.fetchFn } : {})
   const ocr = deps.ocr ?? extractPackagingOcr;
   const evidenceIds: string[] = [];
 
-  // Byte-bound packaging OCR (optional — null when the VLM is unconfigured).
+  // Byte-bound packaging OCR — ONLY when it is free. The effective VLM route
+  // (AI Compute visionOcr, falling back to api_keys ollama_vlm) may point at
+  // a CLOUD provider (e.g. openai-cloud / gpt-5.6-luna) — the operator's rule:
+  // automatic imagery verification must never burn paid tokens. A non-loopback
+  // route skips OCR entirely (verification continues, identity from catalog
+  // evidence only → display-only assets). An injected deps.ocr is a test seam
+  // and always allowed.
   let skippedVlmOcr = true;
   const ocrFacts: ResolvedEvidenceFact[] = [];
-  try {
-    const ocrData = await ocr({ imageUrl, workspacePath, sku: item.upc ?? null });
+  const ocrIsFree =
+    deps.ocr !== undefined ||
+    (() => {
+      try {
+        const vlm = getVlmConfig();
+        return vlm?.enabled === true && isLoopbackBaseUrl(vlm.baseUrl);
+      } catch {
+        return false;
+      }
+    })();
+  if (!ocrIsFree) {
+    console.log(
+      `[DistributorImagery] Skipping OCR for ${imageUrl} — configured VLM route is not loopback (cloud tokens); verification continues display-only`,
+    );
+  }
+  if (ocrIsFree) {
+    try {
+      const ocrData = await ocr({ imageUrl, workspacePath, sku: item.upc ?? null });
     if (ocrData && ocrData.contentHash) {
       skippedVlmOcr = false;
       const addOcrFact = (targetField: string, value: unknown): void => {
@@ -218,8 +242,9 @@ export async function verifyDistributorImage(
       addOcrFact('brand', ocrData.brand);
       addOcrFact('name', ocrData.productName);
     }
-  } catch {
-    // No OCR → display-only path (identity from catalog evidence only).
+    } catch {
+      // No OCR → display-only path (identity from catalog evidence only).
+    }
   }
 
   const attemptFactsForUrl = attemptFacts(item, imageUrl);

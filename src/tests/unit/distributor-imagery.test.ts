@@ -380,3 +380,85 @@ function contractStubFor(contentHash: string) {
     },
   } as never;
 }
+
+describe('cloud-route OCR guard (operator: never burn paid tokens on automatic verification)', () => {
+  let tempDir: string;
+  let workspaceId: string;
+  let wsPath: string;
+  let batchId: string;
+  let itemId: string;
+
+  beforeEach(async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'distributor-imagery-cloud-test-'));
+    initDb(path.join(tempDir, 'test.db'));
+    runMigrations();
+    wsPath = path.join(tempDir, 'ws');
+    fs.mkdirSync(wsPath, { recursive: true });
+    workspaceId = 'ws-imagery-cloud';
+    insertWorkspace({
+      id: workspaceId,
+      name: 'W',
+      workspacePath: wsPath,
+      gitPath: tempDir + '/.git',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    batchId = createBatch({ workspaceId, name: 'B', fileName: 'b.csv', totalItems: 1 }).id;
+    const [item] = insertItems(batchId, [{ upc: '627987480993', name: 'Fromm Gold Adult 4 lb', brandHint: 'Fromm', rowNumber: 1, stage: 'promotion' }], 'review', 1);
+    itemId = item.id;
+    getDb().query("UPDATE onboarding_items SET source_type = 'distributor_record' WHERE id = ?").run(item.id);
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(
+      JSON.stringify({
+        title: 'Fromm Gold Adult 4 lb',
+        brand: 'Fromm',
+        sourceType: 'distributor_record',
+        distributorImageApprovals: [
+          { imageUrl: IMAGE_URL, sourceAttemptIds: ['att-1'], approvedAt: '2026-08-16T00:00:00.000Z', rightsAttested: true, approvalOrigin: 'distributor_channel_opt_in' },
+        ],
+      }),
+      item.id,
+    );
+    // Simulate the operator's AI Compute cloud route: no ai_workload_routes
+    // rows in this test DB, so getVlmConfig falls back to api_keys — a
+    // CLOUD base URL proves the guard (a localhost URL would prove the
+    // opposite, and OCR would attempt a real localhost fetch — never test
+    // that path without stubs).
+    getDb().query(
+      "INSERT INTO api_keys (id, service, api_key, base_url, model, created_at, updated_at) VALUES (?, 'ollama_vlm', 'enabled', 'https://api.openai.com/v1', 'gpt-5.6-luna', ?, ?)",
+    ).run('k-cloud', new Date().toISOString(), new Date().toISOString());
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('a cloud VLM route skips OCR — zero model calls, display-only asset', async () => {
+    // No deps.ocr: the REAL extractPackagingOcr would hit the cloud URL if
+    // the guard failed. The guard must prevent any transport.
+    const item = listItemsByBatch(batchId).find((i) => i.id === itemId)!;
+    const pngBytes = new Uint8Array(
+      await sharp({ create: { width: 240, height: 240, channels: 3, background: { r: 10, g: 200, b: 90 } } })
+        .png()
+        .toBuffer(),
+    );
+    const fetchStub = async () =>
+      new Response(Buffer.from(pngBytes), { status: 200, headers: { 'content-type': 'image/png' } });
+
+    const r = await verifyDistributorImageryForItem(item, wsPath, workspaceId, { fetchFn: fetchStub });
+
+    expect(r.verified).toBe(1);
+    expect(r.commerceApproved).toBe(0);
+    expect(r.displayOnly).toBe(1);
+    expect(r.skippedVlmOcr).toBe(true);
+    // No model call was ever started for the cloud route.
+    const modelCalls = getDb().query('SELECT COUNT(*) AS n FROM classification_model_calls').get() as { n: number };
+    expect(modelCalls.n).toBe(0);
+    const assets = listPiAssetsByOnboardingItem(itemId);
+    expect(assets.length).toBe(1);
+    expect(assets[0].commerceApproved).toBe(0);
+    expect(assets[0].exactProductMatch).toBe(0);
+  });
+});
