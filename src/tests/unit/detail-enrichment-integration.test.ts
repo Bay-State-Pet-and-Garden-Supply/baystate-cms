@@ -77,6 +77,19 @@ describe('Detail Enrichment Integration', () => {
           isCompositionAttribute: false,
           group: 'Pet',
         },
+        {
+          id: 'brand',
+          name: 'Brand',
+          description: null,
+          valueMode: 'freeText' as const,
+          canonicalUnit: null,
+          allowedValues: [],
+          valueAliases: [],
+          visualEvidenceEligibility: 'ineligible' as const,
+          isClaim: false,
+          isCompositionAttribute: false,
+          group: 'Identity',
+        },
       ],
       attributeProfiles: [],
       attributeMappings: [
@@ -107,6 +120,18 @@ describe('Detail Enrichment Integration', () => {
           optionSource: 'configured' as const,
           required: false,
           sortOrder: 1,
+        },
+        {
+          id: 'target-brand',
+          kind: 'product_field' as const, mandatory: false,
+          label: 'Brand',
+          enabled: true,
+          selectionMode: 'single' as const,
+          attributeId: 'brand',
+          catalogField: 'ProductField3',
+          optionSource: 'configured' as const,
+          required: false,
+          sortOrder: 2,
         },
       ],
       guidance: [],
@@ -338,5 +363,180 @@ describe('Detail Enrichment Integration', () => {
     expect(String(proposal.proposedValue)).toMatch(/beef/i);
     // Confidence should be from alias match (0.55) not enrichment (0.6)
     expect(proposal.confidence).toBeCloseTo(0.55, 1);
+  });
+});
+
+describe('freeText attribute grounding (epic #46 review round)', () => {
+  let workspacePath: string;
+  let workspaceId: string;
+
+  beforeAll(() => {
+    workspaceId = randomUUID();
+    workspacePath = path.join(os.tmpdir(), `baystate-cms-grounding-test-${workspaceId.slice(0, 8)}`);
+    fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
+    fs.mkdirSync(path.join(workspacePath, 'store', 'classification'), { recursive: true });
+    initDb(path.join(workspacePath, '.baystate-cms', 'app.db'));
+    runMigrations();
+    insertWorkspace({
+      id: workspaceId,
+      name: 'test',
+      workspacePath,
+      gitPath: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+
+    const now = new Date().toISOString();
+    const config: ClassificationConfig = {
+      manifest: { schemaVersion: 1, compatibilityVersion: 1, createdAt: now, updatedAt: now, fileVersions: {} },
+      productTypes: [],
+      attributes: [
+        {
+          id: 'brand',
+          name: 'Brand',
+          description: null,
+          valueMode: 'freeText' as const,
+          canonicalUnit: null,
+          allowedValues: [],
+          valueAliases: [],
+          visualEvidenceEligibility: 'ineligible' as const,
+          isClaim: false,
+          isCompositionAttribute: false,
+          group: 'Identity',
+        },
+        {
+          id: 'product-type',
+          name: 'Product Type',
+          description: null,
+          valueMode: 'freeText' as const,
+          canonicalUnit: null,
+          allowedValues: [],
+          valueAliases: [],
+          visualEvidenceEligibility: 'ineligible' as const,
+          isClaim: false,
+          isCompositionAttribute: false,
+          group: 'Identity',
+        },
+      ],
+      attributeProfiles: [],
+      attributeMappings: [
+        { id: 'brand-map', attributeId: 'brand', catalogField: 'ProductField16', serialization: { format: 'direct', separator: ', ', prefix: '', suffix: '' }, isStale: false },
+        { id: 'pt-map', attributeId: 'product-type', catalogField: 'ProductField25', serialization: { format: 'direct', separator: ', ', prefix: '', suffix: '' }, isStale: false },
+      ],
+      curationTargets: [
+        {
+          id: 'target-brand', kind: 'product_field' as const, mandatory: false,
+          label: 'Brand', enabled: true, selectionMode: 'single' as const,
+          attributeId: 'brand', catalogField: 'ProductField16',
+          optionSource: 'configured' as const, required: false, sortOrder: 0,
+        },
+        {
+          id: 'target-pt', kind: 'product_field' as const, mandatory: false,
+          label: 'Product Type', enabled: true, selectionMode: 'single' as const,
+          attributeId: 'product-type', catalogField: 'ProductField25',
+          optionSource: 'configured' as const, required: false, sortOrder: 1,
+        },
+      ],
+      guidance: [],
+      brands: [],
+      modelPolicy: {
+        defaultProvider: 'ollama' as const,
+        defaultModel: '',
+        stageOverrides: {},
+        imageDataSharing: 'local_only' as const,
+        textDataSharing: 'local_only' as const,
+      },
+      dataSharing: {
+        imagePolicy: 'local_only' as const,
+        textPolicy: 'local_only' as const,
+        sensitiveDataFiltering: true,
+        retentionDays: 90,
+      },
+    };
+    saveClassificationConfig(workspacePath, config);
+    syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
+  });
+
+  function runContext(runId: string) {
+    return {
+      workspacePath,
+      workspaceId,
+      runId,
+      configSnapshotRef: {
+        id: 'test',
+        hash: 'test',
+        sourceCommit: null,
+        createdAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  it('never uses unrelated title/description text as a freeText value (regression: beehive feeder)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const resolved = resolveEnabledTargets(config, workspaceId);
+    const brandTarget = resolved.productFields.find(t => t.config.attributeId === 'brand');
+    expect(brandTarget).toBeDefined();
+    if (!brandTarget) return;
+
+    // The exact live-batch failure shape: only name + description evidence.
+    const evidence: ClassificationEvidence[] = [
+      {
+        id: randomUUID(), runId: 'g-run', stageName: 'evidence_extraction',
+        productSku: 'SKU', attributeId: null, source: 'distributor_record',
+        reliability: 'medium', sourceUrl: null, sourceField: 'name',
+        snippet: 'LITTLE GIANT BEEHIVE FRAME FEEDER',
+        value: 'LITTLE GIANT BEEHIVE FRAME FEEDER', metadata: {}, capturedAt: new Date().toISOString(),
+      },
+      {
+        id: randomUUID(), runId: 'g-run', stageName: 'evidence_extraction',
+        productSku: 'SKU', attributeId: null, source: 'distributor_record',
+        reliability: 'medium', sourceUrl: null, sourceField: 'description',
+        snippet: 'Feeds your bees when outside nectar sources are unavailable.',
+        value: 'Feeds your bees when outside nectar sources are unavailable.',
+        metadata: {}, capturedAt: new Date().toISOString(),
+      },
+    ];
+
+    const result = await processProductFieldTarget(brandTarget, {
+      sku: 'SKU', evidence, acceptedProposals: [], allProposals: [],
+    }, runContext(randomUUID()));
+
+    expect(result.proposals.length).toBe(0);
+    expect(result.message).toMatch(/abstain/i);
+  });
+
+  it('uses the field-grounded evidence value for freeText (brand from distributor record)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const resolved = resolveEnabledTargets(config, workspaceId);
+    const brandTarget = resolved.productFields.find(t => t.config.attributeId === 'brand');
+    expect(brandTarget).toBeDefined();
+    if (!brandTarget) return;
+
+    const evidence: ClassificationEvidence[] = [
+      {
+        id: randomUUID(), runId: 'g-run', stageName: 'evidence_extraction',
+        productSku: 'SKU', attributeId: 'brand', source: 'distributor_record',
+        reliability: 'medium', sourceUrl: null, sourceField: 'ProductField16',
+        snippet: 'LITTLE GIANT', value: 'LITTLE GIANT', metadata: {}, capturedAt: new Date().toISOString(),
+      },
+      {
+        id: randomUUID(), runId: 'g-run', stageName: 'evidence_extraction',
+        productSku: 'SKU', attributeId: null, source: 'distributor_record',
+        reliability: 'medium', sourceUrl: null, sourceField: 'description',
+        snippet: 'Feeds your bees when outside nectar sources are unavailable.',
+        value: 'Feeds your bees when outside nectar sources are unavailable.',
+        metadata: {}, capturedAt: new Date().toISOString(),
+      },
+    ];
+
+    const result = await processProductFieldTarget(brandTarget, {
+      sku: 'SKU', evidence, acceptedProposals: [], allProposals: [],
+    }, runContext(randomUUID()));
+
+    expect(result.proposals.length).toBe(1);
+    expect(result.proposals[0].proposedValue).toBe('LITTLE GIANT');
+    expect(result.proposals[0].confidence).toBe(0.85);
   });
 });

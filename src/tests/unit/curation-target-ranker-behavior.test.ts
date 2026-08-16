@@ -175,3 +175,45 @@ describe('curation target ranker response handling', () => {
     expect(mocks.callLlmForTaskWithProvenance).not.toHaveBeenCalled();
   });
 });
+
+describe('LLM propose gate (epic #46 review round)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("abstains when the model's own confidence is below the 0.5 propose gate", async () => {
+    // The live-batch failure shape: qwen2.5vl ranked "Poultry Feed" for a
+    // beehive feeder with a floor-level 0.35 confidence and no keyword
+    // evidence. Such a weak guess is noise, not a decision.
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Poultry Feed"],"confidence":0.3}', callId: 'c-low', provider: 'ollama', model: 'qwen2.5vl:latest', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toBeNull();
+    expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+  });
+
+  it('still proposes at exactly 0.5 (the gate is inclusive)', async () => {
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken"],"confidence":0.5}', callId: 'c5', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toEqual({
+      values: ['Chicken'],
+      confidence: 0.5,
+      modelCallIds: ['c5'],
+    });
+  });
+
+  it('proposes when the model omits confidence (defaults to 0.55)', async () => {
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken"]}', callId: 'c6', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions(baseParams)).resolves.toEqual({
+      values: ['Chicken'],
+      confidence: 0.55,
+      modelCallIds: ['c6'],
+    });
+  });
+});

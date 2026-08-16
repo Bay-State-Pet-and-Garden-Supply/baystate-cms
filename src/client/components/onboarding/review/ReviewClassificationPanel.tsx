@@ -2,8 +2,18 @@
  * Epic #46 — Review classification panel (Phase 6).
  *
  * Renders classification proposals (Product Type, Category Pages, attribute
- * assignments) with accept/reject affordances for pending proposals, exposing
- * subsurfaces that require a human decision before review completes.
+ * assignments) with accept/reject affordances for pending proposals.
+ *
+ * Clarity rules (epic #46 review round, operator feedback):
+ * - Abstentions are INFORMATIONAL, never decisions: the review-complete
+ *   route auto-accepts remaining pending proposals, so an abstention row
+ *   with Accept/Reject buttons was pure noise ("I have no idea what I am
+ *   accepting"). They render as plain "nothing to propose" notes.
+ * - Proposal values are humanized (product type labels, matched-word chips,
+ *   evidence counts) — raw JSON blobs never appear.
+ * - Identical pending proposals (same type + value + confidence, e.g. two
+ *   free-text targets producing the same text) collapse into one row.
+ * - Confidence renders as a qualitative chip + percent.
  */
 import { useState } from 'react';
 import type { ItemDetailResponse } from '../../../onboarding-api';
@@ -24,47 +34,90 @@ export const PROPOSAL_TYPE_LABELS: Record<string, string> = {
   reviewable_abstention: 'Reviewable abstention',
 };
 
-function proposalSummary(proposal: ClassificationProposal): string {
+// ─── Humanization helpers ─────────────────────────────────────────────────────
+
+function humanizeId(id: string): string {
+  return id
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, ch => ch.toUpperCase())
+    .trim();
+}
+
+function confidenceTier(confidence: number): { label: string; cls: string } {
+  if (confidence >= 0.85) return { label: 'High', cls: 'rv-conf-high' };
+  if (confidence >= 0.5) return { label: 'Moderate', cls: 'rv-conf-moderate' };
+  return { label: 'Low', cls: 'rv-conf-low' };
+}
+
+/** Human-readable proposal value (never raw JSON). */
+function proposalValueText(proposal: ClassificationProposal): {
+  text: string;
+  matchedWords: string[];
+} {
   const raw = proposal.revisedValue ?? proposal.proposedValue;
-  if (raw === null || raw === undefined) return '—';
-  if (typeof raw === 'string') return raw;
-  if (Array.isArray(raw)) {
-    return raw.map(value => proposalValueText(value)).join(', ');
-  }
-  if (typeof raw === 'object') {
+  if (raw === null || raw === undefined) return { text: '—', matchedWords: [] };
+
+  if (proposal.proposalType === 'primary_product_type' && typeof raw === 'object' && !Array.isArray(raw)) {
     const obj = raw as Record<string, unknown>;
-    const label =
-      obj.label ?? obj.name ?? obj.value ?? obj.pageName ?? obj.productTypeLabel ?? obj.fieldLabel;
-    if (typeof label === 'string' && label) return label;
-    const id = obj.id ?? obj.pageId ?? obj.typeId ?? obj.fieldId;
-    if (typeof id === 'string') {
-      const extra =
-        typeof obj.confidence === 'number' ? ` (${Math.round(obj.confidence * 100)}%)` : '';
-      return `${id}${extra}`;
-    }
+    const typeId = typeof obj.productTypeId === 'string' ? obj.productTypeId : null;
+    const words = Array.isArray(obj.matchedWords)
+      ? (obj.matchedWords as unknown[]).filter((w): w is string => typeof w === 'string')
+      : [];
+    return {
+      text: typeId ? humanizeId(typeId) : '—',
+      matchedWords: words,
+    };
   }
-  try {
-    return JSON.stringify(raw);
-  } catch {
-    return String(raw);
+
+  if (typeof raw === 'string') return { text: raw, matchedWords: [] };
+  if (typeof raw === 'number') return { text: String(raw), matchedWords: [] };
+
+  if (Array.isArray(raw)) {
+    const parts = raw.map(value => proposalValueText({ ...proposal, proposedValue: value, revisedValue: value }).text);
+    return { text: parts.filter(Boolean).join(', '), matchedWords: [] };
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const label =
+    obj.label ?? obj.name ?? obj.value ?? obj.pageName ?? obj.productTypeLabel ?? obj.fieldLabel;
+  if (typeof label === 'string' && label) return { text: label, matchedWords: [] };
+  const id = obj.id ?? obj.pageId ?? obj.typeId ?? obj.fieldId;
+  if (typeof id === 'string') return { text: humanizeId(id), matchedWords: [] };
+  return { text: '—', matchedWords: [] };
+}
+
+function abstentionReason(proposal: ClassificationProposal): string | null {
+  const raw = proposal.proposedValue;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const reason = (raw as Record<string, unknown>).reason;
+    if (typeof reason === 'string' && reason) return reason;
+  }
+  return null;
+}
+
+function statusLabel(status: ClassificationProposal['status']): string {
+  switch (status) {
+    case 'pending':
+      return 'Needs your decision';
+    case 'accepted':
+      return 'Accepted';
+    case 'rejected':
+      return 'Rejected';
+    case 'stale':
+      return 'Stale';
+    default:
+      return String(status);
   }
 }
 
-function proposalValueText(value: unknown): string {
-  if (value === null || value === undefined) return '—';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number') return String(value);
-  if (typeof value === 'object') {
-    const obj = value as Record<string, unknown>;
-    const label = obj.label ?? obj.name ?? obj.value ?? obj.pageName;
-    if (typeof label === 'string' && label) return label;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
+const STATUS_CLASS: Record<string, string> = {
+  pending: 'rv-proposal-status-pending',
+  accepted: 'rv-proposal-status-accepted',
+  rejected: 'rv-proposal-status-rejected',
+  stale: 'rv-proposal-status-stale',
+};
+
+// ─── Panel ────────────────────────────────────────────────────────────────────
 
 export function ReviewClassificationPanel({
   detail,
@@ -88,8 +141,33 @@ export function ReviewClassificationPanel({
   };
 
   const primary = proposals.find(p => p.proposalType === 'primary_product_type');
-  const pending = proposals.filter(p => p.status === 'pending');
-  const settled = proposals.filter(p => p.status !== 'pending');
+  const abstentions = proposals.filter(p => p.proposalType === 'reviewable_abstention');
+  // Attributes/category pages only — the primary type lives in its own
+  // headline row above, never duplicated here.
+  const reviewable = proposals.filter(
+    p =>
+      p.proposalType !== 'reviewable_abstention' &&
+      p.proposalType !== 'primary_product_type' &&
+      p.status === 'pending',
+  );
+  const settled = proposals.filter(
+    p =>
+      p.proposalType !== 'reviewable_abstention' &&
+      p.proposalType !== 'primary_product_type' &&
+      p.status !== 'pending',
+  );
+
+  // Collapse identical pending proposals (same type + value + confidence).
+  const dedupedReviewable = reviewable.reduce<ClassificationProposal[]>((acc, p) => {
+    const key = `${p.proposalType}|${JSON.stringify(p.proposedValue)}|${p.confidence}`;
+    const existing = acc.find(q => {
+      const qKey = `${q.proposalType}|${JSON.stringify(q.proposedValue)}|${q.confidence}`;
+      return qKey === key;
+    });
+    if (!existing) acc.push(p);
+    return acc;
+  }, []);
+  const dedupeCount = reviewable.length - dedupedReviewable.length;
 
   return (
     <section className="rv-panel" aria-label="Classification">
@@ -104,17 +182,42 @@ export function ReviewClassificationPanel({
           </div>
         )}
 
-        {pending.length > 0 && (
+        {dedupedReviewable.length > 0 && (
           <div className="rv-field">
-            <div className="rv-field-label">Decisions needed ({pending.length})</div>
-            {pending.map(proposal => (
+            <div className="rv-field-label">
+              Decisions needed ({dedupedReviewable.length})
+              {dedupeCount > 0 ? ` · ${dedupeCount} duplicate${dedupeCount === 1 ? '' : 's'} merged` : ''}
+            </div>
+            {dedupedReviewable.map(proposal => (
               <ReviewProposalRow
                 key={proposal.id}
                 proposal={proposal}
                 onDecision={handleDecision}
                 busy={busyDecisionId}
+                siblings={reviewable.filter(
+                  q =>
+                    q.id !== proposal.id &&
+                    q.proposalType === proposal.proposalType &&
+                    JSON.stringify(q.proposedValue) === JSON.stringify(proposal.proposedValue),
+                )}
               />
             ))}
+          </div>
+        )}
+
+        {abstentions.length > 0 && (
+          <div className="rv-field">
+            <div className="rv-field-label">Nothing to propose ({abstentions.length})</div>
+            {abstentions.map(proposal => (
+              <div key={proposal.id} className="rv-abstention">
+                <span className="rv-abstention-target">{humanizeId(proposal.targetId ?? '')}</span>
+                <span className="rv-abstention-reason">{abstentionReason(proposal) ?? 'No evidence available.'}</span>
+              </div>
+            ))}
+            <p className="rv-meta-note">
+              Informational only — abstentions are acknowledged automatically when you complete the
+              review. You never need to accept or reject an abstention.
+            </p>
           </div>
         )}
 
@@ -145,32 +248,64 @@ export function ReviewClassificationPanel({
   );
 }
 
+// ─── Proposal row ─────────────────────────────────────────────────────────────
+
 function ReviewProposalRow({
   proposal,
   onDecision,
   busy,
+  siblings = [],
 }: {
   proposal: ClassificationProposal;
   onDecision: (proposal: ClassificationProposal, decision: 'accepted' | 'rejected') => Promise<void>;
   busy: string | null;
+  /** Identical pending proposals merged into this row (different targets). */
+  siblings?: ClassificationProposal[];
 }) {
+  const { text, matchedWords } = proposalValueText(proposal);
+  const isPending = proposal.status === 'pending';
+  const tier = typeof proposal.confidence === 'number' ? confidenceTier(proposal.confidence) : null;
+  const targetLabels = [proposal.targetId, ...siblings.map(s => s.targetId)]
+    .filter((id): id is string => Boolean(id))
+    .map(id => humanizeId(id));
+  const uniqueLabels = [...new Set(targetLabels)];
+
   return (
     <div className="rv-proposal">
       <div className="rv-proposal-head">
         <span className="rv-proposal-type">
           {PROPOSAL_TYPE_LABELS[proposal.proposalType] ?? proposal.proposalType}
+          {uniqueLabels.length > 0 && proposal.proposalType !== 'primary_product_type' && (
+            <span className="rv-proposal-target"> · {uniqueLabels.join(' & ')}</span>
+          )}
         </span>
-        <span className={`rv-proposal-status rv-proposal-status-${proposal.status}`}>
-          {proposal.status}
+        <span className={`rv-proposal-status ${STATUS_CLASS[proposal.status] ?? ''}`}>
+          {statusLabel(proposal.status)}
         </span>
       </div>
+
       <div className="rv-proposal-value">
-        {proposalSummary(proposal)}
-        {typeof proposal.confidence === 'number' && proposal.status === 'pending' && (
-          <span style={{ color: 'var(--color-mulch-brown)', fontSize: '0.75rem' }}> · {Math.round(proposal.confidence * 100)}% confidence</span>
+        {text}
+        {typeof proposal.confidence === 'number' && isPending && tier && (
+          <span className={`rv-conf-chip ${tier.cls}`} title="Confidence of the proposal">
+            {Math.round(proposal.confidence * 100)}% · {tier.label}
+          </span>
         )}
       </div>
-      {proposal.status === 'pending' ? (
+
+      {matchedWords.length > 0 && (
+        <div className="rv-matched-words">
+          <span className="rv-matched-words-label">Keyword match:</span>
+          {matchedWords.map(word => (
+            <span key={word} className="rv-matched-word">{word}</span>
+          ))}
+        </div>
+      )}
+      {proposal.proposalType === 'primary_product_type' && matchedWords.length === 0 && isPending && (
+        <div className="rv-meta-note">Model pick — no keyword evidence. Only accept if it's clearly right.</div>
+      )}
+
+      {isPending ? (
         <div className="rv-proposal-actions">
           <button
             type="button"

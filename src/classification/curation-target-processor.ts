@@ -21,6 +21,7 @@ import {
 import {
   buildEvidenceTargetPacket,
   buildPageEvidencePacket,
+  evidenceMatchesTarget,
   resolveCanonicalAssertion,
   tokenGroundingSupport,
   type EvidenceTargetPacket,
@@ -146,10 +147,15 @@ export async function processProductFieldTarget(
   if (attribute?.valueMode === 'freeText' || attribute?.valueMode === 'measured') {
     const attrId = targetConfig.attributeId ?? targetConfig.id;
     const catalogField = targetConfig.catalogField ?? null;
+    // Evidence extraction stamps freeText values with the ATTRIBUTE id as
+    // source_field ('brand'), while the curation target maps to a catalog
+    // field (ProductField16) — accept BOTH shapes, plus explicit
+    // attributeId-tagged records.
+    const targetSourceFields = [catalogField, attrId].filter((f): f is string => Boolean(f));
     const fieldPacket = buildEvidenceTargetPacket(input.evidence, {
       attributeId: attrId,
-      sourceField: catalogField,
-      sourceFields: catalogField ? [catalogField] : null,
+      sourceField: null,
+      sourceFields: targetSourceFields,
       selectionMode,
       aliases: attribute?.valueAliases ?? [],
       isGroundingSupport: tokenGroundingSupport,
@@ -159,8 +165,28 @@ export async function processProductFieldTarget(
       return { proposals: [], message: `No evidence text for "${targetConfig.label}".` };
     }
 
+    // PR (epic #46 review round): a freeText/measured value is ONLY
+    // acceptable when grounded in the target's OWN evidence (its attribute
+    // id or catalog field). Unrelated general text (title/description) must
+    // never become an attribute value — the previous `?? text` fallback let
+    // the whole description be proposed as "Brand" / "Product Type".
+    // Abstain (no proposals) when the field has no evidence.
+    const grounded = input.evidence.find(
+      e =>
+        evidenceMatchesTarget(e, { attributeId: attrId, sourceField: null, sourceFields: targetSourceFields }) &&
+        typeof e.value === 'string' &&
+        e.value.trim().length > 0,
+    );
+    if (!grounded) {
+      return {
+        proposals: [],
+        message: `No ${targetConfig.label} evidence on ${catalogField ?? attrId} — abstaining rather than inventing a value.`,
+      };
+    }
+    const groundedValue = String(grounded.value);
+
     if (attribute.valueMode === 'freeText') {
-      const extractedValue = (fieldPacket.supporting.find(e => typeof e.value === 'string' && (e.value as string).trim().length > 0)?.value as string) ?? text;
+      const extractedValue = groundedValue;
       const proposal = buildFieldAssignmentProposal({
         runId: context.runId,
         sku: input.sku,
@@ -177,7 +203,7 @@ export async function processProductFieldTarget(
     }
 
     // valueMode === 'measured'
-    const rawVal = fieldPacket.supporting.find(e => e.value !== null && e.value !== undefined)?.value ?? text;
+    const rawVal = groundedValue;
     const valStr = String(rawVal).trim();
     const proposal = buildFieldAssignmentProposal({
       runId: context.runId,

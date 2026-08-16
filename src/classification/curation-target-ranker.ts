@@ -25,6 +25,14 @@ import { recordTerminalPreflight } from '../db/repositories/classification-model
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 import { HeartbeatLostError } from './heartbeat-errors';
 
+/**
+ * Ungrounded model picks below this confidence are abstentions, never
+ * proposals: the ranker only runs after deterministic keyword matching
+ * failed, so a low-confidence guess has no evidence behind it (epic #46
+ * review round — "Poultry Feed" for a beehive feeder at the 0.35 floor).
+ */
+export const LLM_PROPOSE_MIN_CONFIDENCE = 0.5;
+
 export interface LlmRankOptionsParams {
   /** Human-readable label for the target kind (e.g. "product type", "flavor", "category page") */
   targetLabel: string;
@@ -253,6 +261,17 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     if (values.length === 0) return null;
 
     const confidence = Math.max(0.35, Math.min(0.85, parsed.confidence ?? 0.55));
+    // PR (epic #46 review round): a model pick with NO keyword grounding is
+    // only proposed when the model's own confidence clears the propose gate
+    // (0.5). This path is only reached when deterministic keyword matching
+    // already failed, so the pick rests entirely on the model's judgment — a
+    // weak guess (e.g. "Poultry Feed" for a beehive feeder at the 0.35 floor)
+    // is noise, not a decision. Below the gate the ranker abstains and the
+    // stage emits a reviewable abstention with a clear reason instead of a
+    // garbage accept/reject row. (The 0.35 floor remains the documented
+    // `abstainBelow` calibration; this gate is a stricter honesty rule for
+    // ungrounded model output.)
+    if (confidence < LLM_PROPOSE_MIN_CONFIDENCE) return null;
     // Link EVERY call that influenced the accepted parse (the primary call and
     // any retry whose response was embedded in the accepted output).
     return { values, confidence, modelCallIds: influencingCallIds };

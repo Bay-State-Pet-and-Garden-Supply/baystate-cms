@@ -793,3 +793,93 @@
     grid-template-columns: 1fr;
   }
 }
+/* ── Classification clarity (epic #46 review round) ─────────────────────── */
+
+.rv-proposal-target {
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+}
+
+.rv-conf-chip {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: var(--rounded-full);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.rv-conf-high {
+  background: var(--color-success-bg);
+  color: var(--color-success-text);
+}
+
+.rv-conf-moderate {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}
+
+.rv-conf-low {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+}
+
+.rv-matched-words {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3125rem;
+  font-size: 0.75rem;
+}
+
+.rv-matched-words-label {
+  font-weight: 700;
+  color: var(--color-mulch-brown);
+}
+
+.rv-matched-word {
+  background: var(--color-page-cream);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  padding: 0.0625rem 0.4375rem;
+  color: var(--color-ledger-charcoal);
+}
+
+.rv-meta-note {
+  font-size: 0.75rem;
+  font-style: italic;
+  color: var(--color-mulch-brown);
+  margin-top: 0.3125rem;
+  line-height: 1.4;
+}
+
+.rv-abstention {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1875rem;
+  padding: 0.5rem 0.625rem;
+  margin-bottom: 0.4375rem;
+  border-left: 3px solid var(--color-card-border);
+  background: var(--color-page-cream);
+  border-radius: var(--rounded-sm, 0.25rem);
+}
+
+.rv-abstention-target {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-mulch-brown);
+}
+
+.rv-abstention-reason {
+  font-size: 0.8125rem;
+  color: var(--color-ledger-charcoal);
+  line-height: 1.4;
+}
+
+.rv-proposal-status-abstention {
+  background: var(--color-page-cream);
+  color: var(--color-mulch-brown);
+}
