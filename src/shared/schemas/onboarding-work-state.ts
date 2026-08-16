@@ -73,6 +73,7 @@ export const AttentionReasonEnum = z.enum([
   'extraction_profile_failed',
   'source_conflict',
   'processing_failed',
+  'semantic_validation_blocked',
 ]);
 
 export type AttentionReason = z.infer<typeof AttentionReasonEnum>;
@@ -85,6 +86,7 @@ export const AttentionActionEnum = z.enum([
   'retry_extraction',
   'resolve_source_conflict',
   'retry_processing',
+  'resolve_semantic_conflict',
 ]);
 
 export type AttentionAction = z.infer<typeof AttentionActionEnum>;

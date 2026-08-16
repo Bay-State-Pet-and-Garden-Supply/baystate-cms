@@ -148,3 +148,127 @@ export function markApproved(input: {
   ).run(now, input.approvedBy, input.origin ?? 'bulk', now, input.itemId, input.batchId);
   return result.changes > 0;
 }
+
+/**
+ * Atomic bulk approval + review→promotion advance (epic #46 review
+ * remediation, fix 1).
+ *
+ * The two writes — durable approval (`onboarding_review_state`) and the
+ * item stage transition (`onboarding_items` review/completed →
+ * promotion/pending) — happen in ONE transaction per item, so a concurrent
+ * consequential edit can never interleave between them and leave an item in
+ * `promotion` WITHOUT durable approval (a fail-closed dead end: export
+ * refuses it but no in-UI path can re-approve it).
+ *
+ * Guards mirror the existing single-write primitives: the approval UPDATE
+ * requires an existing non-invalidated review and no prior approval; the
+ * advance UPDATE requires the item to still be `review / completed` in the
+ * SAME batch. A blocked semantic validation is refused exactly like the
+ * diagnostics advance guard (`advanceReviewedItemsToPromotion`). When the
+ * advance guard fails AFTER the approval write succeeded, the approval is
+ * reverted inside the SAME transaction — no partial state escapes.
+ *
+ * Returns per-item structured outcomes (approved | rejected + reason).
+ */
+export function approveAndAdvanceItems(input: {
+  itemIds: string[];
+  batchId: string;
+  approvedBy: string;
+  origin?: string;
+}): { approved: string[]; rejected: Array<{ itemId: string; reason: string }> } {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const approved: string[] = [];
+  const rejected: Array<{ itemId: string; reason: string }> = [];
+
+  db.transaction(() => {
+    for (const id of input.itemIds) {
+      // 1. Read the CURRENT item state inside the transaction (serializable
+      //    single-writer: no interleaving is possible after this read).
+      const itemRow = db.query(
+        `SELECT id, batch_id, stage, stage_status, curation_data_json
+         FROM onboarding_items WHERE id = ?`,
+      ).get(id) as
+        | { id: string; batch_id: string; stage: string; stage_status: string; curation_data_json: string | null }
+        | undefined;
+      if (!itemRow) {
+        rejected.push({ itemId: id, reason: 'item_not_found' });
+        continue;
+      }
+      if (itemRow.batch_id !== input.batchId) {
+        rejected.push({ itemId: id, reason: 'item_not_in_batch' });
+        continue;
+      }
+      if (itemRow.stage !== 'review' || itemRow.stage_status !== 'completed') {
+        rejected.push({ itemId: id, reason: `not_eligible:${itemRow.stage}/${itemRow.stage_status}` });
+        continue;
+      }
+      // Semantic-block parity with the diagnostics advance guard: a blocked
+      // member is never a release decision.
+      const curation = itemRow.curation_data_json ? JSON.parse(itemRow.curation_data_json) as {
+        semanticValidation?: { status?: unknown; findings?: Array<{ message?: unknown }> };
+      } : null;
+      const semanticValidation = curation?.semanticValidation;
+      if (
+        semanticValidation &&
+        typeof semanticValidation === 'object' &&
+        semanticValidation.status === 'blocked'
+      ) {
+        const findings = semanticValidation.findings;
+        const firstMessage =
+          Array.isArray(findings) && findings.length > 0 && typeof findings[0]?.message === 'string'
+            ? findings[0].message
+            : 'A hard cohort semantic validation finding blocks this item.';
+        rejected.push({ itemId: id, reason: `semantic_validation_blocked: ${firstMessage}` });
+        continue;
+      }
+
+      // 2. Guarded durable approval write.
+      const approvalResult = db.query(
+        `UPDATE onboarding_review_state
+         SET approved_at = ?, approved_by = ?, approval_origin = ?, updated_at = ?
+         WHERE item_id = ? AND batch_id = ?
+           AND reviewed_at IS NOT NULL AND review_invalidated_at IS NULL AND approved_at IS NULL`,
+      ).run(now, input.approvedBy, input.origin ?? 'bulk', now, id, input.batchId);
+      if (approvalResult.changes === 0) {
+        // Precise rejection reason from the CURRENT durable row.
+        const row = db.query(
+          'SELECT reviewed_at, review_invalidated_at, approved_at FROM onboarding_review_state WHERE item_id = ?',
+        ).get(id) as
+          | { reviewed_at: string | null; review_invalidated_at: string | null; approved_at: string | null }
+          | undefined;
+        if (!row?.reviewed_at) {
+          rejected.push({ itemId: id, reason: 'not_reviewed' });
+        } else if (row.review_invalidated_at) {
+          rejected.push({ itemId: id, reason: 'review_invalidated' });
+        } else if (row.approved_at) {
+          rejected.push({ itemId: id, reason: 'already_approved' });
+        } else {
+          rejected.push({ itemId: id, reason: 'approval_write_conflict' });
+        }
+        continue;
+      }
+
+      // 3. Guarded advance review→promotion in the SAME transaction. On
+      //    failure the approval write is reverted atomically below.
+      const advanceResult = db.query(
+        `UPDATE onboarding_items
+         SET stage = 'promotion', stage_status = 'pending', error_message = NULL, retry_count = 0,
+             claimed_by = NULL, claimed_at = NULL, updated_at = ?
+         WHERE id = ? AND batch_id = ? AND stage = 'review' AND stage_status = 'completed'`,
+      ).run(now, id, input.batchId);
+      if (advanceResult.changes > 0) {
+        approved.push(id);
+      } else {
+        db.query(
+          `UPDATE onboarding_review_state
+           SET approved_at = NULL, approved_by = NULL, approval_origin = 'bulk', updated_at = ?
+           WHERE item_id = ?`,
+        ).run(now, id);
+        rejected.push({ itemId: id, reason: 'advance_failed_state_changed' });
+      }
+    }
+  })();
+
+  return { approved, rejected };
+}

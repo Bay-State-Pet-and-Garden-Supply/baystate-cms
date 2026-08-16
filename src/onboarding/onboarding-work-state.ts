@@ -17,6 +17,7 @@
  * state maps to one operator category/label/attention pair).
  */
 import { listItemsByBatch, findItemById } from '../db/repositories/onboarding-item-repo';
+import { findBatchById } from '../db/repositories/onboarding-batch-repo';
 import { listSourcesByItem } from '../db/repositories/onboarding-source-repo';
 import { listCohortsByBatch } from '../db/repositories/curation-cohort-repo';
 import { buildCohortView } from './curation-cohort-service';
@@ -125,7 +126,10 @@ export function buildBatchWorkStateContext(batchId: string, items: OnboardingIte
   const promotedSkus = items
     .filter(item => item.stage === 'promotion')
     .map(item => item.upc);
-  const changeSetStatusBySku = listChangeSetStatusBySkus(promotedSkus);
+  // Workspace-scoped change-set status (epic #46 fix 3): identical SKUs in
+  // other workspaces must never leak a pushed/draft status into this batch.
+  const workspaceId = findBatchById(batchId)?.workspaceId ?? '';
+  const changeSetStatusBySku = listChangeSetStatusBySkus(workspaceId, promotedSkus);
   const candidateCountByItem = new Map<string, number>();
   for (const item of items) {
     if (item.stage === 'discovery') {
@@ -286,6 +290,24 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
 
     case 'curation': {
       if (item.stageStatus === 'completed') {
+        // Epic #46 review remediation (fix 2): a `curation / completed` item
+        // whose semantic validation is BLOCKED is NOT ready for review — the
+        // automation side refuses to advance it (auto-advance guard) and the
+        // review-completion gate refuses it. Projecting it as ready_for_review
+        // would create two contradictory authorities and a dead end in the
+        // Review queue. It surfaces as Needs Attention with the first finding.
+        const semanticValidation = item.curationData?.semanticValidation;
+        if (semanticValidation?.status === 'blocked') {
+          const firstMessage =
+            semanticValidation.findings[0]?.message ??
+            'A hard cohort semantic validation finding blocks this item.';
+          return attention(
+            'semantic_validation_blocked',
+            'resolve_semantic_conflict',
+            'Curation blocked by semantic validation',
+            firstMessage,
+          );
+        }
         return build(item, row, cohort, { category: 'ready_for_review', activity: 'review', label: 'Ready for review' });
       }
       if (item.stageStatus === 'failed') {
@@ -396,21 +418,43 @@ function initCounts(): WorkStateCounts {
   return { ...EMPTY_WORK_STATE_COUNTS };
 }
 
+/** Human label for the source type (used by the free-text search haystack). */
+function sourceTypeLabel(sourceType: OnboardingWorkState['sourceType']): string {
+  if (sourceType === 'distributor_record') return 'distributor record';
+  if (sourceType === 'official_page') return 'official page';
+  return '';
+}
+
 function matchesFilters(state: OnboardingWorkState, filters: WorkStateFilters): boolean {
   if (filters.category && state.category !== filters.category) return false;
   if (filters.reviewState && state.reviewState !== filters.reviewState) return false;
   if (filters.sourceType && state.sourceType !== filters.sourceType) return false;
+  // Dimensional filter: domain matches the item's OWN normalized host ONLY
+  // (epic #46 fix 5). A family label that merely CONTAINS the domain string
+  // is not a domain match — domain=purina must never match the family
+  // "Purina Pro Plan" when the item's source domain is unrelated.
   if (filters.domain) {
     const needle = filters.domain.toLowerCase().replace(/^www\./, '');
     const domainMatch = state.domain?.toLowerCase() === needle || state.domain?.toLowerCase().endsWith(`.${needle}`);
-    const familyMatch = state.family?.label?.toLowerCase().includes(filters.domain.toLowerCase()) ?? false;
-    if (!domainMatch && !familyMatch) return false;
+    if (!domainMatch) return false;
   }
   if (filters.cohortId && state.family?.cohortId !== filters.cohortId) return false;
   if (filters.q) {
     const q = filters.q.trim().toLowerCase();
     if (!q) return true;
-    const haystack = [state.upc, state.name, state.brand ?? '', state.label, state.domain ?? ''].join(' ').toLowerCase();
+    // Free-text search covers the epic's full contract: UPC, name/title,
+    // Brand, domain, source type, family/cohort label, and work-state label +
+    // category.
+    const haystack = [
+      state.upc,
+      state.name,
+      state.brand ?? '',
+      state.label,
+      state.domain ?? '',
+      sourceTypeLabel(state.sourceType),
+      state.family?.label ?? '',
+      state.category,
+    ].join(' ').toLowerCase();
     if (!haystack.includes(q)) return false;
   }
   return true;
@@ -467,10 +511,11 @@ export function getItemWorkState(itemId: string): OnboardingWorkState | undefine
   const item = findItemById(itemId) as OnboardingItem | undefined;
   if (!item) return undefined;
   const reviewRow = getReviewState(itemId);
+  const workspaceId = findBatchById(item.batchId)?.workspaceId ?? '';
   const ctx: WorkStateContext = {
     reviewStates: new Map(reviewRow ? [[item.id, reviewRow]] : []),
     cohortByItem: buildCohortContext(item.batchId, listItemsByBatch(item.batchId)),
-    changeSetStatusBySku: item.stage === 'promotion' ? listChangeSetStatusBySkus([item.upc]) : new Map(),
+    changeSetStatusBySku: item.stage === 'promotion' ? listChangeSetStatusBySkus(workspaceId, [item.upc]) : new Map(),
     candidateCountByItem: item.stage === 'discovery'
       ? new Map([[item.id, listSourcesByItem(item.id).length]])
       : new Map(),

@@ -254,11 +254,15 @@ describe('telemetry — review state, edits, approval', () => {
     const metrics = getOnboardingMetrics({ workspaceId, batchId });
     const throughput = metrics.metrics.reviewThroughputProductsPerMinute;
     expect(throughput.value).toBeGreaterThan(0);
-    expect(throughput.derivation).toBe('exact');
+    // Epic #46 fix 6: the denominator is batch-creation time (includes
+    // automation lead time), so the metric is an approximation, not exact.
+    expect(throughput.derivation).toBe('approximation');
     expect(throughput.note).toContain('Reviewed 4');
     // 1 of 4 reviews invalidated; 2 of 4 approved.
     expect(metrics.metrics.reviewEditRate.value).toBeCloseTo(0.25, 5);
-    expect(metrics.metrics.reviewEditRate.derivation).toBe('exact');
+    // Epic #46 fix 6: the invalidation ratio is CURRENT state (re-review
+    // clears the marker), so it is an approximation, not a historical rate.
+    expect(metrics.metrics.reviewEditRate.derivation).toBe('approximation');
     expect(metrics.metrics.bulkApprovalSuccessRate.value).toBeCloseTo(0.5, 5);
     expect(metrics.metrics.bulkApprovalSuccessRate.derivation).toBe('approximation');
     expect(metrics.metrics.productsReadyForReview.value).toBe(4);
@@ -405,8 +409,33 @@ describe('telemetry — empty states and derivation markers', () => {
     expect(metrics.metrics.exportSuccessRate.value).toBeNull();
     expect(metrics.metrics.exportSuccessRate.derivation).toBe('not_available');
     expect(metrics.metrics.cohortCurationSuccessRate.value).toBeNull();
-    // An empty batch still has a start time: 0 products/min is honest and exact.
+    // An empty batch still has a start time: 0 products/min, but the metric
+    // is an APPROXIMATION (epic #46 fix 6) — the window is batch-creation
+    // based and includes automation lead time, so it is a floor, never exact.
     expect(metrics.metrics.reviewThroughputProductsPerMinute.value).toBe(0);
-    expect(metrics.metrics.reviewThroughputProductsPerMinute.derivation).toBe('exact');
+    expect(metrics.metrics.reviewThroughputProductsPerMinute.derivation).toBe('approximation');
+  });
+
+  it('honesty markers: review throughput + edit rate are approximations, domain unblock is operations (epic #46 fix 6)', () => {
+    const batchId = makeBatch();
+    const id1 = createItem(batchId, { upc: 'M1', name: 'X', stage: 'review', stageStatus: 'completed' });
+    markReviewed({ itemId: id1, batchId, reviewedBy: 'operator' });
+    markApproved({ itemId: id1, batchId, approvedBy: 'manager' });
+    addAuditLog({
+      workspaceId,
+      entityType: 'onboarding_batch',
+      entityId: batchId,
+      action: 'domain_release',
+      message: 'release',
+      detailsJson: '{}',
+    });
+
+    const metrics = getOnboardingMetrics({ workspaceId, batchId });
+    expect(metrics.metrics.reviewThroughputProductsPerMinute.derivation).toBe('approximation');
+    expect(metrics.metrics.reviewThroughputProductsPerMinute.note).toMatch(/floor/);
+    expect(metrics.metrics.reviewEditRate.derivation).toBe('approximation');
+
+    const globalMetrics = getOnboardingMetrics({ workspaceId });
+    expect(globalMetrics.metrics.extractorProfileDomainUnblockCount.unit).toBe('operations');
   });
 });

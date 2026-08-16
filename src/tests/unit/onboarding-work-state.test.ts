@@ -33,6 +33,7 @@ import {
   createChangeSet,
   upsertChangeSetItem,
   updateChangeSetStatus,
+  listChangeSetStatusBySkus,
 } from '../../db/repositories/change-set-repo';
 import { refreshCandidateCohorts } from '../../onboarding/curation-cohort-service';
 import {
@@ -496,5 +497,131 @@ describe('batch work-state counts + filters', () => {
     const paged = getBatchWorkState(batchId, { limit: 1, offset: 1 });
     expect(paged.items).toHaveLength(1);
     expect(paged.total).toBe(3);
+  });
+});
+
+describe('epic #46 review remediation — fix 2: semantic-blocked curation is never ready_for_review', () => {
+  function seedCurationWithSemantic(itemId: string, status: 'blocked' | 'passed' | null): void {
+    const payload: Record<string, unknown> = { curatedTitle: 'X', titleSource: 'web' };
+    if (status) {
+      payload.semanticValidation = {
+        status,
+        findings: status === 'blocked'
+          ? [{ code: 'family_product_type', memberSku: 'SKU-1', message: 'Family members disagree on product type.' }]
+          : [],
+      };
+    }
+    getDb().run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [JSON.stringify(payload), itemId]);
+  }
+
+  it('curation/completed + blocked → needs_attention / semantic_validation_blocked (NEVER ready_for_review)', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'S1', name: 'X', stage: 'curation', stageStatus: 'completed' });
+    seedCurationWithSemantic(id, 'blocked');
+    const state = derive(batchId, id);
+    expect(state.category).toBe('needs_attention');
+    expect(state.attentionReason).toBe('semantic_validation_blocked');
+    expect(state.attentionAction).toBe('resolve_semantic_conflict');
+    expect(state.label).toBe('Curation blocked by semantic validation');
+    expect(state.detail).toContain('Family members disagree');
+  });
+
+  it('curation/completed + semantic passed → ready_for_review unchanged', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'S2', name: 'X', stage: 'curation', stageStatus: 'completed' });
+    seedCurationWithSemantic(id, 'passed');
+    const state = derive(batchId, id);
+    expect(state.category).toBe('ready_for_review');
+    expect(state.attentionReason).toBeNull();
+  });
+
+  it('curation/completed WITHOUT semanticValidation → ready_for_review unchanged', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'S3', name: 'X', stage: 'curation', stageStatus: 'completed' });
+    seedCurationWithSemantic(id, null);
+    const state = derive(batchId, id);
+    expect(state.category).toBe('ready_for_review');
+  });
+
+  it('blocked curation items are excluded from the ready_for_review count', () => {
+    const batchId = makeBatch();
+    const ok = createItem(batchId, { upc: 'S4', name: 'X', stage: 'curation', stageStatus: 'completed' });
+    const blocked = createItem(batchId, { upc: 'S5', name: 'Y', stage: 'curation', stageStatus: 'completed' });
+    seedCurationWithSemantic(ok, null);
+    seedCurationWithSemantic(blocked, 'blocked');
+    const payload = getBatchWorkState(batchId);
+    expect(payload.counts.ready_for_review).toBe(1);
+    expect(payload.counts.needs_attention).toBe(1);
+  });
+});
+
+describe('epic #46 review remediation — fix 3: change-set status is workspace-scoped', () => {
+  it('a pushed change set for the same SKU in ANOTHER workspace never projects exported', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'SAME-SKU', name: 'X', stage: 'promotion', stageStatus: 'completed' });
+
+    // Workspace B with an identical SKU that is PUSHED.
+    const wsB = randomUUID();
+    const now = new Date().toISOString();
+    getDb().run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at)
+       VALUES (?, 'ws-b', ?, '', ?, ?)`,
+      [wsB, path.join(os.tmpdir(), `baystate-wsb-${wsB.slice(0, 8)}`), now, now],
+    );
+    const batchB = createBatch({ workspaceId: wsB, name: 'Batch B', fileName: 'b.csv', totalItems: 0 });
+    void batchB;
+    const csB = createChangeSet({ workspaceId: wsB, title: 'B', description: null, baseCommit: 'b'.repeat(40) });
+    upsertChangeSetItem({ changeSetId: csB.id, sku: 'SAME-SKU', operation: 'create', draftJson: '{}', baseJson: null, draftHash: 'hb' });
+    updateChangeSetStatus(csB.id, 'pushed');
+
+    // Workspace A's batch has NO change set for this SKU → ready_to_export,
+    // NEVER exported — the other workspace's pushed status must not leak.
+    const state = derive(batchId, id);
+    expect(state.category).toBe('ready_to_export');
+    expect(state.label).toBe('Ready to export');
+
+    // The repo primitive itself is workspace-scoped.
+    expect(listChangeSetStatusBySkus(workspaceId, ['SAME-SKU']).has('SAME-SKU')).toBe(false);
+    expect(listChangeSetStatusBySkus(wsB, ['SAME-SKU']).get('SAME-SKU')).toBe('pushed');
+  });
+});
+
+describe('epic #46 review remediation — fix 5: search/filter contract', () => {
+  it('domain filter matches the item DOMAIN only, never a family label that merely contains the string', () => {
+    const batchId = makeBatch();
+    // Cohort label contains "Purina" (family name) but the item's own source
+    // domain is unrelated.
+    const m1 = createItem(batchId, { upc: 'D1', name: 'Purina Pro Plan Chicken 30 lb', brandHint: 'Purina', stage: 'discovery', stageStatus: 'pending' });
+    const m2 = createItem(batchId, { upc: 'D2', name: 'Purina Pro Plan Chicken 15 lb', brandHint: 'Purina', stage: 'discovery', stageStatus: 'pending' });
+    makeItemExtractionReady(m1, 'https://unrelated-site.example/p/d1');
+    makeItemExtractionReady(m2, 'https://unrelated-site.example/p/d2');
+    refreshCandidateCohorts(workspaceId, batchId);
+    advanceItemsToNextStage([m1, m2]);
+
+    const byDomain = getBatchWorkState(batchId, { domain: 'purina' });
+    expect(byDomain.total).toBe(0);
+    const byDomain2 = getBatchWorkState(batchId, { domain: 'unrelated-site.example' });
+    expect(byDomain2.total).toBe(2);
+  });
+
+  it('free-text q matches the source-type label (distributor record)', () => {
+    const batchId = makeBatch();
+    createItem(batchId, { upc: 'Q1', name: 'Alpha', stage: 'sourcing', stageStatus: 'completed', sourceType: 'distributor_record' });
+    createItem(batchId, { upc: 'Q2', name: 'Beta', stage: 'sourcing', stageStatus: 'completed' });
+    const bySource = getBatchWorkState(batchId, { q: 'distributor record' });
+    expect(bySource.total).toBe(1);
+    expect(bySource.items[0].upc).toBe('Q1');
+  });
+
+  it('free-text q matches the family/cohort label', () => {
+    const batchId = makeBatch();
+    const m1 = createItem(batchId, { upc: 'FQ1', name: 'Blue Buffalo Life Protection Chicken 30 lb', brandHint: 'Blue Buffalo', stage: 'discovery', stageStatus: 'pending' });
+    const m2 = createItem(batchId, { upc: 'FQ2', name: 'Blue Buffalo Life Protection Chicken 15 lb', brandHint: 'Blue Buffalo', stage: 'discovery', stageStatus: 'pending' });
+    makeItemExtractionReady(m1, `https://brand.example.com/products/${m1}`);
+    makeItemExtractionReady(m2, `https://brand.example.com/products/${m2}`);
+    refreshCandidateCohorts(workspaceId, batchId);
+    advanceItemsToNextStage([m1, m2]);
+    const byFamily = getBatchWorkState(batchId, { q: 'life protection chicken' });
+    expect(byFamily.total).toBe(2);
   });
 });

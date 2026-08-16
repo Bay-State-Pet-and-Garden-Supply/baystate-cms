@@ -104,6 +104,7 @@ describe('groupAttentionItems', () => {
       'extraction_profile_failed',
       'source_conflict',
       'processing_failed',
+      'semantic_validation_blocked',
       'unknown',
     ]);
   });

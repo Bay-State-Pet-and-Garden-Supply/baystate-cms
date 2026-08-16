@@ -15,14 +15,13 @@ import { findWorkspace } from '../../db/repositories/workspace-repo';
 import { findBatchById } from '../../db/repositories/onboarding-batch-repo';
 import {
   findItemById,
-  advanceReviewedItemsToPromotion,
 } from '../../db/repositories/onboarding-item-repo';
 import {
   getBatchWorkState,
   getItemWorkState,
   type WorkStateFilters,
 } from '../../onboarding/onboarding-work-state';
-import { getReviewState, markApproved } from '../../db/repositories/onboarding-review-repo';
+import { getReviewState, approveAndAdvanceItems } from '../../db/repositories/onboarding-review-repo';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
@@ -224,37 +223,36 @@ route.post('/onboarding/batches/:id/approve', async (c) => {
     validIds.push(id);
   }
 
-  // ── Phase 2: advance review → promotion (guarded; per-item results) ────
-  const { advanced, refused } = advanceReviewedItemsToPromotion(validIds);
-  const advancedIds: string[] = [];
-  for (const id of advanced) {
-    // Durable approval write (guarded: reviewed, not invalidated, not
-    // already approved). Approval NEVER exports.
-    const ok = markApproved({ itemId: id, batchId, approvedBy, origin: 'bulk' });
-    if (ok) {
-      advancedIds.push(id);
-      addAuditLog({
-        workspaceId: workspace.id,
-        entityType: 'onboarding_item',
-        entityId: id,
-        action: 'bulk_approve',
-        message: `Item approved for export (bulk approval by ${approvedBy})`,
-        detailsJson: JSON.stringify({ batchId, origin: 'bulk' }),
-      });
-      // Epic #46 audit fix: emit an item:status SSE event per approved item so
-      // the Batch Workspace tabs + Ready-to-Export queue refresh without a
-      // manual reload (approval is a durable release decision, not a publish).
-      onboardingEvents.emitItemStatus(findItemById(id)?.batchId ?? batchId, id, 'approved', {
-        stage: 'promotion',
-        approvalOrigin: 'bulk',
-      });
-    } else {
-      rejected.push({ itemId: id, reason: 'approval_write_conflict' });
-    }
+  // ── Phase 2: ATOMIC durable approval + review→promotion advance ──────
+  // One transaction per item (approveAndAdvanceItems): a concurrent
+  // consequential edit can never interleave between the approval write and
+  // the stage transition — an item can never land in `promotion` WITHOUT
+  // durable approval (epic #46 review remediation, fix 1). Approval NEVER
+  // exports.
+  const { approved: advancedIds, rejected: atomicRejected } = approveAndAdvanceItems({
+    itemIds: validIds,
+    batchId,
+    approvedBy,
+    origin: 'bulk',
+  });
+  for (const id of advancedIds) {
+    addAuditLog({
+      workspaceId: workspace.id,
+      entityType: 'onboarding_item',
+      entityId: id,
+      action: 'bulk_approve',
+      message: `Item approved for export (bulk approval by ${approvedBy})`,
+      detailsJson: JSON.stringify({ batchId, origin: 'bulk' }),
+    });
+    // Epic #46 audit fix: emit an item:status SSE event per approved item so
+    // the Batch Workspace tabs + Ready-to-Export queue refresh without a
+    // manual reload (approval is a durable release decision, not a publish).
+    onboardingEvents.emitItemStatus(findItemById(id)?.batchId ?? batchId, id, 'approved', {
+      stage: 'promotion',
+      approvalOrigin: 'bulk',
+    });
   }
-  for (const refusal of refused) {
-    rejected.push({ itemId: refusal.itemId, reason: refusal.reason });
-  }
+  rejected.push(...atomicRejected);
 
   // ── Phase 3: structured outcome ─────────────────────────────────────────
   const results = [

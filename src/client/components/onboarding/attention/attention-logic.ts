@@ -30,6 +30,7 @@ export const ATTENTION_GROUP_ORDER: ReadonlyArray<AttentionGroupMeta> = [
   { reason: 'extraction_profile_failed', label: 'Extraction / profile failure', chipLabel: 'Extraction failed' },
   { reason: 'source_conflict', label: 'Distributor match conflict', chipLabel: 'Conflict' },
   { reason: 'processing_failed', label: 'Processing failure', chipLabel: 'Processing failed' },
+  { reason: 'semantic_validation_blocked', label: 'Curation semantic conflict', chipLabel: 'Curation conflict' },
   { reason: 'unknown', label: 'Other', chipLabel: 'Other' },
 ];
 
@@ -52,6 +53,7 @@ export const ATTENTION_ACTION_LABELS: Record<AttentionAction, string> = {
   retry_extraction: 'Retry extraction',
   resolve_source_conflict: 'Resolve conflict',
   retry_processing: 'Retry',
+  resolve_semantic_conflict: 'Review curation findings',
 };
 
 export function getAttentionActionLabel(action: AttentionAction | null | undefined): string {

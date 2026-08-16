@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { initDb } from '../../db/connection';
+import { initDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
@@ -227,3 +227,36 @@ describe('consequential edit reopens approved promotion items (epic #46 audit fi
 function getBatchIdOf(item: { batchId: string }): string {
   return item.batchId;
 }
+describe('epic #46 review remediation — fix 4: batch routes are workspace-scoped', () => {
+  it('cohorts, staged, and events all 404 for a foreign-workspace batch', async () => {
+    const app = makeApp();
+
+    // Workspace B batch (active workspace via findWorkspace is workspace A —
+    // the FIRST inserted row).
+    const wsB = randomUUID();
+    const wsBPath = path.join(os.tmpdir(), `baystate-wsb-${wsB.slice(0, 8)}`);
+    const now = new Date().toISOString();
+    getDb().run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at)
+       VALUES (?, 'ws-b', ?, '', ?, ?)`,
+      [wsB, wsBPath, now, now],
+    );
+    const batchB = createBatch({ workspaceId: wsB, name: 'Foreign Batch', fileName: 'f.csv', totalItems: 0 });
+
+    const cohorts = await app.request(`/api/onboarding/batches/${batchB.id}/cohorts`);
+    expect(cohorts.status).toBe(404);
+    const staged = await app.request(`/api/onboarding/batches/${batchB.id}/staged`);
+    expect(staged.status).toBe(404);
+    const events = await app.request(`/api/onboarding/batches/${batchB.id}/events`);
+    expect(events.status).toBe(404);
+  });
+
+  it('cohorts and staged return 200 for the active workspace batch', async () => {
+    const app = makeApp();
+    const batchId = makeBatch();
+    const cohorts = await app.request(`/api/onboarding/batches/${batchId}/cohorts`);
+    expect(cohorts.status).toBe(200);
+    const staged = await app.request(`/api/onboarding/batches/${batchId}/staged`);
+    expect(staged.status).toBe(200);
+  });
+});

@@ -31,6 +31,7 @@ import {
   markReviewInvalidated,
   getReviewState,
   listReviewStates,
+  approveAndAdvanceItems,
 } from '../../db/repositories/onboarding-review-repo';
 import {
   deriveItemWorkState,
@@ -38,6 +39,7 @@ import {
 } from '../../onboarding/onboarding-work-state';
 import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
 import onboardingWorkRoutes, { setWorkerPollTriggerForTest } from '../../server/routes/onboarding-work-routes';
+import { getWorker, resetActiveWorkerForTest } from '../../server/routes/onboarding-routes';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 
 let workspaceId: string;
@@ -472,5 +474,126 @@ describe('approval is durable and never implies export', () => {
     expect(projected.category).toBe('ready_for_review');
     expect(projected.reviewState).toBe('reviewed');
     expect(projected.label).toMatch(/pending approval/);
+  });
+});
+
+describe('epic #46 review remediation — fix 1: approval + advance are atomic', () => {
+  it('concurrent invalidation (full edit path) → route rejects BEFORE any advance', async () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'R1', name: 'X', stage: 'review', stageStatus: 'completed' });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+
+    // The concurrent consequential edit: review invalidated AND the item moved
+    // back to review/pending (the real invalidation path).
+    markReviewInvalidated(id, 'consequential_edit');
+    updateItemStageStatus(id, 'pending');
+
+    const res = await makeApp().request(`/api/onboarding/batches/${batchId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itemIds: [id] }),
+    });
+    const body = await res.json();
+    expect(body.approvedCount).toBe(0);
+    expect(body.rejected[0].reason).toMatch(/^not_eligible:review\/pending/);
+
+    // The item is NOT in promotion and NO approval was written.
+    const item = findItemById(id)!;
+    expect(item.stage).toBe('review');
+    expect(item.stageStatus).toBe('pending');
+    expect(getReviewState(id)!.approvedAt).toBeNull();
+  });
+
+  it('approveAndAdvanceItems re-validates INSIDE its transaction — a review invalidated after validation is refused (race window)', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'R1b', name: 'X', stage: 'review', stageStatus: 'completed' });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+    // The route's phase-1 validation already PASSED (review/completed +
+    // reviewed), then the concurrent edit invalidates the durable review
+    // BEFORE the atomic write. Stage is still review/completed (the narrowest
+    // race window) — the primitive must re-validate and refuse.
+    markReviewInvalidated(id, 'consequential_edit');
+
+    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager' });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe('review_invalidated');
+    expect(findItemById(id)!.stage).toBe('review');
+    expect(getReviewState(id)!.approvedAt).toBeNull();
+  });
+
+  it('approveAndAdvanceItems refuses an item that left review/completed (no partial state)', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'R2', name: 'X', stage: 'review', stageStatus: 'completed' });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+    // State moved before the call (e.g. worker advanced it): review/completed
+    // is gone.
+    updateItemStageStatus(id, 'completed'); // still review
+    getDb().run("UPDATE onboarding_items SET stage = 'curation' WHERE id = ?", [id]);
+
+    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager' });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toMatch(/^not_eligible:/);
+    // No approval leaked onto a non-promotion item.
+    expect(getReviewState(id)!.approvedAt).toBeNull();
+    expect(findItemById(id)!.stage).toBe('curation');
+  });
+
+  it('already-approved item is rejected atomically and its stage is untouched', async () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'R3', name: 'X', stage: 'review', stageStatus: 'completed' });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+    markApproved({ itemId: id, batchId, approvedBy: 'manager' });
+
+    const res = await makeApp().request(`/api/onboarding/batches/${batchId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itemIds: [id] }),
+    });
+    const body = await res.json();
+    expect(body.approvedCount).toBe(0);
+    expect(body.rejected[0].reason).toBe('already_approved');
+    expect(findItemById(id)!.stage).toBe('review');
+  });
+
+  it('semantic-blocked reviewed member is refused by the atomic approve+advance', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'R4', name: 'X', stage: 'review', stageStatus: 'completed', curationDataJson: JSON.stringify({
+      curatedTitle: 'X',
+      semanticValidation: { status: 'blocked', findings: [{ code: 'family_product_type', memberSku: 'SKU', message: 'Family members disagree on product type.' }] },
+    }) });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+
+    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager' });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toMatch(/^semantic_validation_blocked/);
+    expect(findItemById(id)!.stage).toBe('review');
+    expect(getReviewState(id)!.approvedAt).toBeNull();
+  });
+});
+
+describe('epic #46 review remediation — fix 7: worker singleton is workspace-keyed', () => {
+  it('reuses the worker for the same workspace and replaces it on a workspace switch', () => {
+    const wsB = randomUUID();
+    const wsBPath = path.join(os.tmpdir(), `baystate-wsb-${wsB.slice(0, 8)}`);
+    fs.mkdirSync(path.join(wsBPath, '.baystate-cms'), { recursive: true });
+    const wsBRow = getDb().query(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at)
+       VALUES (?, 'ws-b', ?, '', ?, ?)`,
+    ).run(wsB, wsBPath, new Date().toISOString(), new Date().toISOString());
+    expect(wsBRow.changes).toBe(1);
+
+    try {
+      const workerA1 = getWorker(workspaceId, workspacePath);
+      const workerA2 = getWorker(workspaceId, workspacePath);
+      expect(workerA1).toBe(workerA2); // same workspace → same instance
+
+      const workerB = getWorker(wsB, wsBPath);
+      expect(workerB).not.toBe(workerA1); // workspace switch → NEW worker
+
+      const workerA3 = getWorker(workspaceId, workspacePath);
+      expect(workerA3).not.toBe(workerB); // switching back creates another
+    } finally {
+      resetActiveWorkerForTest();
+    }
   });
 });

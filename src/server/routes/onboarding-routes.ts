@@ -295,8 +295,16 @@ function projectEvidenceAttempt(
   });
 }
 
-// Global map to hold the worker instance for the current workspace
-let activeWorker: OnboardingWorker | null = null;
+// Global worker holder, keyed by the workspace it serves. Epic #46 review
+// remediation (fix 7): switching the active workspace must REPLACE the worker
+// (stopping the old one) instead of returning a worker permanently bound to
+// the FIRST workspace seen — automation (discovery→extraction→curation→
+// review progression, domain releases) is workspace-scoped.
+interface ActiveWorkerEntry {
+  workspaceId: string;
+  worker: OnboardingWorker;
+}
+let activeWorker: ActiveWorkerEntry | null = null;
 
 /**
  * Lazy worker accessor shared by every mutating onboarding route (epic #46
@@ -304,11 +312,20 @@ let activeWorker: OnboardingWorker | null = null;
  * background poll without instantiating a second worker).
  */
 export function getWorker(workspaceId: string, workspacePath: string): OnboardingWorker {
-  if (!activeWorker) {
-    activeWorker = new OnboardingWorker(workspaceId, workspacePath);
-    activeWorker.start();
+  if (activeWorker?.workspaceId !== workspaceId) {
+    // Stop the previous workspace's poll loop before replacing it.
+    activeWorker?.worker.stop();
+    const worker = new OnboardingWorker(workspaceId, workspacePath);
+    worker.start();
+    activeWorker = { workspaceId, worker };
   }
-  return activeWorker;
+  return activeWorker.worker;
+}
+
+/** Test seam: stop and clear the active worker (idempotent). */
+export function resetActiveWorkerForTest(): void {
+  activeWorker?.worker.stop();
+  activeWorker = null;
 }
 
 function autoAcceptPendingProposalsForRun(runId: string): void {
@@ -662,6 +679,11 @@ route.post('/onboarding/batches/:id/bulk-brand', async (c) => {
  */
 route.get('/onboarding/batches/:id/staged', (c) => {
   const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  const workspace = findWorkspace();
+  if (!workspace || !batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
   const staged = listItemsByBatchStaged(batchId);
   return c.json({ staged });
 });
@@ -675,7 +697,8 @@ route.get('/onboarding/batches/:id/staged', (c) => {
 route.get('/onboarding/batches/:id/cohorts', async (c) => {
   const batchId = c.req.param('id');
   const batch = findBatchById(batchId);
-  if (!batch) {
+  const workspace = findWorkspace();
+  if (!workspace || !batch || batch.workspaceId !== workspace.id) {
     return c.json({ error: 'Batch not found' }, 404);
   }
   const payload = CohortListResponseSchema.parse({ cohorts: listCandidateCohortViews(batchId) });
@@ -1272,6 +1295,13 @@ route.post('/onboarding/batches/:id/promote', async (c) => {
 route.get('/onboarding/batches/:id/events', async (c) => {
   const batchId = c.req.param('id');
   const workspace = findWorkspace();
+  // Workspace-ownership guard (epic #46 review remediation, fix 4): a
+  // foreign-workspace batch is 404 BEFORE any SSE connection opens — family
+  // readiness and item event streams are workspace-scoped.
+  const batch = findBatchById(batchId);
+  if (!workspace || !batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
   if (workspace) {
     getWorker(workspace.id, workspace.workspacePath);
   }

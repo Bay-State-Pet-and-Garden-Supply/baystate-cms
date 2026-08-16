@@ -234,13 +234,15 @@ function aggregateBatch(slices: BatchSlice[], workspaceId: string): Aggregated {
     }
   }
 
-  // Promoted items' change-set statuses (batch export success denominator).
+  // Promoted items' change-set statuses (batch export success denominator),
+  // scoped to THIS workspace (epic #46 fix 3): identical SKUs in other
+  // workspaces must never contribute their change-set lifecycle.
   for (const slice of slices) {
     const promotedSkus = slice.items
       .filter(item => item.stage === 'promotion' && item.stageStatus === 'completed')
       .map(item => item.upc);
     if (promotedSkus.length === 0) continue;
-    for (const [sku, status] of listChangeSetStatusBySkus(promotedSkus)) {
+    for (const [sku, status] of listChangeSetStatusBySkus(workspaceId, promotedSkus)) {
       if (!CHANGE_SET_ACTIVE_STATES.has(status)) continue;
       agg.promotedSkuStatuses.set(sku, status);
     }
@@ -315,8 +317,8 @@ function buildMetrics(
     agg.attentionCount === 0 ? 'No items need attention' : 'Profile-required + profile-failed attention over all attention',
   );
   const domainUnblockCount = scope === 'global'
-    ? metric(countAuditLogsByAction(workspaceId, 'domain_release'), 'items', 'exact',
-      'Count of domain-release audit operations (operator-triggered releases after profile setup)')
+    ? metric(countAuditLogsByAction(workspaceId, 'domain_release'), 'operations', 'exact',
+      'Count of domain-release audit OPERATIONS (operator-triggered releases after profile setup); items released per operation are not recorded')
     : metric(null, 'items', 'not_available',
       'Domain-release operations are recorded per workspace/domain, not per batch');
 
@@ -347,19 +349,23 @@ function buildMetrics(
     throughput = metric(null, 'products/min', 'not_available', 'No batches in scope');
   } else {
     const elapsedMinutes = Math.max((Date.now() - agg.earliestBatchStartMs) / 60_000, 1 / 60);
+    // Approximation, NOT exact (epic #46 fix 6): the elapsed window is
+    // "since the batch was CREATED", which includes automation time before
+    // anyone starts reviewing — this is a throughput floor, not a measured
+    // review rate.
     throughput = metric(
       agg.reviewedCount / elapsedMinutes,
       'products/min',
-      'exact',
-      `Reviewed ${agg.reviewedCount} over ${elapsedMinutes.toFixed(1)} min since batch start (clamped to ≥1s for fresh batches)`,
+      'approximation',
+      `Reviewed ${agg.reviewedCount} over ${elapsedMinutes.toFixed(1)} min since batch creation (clamped to ≥1s for fresh batches); automation lead time inflates the denominator, so this is a floor, not a measured review rate`,
     );
   }
 
   const reviewEditRate = metric(
     divide(agg.invalidatedCount, agg.reviewedCount),
     'ratio',
-    'exact',
-    'Invalidated (consequential edit after review) over all durable reviews — the durable invalidation IS the edit marker',
+    'approximation',
+    'CURRENT invalidated-over-reviewed ratio — a re-review clears the invalidation marker, so historical edits disappear from this ratio; not a historical edit rate',
   );
 
   const approvalSuccessRate = metric(

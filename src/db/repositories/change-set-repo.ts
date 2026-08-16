@@ -256,14 +256,18 @@ export function listChangeSetItems(changeSetId: string): ChangeSetItemRow[] {
 
 /**
  * Most-advanced non-discarded change-set status per onboarding SKU (epic #46
- * Phase 8 — "ready to export / exported" projection). One batched query.
+ * Phase 8 — "ready to export / exported" projection). One batched query,
+ * scoped to ONE workspace (epic #46 review remediation, fix 3): identical
+ * SKUs promoted in DIFFERENT workspaces must never leak their change-set
+ * status across workspace boundaries — a SKU pushed in workspace B can never
+ * make workspace A report its own product as exported.
  *
  * Discarded change sets never count; a SKU in multiple live change sets
  * resolves to the most advanced lifecycle status (`pushed` > `approved` >
  * `reviewing` > `draft`), so an item already pushed through one release is
  * never reported as merely draft-pending.
  */
-export function listChangeSetStatusBySkus(skus: string[]): Map<string, string> {
+export function listChangeSetStatusBySkus(workspaceId: string, skus: string[]): Map<string, string> {
   const db = getDb();
   if (skus.length === 0) return new Map();
   const placeholders = skus.map(() => '?').join(', ');
@@ -271,8 +275,8 @@ export function listChangeSetStatusBySkus(skus: string[]): Map<string, string> {
     `SELECT csi.sku AS sku, cs.status AS status
      FROM change_set_items csi
      JOIN change_sets cs ON cs.id = csi.change_set_id
-     WHERE csi.sku IN (${placeholders}) AND cs.status != 'discarded'`,
-  ).all(...skus) as Array<{ sku: string; status: string }>;
+     WHERE cs.workspace_id = ? AND csi.sku IN (${placeholders}) AND cs.status != 'discarded'`,
+  ).all(workspaceId, ...skus) as Array<{ sku: string; status: string }>;
   const RANK: Record<string, number> = { draft: 1, reviewing: 2, approved: 3, pushed: 4 };
   const result = new Map<string, string>();
   for (const row of rows) {
