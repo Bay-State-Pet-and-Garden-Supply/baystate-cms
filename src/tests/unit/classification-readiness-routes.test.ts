@@ -18,6 +18,7 @@ import { writeProductFile } from '../../git/workspace-files';
 import { sha256Hex } from '../../shared/stable-id';
 import { ClassificationReadinessReportSchema } from '../../shared/schemas/classification';
 import { assertClassificationReady, ClassificationNotReadyError } from '../../classification/readiness';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
 import classificationRoutes from '../../server/routes/classification-routes';
 import catalogClassificationRoutes from '../../server/routes/catalog-classification-routes';
@@ -159,10 +160,14 @@ function writeSkuProduct(sku: string): void {
 
 describe('classification readiness (issue #17 L)', () => {
   beforeEach(async () => {
+    // P0 taxonomy freeze: this suite exercises activation, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     await freshWorkspace();
   });
 
   afterAll(() => {
+    setTaxonomyFreezeForTests(true);
     closeDb();
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });

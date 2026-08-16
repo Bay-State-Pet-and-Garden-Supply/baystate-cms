@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -11,6 +11,10 @@ import { createRun } from '../../db/repositories/classification-run-repo';
 import { insertModelCallStart, completeModelCall } from '../../db/repositories/classification-model-call-repo';
 import { MODEL_CALL_STATUS, COST_BASIS } from '../../classification/model-operation-registry';
 import classificationRoutes from '../../server/routes/classification-routes';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
+
+// P0 taxonomy freeze: this suite persists a legacy config inside a test, so
+// the freeze is lifted for the duration of the suite (restored in afterAll).
 
 const HASH = 'a'.repeat(64);
 const DIGEST = 'b'.repeat(64);
@@ -26,12 +30,17 @@ function makeApp(): Hono {
 
 describe('GET /api/classification/runs/:id (issue #17 E)', () => {
   beforeAll(() => {
+    setTaxonomyFreezeForTests(false);
     wsA = { id: randomUUID(), path: '' };
     wsA.path = path.join(os.tmpdir(), `baystate-cms-run-routes-a-${wsA.id.slice(0, 8)}`);
     fs.mkdirSync(path.join(wsA.path, '.baystate-cms'), { recursive: true });
     initDb(path.join(wsA.path, '.baystate-cms', 'app.db'));
     runMigrations();
     insertWorkspace({ id: wsA.id, name: 'ws-a', workspacePath: wsA.path, gitPath: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), bootstrapStatus: 'complete', baselineCommit: null });
+  });
+
+  afterAll(() => {
+    setTaxonomyFreezeForTests(true);
   });
 
   it('returns 404 for a run that does not exist', async () => {

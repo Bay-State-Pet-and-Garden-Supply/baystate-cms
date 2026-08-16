@@ -20,6 +20,7 @@ import {
   loadRuntimeConfigAuthority,
   createRuntimeActivationContext,
 } from '../../classification/config-loader';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { sha256Hex } from '../../shared/stable-id';
 
 const REVIEWED_FIELDS = [
@@ -123,10 +124,14 @@ async function freshWorkspace(): Promise<void> {
 
 describe('attribute-profile-editor', () => {
   beforeAll(async () => {
+    // P0 taxonomy freeze: this suite exercises the editor implementation, so
+    // the freeze is explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     await freshWorkspace();
   });
 
   afterAll(() => {
+    setTaxonomyFreezeForTests(true);
     try { closeDb(); } catch {}
     try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
   });

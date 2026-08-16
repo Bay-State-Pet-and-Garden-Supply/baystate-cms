@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, mock } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, mock } from 'bun:test';
 import { Hono } from 'hono';
 
 // Mock the LLM client so page assignment works in test environment
@@ -25,6 +25,7 @@ import {
   configHashMatches,
 } from '../../db/repositories/classification-config-repo';
 import { createRun, completeRun, getProposalsByRun, getStageResults, getEvidenceByRun, recordDecision, getAcceptedProposals } from '../../db/repositories/classification-run-repo';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { runPipeline } from '../../classification/pipeline-runner';
 import type { ClassificationStageName } from '../../classification/types';
 import type { ClassificationEvidence } from '../../shared/types';
@@ -86,6 +87,9 @@ describe('Classification Pipeline Integration', () => {
   ];
 
   beforeAll(() => {
+    // P0 taxonomy freeze: this suite writes a legacy config, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     workspaceId = randomUUID();
     workspacePath = path.join(os.tmpdir(), `baystate-cms-class-test-${workspaceId.slice(0, 8)}`);
     const dbPath = path.join(workspacePath, '.baystate-cms', 'app.db');
@@ -117,6 +121,10 @@ describe('Classification Pipeline Integration', () => {
       dataSharing: { imagePolicy: 'local_only' as const, textPolicy: 'local_only' as const, sensitiveDataFiltering: true, retentionDays: 90 },
     });
     syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
+  });
+
+  afterAll(() => {
+    setTaxonomyFreezeForTests(true);
   });
 
   it('loads classification config and verifies cached reads', () => {

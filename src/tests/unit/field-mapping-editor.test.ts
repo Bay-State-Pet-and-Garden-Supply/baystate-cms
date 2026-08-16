@@ -22,6 +22,7 @@ import {
   loadRuntimeConfigAuthority,
   createRuntimeActivationContext,
 } from '../../classification/config-loader';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { sha256Hex } from '../../shared/stable-id';
 import type { ClassificationConfigBundleV2 } from '../../shared/schemas/classification';
 
@@ -134,9 +135,15 @@ function activeBundle(): ClassificationConfigBundleV2 {
 
 describe('field mapping editor (active v2 bundle)', () => {
   beforeAll(async () => {
+    // P0 taxonomy freeze: this suite exercises the editor implementation, so
+    // the freeze is explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     await freshWorkspace();
   });
-  afterAll(() => closeDb());
+  afterAll(() => {
+    setTaxonomyFreezeForTests(true);
+    closeDb();
+  });
 
   it('re-points a mapping (unmap + map) and keeps targets and the cache mirror in sync', () => {
     const before = activeBundle();

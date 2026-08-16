@@ -50,6 +50,7 @@ import {
   syncConfigToCache,
   upsertConfigSnapshot,
 } from '../db/repositories/classification-config-repo';
+import { assertTaxonomyMutable } from './taxonomy-freeze';
 
 export class FieldMappingEditError extends Error {
   constructor(
@@ -99,6 +100,10 @@ export function applyFieldMappingEdits(
   edits: FieldMappingEdit[],
   options: { gitEnabled?: boolean; gitMessage?: string } = {},
 ): FieldMappingEditResult {
+  // P0 taxonomy freeze: field mapping edits mutate the active taxonomy and
+  // must fail closed until a new immutable taxonomy release is deployed.
+  assertTaxonomyMutable('field mapping edits');
+
   const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
   const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
   if (authority.kind !== 'v2') {

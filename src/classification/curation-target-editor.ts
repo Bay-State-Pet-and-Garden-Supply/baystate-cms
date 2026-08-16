@@ -43,6 +43,7 @@ import {
 } from '../db/repositories/classification-config-repo';
 import { deriveCurationApplicability } from './curation-applicability';
 import { listCurationTargetCandidates } from './curation-targets';
+import { assertTaxonomyMutable } from './taxonomy-freeze';
 
 export class CurationTargetEditError extends Error {
   constructor(
@@ -74,6 +75,10 @@ export function applyCurationTargetEdits(
   rawTargets: unknown[],
   options: { gitEnabled?: boolean; gitMessage?: string } = {},
 ): CurationTargetEditResult {
+  // P0 taxonomy freeze: curation target edits mutate the active taxonomy and
+  // must fail closed until a new immutable taxonomy release is deployed.
+  assertTaxonomyMutable('curation target edits');
+
   const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
   const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
   if (authority.kind !== 'v2') {

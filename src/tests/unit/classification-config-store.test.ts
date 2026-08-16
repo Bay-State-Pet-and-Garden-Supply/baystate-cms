@@ -23,6 +23,7 @@ import {
   getCachedProductTypes,
 } from '../../db/repositories/classification-config-repo';
 import { sha256Hex } from '../../shared/stable-id';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
 import type { VerifiedActivationContext } from '../../classification/config-loader';
 
@@ -89,6 +90,9 @@ describe('classification config-store', () => {
   });
 
   beforeAll(() => {
+    // P0 taxonomy freeze: this suite exercises activation, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     workspaceId = randomUUID();
     root = fs.mkdtempSync(path.join(os.tmpdir(), `config-store-${workspaceId.slice(0, 8)}`));
     fs.mkdirSync(path.join(root, 'store', 'classification'), { recursive: true });
@@ -118,6 +122,7 @@ describe('classification config-store', () => {
   });
 
   afterAll(() => {
+    setTaxonomyFreezeForTests(true);
     fs.rmSync(root, { recursive: true, force: true });
   });
 

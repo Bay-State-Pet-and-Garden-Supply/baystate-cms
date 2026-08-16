@@ -1,0 +1,42 @@
+{
+  "bundleOrigin": {
+    "kind": "reviewed_generation"
+  },
+  "policy": {
+    "defaultModel": "qwen2.5vl:latest",
+    "defaultProvider": "ollama",
+    "imageDataSharing": "local_only",
+    "mlFeatures": {
+      "confidenceCalibration": {
+        "activatedAt": null,
+        "activatedBy": null,
+        "qualificationReceiptDigest": null,
+        "state": "disabled"
+      },
+      "pageReranking": {
+        "activatedAt": null,
+        "activatedBy": null,
+        "qualificationReceiptDigest": null,
+        "state": "disabled"
+      },
+      "productionEmbeddings": {
+        "activatedAt": null,
+        "activatedBy": null,
+        "qualificationReceiptDigest": null,
+        "state": "disabled"
+      },
+      "productionRetrieval": {
+        "activatedAt": null,
+        "activatedBy": null,
+        "qualificationReceiptDigest": null,
+        "state": "disabled"
+      }
+    },
+    "providerLocalities": {
+      "ollama": "local"
+    },
+    "stageOverrides": {},
+    "textDataSharing": "local_only"
+  },
+  "schemaVersion": 2
+}

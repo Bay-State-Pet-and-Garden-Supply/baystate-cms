@@ -35,6 +35,7 @@ import {
   syncConfigToCache,
   upsertConfigSnapshot,
 } from '../db/repositories/classification-config-repo';
+import { assertTaxonomyMutable } from './taxonomy-freeze';
 
 export class AttributeEditError extends Error {
   constructor(
@@ -77,6 +78,10 @@ export function applyAttributeEdits(
   updates: AttributeEditInput,
   options: { gitEnabled?: boolean; gitMessage?: string } = {},
 ): AttributeEditResult {
+  // P0 taxonomy freeze: attribute edits mutate the active taxonomy and must
+  // fail closed until a new immutable taxonomy release is deployed.
+  assertTaxonomyMutable('attribute edits');
+
   const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
   const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
   if (authority.kind !== 'v2') {

@@ -8,6 +8,7 @@ import { scanCatalogEvidence } from './catalog-evidence';
 import { loadRuntimeConfig } from './config-loader';
 import { upsertConfigSnapshot, syncConfigToCache } from '../db/repositories/classification-config-repo';
 import { canonicalJsonFileString, sha256Hex } from '../shared/stable-id';
+import { assertTaxonomyMutable } from './taxonomy-freeze';
 import type { ClassificationConfig } from '../shared/types';
 
 /**
@@ -19,6 +20,10 @@ export async function syncSeedToWorkspace(
   workspacePath: string,
   workspaceId: string,
 ): Promise<ClassificationConfig> {
+  // P0 taxonomy freeze: seed sync rewrites the live taxonomy directory and
+  // must fail closed until a new immutable taxonomy release is deployed.
+  assertTaxonomyMutable('seed sync');
+
   const ws = findWorkspace();
   const evidence = await scanCatalogEvidence(workspacePath, workspaceId);
   const evidenceStr = canonicalJsonFileString(evidence);

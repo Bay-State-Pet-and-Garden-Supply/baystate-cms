@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,6 +21,12 @@ import {
   migrateClassificationConfigV1,
 } from '../../classification/config-migrate-v1';
 import { computeClassificationBundleHash, computeMigrationFindingsDigest } from '../../classification/config-validation';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
+
+// P0 taxonomy freeze: this suite exercises the transitional legacy writer, so
+// the freeze is explicitly lifted for the duration of the tests (restored in
+// afterEach below).
+setTaxonomyFreezeForTests(false);
 
 const roots: string[] = [];
 
@@ -126,8 +132,14 @@ function activateManifest(root: string, migrated: ReturnType<typeof migrateClass
   writeManifest(root, migrated.bundle.manifest);
 }
 
+beforeEach(() => {
+  // Lift the P0 freeze for each test in this suite (restored in afterEach).
+  setTaxonomyFreezeForTests(false);
+});
+
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  setTaxonomyFreezeForTests(true);
 });
 
 describe('classification config loader fail-closed reads', () => {

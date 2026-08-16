@@ -22,6 +22,7 @@ import {
   getCohortById,
   getCohortMembers,
 } from '../../db/repositories/curation-cohort-repo';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import {
   claimReadyCurationCohorts,
   getCohortRunById,
@@ -106,6 +107,9 @@ import * as cohortNameCoordinator from '../../onboarding/cohort-name-coordinator
 let workspacePath: string;
 
 beforeAll(() => {
+  // P0 taxonomy freeze: this suite exercises cohort curation which persists
+  // config, so the freeze is explicitly lifted for the duration of the tests.
+  setTaxonomyFreezeForTests(false);
   workspacePath = path.join(os.tmpdir(), `baystate-cms-cohort-worker-${randomUUID().slice(0, 8)}`);
   fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
   initDb(path.join(workspacePath, '.baystate-cms', 'app.db'));
@@ -113,6 +117,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  setTaxonomyFreezeForTests(true);
   closeDb();
   try { fs.rmSync(workspacePath, { recursive: true, force: true }); } catch { /* ok */ }
 });

@@ -53,6 +53,7 @@ import { PhillipsStorefrontConnector } from '../../onboarding/sourcing/connector
 import type { ScraperFetchPage } from '../../onboarding/sourcing/html-scraper/contracts';
 import { overrideCohortCurationFlags, resetCohortCurationFlagsOverride } from '../../classification/flags';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import { refreshCandidateCohorts } from '../../onboarding/curation-cohort-service';
 import {
@@ -317,6 +318,9 @@ describe('Distributor Scrapers offline acceptance (M7, Amendment B)', () => {
     delete process.env.BAYSTATE_CMS_SOURCING_MODE;
     resetSourcingFlagsOverride();
     resetCohortCurationFlagsOverride();
+    // P0 taxonomy freeze: this suite writes a legacy config, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrapers-acceptance-'));
     dbPath = path.join(tempDir, 'test.db');
     initDb(dbPath);
@@ -343,6 +347,7 @@ describe('Distributor Scrapers offline acceptance (M7, Amendment B)', () => {
   afterEach(() => {
     resetSourcingFlagsOverride();
     resetCohortCurationFlagsOverride();
+    setTaxonomyFreezeForTests(true);
     closeDb();
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });

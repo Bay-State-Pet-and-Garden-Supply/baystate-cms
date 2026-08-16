@@ -19,6 +19,7 @@ import {
   loadRuntimeConfigAuthority,
   createRuntimeActivationContext,
 } from '../../classification/config-loader';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { sha256Hex } from '../../shared/stable-id';
 
 const REVIEWED_FIELDS = [
@@ -70,6 +71,9 @@ function evidenceWithFields(fields: string[]): CatalogEvidence {
 }
 
 beforeAll(async () => {
+  // P0 taxonomy freeze: this suite exercises the editor implementation, so
+  // the freeze is explicitly lifted for the duration of the tests.
+  setTaxonomyFreezeForTests(false);
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'attribute-editor-test-'));
   runGit(['init']);
   runGit(['config', 'user.name', 'Test']);
@@ -130,6 +134,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  setTaxonomyFreezeForTests(true);
   try { closeDb(); } catch {}
   fs.rmSync(root, { recursive: true, force: true });
 });

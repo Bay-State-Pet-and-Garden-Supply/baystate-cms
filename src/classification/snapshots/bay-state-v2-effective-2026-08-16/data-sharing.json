@@ -1,0 +1,12 @@
+{
+  "bundleOrigin": {
+    "kind": "reviewed_generation"
+  },
+  "policy": {
+    "imagePolicy": "local_only",
+    "retentionDays": 90,
+    "sensitiveDataFiltering": true,
+    "textPolicy": "local_only"
+  },
+  "schemaVersion": 2
+}

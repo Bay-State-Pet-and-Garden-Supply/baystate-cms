@@ -1,18 +1,10 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
 import { getCurrentWorkspace } from '../services/workspace-service';
-import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext, loadRuntimeConfigAuthority } from '../../classification/config-loader';
+import { loadRuntimeConfig, createRuntimeActivationContext, loadRuntimeConfigAuthority } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
-import { syncSeedToWorkspace } from '../../classification/seed-sync';
-import { applyFieldMappingEdits, FieldMappingEditError, FieldMappingEditSchema } from '../../classification/field-mapping-editor';
-import { applyAttributeProfileEdits, AttributeProfileEditError, AttributeProfileEditsPayloadSchema } from '../../classification/attribute-profile-editor';
-import { applyCurationTargetEdits, CurationTargetEditError } from '../../classification/curation-target-editor';
-import { applyAttributeEdits, AttributeEditError } from '../../classification/attribute-editor';
 import { processRefreshQueue } from '../../classification/refresh-queue-processor';
-import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import { deriveCurationApplicability } from '../../classification/curation-applicability';
 import {
-  applyCurationTargetsToConfig,
   listCurationTargetCandidates,
 } from '../../classification/curation-targets';
 import { getRun, getStageResults, getEvidenceByRun, getLiveDecisionsByRun, getProposalsByRun } from '../../db/repositories/classification-run-repo';
@@ -27,6 +19,25 @@ import { QUALITY_REPORT_MAX_RANGE_DAYS } from '../../shared/schemas/classificati
 import { buildQualityReport } from '../../db/repositories/classification-metrics-repo';
 
 const router = new Hono();
+
+/**
+ * P0 taxonomy freeze (set-in-stone taxonomy).
+ *
+ * The taxonomy is frozen: definitions, attribute profiles, curation targets,
+ * mappings, and seed sync are read-only at the HTTP surface until a new
+ * immutable taxonomy release is deployed. Returns a fail-closed 403 with the
+ * structured `taxonomy_frozen` code. GET (read) endpoints are unaffected.
+ */
+function taxonomyFrozenResponse(c: any) {
+  return c.json(
+    {
+      error:
+        'Taxonomy is frozen. Taxonomy definitions, attribute profiles, curation targets, mappings, and seed sync are read-only until a new immutable taxonomy release is deployed.',
+      code: 'taxonomy_frozen',
+    },
+    403,
+  );
+}
 
 /**
  * Deep-walk sanitization for run-detail responses: any string that carries
@@ -114,42 +125,9 @@ router.put('/classification/config', async (c) => {
     return c.json({ error: 'No active workspace' }, 400);
   }
 
-  try {
-    const body = await c.req.json();
-    const config = body.config;
-    if (!config) {
-      return c.json({ error: 'Missing configuration payload' }, 400);
-    }
-
-    // Issue #31 D5: v2 workspaces have exactly one canonical mutation seam
-    // (the mapping editor + the preview/activate workflow). A full-config
-    // overwrite cannot bypass it — today this endpoint 500s on v2 workspaces
-    // (loadClassificationConfig throws unsupported_version); the gate turns
-    // that into an intentional 400. Unconfigured/legacy workspaces (no active
-    // authority) keep the transitional v1 save path.
-    try {
-      const authority = loadRuntimeConfigAuthority(
-        ws.workspacePath,
-        createRuntimeActivationContext(ws.workspacePath, ws.id),
-      );
-      if (authority.kind === 'v2') {
-        return c.json({
-          error: 'unsupported_in_v2',
-          message: 'Full config replacement is not supported in v2 workspaces. Use the mapping editor or the preview/activate workflow.',
-        }, 400);
-      }
-    } catch {
-      // No active classification config yet: fall through to the v1 path.
-    }
-
-    saveClassificationConfig(ws.workspacePath, config);
-    syncConfigToCache(ws.id, config);
-
-    return c.json({ success: true, config });
-  } catch (err) {
-    console.error('[ClassificationRoutes] Save configuration failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-  }
+  // P0 taxonomy freeze: ALL taxonomy mutation attempts return the same 403
+  // taxonomy_frozen response, including full-config replacement.
+  return taxonomyFrozenResponse(c);
 });
 
 /**
@@ -166,51 +144,8 @@ router.put('/classification/mappings', async (c) => {
     return c.json({ error: 'No active workspace' }, 400);
   }
 
-  try {
-    const body = await c.req.json();
-    const parsed = z.array(FieldMappingEditSchema).safeParse(body?.edits);
-    if (!parsed.success) {
-      return c.json({
-        error: `Invalid edits payload: ${parsed.error.issues
-          .map(issue => `${issue.path.join('.')}: ${issue.message}`)
-          .join('; ')}`,
-        code: 'invalid_edit',
-      }, 400);
-    }
-
-    const result = applyFieldMappingEdits(ws.workspacePath, ws.id, parsed.data);
-
-    // Rebuild the mappings view the same way /catalog/mappings does.
-    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
-    const attrNames = new Map(config.attributes.map(a => [a.id, a.name]));
-    const attrToTypes = new Map<string, string[]>();
-    for (const pt of config.productTypes) {
-      const profile = config.attributeProfiles.find(ap => ap.id === pt.attributeProfileId);
-      if (profile) {
-        for (const pa of profile.attributes) {
-          if (!attrToTypes.has(pa.attributeId)) attrToTypes.set(pa.attributeId, []);
-          attrToTypes.get(pa.attributeId)!.push(pt.name);
-        }
-      }
-    }
-    const mappings = config.attributeMappings.map(m => ({
-      id: m.id,
-      attributeId: m.attributeId,
-      attributeName: attrNames.get(m.attributeId) ?? m.attributeId,
-      catalogField: m.catalogField,
-      serialization: m.serialization,
-      isStale: m.isStale,
-      usedByProductTypes: attrToTypes.get(m.attributeId) ?? [],
-    }));
-
-    return c.json({ success: true, bundleHash: result.bundleHash, mappings });
-  } catch (err) {
-    if (err instanceof FieldMappingEditError) {
-      return c.json({ error: err.message, code: err.code }, 400);
-    }
-    console.error('[ClassificationRoutes] Save field mappings failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-  }
+  // P0 taxonomy freeze: field mapping edits are read-only.
+  return taxonomyFrozenResponse(c);
 });
 
 /**
@@ -222,30 +157,9 @@ router.put('/classification/attribute-profiles/:productTypeId', async (c) => {
   if (!ws) {
     return c.json({ error: 'No active workspace' }, 400);
   }
-  const productTypeId = c.req.param('productTypeId');
 
-  try {
-    const body = await c.req.json();
-    const parsed = AttributeProfileEditsPayloadSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json(
-        {
-          error: `Invalid payload: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
-          code: 'invalid_edit',
-        },
-        400,
-      );
-    }
-
-    const result = applyAttributeProfileEdits(ws.workspacePath, ws.id, productTypeId, parsed.data.edits);
-    return c.json({ success: true, ...result });
-  } catch (err) {
-    if (err instanceof AttributeProfileEditError) {
-      return c.json({ error: err.message, code: err.code }, 400);
-    }
-    console.error('[ClassificationRoutes] Edit attribute profile failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-  }
+  // P0 taxonomy freeze: attribute profile edits are read-only.
+  return taxonomyFrozenResponse(c);
 });
 
 /**
@@ -278,53 +192,8 @@ router.put('/classification/curation-targets', async (c) => {
     return c.json({ error: 'No active workspace' }, 400);
   }
 
-  try {
-    const body = await c.req.json();
-    const targets = Array.isArray(body?.targets) ? body.targets : [];
-
-    try {
-      const authority = loadRuntimeConfigAuthority(
-        ws.workspacePath,
-        createRuntimeActivationContext(ws.workspacePath, ws.id),
-      );
-      if (authority.kind === 'v2') {
-        applyCurationTargetEdits(ws.workspacePath, ws.id, targets);
-        const updatedConfig = loadRuntimeConfig(ws.workspacePath, ws.id);
-        const { applicability, findings } = deriveCurationApplicability(updatedConfig);
-        return c.json({
-          success: true,
-          targets: updatedConfig.curationTargets,
-          candidates: listCurationTargetCandidates(ws.id, updatedConfig),
-          applicability,
-          findings,
-        });
-      }
-    } catch (err) {
-      if (err instanceof CurationTargetEditError) {
-        return c.json({ error: err.message, code: err.code }, 400);
-      }
-      // No active v2 configuration yet: fall through to v1 path
-    }
-
-    const currentConfig = loadClassificationConfig(ws.workspacePath);
-    const nextConfig = applyCurationTargetsToConfig(currentConfig, targets, ws.id);
-    saveClassificationConfig(ws.workspacePath, nextConfig);
-    syncConfigToCache(ws.id, nextConfig);
-    const { applicability, findings } = deriveCurationApplicability(nextConfig);
-    return c.json({
-      success: true,
-      targets: nextConfig.curationTargets,
-      candidates: listCurationTargetCandidates(ws.id, nextConfig),
-      applicability,
-      findings,
-    });
-  } catch (err) {
-    if (err instanceof CurationTargetEditError) {
-      return c.json({ error: err.message, code: err.code }, 400);
-    }
-    console.error('[ClassificationRoutes] Save curation targets failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-  }
+  // P0 taxonomy freeze: curation target edits are read-only.
+  return taxonomyFrozenResponse(c);
 });
 
 /**
@@ -336,25 +205,8 @@ router.put('/classification/attributes/:attributeId', async (c) => {
     return c.json({ error: 'No active workspace' }, 400);
   }
 
-  const attributeId = c.req.param('attributeId');
-  try {
-    const body = await c.req.json();
-    const result = applyAttributeEdits(ws.workspacePath, ws.id, attributeId, body);
-    const updatedConfig = loadRuntimeConfig(ws.workspacePath, ws.id);
-    const { applicability, findings } = deriveCurationApplicability(updatedConfig);
-    return c.json({
-      success: true,
-      attribute: result.attribute,
-      applicability,
-      findings,
-    });
-  } catch (err) {
-    if (err instanceof AttributeEditError) {
-      return c.json({ error: err.message, code: err.code }, 400);
-    }
-    console.error('[ClassificationRoutes] Update attribute failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-  }
+  // P0 taxonomy freeze: attribute definition edits are read-only.
+  return taxonomyFrozenResponse(c);
 });
 
 /**
@@ -400,27 +252,9 @@ router.post('/classification/sync-seed', async (c) => {
     return c.json({ error: 'No active workspace' }, 400);
   }
 
-  try {
-    const config = await syncSeedToWorkspace(ws.workspacePath, ws.id);
-    const { applicability, findings } = deriveCurationApplicability(config);
-    const candidates = listCurationTargetCandidates(ws.id, config);
-
-    return c.json({
-      success: true,
-      summary: {
-        productTypes: config.productTypes.length,
-        attributes: config.attributes.length,
-        attributeProfiles: config.attributeProfiles.length,
-        attributeMappings: config.attributeMappings.length,
-      },
-      candidates,
-      applicability,
-      findings,
-    });
-  } catch (err) {
-    console.error('[ClassificationRoutes] Seed sync failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-  }
+  // P0 taxonomy freeze: seed sync is a destructive regeneration that would
+  // silently overwrite workspace-level curation decisions — read-only now.
+  return taxonomyFrozenResponse(c);
 });
 
 /**

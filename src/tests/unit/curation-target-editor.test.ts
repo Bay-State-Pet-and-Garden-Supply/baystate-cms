@@ -21,6 +21,7 @@ import {
   createRuntimeActivationContext,
 } from '../../classification/config-loader';
 import { deriveCurationApplicability } from '../../classification/curation-applicability';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { sha256Hex } from '../../shared/stable-id';
 
 const REVIEWED_FIELDS = [
@@ -72,6 +73,9 @@ function evidenceWithFields(fields: string[]): CatalogEvidence {
 }
 
 beforeAll(async () => {
+  // P0 taxonomy freeze: this suite exercises the editor implementation, so
+  // the freeze is explicitly lifted for the duration of the tests.
+  setTaxonomyFreezeForTests(false);
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'curation-target-editor-test-'));
   runGit(['init']);
   runGit(['config', 'user.name', 'Test']);
@@ -134,6 +138,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  setTaxonomyFreezeForTests(true);
   closeDb();
   fs.rmSync(root, { recursive: true, force: true });
 });

@@ -7,10 +7,6 @@ import {
   getOllamaModels,
   getOpenaiModels,
   getCurationTargets,
-  saveCurationTargets,
-  syncClassificationSeed,
-  updateAttributeProfile,
-  updateClassificationAttribute,
   getClassificationReadiness,
   getOnboardingCapabilities,
 
@@ -36,11 +32,6 @@ interface OnboardingSettingsProps {
   onBack: () => void;
   /** Initial tab to open (deep-linked, e.g. `?view=onboarding&settingsTab=curation`). */
   initialTab?: OnboardingSettingsTab;
-}
-
-function targetSlug(value: string): string {
-  const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  return /^[a-z]/.test(slug) ? slug : `target-${slug || 'field'}`;
 }
 
 export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsProps) {
@@ -76,7 +67,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [curationTargetsDraft, setCurationTargetsDraft] = useState<CurationTargetConfig[]>([]);
   const [curationTargetsLoading, setCurationTargetsLoading] = useState(false);
-  const [curationTargetsSaving, setCurationTargetsSaving] = useState(false);
   // Classification readiness for the curation targets section.
   const [readinessView, setReadinessView] = useState<ReturnType<typeof readinessViewFromReport> | null>(null);
 
@@ -86,11 +76,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   const [showNonApplicable, setShowNonApplicable] = useState<boolean>(false);
   const [expandedAppliesToField, setExpandedAppliesToField] = useState<string | null>(null);
   const [inspectedCatalogField, setInspectedCatalogField] = useState<string | null>(null);
-  const [editingProfile, setEditingProfile] = useState<boolean>(false);
-  const [profileEditsDraft, setProfileEditsDraft] = useState<
-    Record<string, { included: boolean; required: boolean; cardinality: 'single' | 'multiple' }>
-  >({});
-  const [savingProfile, setSavingProfile] = useState<boolean>(false);
 
   // Worker health & profile builder overlay state
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthResponse | null>(null);
@@ -182,92 +167,8 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
     }
   };
 
-  const startEditingProfile = () => {
-    if (!curationTargetState || !selectedProductTypeId) return;
-    const initialDraft: Record<string, { included: boolean; required: boolean; cardinality: 'single' | 'multiple' }> = {};
-    for (const item of curationTargetState.applicability) {
-      if (!item.attributeId) continue;
-      const isUniversal = item.scope === 'universal';
-      const profileMatch = item.productTypes.find(pt => pt.productTypeId === selectedProductTypeId);
-      initialDraft[item.attributeId] = {
-        included: isUniversal || !!profileMatch,
-        required: profileMatch?.required ?? false,
-        cardinality: profileMatch?.cardinality ?? 'single',
-      };
-    }
-    setProfileEditsDraft(initialDraft);
-    setEditingProfile(true);
-  };
-
-  const handleSaveProfileEdits = async () => {
-    if (!selectedProductTypeId) return;
-    setSavingProfile(true);
-    setError('');
-    try {
-      const edits = Object.entries(profileEditsDraft).map(([attributeId, state]) => ({
-        attributeId,
-        included: state.included,
-        required: state.required,
-        cardinality: state.cardinality,
-      }));
-      await updateAttributeProfile(selectedProductTypeId, edits);
-      setEditingProfile(false);
-      await loadCurationTargets();
-      alert('Product Type attribute profile saved successfully.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSavingProfile(false);
-    }
-  };
-
   const targetForField = (catalogField: string) =>
     curationTargetsDraft.find(t => t.kind === 'product_field' && t.catalogField === catalogField);
-
-  const upsertCurationTarget = (target: CurationTargetConfig) => {
-    setCurationTargetsDraft(prev => {
-      const idx = prev.findIndex(t => t.id === target.id || (target.kind === 'product_field' && t.catalogField === target.catalogField) || (target.kind === t.kind && target.kind !== 'product_field'));
-      if (idx === -1) return [...prev, { ...target, sortOrder: prev.length }];
-      const next = [...prev];
-      next[idx] = { ...next[idx], ...target };
-      return next.map((t, i) => ({ ...t, sortOrder: i }));
-    });
-  };
-
-  const removeCurationTarget = (predicate: (target: CurationTargetConfig) => boolean) => {
-    setCurationTargetsDraft(prev => prev.filter(target => !predicate(target)).map((target, index) => ({ ...target, sortOrder: index })));
-  };
-
-  const handleSaveCurationTargets = async () => {
-    setCurationTargetsSaving(true);
-    setError('');
-    try {
-      const res = await saveCurationTargets(curationTargetsDraft);
-      setCurationTargetState(res);
-      setCurationTargetsDraft(res.targets);
-      alert('Curation targets saved. New curation runs will use this target list.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCurationTargetsSaving(false);
-    }
-  };
-
-  const handleToggleUniversal = async (attributeId: string, makeUniversal: boolean) => {
-    setCurationTargetsSaving(true);
-    setError('');
-    try {
-      const res = await updateClassificationAttribute(attributeId, { isUniversal: makeUniversal });
-      const updatedTargets = await getCurationTargets();
-      setCurationTargetState(updatedTargets);
-      setCurationTargetsDraft(updatedTargets.targets);
-      alert(`Attribute updated to ${makeUniversal ? 'Universal (applies to ALL products)' : 'Profiled (scoped to product types)'}.`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCurationTargetsSaving(false);
-    }
-  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -360,23 +261,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       fetchData();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const [syncingSeed, setSyncingSeed] = useState(false);
-
-  const handleSyncSeed = async () => {
-    if (!confirm('Sync latest taxonomy seed (60+ Product Types across 10 Departments) into your workspace?')) return;
-    setSyncingSeed(true);
-    setError('');
-    try {
-      const res = await syncClassificationSeed();
-      setCurationTargetState(res);
-      alert(`Taxonomy seed synchronized! ${res.candidates.productTypes.length} Product Types active.`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSyncingSeed(false);
     }
   };
 
@@ -615,6 +499,9 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       </div>
 
       <div style={{ display: settingsTab === 'curation' ? 'block' : 'none' }}>
+      <div style={{ marginBottom: 16, padding: 12, background: '#fef9c3', border: '1px solid #fde047', borderRadius: 8, fontSize: 13, color: '#713f12', lineHeight: 1.4 }}>
+        🔒 Taxonomy frozen — Taxonomy definitions, attribute profiles, curation targets, mappings, and seed sync are read-only. Changes require a new immutable taxonomy release.
+      </div>
       {/* ─── CURATION TARGETS ─── */}
       <div style={styles.section}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 8 }}>
@@ -622,33 +509,9 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
             {curationViewMode === 'global' ? 'Global Curation Targets' : 'Curation by Product Type'}
           </h2>
           <div style={{ display: 'flex', gap: 8 }}>
-            {curationViewMode === 'global' ? (
-              <>
-                <button type="button" style={styles.secondaryBtn} onClick={loadCurationTargets} disabled={curationTargetsLoading}>
-                  {curationTargetsLoading ? 'Refreshing…' : 'Refresh'}
-                </button>
-                <button type="button" style={styles.primaryBtn} onClick={handleSaveCurationTargets} disabled={curationTargetsSaving}>
-                  {curationTargetsSaving ? 'Saving…' : 'Save Targets'}
-                </button>
-              </>
-            ) : (
-              <>
-                {!editingProfile ? (
-                  <button type="button" style={styles.primaryBtn} onClick={startEditingProfile} disabled={!selectedProductTypeId}>
-                    Edit Profile
-                  </button>
-                ) : (
-                  <>
-                    <button type="button" style={styles.secondaryBtn} onClick={() => setEditingProfile(false)} disabled={savingProfile}>
-                      Cancel
-                    </button>
-                    <button type="button" style={styles.primaryBtn} onClick={handleSaveProfileEdits} disabled={savingProfile}>
-                      {savingProfile ? 'Saving…' : 'Save Profile Edits'}
-                    </button>
-                  </>
-                )}
-              </>
-            )}
+            <button type="button" style={styles.secondaryBtn} onClick={loadCurationTargets} disabled={curationTargetsLoading}>
+              {curationTargetsLoading ? 'Refreshing…' : 'Refresh'}
+            </button>
           </div>
         </div>
 
@@ -691,32 +554,12 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           >
             By Product Type
           </button>
-
-          <button
-            type="button"
-            disabled={syncingSeed}
-            style={{
-              padding: '6px 14px',
-              borderRadius: 6,
-              fontSize: 13,
-              fontWeight: 600,
-              border: '1px solid #d1d5db',
-              cursor: syncingSeed ? 'not-allowed' : 'pointer',
-              background: '#ffffff',
-              color: '#374151',
-              marginLeft: 'auto',
-            }}
-            onClick={handleSyncSeed}
-            title="Synchronize the latest 60+ product types & taxonomy seed into active workspace"
-          >
-            {syncingSeed ? 'Syncing Taxonomy…' : '🔄 Sync Seed Taxonomy'}
-          </button>
         </div>
 
         <p style={styles.hint}>
           {curationViewMode === 'global'
-            ? 'Enable the outputs Curation is allowed to populate. Product-field targets are further restricted by the current Product Type\'s Attribute Profile.'
-            : 'Inspect and edit effective curation attributes for each Product Type. Profile entries define per-type applicability, cardinality, and required state.'}
+            ? 'Review the outputs Curation is allowed to populate. Product-field targets are further restricted by the current Product Type\'s Attribute Profile.'
+            : 'Review the effective curation attributes for each Product Type. Profile entries define per-type applicability, cardinality, and required state.'}
         </p>
 
         {curationViewMode === 'global' && (
@@ -829,7 +672,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                           const checked = !!target?.enabled;
                           const appl = curationTargetState.applicability?.find(a => a.catalogField === field.catalogField);
                           const isInspected = inspectedCatalogField === field.catalogField;
-                          const isControlled = appl?.valueMode === 'controlled';
 
                           return (
                             <React.Fragment key={field.catalogField}>
@@ -838,30 +680,8 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                                   <input
                                     type="checkbox"
                                     checked={checked}
-                                    onChange={(e) => {
-                                      if (e.target.checked) {
-                                        upsertCurationTarget({
-                                          id: target?.id ?? targetSlug(`target-${field.catalogField}`),
-                                          kind: 'product_field',
-                                          label: field.label,
-                                          mandatory: target?.mandatory ?? false,
-                                          enabled: true,
-                                          selectionMode: target?.selectionMode ?? 'single',
-                                          attributeId: target?.attributeId ?? field.attributeId ?? targetSlug(`field-${field.catalogField}`),
-                                          catalogField: field.catalogField,
-                                          optionSource: isControlled ? (target?.optionSource ?? 'live_store') : 'configured',
-                                          required: false,
-                                          sortOrder: target?.sortOrder ?? curationTargetsDraft.length,
-                                        });
-                                       } else if (target) {
-                                         upsertCurationTarget({
-                                           ...target,
-                                           enabled: false,
-                                         });
-                                       } else {
-                                         removeCurationTarget(t => t.kind === 'product_field' && t.catalogField === field.catalogField);
-                                       }
-                                    }}
+                                    disabled
+                                    title="Taxonomy frozen — read-only"
                                   />
                                 </td>
                                 <td style={styles.td}>
@@ -908,17 +728,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                                         <span style={{ background: '#dcfce7', color: '#166534', padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 600 }}>
                                           Universal
                                         </span>
-                                        {appl?.attributeId && (
-                                          <button
-                                            type="button"
-                                            disabled={curationTargetsSaving}
-                                            onClick={() => handleToggleUniversal(appl.attributeId!, false)}
-                                            title="Click to change attribute scope to Profiled (scoped to specific Product Types)"
-                                            style={{ background: '#ffffff', color: '#4b5563', border: '1px solid #d1d5db', borderRadius: 6, padding: '1px 6px', fontSize: 10, fontWeight: 500, cursor: curationTargetsSaving ? 'not-allowed' : 'pointer' }}
-                                          >
-                                            Set Profiled
-                                          </button>
-                                        )}
                                       </div>
                                     ) : appl?.scope === 'profiled' ? (
                                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -930,17 +739,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                                           >
                                             {appl.productTypes.length} product {appl.productTypes.length === 1 ? 'type' : 'types'} {expandedAppliesToField === field.catalogField ? '▲' : '▼'}
                                           </button>
-                                          {appl?.attributeId && (
-                                            <button
-                                              type="button"
-                                              disabled={curationTargetsSaving}
-                                              onClick={() => handleToggleUniversal(appl.attributeId!, true)}
-                                              title="Click to make this attribute Universal (applies to ALL products store-wide)"
-                                              style={{ background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0', borderRadius: 6, padding: '1px 6px', fontSize: 10, fontWeight: 600, cursor: curationTargetsSaving ? 'not-allowed' : 'pointer' }}
-                                            >
-                                              ⚡ Make Universal
-                                            </button>
-                                          )}
                                         </div>
                                         {expandedAppliesToField === field.catalogField && (
                                           <div style={{ marginTop: 4, padding: 6, background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: 6, fontSize: 11, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -957,17 +755,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                                         <span style={{ background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 600, border: '1px solid #fde68a' }}>
                                           ⚠ Not used by any Product Type
                                         </span>
-                                        {appl?.attributeId && (
-                                          <button
-                                            type="button"
-                                            disabled={curationTargetsSaving}
-                                            onClick={() => handleToggleUniversal(appl.attributeId!, true)}
-                                            title="Click to make this attribute Universal (applies to ALL products store-wide)"
-                                            style={{ background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0', borderRadius: 6, padding: '1px 6px', fontSize: 10, fontWeight: 600, cursor: curationTargetsSaving ? 'not-allowed' : 'pointer' }}
-                                          >
-                                            ⚡ Make Universal
-                                          </button>
-                                        )}
                                       </div>
                                     ) : (
                                       <span style={{ fontSize: 11, color: '#9ca3af' }}>Unmapped</span>
@@ -1056,7 +843,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                 <select
                   style={{ ...styles.select, minWidth: 200 }}
                   value={selectedProductTypeId}
-                  disabled={editingProfile}
                   onChange={(e) => setSelectedProductTypeId(e.target.value)}
                 >
                   {curationTargetState.candidates.productTypes.map(pt => (
@@ -1068,21 +854,14 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                {!editingProfile && (
-                  <label style={{ fontSize: 12, color: '#475569', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={showNonApplicable}
-                      onChange={(e) => setShowNonApplicable(e.target.checked)}
-                    />
-                    Show non-applicable attributes
-                  </label>
-                )}
-                {editingProfile && (
-                  <span style={{ fontSize: 12, color: '#2563eb', fontWeight: 600 }}>
-                    Editing Attribute Profile for {curationTargetState.candidates.productTypes.find(pt => pt.value === selectedProductTypeId)?.label}
-                  </span>
-                )}
+                <label style={{ fontSize: 12, color: '#475569', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={showNonApplicable}
+                    onChange={(e) => setShowNonApplicable(e.target.checked)}
+                  />
+                  Show non-applicable attributes
+                </label>
               </div>
             </div>
 
@@ -1097,7 +876,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
               <table style={styles.table}>
                 <thead>
                   <tr>
-                    {editingProfile && <th style={styles.th}>Include</th>}
                     <th style={styles.th}>Attribute</th>
                     <th style={styles.th}>Catalog Destination</th>
                     <th style={styles.th}>Required</th>
@@ -1110,7 +888,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                   {curationTargetState.applicability
                     .filter(item => {
                       if (!item.attributeId) return false;
-                      if (editingProfile) return true;
                       const isUniversal = item.scope === 'universal';
                       const profileMatch = item.productTypes.find(pt => pt.productTypeId === selectedProductTypeId);
                       const isApplicable = isUniversal || !!profileMatch;
@@ -1122,31 +899,9 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                       const isApplicable = isUniversal || !!profileMatch;
                       const target = targetForField(item.catalogField);
                       const targetEnabled = !!target?.enabled;
-                      const draftState = profileEditsDraft[item.attributeId!];
 
                       return (
-                        <tr key={item.catalogField} style={{ opacity: !isApplicable && !editingProfile ? 0.6 : 1 }}>
-                          {editingProfile && (
-                            <td style={styles.td}>
-                              {isUniversal ? (
-                                <span style={{ fontSize: 11, color: '#166534', fontWeight: 600 }}>Universal</span>
-                              ) : (
-                                <input
-                                  type="checkbox"
-                                  checked={!!draftState?.included}
-                                  onChange={(e) => {
-                                    setProfileEditsDraft(prev => ({
-                                      ...prev,
-                                      [item.attributeId!]: {
-                                        ...prev[item.attributeId!],
-                                        included: e.target.checked,
-                                      },
-                                    }));
-                                  }}
-                                />
-                              )}
-                            </td>
-                          )}
+                        <tr key={item.catalogField} style={{ opacity: !isApplicable ? 0.6 : 1 }}>
 
                           <td style={styles.td}>
                             <strong>{item.attributeName}</strong>
@@ -1158,52 +913,15 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                           </td>
 
                           <td style={styles.td}>
-                            {editingProfile && !isUniversal ? (
-                              <input
-                                type="checkbox"
-                                disabled={!draftState?.included}
-                                checked={!!draftState?.required}
-                                onChange={(e) => {
-                                  setProfileEditsDraft(prev => ({
-                                    ...prev,
-                                    [item.attributeId!]: {
-                                      ...prev[item.attributeId!],
-                                      required: e.target.checked,
-                                    },
-                                  }));
-                                }}
-                              />
-                            ) : (
-                              <span style={{ fontSize: 12, color: profileMatch?.required ? '#dc2626' : '#6b7280', fontWeight: profileMatch?.required ? 600 : 400 }}>
-                                {isApplicable ? (profileMatch?.required ? 'Required' : 'Optional') : '—'}
-                              </span>
-                            )}
+                            <span style={{ fontSize: 12, color: profileMatch?.required ? '#dc2626' : '#6b7280', fontWeight: profileMatch?.required ? 600 : 400 }}>
+                              {isApplicable ? (profileMatch?.required ? 'Required' : 'Optional') : '—'}
+                            </span>
                           </td>
 
                           <td style={styles.td}>
-                            {editingProfile && !isUniversal ? (
-                              <select
-                                style={{ ...styles.select, minWidth: 110 }}
-                                disabled={!draftState?.included}
-                                value={draftState?.cardinality ?? 'single'}
-                                onChange={(e) => {
-                                  setProfileEditsDraft(prev => ({
-                                    ...prev,
-                                    [item.attributeId!]: {
-                                      ...prev[item.attributeId!],
-                                      cardinality: e.target.value as 'single' | 'multiple',
-                                    },
-                                  }));
-                                }}
-                              >
-                                <option value="single">Single</option>
-                                <option value="multiple">Multiple</option>
-                              </select>
-                            ) : (
-                              <span style={{ fontSize: 12, color: '#374151' }}>
-                                {isApplicable ? (profileMatch?.cardinality ?? 'single') : '—'}
-                              </span>
-                            )}
+                            <span style={{ fontSize: 12, color: '#374151' }}>
+                              {isApplicable ? (profileMatch?.cardinality ?? 'single') : '—'}
+                            </span>
                           </td>
 
                           <td style={styles.td}>

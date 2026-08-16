@@ -19,6 +19,7 @@ import {
   createRuntimeActivationContext,
 } from '../../classification/config-loader';
 import { bootstrapFromXml } from '../../server/services/sync-service';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { sha256Hex } from '../../shared/stable-id';
 import type { Workspace } from '../../shared/types';
 
@@ -83,6 +84,9 @@ function evidenceWithFields(fields: string[]): CatalogEvidence {
 
 describe('mapping-validity findings on sync (D4, issue #31 commit 3)', () => {
   beforeAll(async () => {
+    // P0 taxonomy freeze: this suite exercises activation, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     workspaceId = randomUUID();
     root = fs.mkdtempSync(path.join(os.tmpdir(), `mapping-validity-${workspaceId.slice(0, 8)}`));
     fs.mkdirSync(path.join(root, 'store', 'classification'), { recursive: true });
@@ -157,7 +161,10 @@ describe('mapping-validity findings on sync (D4, issue #31 commit 3)', () => {
     });
   });
 
-  afterAll(() => closeDb());
+  afterAll(() => {
+    setTaxonomyFreezeForTests(true);
+    closeDb();
+  });
 
   it('records field_present findings per mapped field and never writes isStale', () => {
     const result = bootstrapFromXml(

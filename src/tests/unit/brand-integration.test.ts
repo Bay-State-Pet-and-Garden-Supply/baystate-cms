@@ -14,6 +14,7 @@ import { evidenceExtractionStage } from '../../classification';
 import { processProductFieldTarget } from '../../classification/curation-target-processor';
 import type { ResolvedTarget } from '../../classification/curation-target-resolver';
 import { getDb } from '../../db/connection';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import type { StageContext } from '../../classification/types';
 import type { ClassificationEvidence } from '../../shared/schemas/classification';
 
@@ -24,6 +25,9 @@ describe('Brand Integration', () => {
   let context: StageContext;
 
   beforeAll(() => {
+    // P0 taxonomy freeze: this suite writes a legacy config, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     workspaceId = randomUUID();
     workspacePath = path.join(os.tmpdir(), `baystate-cms-brand-int-${workspaceId.slice(0, 8)}`);
     const dbPath = path.join(workspacePath, '.baystate-cms', 'app.db');

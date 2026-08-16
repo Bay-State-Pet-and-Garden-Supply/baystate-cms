@@ -34,6 +34,7 @@ import { createRun, getRun } from '../../db/repositories/classification-run-repo
 import { upsertConfigSnapshot, syncConfigToCache, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
 import { upsertApiKey, deleteApiKey } from '../../db/repositories/api-key-repo';
 import { saveClassificationConfig, loadClassificationConfig, loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { generateCandidate, buildFocusedFiles } from '../../classification/config-generator';
 import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
 import { computeClassificationBundleHash } from '../../classification/config-validation';
@@ -78,6 +79,9 @@ import { callLlmForTaskWithProvenance } from '../../onboarding/llm-client';
 let workspacePath: string;
 
 beforeAll(() => {
+  // P0 taxonomy freeze: this suite persists config via cohort curation, so the
+  // freeze is explicitly lifted for the duration of the tests.
+  setTaxonomyFreezeForTests(false);
   workspacePath = path.join(os.tmpdir(), `baystate-cms-cohort-freeze-${randomUUID().slice(0, 8)}`);
   fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
   initDb(path.join(workspacePath, '.baystate-cms', 'app.db'));
@@ -85,6 +89,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  setTaxonomyFreezeForTests(true);
   closeDb();
   try { fs.rmSync(workspacePath, { recursive: true, force: true }); } catch { /* ok */ }
 });

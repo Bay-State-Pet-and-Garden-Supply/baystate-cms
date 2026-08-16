@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { listAttributeMappings, listCatalogFields, updateFieldMappings, type FieldMappingEditPayload } from '../../api';
+import { listAttributeMappings, listCatalogFields } from '../../api';
 import { getClassificationConfig } from '../../onboarding-api';
 import type { AttributeMappingView, CatalogFieldSummary } from './types';
 
@@ -70,16 +70,6 @@ function serializationToEditor(raw: unknown): EditorRow['serialization'] {
   };
 }
 
-function editorToSerialization(editor: EditorRow['serialization']): FieldMappingEditPayload['serialization'] {
-  if (editor.kind === 'delimited') {
-    return { kind: 'delimited', delimiter: editor.delimiter || ', ', escapePolicy: editor.escapePolicy, prefix: editor.prefix, suffix: editor.suffix };
-  }
-  if (editor.kind === 'measured') {
-    return { kind: 'measured', unit: editor.unit || 'lb', valueUnitSeparator: editor.valueUnitSeparator || ' ', prefix: editor.prefix, suffix: editor.suffix };
-  }
-  return { kind: 'scalar', prefix: editor.prefix, suffix: editor.suffix };
-}
-
 function fieldNumber(catalogField: string): number {
   const match = /^ProductField(\d+)$/.exec(catalogField);
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
@@ -89,9 +79,7 @@ export function MappingsView() {
   const [rows, setRows] = useState<EditorRow[]>([]);
   const [attributes, setAttributes] = useState<AttributeOption[]>([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [savedMessage, setSavedMessage] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -156,53 +144,6 @@ export function MappingsView() {
     load();
   }, []);
 
-  const updateRow = (catalogField: string, patch: Partial<EditorRow>) => {
-    setRows(prev => prev.map(row => (row.catalogField === catalogField ? { ...row, ...patch } : row)));
-  };
-
-  const buildEdits = (): FieldMappingEditPayload[] => {
-    const edits: FieldMappingEditPayload[] = [];
-    for (const row of rows) {
-      const mapping = row.mapping;
-      const attributeChanged = (row.attributeId || null) !== (mapping?.attributeId ?? null);
-      const serializationChanged = mapping
-        ? JSON.stringify(serializationToEditor(mapping.serialization)) !== JSON.stringify(row.serialization)
-        : false;
-      if (!attributeChanged && !serializationChanged) continue;
-      edits.push({
-        catalogField: row.catalogField,
-        attributeId: row.attributeId === '' ? null : row.attributeId,
-        serialization: attributeChanged || serializationChanged ? editorToSerialization(row.serialization) : undefined,
-      });
-    }
-    return edits;
-  };
-
-  const handleSave = async () => {
-    const edits = buildEdits();
-    if (edits.length === 0) {
-      setSavedMessage('No changes to save.');
-      return;
-    }
-    setSaving(true);
-    setError('');
-    setSavedMessage('');
-    try {
-      await updateFieldMappings(edits);
-      setSavedMessage(`Saved ${edits.length} field mapping change${edits.length === 1 ? '' : 's'}.`);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleReset = () => {
-    setError('');
-    setSavedMessage('');
-    load();
-  };
 
   if (loading) {
     return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading attribute mappings...</div>;
@@ -210,22 +151,21 @@ export function MappingsView() {
 
   return (
     <div>
+      <div style={{ marginBottom: 16, padding: 10, background: '#fef9c3', border: '1px solid #fde047', borderRadius: 6, fontSize: 12, color: '#713f12', lineHeight: 1.4 }}>
+        🔒 Taxonomy frozen — field mappings are read-only. Changes require a new immutable taxonomy release.
+      </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
         <p style={{ fontSize: 12, color: '#64748b', margin: 0 }}>
-          Mirrors ShopSite's <strong>Extra Fields</strong> configuration. Link each Catalog Field to a Product Attribute
-          (or leave it unmapped) and set how its value is serialized. ShopSite-side field names are managed in{' '}
-          <strong>Catalog → Fields</strong>; saving here validates the bundle and applies to future promotions.
+          Mirrors ShopSite's <strong>Extra Fields</strong> configuration. Read-only view of how each Catalog Field maps to a
+          Product Attribute and its serialization. ShopSite-side field names are managed in{' '}
+          <strong>Catalog → Fields</strong>.
         </p>
         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-          <button type="button" style={styles.secondaryBtn} onClick={handleReset}>Reset</button>
-          <button type="button" style={styles.primaryBtn} onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving…' : 'Save Changes'}
-          </button>
+          <button type="button" style={styles.secondaryBtn} onClick={load}>Refresh</button>
         </div>
       </div>
 
       {error && <div style={styles.error}>{error}</div>}
-      {savedMessage && <div style={styles.saved}>{savedMessage}</div>}
 
       {rows.length === 0 ? (
         <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>
@@ -257,7 +197,8 @@ export function MappingsView() {
                     <select
                       style={{ ...styles.select, minWidth: 190 }}
                       value={row.attributeId}
-                      onChange={(e) => updateRow(row.catalogField, { attributeId: e.target.value })}
+                      disabled
+                      title="Taxonomy frozen — read-only"
                     >
                       <option value="">— Unmapped —</option>
                       {attributes.map(attr => (
@@ -268,7 +209,6 @@ export function MappingsView() {
                   <td style={td}>
                     <SerializationEditor
                       value={row.serialization}
-                      onChange={(serialization) => updateRow(row.catalogField, { serialization })}
                     />
                   </td>
                   <td style={td}>
@@ -290,9 +230,8 @@ export function MappingsView() {
   );
 }
 
-function SerializationEditor({ value, onChange }: {
+function SerializationEditor({ value }: {
   value: EditorRow['serialization'];
-  onChange: (next: EditorRow['serialization']) => void;
 }) {
   const [showAdvanced, setShowAdvanced] = useState(Boolean(value.prefix || value.suffix));
   const inputStyle: React.CSSProperties = { ...styles.input, width: 72, fontSize: 11, padding: '4px 6px' };
@@ -302,7 +241,8 @@ function SerializationEditor({ value, onChange }: {
       <select
         style={{ ...styles.select, width: 95, fontSize: 11, padding: '4px 6px' }}
         value={value.kind}
-        onChange={(e) => onChange({ ...value, kind: e.target.value as EditorRow['serialization']['kind'] })}
+        disabled
+        title="Taxonomy frozen — read-only"
       >
         <option value="scalar">scalar</option>
         <option value="delimited">delimited</option>
@@ -310,19 +250,19 @@ function SerializationEditor({ value, onChange }: {
       </select>
 
       {value.kind === 'delimited' && (
-        <input style={inputStyle} placeholder="delimiter" value={value.delimiter} onChange={(e) => onChange({ ...value, delimiter: e.target.value })} title="Delimiter" />
+        <input style={inputStyle} placeholder="delimiter" value={value.delimiter} disabled title="Taxonomy frozen — read-only" />
       )}
       {value.kind === 'measured' && (
         <>
-          <input style={inputStyle} placeholder="unit" value={value.unit} onChange={(e) => onChange({ ...value, unit: e.target.value })} title="Measurement Unit" />
-          <input style={inputStyle} placeholder="sep" value={value.valueUnitSeparator} onChange={(e) => onChange({ ...value, valueUnitSeparator: e.target.value })} title="Separator" />
+          <input style={inputStyle} placeholder="unit" value={value.unit} disabled title="Taxonomy frozen — read-only" />
+          <input style={inputStyle} placeholder="sep" value={value.valueUnitSeparator} disabled title="Taxonomy frozen — read-only" />
         </>
       )}
 
       {(showAdvanced || value.prefix || value.suffix) ? (
         <>
-          <input style={inputStyle} placeholder="prefix" value={value.prefix} onChange={(e) => onChange({ ...value, prefix: e.target.value })} title="Prefix text" />
-          <input style={inputStyle} placeholder="suffix" value={value.suffix} onChange={(e) => onChange({ ...value, suffix: e.target.value })} title="Suffix text" />
+          <input style={inputStyle} placeholder="prefix" value={value.prefix} disabled title="Taxonomy frozen — read-only" />
+          <input style={inputStyle} placeholder="suffix" value={value.suffix} disabled title="Taxonomy frozen — read-only" />
           <button type="button" onClick={() => setShowAdvanced(false)} style={{ background: 'none', border: 'none', color: '#999', fontSize: 11, cursor: 'pointer', padding: 0 }}>×</button>
         </>
       ) : (
@@ -330,7 +270,7 @@ function SerializationEditor({ value, onChange }: {
           type="button"
           onClick={() => setShowAdvanced(true)}
           style={{ background: 'none', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, color: '#525252', fontSize: 10, cursor: 'pointer', padding: '2px 6px' }}
-          title="Configure Prefix / Suffix"
+          title="Show Prefix / Suffix (read-only)"
         >
           + Format
         </button>
@@ -342,10 +282,8 @@ function SerializationEditor({ value, onChange }: {
 const styles: Record<string, React.CSSProperties> = {
   input: { border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, padding: '6px 8px', fontSize: 13, background: '#fff' },
   select: { border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, padding: '6px 8px', fontSize: 13, background: '#fff' },
-  primaryBtn: { background: 'var(--color-uniform-green, #14532D)', color: 'var(--color-feed-bag-cream, #FAF9F2)', border: 'none', borderRadius: 4, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13 },
   secondaryBtn: { background: 'none', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, padding: '8px 16px', cursor: 'pointer', fontSize: 13, color: '#211414', fontWeight: 600 },
   error: { color: 'var(--color-danger-text, #760c19)', padding: 12, background: 'var(--color-danger-bg, #fee2e2)', borderRadius: 6, marginBottom: 16, fontSize: 13, border: '1px solid var(--color-danger-border, #fca5a5)' },
-  saved: { color: 'var(--color-uniform-green, #14532D)', padding: 12, background: 'var(--color-success-bg, #d1fae5)', borderRadius: 6, marginBottom: 16, fontSize: 13, border: '1px solid var(--color-success-border, #a7f3d0)', fontWeight: 600 },
 };
 
 const th: React.CSSProperties = { textAlign: 'left', padding: '10px 12px', borderBottom: '2px solid var(--color-card-border, #E8E6D9)', fontSize: 11, fontWeight: 700, color: 'var(--color-uniform-green, #14532D)', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' };

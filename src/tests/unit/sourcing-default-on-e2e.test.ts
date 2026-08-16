@@ -68,6 +68,7 @@ import { freezeCohortForExecution } from '../../onboarding/cohort-curator';
 import { parseExecutionEvidenceProjection } from '../../shared/schemas/cohorts';
 import { hashCanonicalJson } from '../../shared/stable-id';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import { overrideCohortCurationFlags, resetCohortCurationFlagsOverride } from '../../classification/flags';
@@ -164,6 +165,9 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     delete process.env.BAYSTATE_CMS_SOURCING_ENABLED;
     delete process.env.BAYSTATE_CMS_SOURCING_MODE;
     resetSourcingFlagsOverride();
+    // P0 taxonomy freeze: this suite writes a legacy config, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sourcing-e2e-test-'));
     dbPath = path.join(tempDir, 'test.db');
     initDb(dbPath);
@@ -191,6 +195,7 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
   afterEach(() => {
     resetSourcingFlagsOverride();
     resetCohortCurationFlagsOverride();
+    setTaxonomyFreezeForTests(true);
     closeDb();
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -880,6 +885,11 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     expect(member.extraction.title).toBe('Pet Kibble 5lb');
     expect(member.extraction.description).toBeNull();
     expect(member.extraction.primaryImage).toBeNull();
+    // Per-distributor reference values are frozen into the curation input so
+    // Curation/classification can consume every accepted attempt's values.
+    expect(member.extraction.distributorReferenceValues).toMatchObject({
+      name: ['Pet Kibble 5lb'],
+    });
 
     // EXECUTE distributor-labeled classification: run the classification
     // evidence-extraction stage over the frozen V2 member and assert every

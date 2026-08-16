@@ -20,6 +20,7 @@ import {
   syncConfigToCache,
 } from '../../db/repositories/classification-config-repo';
 import { resolveEnabledTargets } from '../../classification/curation-target-resolver';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { processProductFieldTarget } from '../../classification/curation-target-processor';
 import type { ClassificationEvidence, ClassificationConfig } from '../../shared/schemas/classification';
 
@@ -28,6 +29,9 @@ describe('Detail Enrichment Integration', () => {
   let workspaceId: string;
 
   beforeAll(() => {
+    // P0 taxonomy freeze: this suite writes a legacy config, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     workspaceId = randomUUID();
     workspacePath = path.join(os.tmpdir(), `baystate-cms-detail-test-${workspaceId.slice(0, 8)}`);
     fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
@@ -371,6 +375,9 @@ describe('freeText attribute grounding (epic #46 review round)', () => {
   let workspaceId: string;
 
   beforeAll(() => {
+    // P0 taxonomy freeze: this suite writes a legacy config, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     workspaceId = randomUUID();
     workspacePath = path.join(os.tmpdir(), `baystate-cms-grounding-test-${workspaceId.slice(0, 8)}`);
     fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
@@ -540,3 +547,5 @@ describe('freeText attribute grounding (epic #46 review round)', () => {
     expect(result.proposals[0].confidence).toBe(0.85);
   });
 });
+
+setTaxonomyFreezeForTests(true);

@@ -32,6 +32,7 @@ import {
   type CatalogEvidenceVerifier,
   type ClassificationConfigValidationOptions,
 } from './config-validation';
+import { assertTaxonomyMutable } from './taxonomy-freeze';
 
 const CLASSIFICATION_DIR = 'classification';
 
@@ -677,6 +678,11 @@ export function loadRuntimeConfig(workspacePath: string, workspaceId: string): C
  * long-term activation API.
  */
 export function saveClassificationConfig(workspacePath: string, config: ClassificationConfig): void {
+  // P0 taxonomy freeze: the legacy direct writer mutates the live taxonomy
+  // directory and must fail closed until a new immutable taxonomy release is
+  // deployed.
+  assertTaxonomyMutable('config save');
+
   const parsed = LegacyClassificationConfigV1Schema.safeParse(config);
   if (!parsed.success) {
     throw new ClassificationConfigLoadError(

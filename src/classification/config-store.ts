@@ -44,6 +44,7 @@ import {
   upsertConfigSnapshot,
   type ConfigCacheState,
 } from '../db/repositories/classification-config-repo';
+import { assertTaxonomyMutable } from './taxonomy-freeze';
 
 export class ConfigStoreError extends Error {
   constructor(
@@ -580,5 +581,8 @@ export function activateBundle(
   expectedActiveHash: string | null,
   options: ActivateBundleOptions,
 ): Promise<ActivationResult> {
+  // P0 taxonomy freeze: activation replaces the active taxonomy directory and
+  // must fail closed until a new immutable taxonomy release is deployed.
+  assertTaxonomyMutable('bundle activation');
   return enqueueActivation(() => performActivation(stagingHash, expectedActiveHash, options));
 }

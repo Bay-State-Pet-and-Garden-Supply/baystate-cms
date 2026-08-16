@@ -8,6 +8,7 @@ import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createRun } from '../../db/repositories/classification-run-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
+import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
 import { createConfigSnapshot } from '../../db/repositories/classification-config-repo';
 import {
   buildRuntimeSnapshot,
@@ -50,6 +51,9 @@ function buildInput(overrides: Partial<RuntimeSnapshotInput> = {}): RuntimeSnaps
 
 describe('classification runtime snapshot', () => {
   beforeAll(() => {
+    // P0 taxonomy freeze: this suite writes a legacy config, so the freeze is
+    // explicitly lifted for the duration of the tests.
+    setTaxonomyFreezeForTests(false);
     workspaceId = randomUUID();
     workspacePath = path.join(os.tmpdir(), `baystate-cms-runtime-snap-${workspaceId.slice(0, 8)}`);
     fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
@@ -290,3 +294,5 @@ describe('classification runtime snapshot', () => {
     }).toThrow();
   });
 });
+
+setTaxonomyFreezeForTests(true);
