@@ -450,6 +450,37 @@ export async function setItemUrl(itemId: string, url: string): Promise<{ success
   });
 }
 
+/**
+ * ADR 0017 commitment 4 — discovery-card attention action: assign a brand
+ * hint to the item and re-run official site discovery guided by that brand
+ * (server resets the item to discovery/pending and polls the worker).
+ */
+export async function assignItemBrand(
+  itemId: string,
+  brand: string,
+): Promise<{ success: boolean; item?: OnboardingItem }> {
+  return request<{ success: boolean; item?: OnboardingItem }>(`/items/${itemId}/assign-brand`, {
+    method: 'POST',
+    body: JSON.stringify({ brand }),
+  });
+}
+
+/**
+ * ADR 0017 commitment 4 — discovery-card attention action: map an official
+ * domain for the item's current brand hint (brand_sites upsert) and re-run
+ * official site discovery. Fails server-side with a clear error when the
+ * item has no brand hint yet (assign the brand first).
+ */
+export async function assignItemDomain(
+  itemId: string,
+  domain: string,
+): Promise<{ success: boolean; item?: OnboardingItem }> {
+  return request<{ success: boolean; item?: OnboardingItem }>(`/items/${itemId}/assign-domain`, {
+    method: 'POST',
+    body: JSON.stringify({ domain }),
+  });
+}
+
 export async function skipItem(itemId: string): Promise<{ success: boolean }> {
   return request<{ success: boolean }>(`/items/${itemId}/skip`, {
     method: 'POST',

@@ -19,6 +19,12 @@ export default defineConfig({
       'src/tests/unit/sourcing-live-smoke-db.test.ts',
       // Brand authority gate — bun:sqlite/bun:test, run under bun test (test:db)
       'src/tests/unit/brand-authority-gate.test.ts',
+      // ADR 0017 assign_brand/assign_domain attention routes — bun:sqlite,
+      // run under bun test (test:db)
+      'src/tests/unit/brand-assign-routes.test.ts',
+      // ADR 0017 batch brand-domain setup (service + blockers + routes) —
+      // bun:sqlite, run under bun test (test:db)
+      'src/tests/unit/brand-domain-setup.test.ts',
       // DB-backed tests — use bun:sqlite, run under bun test instead of vitest
       'src/tests/unit/db-migration.test.ts',
       'src/tests/unit/catalog-health.test.ts',

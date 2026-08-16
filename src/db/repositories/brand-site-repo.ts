@@ -75,6 +75,48 @@ export function upsertBrandSite(
   };
 }
 
+/**
+ * ADR 0017 commitment 1 — atomic first-mapping-wins insert used for
+ * provisional inferred-domain persistence. A single guarded INSERT statement
+ * (never a read-then-write pair) guarantees that only the FIRST mapping for a
+ * brand is ever created: once ANY `brand_sites` row exists for the brand, the
+ * insert no-ops even when two workers infer the same brand concurrently with
+ * different domains. `upsertBrandSite` (increment-on-repeat, operator/route
+ * use) is intentionally untouched.
+ *
+ * Returns the brand→domain row: the just-created row, or the pre-existing row
+ * for the same (brand, domain). Returns null when the guarded insert was
+ * skipped because a DIFFERENT domain already holds the brand's first mapping
+ * (the caller's candidate never became the mapping). Existing rows are never
+ * modified — no success_count increment, no url_pattern overwrite.
+ */
+export function insertBrandSiteIfAbsent(
+  brandName: string,
+  domain: string,
+  urlPattern?: string | null,
+): BrandSite | null {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const normalizedBrand = brandName.toLowerCase().trim();
+  const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
+  const id = randomUUID();
+
+  db.query(
+    `INSERT INTO brand_sites (id, brand_name, domain, url_pattern, success_count, last_used_at, created_at)
+     SELECT ?, ?, ?, ?, 1, ?, ?
+     WHERE NOT EXISTS (SELECT 1 FROM brand_sites WHERE brand_name = ?)`,
+  ).run(id, normalizedBrand, normalizedDomain, urlPattern ?? null, now, now, normalizedBrand);
+
+  const row = db.query(
+    'SELECT * FROM brand_sites WHERE brand_name = ? AND domain = ?',
+  ).get(normalizedBrand, normalizedDomain) as BrandSiteRow | undefined;
+  if (row) return mapRowToBrandSite(row);
+
+  // The guarded insert was skipped because a different domain already holds
+  // the brand's first mapping — this call did not create (or match) a row.
+  return null;
+}
+
 export function findBrandSites(brandName: string): BrandSite[] {
   const db = getDb();
   const normalizedBrand = brandName.toLowerCase().trim();

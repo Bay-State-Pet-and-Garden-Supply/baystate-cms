@@ -35,6 +35,7 @@ import {
   getWeeklyReportItems,
   revertToOfficialDiscovery,
   reopenApprovedForReapproval,
+  updateItemBrandHint,
 } from '../../db/repositories/onboarding-item-repo';
 import type { PipelineStage } from '../../shared/schemas/onboarding';
 import { ResolveSourcingRequestSchema, FallbackSourcingItemsRequestSchema } from '../../shared/schemas/onboarding';
@@ -82,9 +83,10 @@ import {
   listAllBrandSites,
   deleteBrandSite,
   findBrandSites,
-  upsertBrandSite,
   updateBrandSiteDomain
 } from '../../db/repositories/brand-site-repo';
+import { assignOfficialDomainForBrand } from '../../onboarding/brand-domain-service';
+import { getBrandDomainBlockers } from '../../onboarding/brand-domain-blockers';
 import {
   listAllProfiles,
   upsertProfile,
@@ -484,16 +486,13 @@ route.post('/onboarding/batches', async (c) => {
       return c.json({ error: 'All products in this spreadsheet already exist in the catalog.', validationErrors: errors }, 400);
     }
 
-    // Save/upsert brand mappings to database if provided
-    if (brandMappings && typeof brandMappings === 'object') {
-      const db = getDb();
-      db.transaction(() => {
-        for (const [brand, domain] of Object.entries(brandMappings)) {
-          if (brand && domain && typeof domain === 'string' && domain.trim()) {
-            upsertBrandSite(brand, domain.trim());
-          }
-        }
-      })();
+    // ADR 0017 follow-up: uploads no longer write brand_sites. Brand→domain
+    // authority lives in Settings (Domain Configuration) and in Discovery
+    // attention actions (assign_brand / assign_domain). The field is still
+    // accepted for backward compatibility with older clients, but a non-empty
+    // payload is only warned about — never persisted.
+    if (brandMappings && typeof brandMappings === 'object' && Object.keys(brandMappings).length > 0) {
+      console.warn('[OnboardingRoutes] Ignoring deprecated brandMappings from upload; brand_sites must be updated through Settings or Discovery attention actions.');
     }
 
     // Entry stage: single-sourced from the effective sourcing capability
@@ -1884,6 +1883,241 @@ route.post('/onboarding/items/:id/set-url', async (c) => {
 
   setDiscoverySourceUrl(itemId, url);
   return c.json({ success: true });
+});
+
+/**
+ * ADR 0017 commitment 4 — re-trigger official site discovery using the SAME
+ * re-run flow the existing search_again/retry path uses: reset the item to
+ * discovery/pending (retry_count cleared, error cleared, flat status back to
+ * 'imported') and poll the background worker so the guided discovery run
+ * starts immediately. A background poll failure must never fail the
+ * endpoint that triggered it.
+ */
+function requeueDiscoveryRun(itemId: string, workspaceId: string, workspacePath: string): void {
+  const db = getDb();
+  db.query(
+    'UPDATE onboarding_items SET stage_status = ?, status = ?, retry_count = 0, error_message = NULL WHERE id = ?',
+  ).run('pending', 'imported', itemId);
+  const worker = getWorker(workspaceId, workspacePath);
+  try {
+    worker.poll();
+  } catch (pollErr) {
+    console.error('[OnboardingRoutes] Background worker poll failed (non-blocking):', pollErr);
+  }
+}
+
+/**
+ * POST /api/onboarding/items/:id/assign-brand
+ *
+ * ADR 0017 commitment 4 — first-class discovery-card attention action:
+ * assign a brand hint to the item and re-run official site discovery
+ * guided by that brand. On the next discovery run the resolved brand
+ * scopes the search (`site:` + sitemap pass) and feeds the authority gate
+ * (auto-accept requires the brand's mapped official domain). Re-triggers
+ * discovery exactly like the existing search_again flow.
+ *
+ * Request:  { "brand": string }
+ * Response: 200 { success: true, item } | 400 { error } | 404 { error }
+ */
+route.post('/onboarding/items/:id/assign-brand', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const brand = (body as { brand?: unknown })?.brand;
+  if (typeof brand !== 'string' || brand.trim().length === 0) {
+    return c.json({ error: 'brand is required' }, 400);
+  }
+
+  const itemId = c.req.param('id');
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
+  if (item.stage !== 'discovery') {
+    return c.json(
+      { error: `assign_brand requires the item to be in Discovery, got ${item.stage}/${item.stageStatus}` },
+      400,
+    );
+  }
+
+  updateItemBrandHint(itemId, brand.trim());
+  requeueDiscoveryRun(itemId, workspace.id, workspace.workspacePath);
+  console.log(
+    `[OnboardingRoutes] assign_brand for ${itemId}: brand hint -> "${brand.trim()}", discovery re-queued`,
+  );
+
+  return c.json({ success: true, item: findItemById(itemId) });
+});
+
+/**
+ * POST /api/onboarding/items/:id/assign-domain
+ *
+ * ADR 0017 commitment 4 — first-class discovery-card attention action:
+ * upsert a brand→domain mapping for the item's CURRENT brand hint and
+ * re-run official site discovery so the mapped domain guides the search
+ * and becomes authority-gate-eligible. Requires the item to already have a
+ * brand hint — an operator must assign the brand first (assign_brand),
+ * otherwise the mapping would be attached to an unresolved brand identity.
+ *
+ * Request:  { "domain": string }  (bare domain or URL; scheme/www/path stripped)
+ * Response: 200 { success: true, item } | 400 { error } | 404 { error }
+ */
+route.post('/onboarding/items/:id/assign-domain', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const domain = (body as { domain?: unknown })?.domain;
+  if (typeof domain !== 'string' || domain.trim().length === 0) {
+    return c.json({ error: 'domain is required' }, 400);
+  }
+
+  const itemId = c.req.param('id');
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
+  if (item.stage !== 'discovery') {
+    return c.json(
+      { error: `assign_domain requires the item to be in Discovery, got ${item.stage}/${item.stageStatus}` },
+      400,
+    );
+  }
+
+  const brandHint = item.brandHint;
+  if (!brandHint || brandHint.trim().length === 0) {
+    return c.json(
+      { error: 'This product has no brand assigned yet — assign a brand first (Assign Brand), then map its official domain.' },
+      400,
+    );
+  }
+
+  // Shared guarded logic (brand-domain-service): URL-tolerant normalization,
+  // blank/invalid rejection, the ADR 0017 commitment 3 retailer/distributor
+  // denylist guard, and the brand_sites upsert. Error strings identical to
+  // the pre-refactor inline implementation.
+  const result = assignOfficialDomainForBrand({ brand: brandHint.trim(), domain });
+  if (!result.ok) {
+    return c.json({ error: result.message }, 400);
+  }
+
+  requeueDiscoveryRun(itemId, workspace.id, workspace.workspacePath);
+  console.log(
+    `[OnboardingRoutes] assign_domain for ${itemId}: brand "${result.brand}" -> ${result.domain}, discovery re-queued`,
+  );
+
+  return c.json({ success: true, item: findItemById(itemId) });
+});
+
+/**
+ * GET /api/onboarding/batches/:id/brand-domain-setup
+ *
+ * ADR 0017 — batch-level 'Resolve Brand Domains' setup queue (epic #46
+ * follow-up): discovery items parked because their brand has no mapped
+ * official domain, grouped by brand and sorted by blocked-product count. The
+ * operator surface mirrors the extractor-profile setup queue (one task per
+ * brand: "assign domain for BUTCHERS — unblocks 7 products"). Workspace-scoped
+ * like every batch projection.
+ *
+ * Response: 200 { blockers: BrandDomainSetupBlocker[] } | 404 { error }
+ */
+route.get('/onboarding/batches/:id/brand-domain-setup', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const workspace = findWorkspace();
+  if (!workspace || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  return c.json({ blockers: getBrandDomainBlockers(batchId) });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/brand-domain-setup/:brand
+ *
+ * ADR 0017 — batch-level domain assignment for an unmapped brand: upserts
+ * the brand→domain mapping via the SAME guarded service the per-item
+ * assign_domain action uses, then re-queues EVERY discovery item in the
+ * batch that is parked for this brand's unmapped domain so guided discovery
+ * runs immediately with the mapped domain authority-gate-eligible.
+ *
+ * Request:  { "domain": string }  (bare domain or URL; scheme/www/path stripped)
+ * Response: 200 { success: true, requeued: N, blockers: refreshed list }
+ *          | 400 { error } | 404 { error }
+ */
+route.post('/onboarding/batches/:id/brand-domain-setup/:brand', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  const brand = c.req.param('brand').trim();
+  if (!brand) {
+    return c.json({ error: 'brand is required' }, 400);
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const domain = (body as { domain?: unknown })?.domain;
+  if (typeof domain !== 'string' || domain.trim().length === 0) {
+    return c.json({ error: 'domain is required' }, 400);
+  }
+
+  // The blocker group: every item in THIS batch parked for this brand's
+  // unmapped domain. An empty group still maps the domain (useful for later
+  // discovery runs) but has nothing to requeue.
+  const blockers = getBrandDomainBlockers(batchId);
+  const blocker = blockers.find(b => b.brand === brand);
+  const itemIds = blocker?.itemIds ?? [];
+
+  const result = assignOfficialDomainForBrand({ brand, domain });
+  if (!result.ok) {
+    return c.json({ error: result.message }, 400);
+  }
+
+  for (const itemId of itemIds) {
+    requeueDiscoveryRun(itemId, workspace.id, workspace.workspacePath);
+  }
+  console.log(
+    `[OnboardingRoutes] brand-domain-setup for batch ${batchId}: brand "${result.brand}" -> ${result.domain}, requeued ${itemIds.length} item(s)`,
+  );
+
+  return c.json({
+    success: true,
+    requeued: itemIds.length,
+    blockers: getBrandDomainBlockers(batchId),
+  });
 });
 
 /**

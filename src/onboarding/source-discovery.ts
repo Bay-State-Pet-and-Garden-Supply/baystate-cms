@@ -636,10 +636,10 @@ export function scoreResult(
   // Add overlap weights: 0.25 max for base matching + 0.05 max for variant tie-breakers
   score += 0.25 * baseOverlap + 0.05 * variantOverlap;
 
-  // Domain looks like a pet retailer / specialty shop
-  if (/pet|animal|dog|cat|paw|woof|bark|feed|farm|supply|agway/.test(domain)) {
-    score += 0.05;
-  }
+  // ADR 0017: the pet-word domain bonus was removed — retailer-sounding
+  // domains (farmtopaw.ca, woofmeownh.com) must never be rewarded for
+  // sounding pet-like. Retailer/distributor demotion is handled by
+  // isKnownRetailerOrDistributorDomain below (ranking bias, never discard).
 
   // ── Negative signals ──────────────────────────────────────────────────
 

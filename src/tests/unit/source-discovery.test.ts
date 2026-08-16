@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { scoreResult } from '../../onboarding/source-discovery';
+import { isKnownRetailerOrDistributorDomain } from '../../onboarding/discovery/retailer-domain-list';
 
 describe('Source Discovery URL Scoring', () => {
   const upc = '850067859598';
@@ -130,5 +131,39 @@ describe('Source Discovery URL Scoring', () => {
 
     const score = scoreResult(result, '850067859833', expectedName, 'woof', 'mywoof.com', ['mywoof.com']);
     expect(score).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it('should recognize seeded retailer/distributor domains (ADR 0017)', () => {
+    const seeded = [
+      'farmtopaw.ca',
+      'torontopets.ca',
+      'mypetshoponyonge.ca',
+      'woofmeownh.com',
+      'shop.allpetsconsidered.com',
+    ];
+    for (const domain of seeded) {
+      expect(isKnownRetailerOrDistributorDomain(domain)).toBe(true);
+    }
+    // A bare brand domain is not a known retailer.
+    expect(isKnownRetailerOrDistributorDomain('frommfamily.com')).toBe(false);
+    // Lookup is normalized: leading www is stripped.
+    expect(isKnownRetailerOrDistributorDomain('www.farmtopaw.ca')).toBe(true);
+  });
+
+  it('should demote known retailer domains relative to otherwise-identical neutral domains', () => {
+    const result = {
+      title: 'Butchers Puppy Frozen Sausage Range',
+      link: 'https://example.com/products/butchers-pup',
+      snippet: 'Official distributor range',
+      position: 1
+    };
+
+    const retailerScore = scoreResult(result, upc, name, null, 'farmtopaw.ca', []);
+    const neutralScore = scoreResult(result, upc, name, null, 'neutralstore.ca', []);
+
+    expect(retailerScore).toBeLessThan(neutralScore);
+    // Demotion is a bias, never a discard: a retailer page keeps a positive
+    // base score so it can still surface as a reviewed fallback.
+    expect(retailerScore).toBeGreaterThan(0);
   });
 });

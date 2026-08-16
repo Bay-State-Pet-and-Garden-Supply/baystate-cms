@@ -18,6 +18,14 @@ export const KNOWN_RETAILER_OR_DISTRIBUTOR_DOMAINS: ReadonlySet<string> = new Se
   'net32.com',
   'zeiglersdist.com',
   'pood.bluepetfood.eu',
+  // ADR 0017 seed: Canadian pet retailers surfacing as discovery candidates
+  // for brands without mapped official domains (live-batch blockers).
+  // shop.allpetsconsidered.com is a multi-brand retailer, not a brand site.
+  'farmtopaw.ca',
+  'torontopets.ca',
+  'mypetshoponyonge.ca',
+  'woofmeownh.com',
+  'shop.allpetsconsidered.com',
 ]);
 
 /** Normalize a candidate URL's domain for list lookup (lowercase, strip www). */

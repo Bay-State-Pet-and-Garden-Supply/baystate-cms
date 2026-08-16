@@ -10,6 +10,7 @@ import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-
 import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { AttentionRow } from './AttentionRow';
 import { DomainBlockerPanel } from './DomainBlockerPanel';
+import { BrandDomainSetupPanel } from './BrandDomainSetupPanel';
 import { groupAttentionItems, getAttentionGroupChip } from './attention-logic';
 import './attention.css';
 
@@ -146,6 +147,7 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
 
   return (
     <div className="attn-queue">
+      <BrandDomainSetupPanel batchId={batchId} />
       <DomainBlockerPanel batchId={batchId} />
       <div className="attn-chips" role="group" aria-label="Filter by attention type">
         <button

@@ -250,12 +250,14 @@ export function Onboarding() {
     setLoading(true);
     setError('');
     try {
+      // ADR 0017 follow-up: uploads no longer submit brandMappings — brand→domain
+      // authority is managed in Settings (Domain Configuration) and via Discovery
+      // attention actions. The step-2 UI is now a read-only confirm summary.
       const res = await createBatch({
         name: uploadBatchName,
         fileName: uploadFile!.name,
         mapping: uploadMapping as ColumnMapping,
         rows: uploadTempRows,
-        brandMappings,
       });
 
       setShowUploadModal(false);
@@ -692,10 +694,10 @@ export function Onboarding() {
                     </div>
                   ) : (
                     <div>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px 0' }}>Assign Brand Domains</h3>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px 0' }}>Confirm Import</h3>
                       <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 16px 0', lineHeight: '1.4' }}>
                         We detected <strong>{detectedBrands.length}</strong> distinct brand(s) in this batch.
-                        Provide official domains (e.g. <code>brandname.com</code>) to search, or leave blank to fallback to retailer queries.
+                        Brands without configured official domains will be handled during Discovery.
                       </p>
 
                       {detectedBrands.length === 0 ? (
@@ -704,31 +706,25 @@ export function Onboarding() {
                         </p>
                       ) : (
                         <div style={{ maxHeight: '250px', overflowY: 'auto', border: '1px solid #e5e7eb', borderRadius: 8, padding: 12, backgroundColor: '#f9fafb' }}>
-                          {detectedBrands.map((brand) => (
-                            <div key={brand} style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 12, alignItems: 'center', marginBottom: 10 }}>
-                              <span style={{ fontSize: 13, fontWeight: 600, color: '#374151', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }} title={brand}>
-                                {brand}
-                              </span>
-                              <input
-                                style={{
-                                  ...styles.input,
-                                  padding: '6px 10px',
-                                  border: '1px solid #d1d5db',
-                                  borderRadius: 6,
-                                  fontSize: 13,
-                                  height: 'auto',
-                                  width: '100%',
-                                  boxSizing: 'border-box',
-                                  ...(loading ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
-                                }}
-                                type="text"
-                                placeholder="e.g. brandname.com"
-                                value={brandMappings[brand] || ''}
-                                onChange={(e) => setBrandMappings(p => ({ ...p, [brand]: e.target.value }))}
-                                disabled={loading}
-                              />
-                            </div>
-                          ))}
+                          {detectedBrands.map((brand) => {
+                            const domain = (brandMappings[brand] || '').trim();
+                            return (
+                              <div key={brand} style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 12, alignItems: 'baseline', marginBottom: 10 }}>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: '#374151', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }} title={brand}>
+                                  {brand}
+                                </span>
+                                {domain ? (
+                                  <span style={{ fontSize: 13, color: '#166534' }}>
+                                    → {domain} (configured)
+                                  </span>
+                                ) : (
+                                  <span style={{ fontSize: 13, color: '#92400e' }}>
+                                    No official domain configured — will be resolved during Discovery (items may pause for setup; they will not block upload)
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
 

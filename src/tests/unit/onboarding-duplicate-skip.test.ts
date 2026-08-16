@@ -6,6 +6,7 @@ import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import { listItemsByBatch } from '../../db/repositories/onboarding-item-repo';
+import { listAllBrandSites } from '../../db/repositories/brand-site-repo';
 import { overrideSourcingFlags, resetSourcingFlagsOverride } from '../../onboarding/flags';
 import app from '../../server/app';
 
@@ -134,5 +135,54 @@ describe('Onboarding Duplicate Product Skipping', () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe('All products in this spreadsheet already exist in the catalog.');
+  });
+
+  it('should ignore deprecated brandMappings: no brand_sites rows, batch + items still created', async () => {
+    const payload = {
+      name: 'Import With Deprecated Brand Mappings',
+      fileName: 'import_brands.xlsx',
+      mapping: {
+        upc: 'SKU/UPC',
+        name: 'Product Name',
+        nameMergeWith: null,
+        price: 'Price',
+        quantity: null,
+        brand: 'Brand',
+        department: null,
+        sourceUrl: null,
+      },
+      rows: [
+        { 'SKU/UPC': 'SKU-BRANDED-1', 'Product Name': 'Branded Product', 'Brand': 'ACME' },
+      ],
+      // Legacy upload-wizard field: must be accepted but ignored (ADR 0017
+      // follow-up — brand_sites is managed through Settings or Discovery
+      // attention actions, never import-time writes).
+      brandMappings: { ACME: 'acme.com', 'OTHER BRAND': 'otherbrand.com' },
+    };
+
+    const res = await app.request('/api/onboarding/batches', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    // Batch and items are created normally.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.batch).toBeDefined();
+    expect(body.batch.totalItems).toBe(1);
+
+    const items = listItemsByBatch(body.batch.id);
+    expect(items).toHaveLength(1);
+    expect(items[0].upc).toBe('SKU-BRANDED-1');
+    // Disabled sourcing engine: the new item enters Discovery.
+    expect(items[0].stage).toBe('discovery');
+    expect(items[0].stageStatus).toBe('pending');
+
+    // The deprecated brandMappings payload must NOT write brand_sites rows.
+    const sites = listAllBrandSites();
+    expect(sites.some(s => s.brandName === 'acme' || s.brandName === 'other brand')).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import {
 } from '../db/repositories/onboarding-item-repo';
 import { randomUUID } from 'node:crypto';
 import { discoverSources } from './source-discovery';
+import type { BrandInferenceResult } from './brand-inferrer';
 import { captureModelPolicySnapshot } from './model-policy-snapshot';
 import {
   insertSources,
@@ -25,7 +26,7 @@ import {
   type InsertSourceData,
 } from '../db/repositories/onboarding-source-repo';
 import { verifyTopCandidates, type VerificationResult } from './page-verifier';
-import { findBrandSites } from '../db/repositories/brand-site-repo';
+import { findBrandSites, insertBrandSiteIfAbsent } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItemWithPipeline } from './product-curator';
@@ -69,7 +70,7 @@ import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from 
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
-import type { OnboardingSource, PipelineStage } from '../shared/schemas/onboarding';
+import type { OnboardingSource, PipelineStage, BrandSite } from '../shared/schemas/onboarding';
 import { getSourcingFlags } from './flags';
 import { normalizeGtin } from './sourcing/contracts';
 import { listCurrentGenerationConflictsForItem } from '../db/repositories/onboarding-conflict-repo';
@@ -149,6 +150,7 @@ const COHORT_RUN_TERMINAL = new Set([
  */
 import { normalizeDiscoveryDomain, isOfficialDomainMatch } from './domain-utils';
 export { normalizeDiscoveryDomain, isOfficialDomainMatch };
+import { isKnownRetailerOrDistributorDomain } from './discovery/retailer-domain-list';
 
 /**
  * Return the list of normalized official domains mapped to a brand.
@@ -164,6 +166,77 @@ export function getOfficialDomainsForBrand(brandHint: string | null | undefined)
     if (normalized) domains.push(normalized);
   }
   return domains;
+}
+
+/** ADR 0017 commitment 1: minimum inferred-brand confidence required before an
+ *  inferred domain may be persisted as a provisional `brand_sites` mapping.
+ *  Stricter than the inference gate (brand-inferrer's 0.7) because the mapping
+ *  becomes durable guidance for every future discovery run of the brand. */
+export const PROVISIONAL_BRAND_SITE_MIN_CONFIDENCE = 0.8;
+
+/** Tolerate URL-shaped inferred domains ("https://frommfamily.com/products/x")
+ *  down to a bare registrable-ish label; beats normalizeDiscoveryDomain which
+ *  only strips a leading `www.`. */
+function cleanProvisionalDomain(raw: string): string {
+  let token = raw.trim().toLowerCase();
+  if (token.includes('://')) {
+    try {
+      token = new URL(token).hostname;
+    } catch {
+      /* fall through to string cleanup */
+    }
+  }
+  return normalizeDiscoveryDomain(token.split('/')[0].split(':')[0]);
+}
+
+/**
+ * ADR 0017 commitment 1 — persist a high-confidence inferred brand→domain as a
+ * provisional `brand_sites` mapping so later discovery runs for the same brand
+ * are guided (`site:` scoping + sitemap pass). Saved only when:
+ *   - the inference carried an `inferredDomain`;
+ *   - confidence is at/above PROVISIONAL_BRAND_SITE_MIN_CONFIDENCE;
+ *   - the brand has NO existing `brand_sites` rows (an operator-maintained
+ *     mapping is never overwritten).
+ * Returns the created mapping (normalized domain) or null when skipped. The
+ * operator can edit/remove the provisional row in Settings → Domain
+ * Configuration (existing `upsertDomainConfig` full-replacement semantics).
+ */
+export function persistProvisionalInferredDomain(
+  inferredBrand: BrandInferenceResult,
+): BrandSite | null {
+  if (!inferredBrand.inferredDomain) return null;
+  if (inferredBrand.confidence < PROVISIONAL_BRAND_SITE_MIN_CONFIDENCE) return null;
+  const domain = cleanProvisionalDomain(inferredBrand.inferredDomain);
+  if (!domain) return null;
+  // Retailer/distributor domains never become authority mappings, even
+  // provisionally — the observed BUTCHERS failure mode was exactly this
+  // (a retailer page persisted as the brand's official domain).
+  if (isKnownRetailerOrDistributorDomain(domain)) return null;
+  // An existing mapping (operator-maintained or provisional) is never
+  // overwritten, incremented, or duplicated. The atomic first-mapping-wins
+  // insert below makes the write race-free even under concurrent workers.
+  if (findBrandSites(inferredBrand.brand).length > 0) return null;
+  return insertBrandSiteIfAbsent(inferredBrand.brand, domain);
+}
+
+/**
+ * ADR 0017 commitment 2 — authority-gate predicate. An official-page candidate
+ * may be auto-accepted ONLY when the item has a resolved brand hint, that brand
+ * maps to at least one official domain, and the candidate's domain matches a
+ * mapped domain (strict exact-or-subdomain via `isOfficialDomainMatch`).
+ * Unknown or unmapped brands never auto-accept official candidates — review
+ * decides authority. Identity evidence from the page verifier remains a
+ * separate, additional conjunct.
+ */
+export function passesAuthorityGate(
+  brandHint: string | null | undefined,
+  officialDomains: string[],
+  candidateDomain: string | null | undefined,
+): boolean {
+  if (!brandHint || !brandHint.trim()) return false;
+  if (officialDomains.length === 0) return false;
+  if (!candidateDomain) return false;
+  return officialDomains.some(d => isOfficialDomainMatch(candidateDomain, d));
 }
 
 /**
@@ -1184,11 +1257,54 @@ export class OnboardingWorker {
 
       // ── Persist the inferred brand if discovery inferred one ────────────
       let activeBrandHint = item.brandHint;
+      let provisionalMappingCreated = false;
+      let provisionalMappingDomain: string | null = null;
       if (inferredBrand) {
         console.log(`[OnboardingWorker] ✓ Persisted inferred brand for ${item.upc}: "${inferredBrand.brand}"`);
         updateItemBrandHint(item.id, inferredBrand.brand);
         activeBrandHint = inferredBrand.brand;
+
+        // ADR 0017 commitment 1: persist a high-confidence inferred domain as
+        // a provisional brand_sites mapping so the NEXT discovery run for this
+        // brand is guided (site: scoping + sitemap). Never overwrites an
+        // operator-maintained mapping. A mapping-write failure must never
+        // abort discovery processing — it is logged as a warning and the
+        // provisional flag stays false. The authority snapshot
+        // (officialDomains, below) is taken with an explicit same-run
+        // exclusion of the just-created provisional mapping, so it grants NO
+        // auto-accept authority in this same run — candidates on it still
+        // require human source review.
+        let created: BrandSite | null = null;
+        try {
+          created = persistProvisionalInferredDomain(inferredBrand);
+        } catch (err) {
+          console.warn(
+            `[OnboardingWorker] ⚠ Provisional brand→domain mapping failed for "${inferredBrand.brand}" (non-blocking):`,
+            err,
+          );
+        }
+        provisionalMappingCreated = created !== null;
+        provisionalMappingDomain = created?.domain ?? null;
+        if (created) {
+          console.log(
+            `[OnboardingWorker] ✓ Provisional brand→domain mapping created for "${inferredBrand.brand}" → ${created.domain} — verify in Settings → Domain Configuration`,
+          );
+        }
       }
+
+      // ── Authority snapshot (ADR 0017 commitment 2) ──────────────────────
+      // The official-domain set that may authorize auto-accept THIS run,
+      // paired against the RESOLVED brand (pre-run hint, or the brand inferred
+      // this run) with an explicit same-run exclusion: a provisional mapping
+      // created by this run's inference grants no auto-accept authority in
+      // the same run — provisional mappings require human source review
+      // first. When inference did not run (pre-run hint present), the resolved
+      // brand IS the pre-run hint, so semantics are unchanged; the explicit
+      // exclusion keeps the pairing correct even if inference ever runs with
+      // a pre-existing hint.
+      const officialDomains = getOfficialDomainsForBrand(activeBrandHint).filter(
+        (d) => provisionalMappingDomain === null || d !== provisionalMappingDomain,
+      );
 
       // ── Hold on discovery if brand has no domain ───────────────────────
       if (discovery.noDomainMapped) {
@@ -1273,7 +1389,6 @@ export class OnboardingWorker {
         // product-identity signals BEFORE auto-selection. This prevents
         // confidently saving the wrong URL just because its slug looked
         // tasty on a high-confidence domain.
-        const officialDomains = getOfficialDomainsForBrand(activeBrandHint);
         updateDiscoveryRunStep(discoveryRunId, 'page_verification');
         const verify = this.deps?.verifyTopCandidates ?? verifyTopCandidates;
         const verificationResults: VerificationResult[] = sources.length > 0
@@ -1328,11 +1443,43 @@ export class OnboardingWorker {
           );
         });
 
-        const autoSelectedResult = officialDomainResult
-          ? officialDomainResult
-          : (verifiedStrong.length > 0 ? verifiedStrong[0] : null);
+        // ADR 0017 commitment 2 — authority gate: auto-accept is allowed only
+        // when the chosen candidate's domain is a mapped official brand domain
+        // (strict isOfficialDomainMatch against the pre-run snapshot). A
+        // strongly-verified retailer or off-domain candidate is NEVER
+        // auto-accepted as the official source — it falls to manual review so
+        // the operator decides authority. Identity evidence from the page
+        // verifier (verifiedStrong) remains a separate, additional conjunct.
+        const hasAuthority = (s: InsertSourceData): boolean =>
+          passesAuthorityGate(activeBrandHint, officialDomains, s.domain);
+
+        const autoSelectedResult =
+          officialDomainResult && hasAuthority(officialDomainResult.candidate)
+            ? officialDomainResult
+            : verifiedStrong.find((v) => hasAuthority(v.candidate)) ?? null;
         const autoSelectedSource = autoSelectedResult?.candidate ?? null;
         const shouldAutoSelect = autoSelectedSource !== null;
+
+        // When raw identity evidence was strong but the domain failed the
+        // authority gate, name the requirement in the review reason so the
+        // reviewer knows WHY auto-selection was skipped. The trigger is
+        // autoSelectedResult === null AND a candidate existed (official or
+        // strongly verified) — it never falsely fires when an authorized
+        // strong candidate was selected.
+        const deniedByAuthority =
+          autoSelectedResult === null &&
+          (officialDomainResult !== undefined || verifiedStrong.length > 0);
+        const authorityDetail = deniedByAuthority
+          ? ` | authority: auto-accept requires the brand's mapped official domain` +
+            ` (brand "${activeBrandHint ?? ''}"` +
+            (officialDomains.length > 0
+              ? ` official domains: ${officialDomains.join(', ')}`
+              : ` has no mapped official domain — assign one in Settings → Domain Configuration`) +
+            (provisionalMappingCreated
+              ? `; a provisional inference mapping was created this run — confirm the source URL manually`
+              : '') +
+            ')'
+          : '';
         updateDiscoveryRunStep(discoveryRunId, 'applying_outcome');
 
         if (shouldAutoSelect && autoSelectedSource) {
@@ -1367,10 +1514,10 @@ export class OnboardingWorker {
           completeDiscoveryRun(
             discoveryRunId,
             'needs_input_candidates',
-            `No candidate passed verification — needs manual URL review${verificationDetail}`,
+            `No candidate passed verification — needs manual URL review${verificationDetail}${authorityDetail}`,
           );
           const manualReviewReason =
-            `needs_review: no candidate passed verification${verificationDetail}`;
+            `needs_review: no candidate passed verification${verificationDetail}${authorityDetail}`;
           updateItemStageStatus(item.id, 'completed', manualReviewReason);
 
           console.log(
@@ -1388,7 +1535,8 @@ export class OnboardingWorker {
           manualReviewReason: shouldAutoSelect
             ? null
             : `needs_review: no candidate passed verification` +
-              (topVerificationForEvent ? ` | ${topVerificationForEvent.decisionReason}` : ''),
+              (topVerificationForEvent ? ` | ${topVerificationForEvent.decisionReason}` : '') +
+              authorityDetail,
           bestCandidateUrl: bestSource.url,
           bestCandidateDomain: bestSource.domain ?? null,
           officialDomains,

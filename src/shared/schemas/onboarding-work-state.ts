@@ -266,6 +266,39 @@ export const ExtractorProfileBlockersResponseSchema = z.object({
 export type ExtractorProfileDomainBlocker = z.infer<typeof ExtractorProfileDomainBlockerSchema>;
 export type ExtractorProfileBlockersResponse = z.infer<typeof ExtractorProfileBlockersResponseSchema>;
 
+// ─── Brand-domain setup blockers (ADR 0017 — batch-level Resolve Brand Domains) ─
+
+/** One sample item behind a brand-domain blocker (up to 3 per blocker). */
+export const BrandDomainSetupBlockerSampleSchema = z.object({
+  itemId: z.string(),
+  upc: z.string().optional(),
+  name: z.string(),
+  sourceUrl: z.string().nullable(),
+});
+
+/**
+ * Discovery items parked because their brand has no mapped official domain
+ * (`needs_review: no domain mapped for brand "X" …`), grouped by brand.
+ */
+export const BrandDomainSetupBlockerSchema = z.object({
+  brand: z.string(),
+  blockedItemCount: z.number().int(),
+  batchId: z.string(),
+  itemIds: z.array(z.string()),
+  sampleItems: z.array(BrandDomainSetupBlockerSampleSchema),
+  /** Best-known brand→domain mapping from `brand_sites` (null when unmapped). */
+  existingMapping: z.string().nullable(),
+  /** When the group's earliest parked item was created (ISO timestamp). */
+  createdAt: z.string(),
+});
+
+export const BrandDomainSetupResponseSchema = z.object({
+  blockers: z.array(BrandDomainSetupBlockerSchema),
+});
+
+export type BrandDomainSetupBlocker = z.infer<typeof BrandDomainSetupBlockerSchema>;
+export type BrandDomainSetupResponse = z.infer<typeof BrandDomainSetupResponseSchema>;
+
 // ─── Domain release response ───────────────────────────────────────────────────
 
 export const DomainReleaseResponseSchema = z.object({

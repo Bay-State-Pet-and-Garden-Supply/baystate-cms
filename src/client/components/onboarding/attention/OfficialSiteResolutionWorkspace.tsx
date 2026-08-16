@@ -18,6 +18,8 @@ import type { DomainReleaseResponse } from '../../../../shared/schemas/onboardin
 import type { OnboardingEvidenceConflict } from '../../../../shared/schemas/distributor';
 import type { OnboardingSource, OnboardingItem } from '../../../../shared/schemas/onboarding';
 import {
+  assignItemBrand,
+  assignItemDomain,
   continueWithOfficialDiscovery,
   getItemConflicts,
   getItemDetail,
@@ -84,7 +86,17 @@ export function OfficialSiteResolutionWorkspace({
   const [evidenceAttemptCount, setEvidenceAttemptCount] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [confirmedUrl, setConfirmedUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState<'select-source' | 'set-url' | 'retry' | 'conflict' | 'sourcing-route' | 'rerun-cohort' | null>(null);
+  const [busy, setBusy] = useState<
+    | 'select-source'
+    | 'set-url'
+    | 'retry'
+    | 'conflict'
+    | 'sourcing-route'
+    | 'rerun-cohort'
+    | 'assign-brand'
+    | 'assign-domain'
+    | null
+  >(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [releaseResult, setReleaseResult] = useState<DomainReleaseResponse | null>(null);
   /** Honest resolution note rendered in the done phase (semantic re-run etc.). */
@@ -193,6 +205,70 @@ export function OfficialSiteResolutionWorkspace({
     } catch (err) {
       setMutationError(err instanceof Error ? err.message : 'Could not save that URL');
       throw err; // surfaced by the manual input
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // ── Brand / official-domain assignment (ADR 0017 commitment 4) ────────
+
+  const [brandInput, setBrandInput] = useState('');
+  const [domainInput, setDomainInput] = useState('');
+
+  // Prefill the inputs ONCE per item (ADR 0017 review fix): a ref tracking
+  // the last-prefilled item id means an intentional clear is never
+  // repopulated by a later item reload, while the `prev || …` guard still
+  // never clobbers in-progress typing during the first prefill.
+  const lastPrefilledItemId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!item || lastPrefilledItemId.current === itemId) return;
+    lastPrefilledItemId.current = itemId;
+    setBrandInput((prev) => prev || (item.brandHint ?? ''));
+    const prefillDomain = item.sourceUrl ? domainFromUrl(item.sourceUrl) : null;
+    if (prefillDomain) setDomainInput((prev) => prev || prefillDomain);
+  }, [item, itemId]);
+
+  const handleAssignBrand = async () => {
+    const brand = brandInput.trim();
+    if (!brand) {
+      setMutationError('Enter a brand name first.');
+      return;
+    }
+    setBusy('assign-brand');
+    setMutationError(null);
+    try {
+      await assignItemBrand(itemId, brand);
+      setMutationError(null); // a previously seen error must not persist after success
+      setResolutionNote(
+        `Brand set to “${brand}”. Official site discovery re-queued — this product re-searches the brand's official site automatically.`,
+      );
+      setPhase('done');
+    } catch (err) {
+      setMutationError(err instanceof Error ? err.message : 'Could not assign the brand');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleAssignDomain = async () => {
+    const domain = domainInput.trim();
+    if (!domain) {
+      setMutationError('Enter an official brand domain first.');
+      return;
+    }
+    setBusy('assign-domain');
+    setMutationError(null);
+    try {
+      await assignItemDomain(itemId, domain);
+      setMutationError(null); // a previously seen error must not persist after success
+      setResolutionNote(
+        `Official domain mapped: ${domain
+          .replace(/^https?:\/\//i, '')
+          .replace(/\/.*$/, '')}. Discovery re-queued — this product re-searches the mapped domain automatically.`,
+      );
+      setPhase('done');
+    } catch (err) {
+      setMutationError(err instanceof Error ? err.message : 'Could not map the domain');
     } finally {
       setBusy(null);
     }
@@ -405,6 +481,74 @@ export function OfficialSiteResolutionWorkspace({
             onConfirm={(source) => void handleConfirmCandidate(source)}
             onUseManualUrl={handleManualUrl}
           />
+        ) : null}
+
+        {/* ADR 0017 commitment 4: brand/domain attention actions. Discovery
+            cannot resolve an official source when the brand is missing or
+            unmapped — let the operator assign either and re-run guided. */}
+        {phase === 'url' ? (
+          <section className="attn-section" aria-label="Brand and official domain">
+            <h3 className="attn-section-title">Brand &amp; official domain</h3>
+            <div className="attn-section-body">
+              <p style={{ margin: 0, fontFamily: 'var(--font-body)', fontSize: '0.8125rem', color: 'var(--color-mulch-brown)' }}>
+                {workState?.brand || item?.brandHint
+                  ? 'Assigning the official domain re-runs discovery scoped to it — the next search targets the brand site and can auto-confirm only mapped domains.'
+                  : 'This product has no brand yet. Assign one so discovery can target the brand’s official site, then map its official domain.'}
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                <label htmlFor="attn-brand" className="text-label" style={{ color: 'var(--color-mulch-brown)' }}>
+                  Brand name
+                </label>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input
+                    id="attn-brand"
+                    className="input"
+                    placeholder="e.g. Fromm"
+                    value={brandInput}
+                    onChange={(e) => setBrandInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void handleAssignBrand();
+                    }}
+                    disabled={busy !== null}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    style={{ flexShrink: 0 }}
+                    onClick={() => void handleAssignBrand()}
+                    disabled={busy !== null || brandInput.trim().length === 0}
+                  >
+                    {busy === 'assign-brand' ? 'Assigning…' : 'Assign Brand & Re-search'}
+                  </button>
+                </div>
+                <label htmlFor="attn-domain" className="text-label" style={{ color: 'var(--color-mulch-brown)' }}>
+                  Official domain
+                </label>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input
+                    id="attn-domain"
+                    className="input"
+                    placeholder="e.g. frommfamily.com"
+                    value={domainInput}
+                    onChange={(e) => setDomainInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void handleAssignDomain();
+                    }}
+                    disabled={busy !== null}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    style={{ flexShrink: 0 }}
+                    onClick={() => void handleAssignDomain()}
+                    disabled={busy !== null || domainInput.trim().length === 0}
+                  >
+                    {busy === 'assign-domain' ? 'Mapping…' : 'Map Domain & Re-search'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
         ) : null}
 
         {phase === 'extractor' && domain ? (
