@@ -241,6 +241,9 @@ export default defineConfig({
       // Epic #46 follow-up official-domain ranking (imports source-discovery,
       // which pulls bun:sqlite modules — run under bun test via test:db)
       'src/tests/unit/official-domain-ranking.test.ts',
+      // Epic #46 follow-up distributor imagery verification (bun:sqlite/
+      // bun:test + sharp — run under bun test via test:db)
+      'src/tests/unit/distributor-imagery.test.ts',
       // Epic #46 Phase 1/7/8 + telemetry DB suites (bun:sqlite — run under bun test via test:db)
       'src/tests/unit/onboarding-work-state.test.ts',
       'src/tests/unit/onboarding-review-state.test.ts',

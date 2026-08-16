@@ -4026,6 +4026,120 @@ export function runMigrations(): void {
     console.log('[Migrations] Agent Training & Alignment schema migration complete.');
   }
 
+  // ── Onboarding distributor imagery (epic #46 follow-up, PI-6 reuse) ────
+  // Verified distributor images are durable `product_intelligence_assets`
+  // rows ORIGINATING from the onboarding pipeline (not a PI run): run_id is
+  // relaxed to NULL for these rows, `origin` records the producer, and
+  // `onboarding_item_id` links the asset to its item (cascade delete). The
+  // same-run candidate trigger only fires when candidate_id is set, so
+  // onboarding rows (no candidate) are unaffected. Idempotent per
+  // (item, source_url) via a partial unique index.
+  try {
+    const imageryVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('onboarding_distributor_imagery_schema_version') as { value: string } | undefined;
+    if (!imageryVersion) {
+      console.log('[Migrations] Running onboarding distributor imagery schema migration...');
+      db.transaction(() => {
+        // Rebuild the assets table: run_id becomes nullable (onboarding rows
+        // carry no PI run); origin + onboarding_item_id are added. Column set
+        // mirrors the live table plus the new columns.
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS product_intelligence_assets_new (
+            id TEXT PRIMARY KEY,
+            run_id TEXT REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            source_id TEXT REFERENCES product_intelligence_sources(id) ON DELETE SET NULL,
+            source_url TEXT NOT NULL,
+            source_page_url TEXT,
+            source_type TEXT NOT NULL,
+            source_path TEXT,
+            source_artifact_id TEXT,
+            extraction_method TEXT NOT NULL CHECK (extraction_method IN ('json_ld', 'platform_api', 'network_response', 'profile_selector', 'media_api', 'manual', 'image_ocr', 'decoder')),
+            retrieved_at TEXT NOT NULL,
+            original_content_hash TEXT NOT NULL,
+            perceptual_hash TEXT,
+            variant_reference TEXT,
+            rights_status TEXT NOT NULL CHECK (rights_status IN ('approved', 'restricted', 'unknown')),
+            rights_basis TEXT,
+            rights_evidence_ref TEXT,
+            observed_brand TEXT,
+            observed_product_name TEXT,
+            observed_variant TEXT,
+            observed_net_content_json TEXT,
+            observed_pack_count INTEGER,
+            observed_gtin TEXT,
+            exact_product_match INTEGER NOT NULL DEFAULT 0,
+            exact_variant_match INTEGER,
+            quality_status TEXT NOT NULL CHECK (quality_status IN ('usable', 'low_quality', 'invalid')),
+            commerce_approved INTEGER NOT NULL DEFAULT 0,
+            conflicts_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            verified_against_json TEXT,
+            verified_against_hash TEXT,
+            declared_source_type TEXT,
+            candidate_id TEXT,
+            brand_evidence_id TEXT,
+            brand_evidence_hash TEXT,
+            origin TEXT NOT NULL DEFAULT 'pi_run',
+            onboarding_item_id TEXT REFERENCES onboarding_items(id) ON DELETE CASCADE
+          );
+          INSERT INTO product_intelligence_assets_new
+            (id, run_id, source_id, source_url, source_page_url, source_type, source_path, source_artifact_id,
+             extraction_method, retrieved_at, original_content_hash, perceptual_hash, variant_reference,
+             rights_status, rights_basis, rights_evidence_ref, observed_brand, observed_product_name,
+             observed_variant, observed_net_content_json, observed_pack_count, observed_gtin,
+             exact_product_match, exact_variant_match, quality_status, commerce_approved, conflicts_json,
+             payload_json, created_at, verified_against_json, verified_against_hash, declared_source_type,
+             candidate_id, brand_evidence_id, brand_evidence_hash, origin, onboarding_item_id)
+          SELECT id, run_id, source_id, source_url, source_page_url, source_type, source_path, source_artifact_id,
+             extraction_method, retrieved_at, original_content_hash, perceptual_hash, variant_reference,
+             rights_status, rights_basis, rights_evidence_ref, observed_brand, observed_product_name,
+             observed_variant, observed_net_content_json, observed_pack_count, observed_gtin,
+             exact_product_match, exact_variant_match, quality_status, commerce_approved, conflicts_json,
+             payload_json, created_at, verified_against_json, verified_against_hash, declared_source_type,
+             candidate_id, brand_evidence_id, brand_evidence_hash, 'pi_run', NULL
+          FROM product_intelligence_assets;
+          DROP TABLE product_intelligence_assets;
+          ALTER TABLE product_intelligence_assets_new RENAME TO product_intelligence_assets;
+          CREATE INDEX IF NOT EXISTS idx_pi_assets_run ON product_intelligence_assets(run_id);
+          CREATE INDEX IF NOT EXISTS idx_pi_assets_commerce ON product_intelligence_assets(run_id, commerce_approved);
+          CREATE INDEX IF NOT EXISTS idx_pi_assets_onboarding_item ON product_intelligence_assets(onboarding_item_id);
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_pi_assets_onboarding_url
+            ON product_intelligence_assets(onboarding_item_id, source_url)
+            WHERE origin = 'onboarding_distributor' AND onboarding_item_id IS NOT NULL;
+        `);
+        // Recreate the same-run candidate trigger (dropped with the table).
+        const candidateRunTrigger = db
+          .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_pi_asset_candidate_same_run'")
+          .get();
+        if (!candidateRunTrigger) {
+          db.exec(`
+            CREATE TRIGGER trg_pi_asset_candidate_same_run
+            BEFORE INSERT ON product_intelligence_assets
+            WHEN NEW.candidate_id IS NOT NULL
+            BEGIN
+              SELECT CASE
+                WHEN NOT EXISTS (SELECT 1 FROM pi_image_candidates WHERE id = NEW.candidate_id)
+                  THEN RAISE(ABORT, 'candidate_id references a nonexistent pi_image_candidates row')
+                WHEN (SELECT run_id FROM pi_image_candidates WHERE id = NEW.candidate_id) <> NEW.run_id
+                  THEN RAISE(ABORT, 'candidate_id belongs to a different run')
+              END;
+            END;`);
+        }
+      })();
+      const fkViolations = db.query("PRAGMA foreign_key_check('product_intelligence_assets')").all();
+      if (fkViolations.length > 0) {
+        console.warn(`[Migrations] ${fkViolations.length} FK violations in product_intelligence_assets after imagery rebuild (pre-existing):`, fkViolations.slice(0, 5));
+      }
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_distributor_imagery_schema_version', '1');");
+      console.log('[Migrations] Onboarding distributor imagery schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Onboarding distributor imagery schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

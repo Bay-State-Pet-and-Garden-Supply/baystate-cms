@@ -117,6 +117,27 @@ export async function getExtractorProfileBlockers(batchId: string): Promise<Extr
   return request<ExtractorProfileBlockersResponse>(`/batches/${batchId}/extractor-profile-blockers`);
 }
 
+/**
+ * Run the deterministic PI-6 verification pipeline over the batch's approved
+ * distributor imagery (epic #46 follow-up). Idempotent.
+ */
+export async function verifyDistributorImagery(batchId: string): Promise<{
+  summary: {
+    items: number;
+    images: number;
+    verified: number;
+    commerceApproved: number;
+    displayOnly: number;
+    failed: number;
+    skippedVlmOcr: boolean;
+    perItem: Array<{ itemId: string; upc: string; images: number; commerceApproved: number }>;
+  };
+}> {
+  return request(`/batches/${batchId}/verify-distributor-imagery`, {
+    method: 'POST',
+  });
+}
+
 // ─── Live events ───────────────────────────────────────────────────────────────
 
 /**

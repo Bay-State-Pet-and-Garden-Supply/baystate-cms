@@ -22,6 +22,7 @@ import {
   sortForReview,
   toggleQueueSelection,
   warningInfoFromDetail,
+  distributorApprovedImages,
   type ReviewQueueFilters,
 } from '../../client/components/onboarding/review/review-logic';
 import type { OnboardingWorkState, ReviewState } from '../../shared/schemas/onboarding-work-state';
@@ -325,5 +326,25 @@ describe('bulk review selection (epic #46 follow-up, phase 4)', () => {
     expect(reviewableSelectionIds(['a', 'b', 'c', 'd'], [a, b, d])).toEqual(['a']);
     expect(reviewableSelectionIds(['c'], [a, b, d])).toEqual([]);
     expect(reviewableSelectionIds([], [a, b, d])).toEqual([]);
+  });
+});
+
+describe('distributorApprovedImages (epic #46 follow-up)', () => {
+  it('derives primary + additional from rights-attested approvals', () => {
+    const images = distributorApprovedImages({
+      distributorImageApprovals: [
+        { imageUrl: 'https://cdn.example.com/a.jpg' },
+        { imageUrl: 'https://cdn.example.com/b.jpg' },
+        { imageUrl: '' },
+      ],
+    });
+    expect(images).toEqual({ primary: 'https://cdn.example.com/a.jpg', additional: ['https://cdn.example.com/b.jpg'] });
+  });
+
+  it('returns null when there are no approvals or no extraction', () => {
+    expect(distributorApprovedImages(null)).toBeNull();
+    expect(distributorApprovedImages(undefined)).toBeNull();
+    expect(distributorApprovedImages({})).toBeNull();
+    expect(distributorApprovedImages({ distributorImageApprovals: [] })).toBeNull();
   });
 });

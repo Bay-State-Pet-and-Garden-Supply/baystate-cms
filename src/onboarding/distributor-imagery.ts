@@ -1,0 +1,343 @@
+/**
+ * Onboarding distributor imagery verification (epic #46 follow-up, PI-6
+ * reuse for the onboarding pipeline).
+ *
+ * Distributor records already carry RIGHTS-ATTESTED approvals
+ * (distributorImageApprovals, `distributor_channel_opt_in` — the operator's
+ * explicit licensed-opt-in). This service runs the deterministic PI-6
+ * verification pipeline (`verifyImageCandidate`) over those approved URLs:
+ *
+ * - durable reuse grants are seeded per image domain (tier 'supplier',
+ *   terms recording the channel opt-in) so rights resolve 'approved';
+ * - when a local VLM is configured, packaging OCR supplies BYTE-BOUND
+ *   identity facts (the OCR content hash must equal the fetched bytes) so
+ *   `classifyAssetIdentity` can establish an exact GTIN/brand match;
+ * - every outcome persists as a durable `product_intelligence_assets` row
+ *   (origin 'onboarding_distributor', linked to the onboarding item) —
+ *   commerce-approved when identity + quality + rights hold, display-only
+ *   otherwise;
+ * - idempotent per (item, source_url).
+ *
+ * The review drawer renders the approved URLs regardless of verification
+ * outcome (display-only until the asset is commerce-approved); the draft
+ * promoter already gates commerce downloads on the approvals list.
+ */
+import { PolicyGateway } from '../product-intelligence/policy/policy-gateway';
+import { ProductIntelligencePolicySchema } from '../product-intelligence/contracts';
+import { verifyImageCandidate, type ResolvedEvidenceFact } from '../product-intelligence/assets/verification';
+import type { ProductAssetEvidence } from '../product-intelligence/assets/schema';
+import type { ImageVerificationContract } from '../product-intelligence/assets/contract';
+import { buildReuseGrantResolver, upsertReusePolicy } from '../db/repositories/pi-reuse-policy-repo';
+import { insertOnboardingPiAsset } from '../db/repositories/product-intelligence-repo';
+import { getDb } from '../db/connection';
+import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
+import type { OnboardingItem } from '../shared/schemas/onboarding';
+import { extractPackagingOcr } from './packaging-ocr';
+import type { DistributorImageApproval } from '../shared/schemas/onboarding';
+
+/** Frozen onboarding verification policy: public network (CDN fetches),
+ *  bounded response size, standard SSRF/protocol protections from the
+ *  gateway. */
+const ONBOARDING_IMAGERY_POLICY = ProductIntelligencePolicySchema.parse({
+  configId: 'onboarding-distributor-imagery-v1',
+  networkPolicy: 'allowlisted_remote',
+  dataSharingPolicy: 'cloud_models_and_sources',
+  domainAllowlist: [],
+  allowedTools: [],
+  researchTools: [],
+  maxResponseBytes: 10 * 1024 * 1024,
+});
+
+export interface DistributorImagerySummary {
+  items: number;
+  images: number;
+  verified: number;
+  commerceApproved: number;
+  displayOnly: number;
+  failed: number;
+  skippedVlmOcr: boolean;
+  perItem: Array<{
+    itemId: string;
+    upc: string;
+    images: number;
+    commerceApproved: number;
+  }>;
+}
+
+export interface DistributorImageryDeps {
+  /** OCR override for tests (default: real extractPackagingOcr). */
+  ocr?: typeof extractPackagingOcr;
+  /** Gateway fetch override for tests. */
+  fetchFn?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  /** Pixel-decode contract override for tests (default: sharp adapter). */
+  contract?: ImageVerificationContract;
+}
+
+/** Distinct image domains across a batch's approved distributor imagery. */
+export function distributorImageDomains(batchId: string): string[] {
+  const db = getDb();
+  const rows = db.query(
+    `SELECT extraction_data_json FROM onboarding_items
+     WHERE batch_id = ? AND source_type = 'distributor_record'`,
+  ).all(batchId) as Array<{ extraction_data_json: string | null }>;
+  const domains = new Set<string>();
+  for (const row of rows) {
+    if (!row.extraction_data_json) continue;
+    try {
+      const data = JSON.parse(row.extraction_data_json) as { distributorImageApprovals?: DistributorImageApproval[] };
+      for (const approval of data.distributorImageApprovals ?? []) {
+        try {
+          domains.add(new URL(approval.imageUrl).hostname.toLowerCase());
+        } catch {
+          // unparseable URL — skip
+        }
+      }
+    } catch {
+      // corrupt payload — skip
+    }
+  }
+  return [...domains].sort();
+}
+
+/** Seed supplier-tier reuse grants for the batch's image domains. The
+ *  operator's explicit channel opt-in (distributorImageApprovals with origin
+ *  distributor_channel_opt_in) IS the authorization; the grant records it
+ *  durably so `verifyImageCandidate` resolves rights server-side. */
+export function authorizeDistributorImageDomains(batchId: string, workspaceId: string): string[] {
+  const domains = distributorImageDomains(batchId);
+  for (const domain of domains) {
+    upsertReusePolicy({
+      workspaceId,
+      sourceTier: 'supplier',
+      domainPattern: domain,
+      allowed: true,
+      terms: 'Distributor channel opt-in (licensed distributor imagery) — operator-authorized via onboarding batch verification',
+    });
+  }
+  return domains;
+}
+
+function approvedImagesOf(item: OnboardingItem): DistributorImageApproval[] {
+  const data = item.extractionData as Record<string, unknown> | null;
+  const approvals = (data?.distributorImageApprovals ?? []) as DistributorImageApproval[];
+  return approvals.filter((a) => typeof a?.imageUrl === 'string' && a.imageUrl.length > 0);
+}
+
+/** Resolve the item's durable evidence attempts as verification facts. */
+function attemptFacts(item: OnboardingItem, imageUrl: string): ResolvedEvidenceFact[] {
+  const db = getDb();
+  const attempts = db.query(
+    `SELECT id, provider_id, identity_json FROM onboarding_evidence_attempts WHERE item_id = ? AND outcome = 'found'`,
+  ).all(item.id) as Array<{ id: string; provider_id: string; identity_json: string | null }>;
+  const facts: ResolvedEvidenceFact[] = [];
+  for (const attempt of attempts) {
+    if (!attempt.identity_json) continue;
+    let identity: Record<string, unknown>;
+    try {
+      identity = JSON.parse(attempt.identity_json) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    // The attempt's OWN images bind this evidence to the URL being verified.
+    const images = Array.isArray(identity.images) ? (identity.images as string[]) : [];
+    if (!images.some((u) => u === imageUrl)) continue;
+    const addFact = (targetField: string, value: unknown): void => {
+      if (value === null || value === undefined || value === '') return;
+      facts.push({
+        id: attempt.id,
+        targetField,
+        value,
+        extractionMethod: 'distributor_catalog',
+        snippet: null,
+        sourceUrl: imageUrl,
+        sourceDomain: null,
+        contentHash: null,
+        entityId: attempt.id,
+        matchedNamespace: 'row_id',
+      });
+    };
+    addFact('gtin', identity.upc ?? identity.gtin);
+    addFact('brand', identity.brand);
+    addFact('name', identity.name);
+    for (const [key, value] of Object.entries(identity)) {
+      if (['gtin', 'upc', 'brand', 'name'].includes(key)) continue;
+      addFact(key, value);
+    }
+  }
+  return facts;
+}
+
+/**
+ * Verify one approved distributor image end-to-end. Returns the evidence
+ * record (commerce-approved when identity+quality+rights hold).
+ */
+export async function verifyDistributorImage(
+  item: OnboardingItem,
+  imageUrl: string,
+  workspacePath: string,
+  workspaceId: string,
+  deps: DistributorImageryDeps = {},
+): Promise<{ record: ProductAssetEvidence; skippedVlmOcr: boolean }> {
+  const gateway = new PolicyGateway(deps.fetchFn ? { fetchFn: deps.fetchFn } : {});
+  const ocr = deps.ocr ?? extractPackagingOcr;
+  const evidenceIds: string[] = [];
+
+  // Byte-bound packaging OCR (optional — null when the VLM is unconfigured).
+  let skippedVlmOcr = true;
+  const ocrFacts: ResolvedEvidenceFact[] = [];
+  try {
+    const ocrData = await ocr({ imageUrl, workspacePath, sku: item.upc ?? null });
+    if (ocrData && ocrData.contentHash) {
+      skippedVlmOcr = false;
+      const addOcrFact = (targetField: string, value: unknown): void => {
+        if (value === null || value === undefined || value === '') return;
+        const id = `ocr_${item.id}_${Buffer.from(imageUrl).toString('hex').slice(0, 12)}_${targetField}`;
+        evidenceIds.push(id);
+        ocrFacts.push({
+          id,
+          targetField,
+          value,
+          extractionMethod: 'image_ocr',
+          snippet: null,
+          sourceUrl: imageUrl,
+          sourceDomain: null,
+          contentHash: ocrData.contentHash,
+          entityId: item.id,
+          matchedNamespace: 'row_id',
+        });
+      };
+      addOcrFact('gtin', ocrData.upc);
+      addOcrFact('brand', ocrData.brand);
+      addOcrFact('name', ocrData.productName);
+    } else {
+      skippedVlmOcr = true;
+    }
+  } catch {
+    skippedVlmOcr = true;
+  }
+
+  const attemptFactsForUrl = attemptFacts(item, imageUrl);
+  for (const fact of attemptFactsForUrl) evidenceIds.push(fact.id);
+
+  const evidenceResolver = (ids: string[]): ResolvedEvidenceFact[] => {
+    const all = [...attemptFactsForUrl, ...ocrFacts];
+    const byId = new Map(all.map((f) => [f.id, f]));
+    return ids.map((id) => byId.get(id)).filter((f): f is ResolvedEvidenceFact => f !== undefined);
+  };
+
+  const record = await verifyImageCandidate(
+    {
+      url: imageUrl,
+      sourcePageUrl: null,
+      extractionMethod: 'image_ocr',
+      runIdentity: {
+        gtin: item.upc ?? null,
+        name: item.name ?? null,
+        variant: null,
+        netContent: null,
+        packCount: null,
+        flavor: null,
+        formula: null,
+      },
+      expectedGtin: item.upc ?? null,
+      expectedBrand: item.brandHint ?? null,
+      expectedName: item.name ?? null,
+      evidenceIds,
+      // Round-8 content-addressed linkage: prior verified assets for THIS
+      // item+URL (server-derived — the first verification has none, OCR
+      // covers the byte binding).
+      assetGtinLinkages: [],
+    },
+    {
+      runId: `onboarding:${item.id}`,
+      policy: ONBOARDING_IMAGERY_POLICY,
+      gateway,
+      signal: new AbortController().signal,
+      evidenceResolver,
+      contract: deps.contract,
+      // The distributor IS the supplier tier (rights resolve via the
+      // seeded reuse grant below).
+      sourceTypeResolver: () => 'supplier',
+      reuseGrantResolver: buildReuseGrantResolver(workspaceId),
+    },
+  );
+  return { record, skippedVlmOcr };
+}
+
+/**
+ * Verify all approved distributor imagery for a batch: authorize domains,
+ * run PI-6 verification per image, persist durable assets. Returns a
+ * per-item summary. Idempotent — re-runs skip already-verified URLs.
+ */
+export async function verifyDistributorImageryForBatch(
+  batchId: string,
+  workspaceId: string,
+  workspacePath: string,
+  deps: DistributorImageryDeps = {},
+): Promise<DistributorImagerySummary> {
+  authorizeDistributorImageDomains(batchId, workspaceId);
+  const items = listItemsByBatch(batchId).filter(
+    (i) => i.sourceType === 'distributor_record' && approvedImagesOf(i).length > 0,
+  );
+  const summary: DistributorImagerySummary = {
+    items: items.length,
+    images: 0,
+    verified: 0,
+    commerceApproved: 0,
+    displayOnly: 0,
+    failed: 0,
+    skippedVlmOcr: false,
+    perItem: [],
+  };
+
+  for (const item of items) {
+    let approved = 0;
+    for (const approval of approvedImagesOf(item)) {
+      summary.images += 1;
+      const { record, skippedVlmOcr } = await verifyDistributorImage(item, approval.imageUrl, workspacePath, workspaceId, deps);
+      summary.skippedVlmOcr = summary.skippedVlmOcr || skippedVlmOcr;
+      if (record.qualityStatus === 'invalid') {
+        summary.failed += 1;
+        continue;
+      }
+      summary.verified += 1;
+      insertOnboardingPiAsset({
+        onboardingItemId: item.id,
+        sourceUrl: approval.imageUrl,
+        sourceType: record.sourceType ?? 'supplier',
+        extractionMethod: record.extractionMethod ?? 'image_ocr',
+        retrievedAt: record.retrievedAt,
+        originalContentHash: record.originalContentHash,
+        perceptualHash: record.perceptualHash ?? null,
+        rightsStatus: record.rightsStatus,
+        rightsBasis: record.rightsBasis ?? null,
+        rightsEvidenceRef: record.rightsEvidenceRef ?? null,
+        observedBrand: record.observedBrand ?? null,
+        observedProductName: record.observedProductName ?? null,
+        observedVariant: record.observedVariant ?? null,
+        observedNetContent: record.observedNetContent ?? null,
+        observedPackCount: record.observedPackCount ?? null,
+        observedGtin: record.observedGtin ?? null,
+        exactProductMatch: record.exactProductMatch,
+        exactVariantMatch: record.exactVariantMatch,
+        qualityStatus: record.qualityStatus,
+        commerceApproved: record.commerceApproved,
+        conflicts: record.conflicts,
+        payload: record,
+        verifiedAgainstJson: record.verifiedAgainst ? JSON.stringify(record.verifiedAgainst) : null,
+        verifiedAgainstHash: record.verifiedAgainstHash ?? null,
+        declaredSourceType: record.sourceType ?? 'supplier',
+        brandEvidenceId: record.brandEvidenceId ?? null,
+        brandEvidenceHash: record.brandEvidenceHash ?? null,
+      });
+      if (record.commerceApproved) {
+        approved += 1;
+        summary.commerceApproved += 1;
+      } else {
+        summary.displayOnly += 1;
+      }
+    }
+    summary.perItem.push({ itemId: item.id, upc: item.upc ?? '', images: approvedImagesOf(item).length, commerceApproved: approved });
+  }
+  return summary;
+}

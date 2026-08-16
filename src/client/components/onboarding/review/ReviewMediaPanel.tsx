@@ -6,6 +6,7 @@
  */
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import type { ItemDetailResponse } from '../../../onboarding-api';
+import { distributorApprovedImages } from './review-logic';
 
 export interface ReviewMediaPanelProps {
   workState: OnboardingWorkState;
@@ -28,8 +29,15 @@ function hostOf(url: string | null | undefined): string | null {
 
 export function ReviewMediaPanel({ workState, detail, onOpenLightbox }: ReviewMediaPanelProps) {
   const ext = extraction(detail);
-  const primary = ext?.primaryImage ?? null;
+  const approved = distributorApprovedImages(ext);
+  // Distributor records carry rights-attested approvals (Amendment B addendum
+  // 3) instead of primaryImage/additionalImages — render those so the
+  // operator can actually SEE the product during review.
+  const primary = ext?.primaryImage ?? approved?.primary ?? null;
   const additional = (ext?.additionalImages ?? []).filter(url => url !== primary);
+  for (const url of approved?.additional ?? []) {
+    if (url !== primary && !additional.includes(url)) additional.push(url);
+  }
   const provenance =
     workState.sourceType === 'distributor_record'
       ? 'Distributor record image'

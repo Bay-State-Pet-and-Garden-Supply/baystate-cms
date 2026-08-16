@@ -28,6 +28,7 @@ import { addAuditLog } from '../../db/repositories/audit-log-repo';
 import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
 import { getOnboardingMetrics } from '../../onboarding/onboarding-telemetry';
 import { getExtractorProfileDomainBlockers } from '../../onboarding/extraction/profile-blockers';
+import { verifyDistributorImageryForBatch } from '../../onboarding/distributor-imagery';
 import { getWorker } from './onboarding-routes';import {
   ApproveItemsRequestSchema,
   WorkStateCategoryEnum,
@@ -133,6 +134,34 @@ route.get('/onboarding/items/:id/work-state', async (c) => {
   }
   const workState = getItemWorkState(itemId);
   return c.json({ workState });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/verify-distributor-imagery
+ * Run the deterministic PI-6 verification pipeline over the batch's approved
+ * distributor imagery (epic #46 follow-up). Seeds supplier-tier reuse grants
+ * for the image domains (the operator's distributor-channel opt-in), runs
+ * byte-bound OCR + identity classification per image, and persists durable
+ * `product_intelligence_assets` rows (origin 'onboarding_distributor').
+ * Idempotent: already-verified URLs are skipped. Workspace-scoped.
+ */
+route.post('/onboarding/batches/:id/verify-distributor-imagery', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const workspace = findWorkspace();
+  if (!workspace || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  try {
+    const summary = await verifyDistributorImageryForBatch(batchId, workspace.id, workspace.workspacePath);
+    return c.json({ summary });
+  } catch (err) {
+    console.error(`[VerifyDistributorImagery] Batch ${batchId} verification failed:`, err);
+    return c.json({ error: err instanceof Error ? err.message : 'Distributor imagery verification failed' }, 500);
+  }
 });
 
 /**
