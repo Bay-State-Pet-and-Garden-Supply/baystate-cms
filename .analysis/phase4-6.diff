@@ -1,0 +1,1297 @@
+diff --git a/package.json b/package.json
+index e12a386..87e909d 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,7 @@
+     "test": "vitest run && bun run test:db",
+     "test:watch": "vitest",
+     "test:unit": "vitest run",
+-    "test:db": "bun test src/tests/unit/classification-pipeline.test.ts && bun test src/extraction-worker/routes/snapshot-subrequest.test.ts src/tests/unit/pi-approved-policies.test.ts src/tests/unit/pi-network-boundary.test.ts src/tests/unit/pi-review-decisions.test.ts src/tests/unit/pi-reuse-policies.test.ts src/tests/unit/pi-deterministic-preflight.test.ts src/tests/unit/pi-governed-proposal-trigger.test.ts src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts src/tests/unit/benchmark-dataset-lifecycle.test.ts src/tests/unit/benchmark-evaluator.test.ts src/tests/unit/benchmark-export.test.ts src/tests/unit/benchmark-prediction.test.ts src/tests/unit/benchmark-qualification.test.ts src/tests/unit/brand-integration.test.ts src/tests/unit/catalog-classification-db.test.ts src/tests/unit/catalog-evidence-verifier.test.ts src/tests/unit/catalog-health.test.ts src/tests/unit/classification-config-store.test.ts src/tests/unit/classification-integrity-audit.test.ts src/tests/unit/classification-model-call-repo.test.ts src/tests/unit/classification-run-routes.test.ts src/tests/unit/classification-quality-routes.test.ts src/tests/unit/classification-runtime-snapshot.test.ts src/tests/unit/cloud-vlm-client.test.ts src/tests/unit/curation-target-ranker.test.ts src/tests/unit/db-migration.test.ts src/tests/unit/decision-revision-migration.test.ts src/tests/unit/detail-enrichment-integration.test.ts src/tests/unit/domain-diagnostics-service.test.ts src/tests/unit/draft-promoter.test.ts src/tests/unit/embedding-maintenance.test.ts src/tests/unit/embedding-routes.test.ts src/tests/unit/evidence-extraction.test.ts src/tests/unit/extraction-remedies.test.ts src/tests/unit/extractor-profiles.test.ts src/tests/unit/llm-client-task-routing.test.ts src/tests/unit/provider-connection-routing.test.ts src/tests/unit/vlm-client.test.ts src/tests/unit/llm-task-config-repo.test.ts src/tests/unit/name-consolidation-guard.test.ts src/tests/unit/onboarding-decision-routes.test.ts src/tests/unit/onboarding-duplicate-skip.test.ts src/tests/unit/onboarding-repos.test.ts src/tests/unit/packaging-ocr.test.ts src/tests/unit/page-identity-migration.test.ts src/tests/unit/page-import-service.test.ts src/tests/unit/page-routes.test.ts src/tests/unit/product-field-audit-service.test.ts src/tests/unit/product-intelligence-repo.test.ts src/tests/unit/product-intelligence-run-service.test.ts src/tests/unit/product-intelligence-sse.test.ts src/tests/unit/product-intelligence-tool-contracts.test.ts src/tests/unit/product-intelligence-tools.test.ts src/tests/unit/product-intelligence-workflow.test.ts src/tests/unit/product-intelligence-policy.test.ts src/tests/unit/product-intelligence-assets.test.ts src/tests/unit/product-intelligence-image-tools.test.ts src/tests/unit/product-intelligence-import.test.ts src/tests/unit/pi-golden-dataset.test.ts src/tests/unit/pi-evaluation-runner.test.ts src/tests/unit/pi-extraction-benchmark.test.ts src/tests/unit/pi-rollout.test.ts src/tests/unit/pi-shadow-immutability.test.ts src/tests/unit/pi-budgets.test.ts src/tests/unit/pi-retention.test.ts src/tests/unit/pi-replay.test.ts src/tests/unit/pi-search-benchmark.test.ts src/tests/unit/pi-evidence-persistence.test.ts src/tests/unit/product-retrieval.test.ts src/tests/unit/profile-generation-field-decision-repo.test.ts src/tests/unit/profile-generation-repo.test.ts src/tests/unit/profile-generation-revision-repo.test.ts src/tests/unit/profile-governance-service.test.ts src/tests/unit/profile-promoter.test.ts src/tests/unit/reviewed-facts.test.ts src/tests/unit/runtime-snapshot-v2.test.ts src/tests/unit/serper-cache-integration.test.ts src/tests/unit/serper-cache-repo.test.ts src/tests/unit/sitemap-cache-repo.test.ts src/tests/unit/sitemap-fetcher.test.ts src/tests/unit/sitemap-matcher.test.ts src/tests/unit/source-discovery.test.ts src/tests/unit/store-manager-approval.test.ts src/tests/unit/store-manager-ai-proposals.test.ts src/tests/unit/store-manager-chat-history-service.test.ts src/tests/unit/store-manager-context.test.ts src/tests/unit/store-manager-image-repair.test.ts src/tests/unit/store-manager-tools.test.ts src/tests/unit/store-manager.test.ts src/tests/unit/weekly-report.test.ts src/tests/unit/workspace-connection.test.ts src/tests/unit/pi-authority-lifecycle.test.ts src/tests/unit/pi-supplier-boundary.test.ts src/tests/unit/classification-config-loader.test.ts src/tests/unit/name-consolidation-stage.test.ts src/tests/unit/classification-page-snapshot.test.ts src/tests/unit/classification-readiness-routes.test.ts src/tests/unit/sqlite-backup-verifier.test.ts src/tests/unit/classification-integrity-cli.test.ts src/tests/unit/sourcing-resolution.test.ts src/tests/unit/sourcing-safety-routes.test.ts src/tests/unit/sourcing-stage-order.test.ts src/tests/unit/distributor-v2.test.ts src/tests/unit/acceptance-migration.test.ts src/tests/unit/conflict-resolution.test.ts src/tests/unit/sourcing-engine.test.ts src/tests/unit/sourcing-reconciler.test.ts src/tests/unit/sourcing-pass-through.test.ts src/tests/unit/sourcing-recovery-acceptance.test.ts src/tests/unit/distributor-routes.test.ts src/tests/unit/store-manager-execution-boundary.test.ts src/tests/unit/store-manager-operations-migration.test.ts src/tests/unit/store-manager-report.test.ts src/tests/unit/store-manager-tool-registry.test.ts src/tests/unit/store-manager-runtime.test.ts src/tests/unit/store-manager-chat-runtime.test.ts src/tests/unit/zero-deployment-rollback.test.ts src/tests/unit/curation-cohort-repo.test.ts src/tests/unit/curation-cohort-service.test.ts src/tests/unit/cohort-output-repo.test.ts src/tests/unit/cohort-title-hash.test.ts src/tests/unit/cohort-v7-migration.test.ts src/tests/unit/cohort-page-hash.test.ts src/tests/unit/cohort-product-type-resolver.test.ts && bun test src/tests/unit/general-task-fallback-telemetry.test.ts src/tests/unit/pricing-and-telemetry.test.ts src/tests/unit/provider-and-model-registry.test.ts src/tests/unit/store-manager-models.test.ts && bun test src/tests/unit/cohort-title-coordinator.test.ts src/tests/unit/pr6-acceptance.test.ts src/tests/unit/pr7-acceptance.test.ts src/tests/unit/pr8-acceptance.test.ts src/tests/unit/pr9-acceptance.test.ts src/tests/unit/pr10-acceptance.test.ts src/tests/unit/pr11-acceptance.test.ts src/tests/unit/pr12-acceptance.test.ts src/tests/unit/pr13-acceptance.test.ts src/tests/unit/store-manager-operations-acceptance.test.ts && bun test src/tests/unit/store-manager-action-diff.test.ts src/tests/unit/store-manager-bulk-review-repo.test.ts src/tests/unit/store-manager-bulk-review-tools.test.ts src/tests/unit/store-manager-bulk-review.test.ts src/tests/unit/store-manager-event-runtime.test.ts src/tests/unit/store-manager-event-worker.test.ts src/tests/unit/store-manager-events-sse.test.ts src/tests/unit/store-manager-history-query.test.ts src/tests/unit/store-manager-history.test.ts src/tests/unit/store-manager-inbox-repo.test.ts src/tests/unit/store-manager-inbox.test.ts src/tests/unit/store-manager-notifications.test.ts src/tests/unit/store-manager-playbook-repo.test.ts src/tests/unit/store-manager-playbook-runner.test.ts src/tests/unit/store-manager-playbook-templates.test.ts src/tests/unit/store-manager-playbook-validator.test.ts src/tests/unit/store-manager-preferences.test.ts src/tests/unit/store-manager-replay.test.ts src/tests/unit/store-manager-schedule-repo.test.ts src/tests/unit/store-manager-scheduled-runtime.test.ts src/tests/unit/store-manager-scheduler.test.ts src/tests/unit/store-manager-scope.test.ts src/tests/unit/store-manager-trigger-repo.test.ts && bun test src/tests/unit/sourcing-observe-mode.test.ts && bun test src/tests/unit/distributor-record-materializer.test.ts && bun test src/tests/unit/sourcing-default-on-e2e.test.ts && bun test src/tests/unit/cohort-freeze.test.ts && bun test src/tests/unit/cohort-worker.test.ts && bun test src/tests/unit/sourcing-live-smoke-db.test.ts && bun test src/tests/unit/agent-version-repo.test.ts src/tests/unit/evaluation-orchestrator.test.ts && bun test src/tests/unit/distributor-scrapers-acceptance.test.ts && bun test src/tests/unit/onboarding-automation.test.ts && bun test src/tests/unit/discovery-run-trace.test.ts && bun test src/tests/unit/onboarding-work-state.test.ts src/tests/unit/onboarding-review-state.test.ts src/tests/unit/onboarding-telemetry.test.ts src/tests/unit/onboarding-approval-gates.test.ts src/tests/unit/durable-approval-promote.test.ts",
++    "test:db": "bun test src/tests/unit/classification-pipeline.test.ts && bun test src/extraction-worker/routes/snapshot-subrequest.test.ts src/tests/unit/pi-approved-policies.test.ts src/tests/unit/pi-network-boundary.test.ts src/tests/unit/pi-review-decisions.test.ts src/tests/unit/pi-reuse-policies.test.ts src/tests/unit/pi-deterministic-preflight.test.ts src/tests/unit/pi-governed-proposal-trigger.test.ts src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts src/tests/unit/benchmark-dataset-lifecycle.test.ts src/tests/unit/benchmark-evaluator.test.ts src/tests/unit/benchmark-export.test.ts src/tests/unit/benchmark-prediction.test.ts src/tests/unit/benchmark-qualification.test.ts src/tests/unit/brand-integration.test.ts src/tests/unit/catalog-classification-db.test.ts src/tests/unit/catalog-evidence-verifier.test.ts src/tests/unit/catalog-health.test.ts src/tests/unit/classification-config-store.test.ts src/tests/unit/classification-integrity-audit.test.ts src/tests/unit/classification-model-call-repo.test.ts src/tests/unit/classification-run-routes.test.ts src/tests/unit/classification-quality-routes.test.ts src/tests/unit/classification-runtime-snapshot.test.ts src/tests/unit/cloud-vlm-client.test.ts src/tests/unit/curation-target-ranker.test.ts src/tests/unit/db-migration.test.ts src/tests/unit/decision-revision-migration.test.ts src/tests/unit/detail-enrichment-integration.test.ts src/tests/unit/domain-diagnostics-service.test.ts src/tests/unit/draft-promoter.test.ts src/tests/unit/embedding-maintenance.test.ts src/tests/unit/embedding-routes.test.ts src/tests/unit/evidence-extraction.test.ts src/tests/unit/extraction-remedies.test.ts src/tests/unit/extractor-profiles.test.ts src/tests/unit/llm-client-task-routing.test.ts src/tests/unit/provider-connection-routing.test.ts src/tests/unit/vlm-client.test.ts src/tests/unit/llm-task-config-repo.test.ts src/tests/unit/name-consolidation-guard.test.ts src/tests/unit/onboarding-decision-routes.test.ts src/tests/unit/onboarding-duplicate-skip.test.ts src/tests/unit/onboarding-repos.test.ts src/tests/unit/packaging-ocr.test.ts src/tests/unit/page-identity-migration.test.ts src/tests/unit/page-import-service.test.ts src/tests/unit/page-routes.test.ts src/tests/unit/product-field-audit-service.test.ts src/tests/unit/product-intelligence-repo.test.ts src/tests/unit/product-intelligence-run-service.test.ts src/tests/unit/product-intelligence-sse.test.ts src/tests/unit/product-intelligence-tool-contracts.test.ts src/tests/unit/product-intelligence-tools.test.ts src/tests/unit/product-intelligence-workflow.test.ts src/tests/unit/product-intelligence-policy.test.ts src/tests/unit/product-intelligence-assets.test.ts src/tests/unit/product-intelligence-image-tools.test.ts src/tests/unit/product-intelligence-import.test.ts src/tests/unit/pi-golden-dataset.test.ts src/tests/unit/pi-evaluation-runner.test.ts src/tests/unit/pi-extraction-benchmark.test.ts src/tests/unit/pi-rollout.test.ts src/tests/unit/pi-shadow-immutability.test.ts src/tests/unit/pi-budgets.test.ts src/tests/unit/pi-retention.test.ts src/tests/unit/pi-replay.test.ts src/tests/unit/pi-search-benchmark.test.ts src/tests/unit/pi-evidence-persistence.test.ts src/tests/unit/product-retrieval.test.ts src/tests/unit/profile-generation-field-decision-repo.test.ts src/tests/unit/profile-generation-repo.test.ts src/tests/unit/profile-generation-revision-repo.test.ts src/tests/unit/profile-governance-service.test.ts src/tests/unit/profile-promoter.test.ts src/tests/unit/reviewed-facts.test.ts src/tests/unit/runtime-snapshot-v2.test.ts src/tests/unit/serper-cache-integration.test.ts src/tests/unit/serper-cache-repo.test.ts src/tests/unit/sitemap-cache-repo.test.ts src/tests/unit/sitemap-fetcher.test.ts src/tests/unit/sitemap-matcher.test.ts src/tests/unit/source-discovery.test.ts src/tests/unit/store-manager-approval.test.ts src/tests/unit/store-manager-ai-proposals.test.ts src/tests/unit/store-manager-chat-history-service.test.ts src/tests/unit/store-manager-context.test.ts src/tests/unit/store-manager-image-repair.test.ts src/tests/unit/store-manager-tools.test.ts src/tests/unit/store-manager.test.ts src/tests/unit/weekly-report.test.ts src/tests/unit/workspace-connection.test.ts src/tests/unit/pi-authority-lifecycle.test.ts src/tests/unit/pi-supplier-boundary.test.ts src/tests/unit/classification-config-loader.test.ts src/tests/unit/name-consolidation-stage.test.ts src/tests/unit/classification-page-snapshot.test.ts src/tests/unit/classification-readiness-routes.test.ts src/tests/unit/sqlite-backup-verifier.test.ts src/tests/unit/classification-integrity-cli.test.ts src/tests/unit/sourcing-resolution.test.ts src/tests/unit/sourcing-safety-routes.test.ts src/tests/unit/sourcing-stage-order.test.ts src/tests/unit/distributor-v2.test.ts src/tests/unit/acceptance-migration.test.ts src/tests/unit/conflict-resolution.test.ts src/tests/unit/sourcing-engine.test.ts src/tests/unit/sourcing-reconciler.test.ts src/tests/unit/sourcing-pass-through.test.ts src/tests/unit/sourcing-recovery-acceptance.test.ts src/tests/unit/distributor-routes.test.ts src/tests/unit/store-manager-execution-boundary.test.ts src/tests/unit/store-manager-operations-migration.test.ts src/tests/unit/store-manager-report.test.ts src/tests/unit/store-manager-tool-registry.test.ts src/tests/unit/store-manager-runtime.test.ts src/tests/unit/store-manager-chat-runtime.test.ts src/tests/unit/zero-deployment-rollback.test.ts src/tests/unit/curation-cohort-repo.test.ts src/tests/unit/curation-cohort-service.test.ts src/tests/unit/cohort-output-repo.test.ts src/tests/unit/cohort-title-hash.test.ts src/tests/unit/cohort-v7-migration.test.ts src/tests/unit/cohort-page-hash.test.ts src/tests/unit/cohort-product-type-resolver.test.ts && bun test src/tests/unit/general-task-fallback-telemetry.test.ts src/tests/unit/pricing-and-telemetry.test.ts src/tests/unit/provider-and-model-registry.test.ts src/tests/unit/store-manager-models.test.ts && bun test src/tests/unit/cohort-title-coordinator.test.ts src/tests/unit/pr6-acceptance.test.ts src/tests/unit/pr7-acceptance.test.ts src/tests/unit/pr8-acceptance.test.ts src/tests/unit/pr9-acceptance.test.ts src/tests/unit/pr10-acceptance.test.ts src/tests/unit/pr11-acceptance.test.ts src/tests/unit/pr12-acceptance.test.ts src/tests/unit/pr13-acceptance.test.ts src/tests/unit/store-manager-operations-acceptance.test.ts && bun test src/tests/unit/store-manager-action-diff.test.ts src/tests/unit/store-manager-bulk-review-repo.test.ts src/tests/unit/store-manager-bulk-review-tools.test.ts src/tests/unit/store-manager-bulk-review.test.ts src/tests/unit/store-manager-event-runtime.test.ts src/tests/unit/store-manager-event-worker.test.ts src/tests/unit/store-manager-events-sse.test.ts src/tests/unit/store-manager-history-query.test.ts src/tests/unit/store-manager-history.test.ts src/tests/unit/store-manager-inbox-repo.test.ts src/tests/unit/store-manager-inbox.test.ts src/tests/unit/store-manager-notifications.test.ts src/tests/unit/store-manager-playbook-repo.test.ts src/tests/unit/store-manager-playbook-runner.test.ts src/tests/unit/store-manager-playbook-templates.test.ts src/tests/unit/store-manager-playbook-validator.test.ts src/tests/unit/store-manager-preferences.test.ts src/tests/unit/store-manager-replay.test.ts src/tests/unit/store-manager-schedule-repo.test.ts src/tests/unit/store-manager-scheduled-runtime.test.ts src/tests/unit/store-manager-scheduler.test.ts src/tests/unit/store-manager-scope.test.ts src/tests/unit/store-manager-trigger-repo.test.ts && bun test src/tests/unit/sourcing-observe-mode.test.ts && bun test src/tests/unit/distributor-record-materializer.test.ts && bun test src/tests/unit/sourcing-default-on-e2e.test.ts && bun test src/tests/unit/cohort-freeze.test.ts && bun test src/tests/unit/cohort-worker.test.ts && bun test src/tests/unit/sourcing-live-smoke-db.test.ts && bun test src/tests/unit/agent-version-repo.test.ts src/tests/unit/evaluation-orchestrator.test.ts && bun test src/tests/unit/distributor-scrapers-acceptance.test.ts && bun test src/tests/unit/onboarding-automation.test.ts && bun test src/tests/unit/discovery-run-trace.test.ts && bun test src/tests/unit/profile-blockers.test.ts && bun test src/tests/unit/official-domain-ranking.test.ts && bun test src/tests/unit/onboarding-work-state.test.ts src/tests/unit/onboarding-review-state.test.ts src/tests/unit/onboarding-telemetry.test.ts src/tests/unit/onboarding-approval-gates.test.ts src/tests/unit/durable-approval-promote.test.ts",
+     "test:db-catalog": "bun test src/tests/unit/catalog-classification-db.test.ts",
+     "classification:integrity": "bun scripts/classification-integrity.ts",
+     "sourcing:live-smoke": "bun scripts/sourcing-live-smoke.ts",
+diff --git a/src/client/components/onboarding/attention/AttentionQueueView.tsx b/src/client/components/onboarding/attention/AttentionQueueView.tsx
+index 5654c2b..ff71687 100644
+--- a/src/client/components/onboarding/attention/AttentionQueueView.tsx
++++ b/src/client/components/onboarding/attention/AttentionQueueView.tsx
+@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
+ import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+ import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-work-api';
+ import { AttentionRow } from './AttentionRow';
++import { DomainBlockerPanel } from './DomainBlockerPanel';
+ import { groupAttentionItems, getAttentionGroupChip } from './attention-logic';
+ import './attention.css';
+ 
+@@ -145,8 +146,8 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
+ 
+   return (
+     <div className="attn-queue">
+-      <div className="attn-chips" role="group" aria-label="Filter by attention type">
+-        <button
++      <DomainBlockerPanel batchId={batchId} />
++      <div className="attn-chips" role="group" aria-label="Filter by attention type">        <button
+           type="button"
+           className={`attn-chip ${activeFilter === 'all' ? 'attn-chip-active' : ''}`}
+           onClick={() => setActiveFilter('all')}
+diff --git a/src/client/components/onboarding/attention/DomainBlockerPanel.tsx b/src/client/components/onboarding/attention/DomainBlockerPanel.tsx
+new file mode 100644
+index 0000000..1b52715
+--- /dev/null
++++ b/src/client/components/onboarding/attention/DomainBlockerPanel.tsx
+@@ -0,0 +1,122 @@
++/**
++ * Epic #46 follow-up (GPT plan phase 5) — domain-level extractor setup queue.
++ *
++ * Instead of 14 indistinguishable item failures, the operator sees
++ * "build profile for frommfamily.com — unblocks 4 products". Building the
++ * profile (Profile Builder renders in place, same pattern as the per-domain
++ * ExtractorStatusPanel) makes the domain-release sweep re-queue the blocked
++ * items automatically; the panel refreshes and the row disappears.
++ */
++import React, { useCallback, useEffect, useRef, useState } from 'react';
++import type {
++  ExtractorProfileDomainBlocker,
++  ExtractorProfileBlockersResponse,
++} from '../../../../shared/schemas/onboarding-work-state';
++import { getExtractorProfileBlockers } from '../../../onboarding-work-api';
++import ProfileBuilderWorkspace from '../../ProfileBuilderWorkspace';
++import './attention.css';
++
++interface DomainBlockerPanelProps {
++  batchId: string;
++}
++
++export function DomainBlockerPanel({ batchId }: DomainBlockerPanelProps): React.ReactElement | null {
++  const [blockers, setBlockers] = useState<ExtractorProfileDomainBlocker[] | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [builderDomain, setBuilderDomain] = useState<string | null>(null);
++
++  const mounted = useRef(true);
++
++  const load = useCallback(async () => {
++    setError(null);
++    try {
++      const res: ExtractorProfileBlockersResponse = await getExtractorProfileBlockers(batchId);
++      if (mounted.current) setBlockers(res.blockers);
++    } catch (err) {
++      if (mounted.current) setError(err instanceof Error ? err.message : 'Could not load domain setup queue');
++    }
++  }, [batchId]);
++
++  useEffect(() => {
++    mounted.current = true;
++    void load();
++    return () => {
++      mounted.current = false;
++    };
++  }, [load]);
++
++  if (error) {
++    return (
++      <div className="attn-error" role="alert" style={{ margin: '0 0 12px' }}>
++        {error}
++      </div>
++    );
++  }
++
++  if (!blockers || blockers.length === 0) return null;
++
++  const builderBlocker = blockers.find(b => b.domain === builderDomain) ?? null;
++
++  return (
++    <section className="attn-domain-queue" aria-label="Extractor profile setup queue">
++      <div className="attn-domain-queue-title">
++        <strong>Extractor profiles needed</strong>
++        <span className="attn-domain-queue-sub">
++          One profile per domain unblocks every product on it — the domain release
++          sweep re-queues them automatically once the profile is usable.
++        </span>
++      </div>
++      <ul className="attn-domain-queue-list">
++        {blockers.map(blocker => (
++          <li className="attn-domain-queue-row" key={blocker.domain}>
++            <div className="attn-domain-queue-main">
++              <span className="attn-domain-queue-domain">{blocker.domain}</span>
++              <span className="attn-domain-queue-count">
++                {blocker.blockedItemCount} product{blocker.blockedItemCount === 1 ? '' : 's'} blocked
++              </span>
++              {blocker.profileExists && (
++                <span className="attn-badge attn-badge-warn" title="A profile exists but these items still failed — the profile may be broken or the failures stale">
++                  profile on file
++                </span>
++              )}
++              {blocker.sampleItems.length > 0 && (
++                <span className="attn-domain-queue-samples">
++                  e.g. {blocker.sampleItems.map(s => s.name).join(' · ')}
++                </span>
++              )}
++            </div>
++            <button
++              type="button"
++              className="btn btn-outline btn-sm"
++              onClick={() => setBuilderDomain(blocker.domain)}
++            >
++              Build profile
++            </button>
++          </li>
++        ))}
++      </ul>
++
++      {builderBlocker && (
++        <div className="attn-builder-overlay">
++          <ProfileBuilderWorkspace
++            domain={builderBlocker.domain}
++            onClose={() => {
++              setBuilderDomain(null);
++              void load();
++            }}
++            seedItem={
++              builderBlocker.sampleItems[0]
++                ? {
++                    expectedName: builderBlocker.sampleItems[0].name ?? null,
++                    upc: builderBlocker.sampleItems[0].upc ?? null,
++                    brandHint: null,
++                  }
++                : null
++            }
++            diagnostics={null}
++          />
++        </div>
++      )}
++    </section>
++  );
++}
+diff --git a/src/client/components/onboarding/attention/attention.css b/src/client/components/onboarding/attention/attention.css
+index 1fd4041..9d38ede 100644
+--- a/src/client/components/onboarding/attention/attention.css
++++ b/src/client/components/onboarding/attention/attention.css
+@@ -514,3 +514,92 @@
+     animation: none;
+   }
+ }
++
++/* ── Domain setup queue (epic #46 follow-up, phase 5) ───────────────────────── */
++
++.attn-domain-queue {
++  margin-bottom: 0.75rem;
++  border: 1px solid var(--color-card-border);
++  border-radius: var(--rounded-lg);
++  background: var(--color-white-surface);
++  overflow: hidden;
++}
++
++.attn-domain-queue-title {
++  display: flex;
++  flex-direction: column;
++  gap: 0.125rem;
++  padding: 0.625rem 0.75rem;
++  background: color-mix(in srgb, var(--color-feed-bag-cream) 60%, var(--color-white-surface));
++  border-bottom: 1px solid var(--color-card-border);
++}
++
++.attn-domain-queue-sub {
++  font-size: 0.75rem;
++  color: var(--color-mulch-brown);
++}
++
++.attn-domain-queue-list {
++  list-style: none;
++  margin: 0;
++  padding: 0;
++}
++
++.attn-domain-queue-row {
++  display: flex;
++  align-items: center;
++  gap: 0.75rem;
++  padding: 0.5rem 0.75rem;
++  border-bottom: 1px solid var(--color-card-border);
++}
++
++.attn-domain-queue-row:last-child {
++  border-bottom: none;
++}
++
++.attn-domain-queue-main {
++  display: flex;
++  align-items: center;
++  gap: 0.5rem;
++  flex-wrap: wrap;
++  min-width: 0;
++  flex: 1;
++}
++
++.attn-domain-queue-domain {
++  font-weight: 700;
++  font-size: 0.8125rem;
++}
++
++.attn-domain-queue-count {
++  font-size: 0.75rem;
++  color: var(--color-mulch-brown);
++  background: var(--color-danger-bg);
++  color: var(--color-danger-text);
++  border-radius: var(--rounded-full);
++  padding: 0.0625rem 0.5rem;
++  font-weight: 700;
++}
++
++.attn-domain-queue-samples {
++  font-size: 0.75rem;
++  color: var(--color-mulch-brown);
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++  max-width: 100%;
++}
++
++.attn-badge {
++  display: inline-flex;
++  align-items: center;
++  border-radius: var(--rounded-full);
++  padding: 0.0625rem 0.4375rem;
++  font-size: 0.6875rem;
++  font-weight: 700;
++}
++
++.attn-badge-warn {
++  background: var(--color-warning-bg);
++  color: var(--color-warning-text);
++}
+diff --git a/src/client/components/onboarding/review/ReviewQueue.tsx b/src/client/components/onboarding/review/ReviewQueue.tsx
+index 1728320..3b07007 100644
+--- a/src/client/components/onboarding/review/ReviewQueue.tsx
++++ b/src/client/components/onboarding/review/ReviewQueue.tsx
+@@ -19,6 +19,9 @@ export interface ReviewQueueProps {
+   warnedIds: Set<string>;
+   /** Item ids edited during this session. */
+   editedIds: Set<string>;
++  /** Bulk-review selection (epic #46 follow-up, phase 4). */
++  selectedIds?: Set<string>;
++  onToggleSelected?: (itemId: string) => void;
+   emptyMessage: string;
+   onSelect: (itemId: string) => void;
+ }
+@@ -29,6 +32,8 @@ export function ReviewQueue({
+   details,
+   warnedIds,
+   editedIds,
++  selectedIds = new Set(),
++  onToggleSelected,
+   emptyMessage,
+   onSelect,
+ }: ReviewQueueProps) {
+@@ -46,7 +51,9 @@ export function ReviewQueue({
+           detail={details.get(item.itemId) ?? null}
+           warned={warnedIds.has(item.itemId)}
+           edited={editedIds.has(item.itemId)}
++          selected={onToggleSelected ? selectedIds.has(item.itemId) : false}
+           onSelect={onSelect}
++          onToggleSelected={onToggleSelected}
+         />
+       ))}
+     </ul>
+@@ -59,14 +66,18 @@ function ReviewQueueRow({
+   detail,
+   warned,
+   edited,
++  selected,
+   onSelect,
++  onToggleSelected,
+ }: {
+   item: OnboardingWorkState;
+   active: boolean;
+   detail: ItemDetailResponse | null;
+   warned: boolean;
+   edited: boolean;
++  selected: boolean;
+   onSelect: (itemId: string) => void;
++  onToggleSelected?: (itemId: string) => void;
+ }) {
+   const ext = detail?.extraction ?? detail?.item.extractionData ?? null;
+   const image = ext?.primaryImage ?? null;
+@@ -80,7 +91,7 @@ function ReviewQueueRow({
+       id={item.itemId}
+       role="option"
+       aria-selected={active}
+-      className={`rv-queue-row${active ? ' rv-row-active' : ''}`}
++      className={`rv-queue-row${active ? ' rv-row-active' : ''}${selected ? ' rv-row-selected' : ''}`}
+       onClick={() => onSelect(item.itemId)}
+       onKeyDown={e => {
+         if (e.key === 'Enter' || e.key === ' ') {
+@@ -90,6 +101,16 @@ function ReviewQueueRow({
+       }}
+       tabIndex={-1}
+     >
++      {onToggleSelected && (
++        <span className="rv-row-checkbox" onClick={e => e.stopPropagation()}>
++          <input
++            type="checkbox"
++            aria-label={`Select ${title} for bulk review`}
++            checked={selected}
++            onChange={() => onToggleSelected(item.itemId)}
++          />
++        </span>
++      )}
+       <span className={image ? undefined : 'rv-row-thumb rv-no-thumb'}>
+         {image ? (
+           <img className="rv-row-thumb" src={image} alt="" aria-hidden="true" loading="lazy" />
+diff --git a/src/client/components/onboarding/review/ReviewWorkspace.tsx b/src/client/components/onboarding/review/ReviewWorkspace.tsx
+index 260dcab..bcf77a4 100644
+--- a/src/client/components/onboarding/review/ReviewWorkspace.tsx
++++ b/src/client/components/onboarding/review/ReviewWorkspace.tsx
+@@ -35,8 +35,12 @@ import {
+   findPreviousReviewTarget,
+   formatReviewProgress,
+   hasActiveQueueFilters,
++  countReviewableSelection,
++  pruneQueueSelection,
+   reviewProgress,
++  selectAllVisible,
+   sortForReview,
++  toggleQueueSelection,
+   warningInfoFromDetail,
+   type ReviewQueueFilters,
+ } from './review-logic';
+@@ -71,6 +75,13 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
+   // ── Filters / facets ────────────────────────────────────────────────────
+   const [filters, setFilters] = useState<ReviewQueueFilters>({});
+ 
++  // ── Bulk review selection (epic #46 follow-up, phase 4) ─────────────────
++  const [selectedIds, setSelectedIds] = useState<string[]>([]);
++  const [bulkBusy, setBulkBusy] = useState(false);
++  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
++  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
++  const [bulkError, setBulkError] = useState<string | null>(null);
++
+   // ── Session tracking ────────────────────────────────────────────────────
+   const [editedIds, setEditedIds] = useState<Set<string>>(() => new Set());
+   const [warnedIds, setWarnedIds] = useState<Set<string>>(() => new Set());
+@@ -277,6 +288,40 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
+     [sortedAll, filters, editedIds, warnedIds],
+   );
+ 
++  // Prune the bulk-review selection whenever the queue reloads.
++  useEffect(() => {
++    setSelectedIds(prev => pruneQueueSelection(prev, items.map(i => i.itemId)));
++  }, [items]);
++
++  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
++  const reviewableSelected = useMemo(
++    () => countReviewableSelection(selectedIds, filteredItems),
++    [selectedIds, filteredItems],
++  );
++
++  const handleBulkReview = useCallback(async () => {
++    if (selectedIds.length === 0 || bulkBusy) return;
++    setBulkBusy(true);
++    setBulkError(null);
++    setBulkNotice(null);
++    try {
++      const res = await completeReviewStage(selectedIds);
++      setBulkNotice(
++        `${res.count} product${res.count === 1 ? '' : 's'} marked reviewed` +
++          (res.classifiedCount !== undefined && res.legacyCount !== undefined
++            ? ` (${res.classifiedCount} classified, ${res.legacyCount} legacy)`
++            : ''),
++      );
++      setSelectedIds([]);
++      await loadQueue();
++    } catch (err) {
++      setBulkError(err instanceof Error ? err.message : String(err));
++    } finally {
++      setBulkBusy(false);
++      setBulkConfirmOpen(false);
++    }
++  }, [selectedIds, bulkBusy, loadQueue]);
++
+   const progress = useMemo(() => {
+     const base = reviewProgress(items, { total, reviewedTotal: reviewedTotal + optimisticReviewed });
+     return base;
+@@ -512,6 +557,75 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
+ 
+       <div className="rv-body">
+         <div className="rv-queue-pane">
++          {(selectedIds.length > 0 || filters.sourceType === 'distributor_record') && (
++            <div className="rv-bulk-bar" role="region" aria-label="Bulk review">
++              <button
++                type="button"
++                className="btn btn-outline btn-sm"
++                disabled={bulkBusy || filteredItems.length === 0}
++                onClick={() =>
++                  setSelectedIds(prev =>
++                    prev.length === filteredItems.length ? [] : selectAllVisible(filteredItems.map(i => i.itemId)),
++                  )
++                }
++              >
++                {selectedIds.length === filteredItems.length && filteredItems.length > 0
++                  ? 'Clear selection'
++                  : `Select all shown (${filteredItems.length})`}
++              </button>
++              <span className="rv-bulk-count">
++                {selectedIds.length} selected · {reviewableSelected} reviewable
++              </span>
++              <button
++                type="button"
++                className="btn btn-primary btn-sm"
++                disabled={bulkBusy || reviewableSelected === 0}
++                onClick={() => setBulkConfirmOpen(true)}
++              >
++                Mark reviewed ({reviewableSelected})
++              </button>
++            </div>
++          )}
++          {bulkNotice && (
++            <div className="rv-bulk-notice" role="status">
++              ✓ {bulkNotice}
++            </div>
++          )}
++          {bulkError && (
++            <div className="rv-error-banner" role="alert">
++              {bulkError}
++            </div>
++          )}
++          {bulkConfirmOpen && (
++            <div className="rv-modal-backdrop" role="presentation" onMouseDown={() => setBulkConfirmOpen(false)}>
++              <div
++                className="rv-modal"
++                role="dialog"
++                aria-modal="true"
++                aria-label="Confirm bulk review"
++                onMouseDown={e => e.stopPropagation()}
++              >
++                <h3 className="rv-modal-title">Mark {reviewableSelected} product{reviewableSelected === 1 ? '' : 's'} reviewed?</h3>
++                <p className="rv-modal-body">
++                  These products will be durably marked reviewed and moved to the approval
++                  queue. Approving never exports anything — export stays a separate step.
++                </p>
++                <div className="rv-modal-actions">
++                  <button type="button" className="btn btn-outline" onClick={() => setBulkConfirmOpen(false)}>
++                    Cancel
++                  </button>
++                  <button
++                    type="button"
++                    className="btn btn-primary"
++                    disabled={bulkBusy}
++                    onClick={() => void handleBulkReview()}
++                  >
++                    {bulkBusy ? 'Reviewing…' : `Mark reviewed (${reviewableSelected})`}
++                  </button>
++                </div>
++              </div>
++            </div>
++          )}
+           {queueState === 'error' ? (
+             <div className="rv-state-note" role="alert">
+               Could not load the review queue: {queueError}
+@@ -523,6 +637,10 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
+               details={details}
+               warnedIds={warnedIds}
+               editedIds={editedIds}
++              selectedIds={selectedSet}
++              onToggleSelected={itemId =>
++                setSelectedIds(prev => toggleQueueSelection(prev, itemId))
++              }
+               emptyMessage={queueEmptyMessage}
+               onSelect={setCurrentItemId}
+             />
+diff --git a/src/client/components/onboarding/review/review-logic.ts b/src/client/components/onboarding/review/review-logic.ts
+index 5447a99..bc35699 100644
+--- a/src/client/components/onboarding/review/review-logic.ts
++++ b/src/client/components/onboarding/review/review-logic.ts
+@@ -275,4 +275,36 @@ export function itemDisplayName(
+ export function isReviewed(workState: OnboardingWorkState): boolean {
+   const state = workState.reviewState ?? 'unreviewed';
+   return state === 'reviewed' || state === 'approved';
+-}
+\ No newline at end of file
++}
++// ─── Bulk review selection (epic #46 follow-up, GPT plan phase 4) ─────────────
++
++/** Toggle one item in the bulk-review selection (order-stable). */
++export function toggleQueueSelection(selectedIds: string[], itemId: string): string[] {
++  return selectedIds.includes(itemId)
++    ? selectedIds.filter(id => id !== itemId)
++    : [...selectedIds, itemId];
++}
++
++/** Select every visible (filtered) item. */
++export function selectAllVisible(visibleIds: string[]): string[] {
++  return Array.from(new Set(visibleIds));
++}
++
++/** Drop ids that are no longer in the queue (prune after reload). */
++export function pruneQueueSelection(selectedIds: string[], validIds: string[]): string[] {
++  if (selectedIds.length === 0) return selectedIds;
++  const valid = new Set(validIds);
++  return selectedIds.filter(id => valid.has(id));
++}
++
++/** Count of selected items still eligible for bulk review (unreviewed). */
++export function countReviewableSelection(
++  selectedIds: string[],
++  items: OnboardingWorkState[],
++): number {
++  const byId = new Map(items.map(i => [i.itemId, i]));
++  return selectedIds.filter(id => {
++    const item = byId.get(id);
++    return item ? !isReviewed(item) : false;
++  }).length;
++}
+diff --git a/src/client/components/onboarding/review/review.css b/src/client/components/onboarding/review/review.css
+index 06174b2..769057e 100644
+--- a/src/client/components/onboarding/review/review.css
++++ b/src/client/components/onboarding/review/review.css
+@@ -157,6 +157,66 @@
+   border-radius: var(--rounded-lg);
+ }
+ 
++.rv-bulk-bar {
++  display: flex;
++  align-items: center;
++  gap: 0.625rem;
++  padding: 0.5rem 0.625rem;
++  border-bottom: 1px solid var(--color-card-border);
++  background: color-mix(in srgb, var(--color-feed-bag-cream) 55%, var(--color-white-surface));
++  flex-wrap: wrap;
++}
++
++.rv-bulk-count {
++  font-size: 0.75rem;
++  color: var(--color-mulch-brown);
++  margin-right: auto;
++}
++
++.rv-bulk-notice {
++  padding: 0.5rem 0.625rem;
++  font-size: 0.8125rem;
++  color: var(--color-success-text);
++  background: var(--color-success-bg);
++  border-bottom: 1px solid var(--color-card-border);
++}
++
++.rv-modal-backdrop {
++  position: fixed;
++  inset: 0;
++  background: rgb(0 0 0 / 0.35);
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  z-index: 50;
++}
++
++.rv-modal {
++  width: min(28rem, calc(100vw - 2rem));
++  background: var(--color-white-surface);
++  border: 1px solid var(--color-card-border);
++  border-radius: var(--rounded-lg);
++  padding: 1.25rem;
++  box-shadow: 0 12px 32px rgb(0 0 0 / 0.2);
++}
++
++.rv-modal-title {
++  margin: 0 0 0.5rem;
++  font-size: 1rem;
++}
++
++.rv-modal-body {
++  margin: 0 0 1rem;
++  font-size: 0.8125rem;
++  color: var(--color-ledger-charcoal);
++}
++
++.rv-modal-actions {
++  display: flex;
++  justify-content: flex-end;
++  gap: 0.5rem;
++}
++
+ /* ── Queue table ─────────────────────────────────────────────────────────── */
+ .rv-queue-list {
+   flex: 1;
+@@ -182,6 +242,26 @@
+   transition: background var(--transition-fast);
+ }
+ 
++/* Bulk-review selection (epic #46 follow-up, phase 4): rows with a
++   checkbox gain a leading 24px column. */
++.rv-queue-row:has(.rv-row-checkbox) {
++  grid-template-columns: 24px 44px minmax(0, 1fr) minmax(0, auto);
++}
++
++.rv-row-checkbox {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++}
++
++.rv-queue-row.rv-row-selected {
++  background: color-mix(in srgb, var(--color-uniform-green) 5%, var(--color-white-surface));
++}
++
++.rv-queue-row.rv-row-selected:hover {
++  background: color-mix(in srgb, var(--color-uniform-green) 9%, var(--color-white-surface));
++}
++
+ .rv-queue-row:hover,
+ .rv-queue-row.rv-row-active:hover {
+   background: var(--color-feed-bag-cream);
+diff --git a/src/client/onboarding-work-api.ts b/src/client/onboarding-work-api.ts
+index f02a1c1..0d95c42 100644
+--- a/src/client/onboarding-work-api.ts
++++ b/src/client/onboarding-work-api.ts
+@@ -20,6 +20,7 @@ import type {
+   WorkStateFilters,
+   ApproveItemsResponse,
+   DomainReleaseResponse,
++  ExtractorProfileBlockersResponse,
+ } from '../shared/schemas/onboarding-work-state';
+ 
+ const API_BASE = '/api/onboarding';
+@@ -107,6 +108,15 @@ export async function releaseDomainItems(domain: string): Promise<DomainReleaseR
+   });
+ }
+ 
++/**
++ * Domain-level extractor setup queue (epic #46 follow-up, phase 5):
++ * missing-profile extraction failures grouped by domain, sorted by
++ * blocked-product count.
++ */
++export async function getExtractorProfileBlockers(batchId: string): Promise<ExtractorProfileBlockersResponse> {
++  return request<ExtractorProfileBlockersResponse>(`/batches/${batchId}/extractor-profile-blockers`);
++}
++
+ // ─── Live events ───────────────────────────────────────────────────────────────
+ 
+ /**
+diff --git a/src/onboarding/discovery/official-domain.ts b/src/onboarding/discovery/official-domain.ts
+new file mode 100644
+index 0000000..1dda3c6
+--- /dev/null
++++ b/src/onboarding/discovery/official-domain.ts
+@@ -0,0 +1,53 @@
++/**
++ * Official-domain matching for candidate ranking (epic #46 follow-up, GPT
++ * plan phase 6).
++ *
++ * `scoreBrandDomainMatch` gives a conservative 0..1 similarity between a
++ * brand and a candidate domain — used as a RANKING BIAS only. Auto-selection
++ * stays gated by the page verifier; a brand-like domain never auto-verifies
++ * on its own. Generic pet-store words ("pet", "dog", "store", "shop"…) never
++ * count as a brand match.
++ */
++/** Generic tokens that must not alone constitute a brand match. */
++export const GENERIC_BRAND_TOKENS: ReadonlySet<string> = new Set([
++  'pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'natural', 'healthy', 'health',
++  'store', 'shop', 'supply', 'supplies', 'food', 'feed', 'farm', 'market',
++  'online', 'express', 'plus', 'pro', 'best', 'value', 'wholesale',
++]);
++
++/** Brand → comparison slug (lowercase, non-alphanumerics stripped). */
++export function normalizeBrandForDomainMatch(brand: string): string {
++  return brand.toLowerCase().replace(/[^a-z0-9]/g, '');
++}
++
++/** Domain → comparison label (second-level registrable-ish label). */
++export function domainMatchLabel(domain: string): string {
++  const normalized = domain.toLowerCase().replace(/^www\./, '').trim();
++  const parts = normalized.split('.');
++  // shop.dogkrazy.com → dogkrazy; co.uk-style tails are rare here and the
++  // label is only used for substring similarity — take the second-to-last
++  // part when the host has 3+ labels, else the first.
++  return parts.length >= 3 ? parts[parts.length - 2] : parts[0] ?? '';
++}
++
++/**
++ * 0..1 brand↔domain similarity:
++ * - 1.0  — the full brand slug appears inside the domain's main label
++ *          (e.g. "fromm" in "frommfamily") and the brand is not generic;
++ * - 0.5  — every non-generic brand word appears inside the main label
++ *          (multi-word brands, order-insensitive);
++ * - 0    — no match or the brand is a generic token.
++ */
++export function scoreBrandDomainMatch(brand: string | null | undefined, domain: string): number {
++  if (!brand || !brand.trim() || !domain) return 0;
++  const brandSlug = normalizeBrandForDomainMatch(brand);
++  if (!brandSlug || GENERIC_BRAND_TOKENS.has(brandSlug)) return 0;
++  const label = domainMatchLabel(domain);
++  if (!label) return 0;
++  if (label.includes(brandSlug)) return 1;
++  const words = brand.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
++  const meaningful = words.filter(w => !GENERIC_BRAND_TOKENS.has(w));
++  if (meaningful.length === 0) return 0;
++  if (meaningful.every(w => label.includes(w))) return 0.5;
++  return 0;
++}
+diff --git a/src/onboarding/discovery/retailer-domain-list.ts b/src/onboarding/discovery/retailer-domain-list.ts
+new file mode 100644
+index 0000000..5103abb
+--- /dev/null
++++ b/src/onboarding/discovery/retailer-domain-list.ts
+@@ -0,0 +1,30 @@
++/**
++ * Known retailer/distributor domains (epic #46 follow-up, GPT plan phase 6).
++ *
++ * Conservative demotion list seeded from the live batch's weak discovery
++ * candidates (retailer/distributor pages that dominated URL-verification
++ * attention). Candidates on these domains are DEMOTED in ranking, never
++ * discarded — a retailer page can still be a useful fallback.
++ */
++export const KNOWN_RETAILER_OR_DISTRIBUTOR_DOMAINS: ReadonlySet<string> = new Set([
++  'chewy.com',
++  'petco.com',
++  'petsmart.com',
++  'shop.dogkrazy.com',
++  'theproperpet.com',
++  'shop.barkandluv.com',
++  'pacificpet.net',
++  'burlopet.com',
++  'net32.com',
++  'zeiglersdist.com',
++  'pood.bluepetfood.eu',
++]);
++
++/** Normalize a candidate URL's domain for list lookup (lowercase, strip www). */
++export function normalizeDomainForLookup(domain: string): string {
++  return domain.toLowerCase().replace(/^www\./, '').trim();
++}
++
++export function isKnownRetailerOrDistributorDomain(domain: string): boolean {
++  return KNOWN_RETAILER_OR_DISTRIBUTOR_DOMAINS.has(normalizeDomainForLookup(domain));
++}
+diff --git a/src/onboarding/extraction/profile-blockers.ts b/src/onboarding/extraction/profile-blockers.ts
+new file mode 100644
+index 0000000..287c728
+--- /dev/null
++++ b/src/onboarding/extraction/profile-blockers.ts
+@@ -0,0 +1,85 @@
++/**
++ * Extractor-profile domain blockers (epic #46 follow-up, GPT plan phase 5).
++ *
++ * Missing-profile extraction failures surface as DOMAIN-level tasks —
++ * "build profile for frommfamily.com — unblocks 4 products" — instead of 14
++ * indistinguishable item failures. The domain release sweep
++ * (`releaseDomainExtractionItems`) handles the retry automatically once a
++ * profile becomes usable, so this queue is purely the operator's setup
++ * surface.
++ */
++import { getDb } from '../../db/connection';
++import { findProfileByDomain } from '../../db/repositories/extractor-profile-repo';
++
++export interface ExtractorProfileDomainBlocker {
++  domain: string;
++  blockedItemCount: number;
++  batchId: string;
++  itemIds: string[];
++  sampleItems: Array<{
++    itemId: string;
++    upc?: string;
++    name: string;
++    sourceUrl: string | null;
++    errorMessage: string;
++  }>;
++  /** True when an extractor profile already exists for the domain (the
++   *  failures may be stale or the profile unusable — surface it either way). */
++  profileExists: boolean;
++}
++
++/** The worker's stable failure signature (page-extractor). */
++const MISSING_PROFILE_RE = /^No extractor profile for\s+([^\s—–-]+)/i;
++
++/** Group a batch's missing-profile extraction failures by source domain. */
++export function getExtractorProfileDomainBlockers(batchId: string): ExtractorProfileDomainBlocker[] {
++  const db = getDb();
++  const rows = db.query(
++    `SELECT id, upc, name, source_url, error_message
++     FROM onboarding_items
++     WHERE batch_id = ? AND stage = 'extraction' AND stage_status = 'failed'
++       AND error_message IS NOT NULL
++     ORDER BY row_number ASC`,
++  ).all(batchId) as Array<{
++    id: string;
++    upc: string | null;
++    name: string | null;
++    source_url: string | null;
++    error_message: string | null;
++  }>;
++
++  const byDomain = new Map<string, ExtractorProfileDomainBlocker>();
++  for (const row of rows) {
++    const match = MISSING_PROFILE_RE.exec(row.error_message ?? '');
++    if (!match) continue; // not a missing-profile failure (HTTP/parse/timeout)
++    const domain = match[1].trim().toLowerCase();
++    let blocker = byDomain.get(domain);
++    if (!blocker) {
++      blocker = {
++        domain,
++        blockedItemCount: 0,
++        batchId,
++        itemIds: [],
++        sampleItems: [],
++        profileExists: findProfileByDomain(domain) !== null,
++      };
++      byDomain.set(domain, blocker);
++    }
++    blocker.blockedItemCount += 1;
++    blocker.itemIds.push(row.id);
++    if (blocker.sampleItems.length < 3) {
++      blocker.sampleItems.push({
++        itemId: row.id,
++        upc: row.upc ?? undefined,
++        name: row.name ?? '',
++        sourceUrl: row.source_url,
++        errorMessage: row.error_message ?? '',
++      });
++    }
++  }
++
++  // Highest impact first (most blocked products), then domain asc.
++  return [...byDomain.values()].sort(
++    (a, b) => b.blockedItemCount - a.blockedItemCount || a.domain.localeCompare(b.domain),
++  );
++}
+diff --git a/src/onboarding/source-discovery.ts b/src/onboarding/source-discovery.ts
+index 06fbc65..119b102 100644
+--- a/src/onboarding/source-discovery.ts
++++ b/src/onboarding/source-discovery.ts
+@@ -40,6 +40,8 @@ import { getCachedSitemapUrls, insertSitemapCache } from '../db/repositories/sit
+ import { fetchAndParseSitemap } from './sitemap-fetcher';
+ import { matchSitemapUrls, type SitemapMatchResult } from './sitemap-matcher';
+ import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
++import { isKnownRetailerOrDistributorDomain } from './discovery/retailer-domain-list';
++import { scoreBrandDomainMatch } from './discovery/official-domain';
+ import { resolveVariantsForCandidates } from './variant-url-resolver';
+ import { isOfficialDomainMatch } from './domain-utils';
+ import { inferBrandFromSearchResults, type BrandInferenceResult } from './brand-inferrer';
+@@ -203,6 +205,7 @@ export async function discoverSources(
+ 
+     const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
+ 
++    const rankSignals = buildRankSignals(activeBrandHint, resultDomain);
+     candidates.push({
+       url: result.link,
+       title: result.title,
+@@ -210,6 +213,7 @@ export async function discoverSources(
+       domain: resultDomain,
+       confidence,
+       sourceMethod: 'serper_upc',
++      ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
+     });
+   }
+ 
+@@ -356,6 +360,7 @@ export async function discoverSources(
+ 
+             const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
+ 
++            const rankSignals = buildRankSignals(activeBrandHint, resultDomain);
+             candidates.push({
+               url: result.link,
+               title: result.title,
+@@ -363,6 +368,7 @@ export async function discoverSources(
+               domain: resultDomain,
+               confidence,
+               sourceMethod: 'serper_name',
++              ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
+             });
+           }
+         } catch (err) {
+@@ -485,6 +491,27 @@ async function searchSerper(apiKey: string, query: string, networkFetch?: Networ
+  * - Marketplaces are lightly penalized (valid fallback but not preferred)
+  * - Social media, review, and irrelevant sites are heavily penalized
+  */
++
++/**
++ * Rank-signal metadata for a candidate (epic #46 follow-up, phase 6):
++ * why this candidate was promoted/demoted — explainable discovery.
++ */
++function buildRankSignals(
++  brandHint: string | null | undefined,
++  domain: string,
++): { rankSignals: { strongBrandDomainMatch: boolean; brandDomainMatchScore: number; knownRetailerDomain: boolean } } | null {
++  const brandDomainMatchScore = scoreBrandDomainMatch(brandHint, domain);
++  const knownRetailerDomain = isKnownRetailerOrDistributorDomain(domain);
++  if (brandDomainMatchScore < 0.5 && !knownRetailerDomain) return null;
++  return {
++    rankSignals: {
++      strongBrandDomainMatch: brandDomainMatchScore >= 0.5,
++      brandDomainMatchScore,
++      knownRetailerDomain,
++    },
++  };
++}
++
+ // fallow-ignore-next-line unused-export
+ export function scoreResult(
+   result: SerperSearchResult,
+@@ -524,6 +551,19 @@ export function scoreResult(
+     }
+   }
+ 
++  // Epic #46 follow-up (GPT plan phase 6): official-domain-aware ranking.
++  // A strong brand↔domain match earns an extra bias; known retailer or
++  // distributor domains are demoted (never discarded). Both signals are
++  // recorded so the candidate's rank is explainable.
++  const brandDomainMatch = scoreBrandDomainMatch(brandHint, domain);
++  if (brandDomainMatch >= 0.5) {
++    score += 0.1;
++  }
++  const retailerDomain = isKnownRetailerOrDistributorDomain(domain);
++  if (retailerDomain) {
++    score -= 0.2;
++  }
++
+   // UPC appears in snippet or title: strong relevance signal
+   if (snippet.includes(upc) || title.includes(upc)) {
+     score += 0.15;
+diff --git a/src/server/routes/onboarding-work-routes.ts b/src/server/routes/onboarding-work-routes.ts
+index e200e30..cd24bc3 100644
+--- a/src/server/routes/onboarding-work-routes.ts
++++ b/src/server/routes/onboarding-work-routes.ts
+@@ -27,6 +27,7 @@ import { validateReviewCompletionGate } from '../../classification/review-comple
+ import { addAuditLog } from '../../db/repositories/audit-log-repo';
+ import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
+ import { getOnboardingMetrics } from '../../onboarding/onboarding-telemetry';
++import { getExtractorProfileDomainBlockers } from '../../onboarding/extraction/profile-blockers';
+ import { getWorker } from './onboarding-routes';import {
+   ApproveItemsRequestSchema,
+   WorkStateCategoryEnum,
+@@ -134,6 +135,26 @@ route.get('/onboarding/items/:id/work-state', async (c) => {
+   return c.json({ workState });
+ });
+ 
++/**
++ * GET /api/onboarding/batches/:id/extractor-profile-blockers
++ * Domain-level extractor setup queue (epic #46 follow-up, GPT plan phase 5):
++ * missing-profile extraction failures grouped by source domain, sorted by
++ * blocked-product count, with per-domain sample items and profile status.
++ * Workspace-scoped like every batch projection.
++ */
++route.get('/onboarding/batches/:id/extractor-profile-blockers', async (c) => {
++  const batchId = c.req.param('id');
++  const batch = findBatchById(batchId);
++  if (!batch) {
++    return c.json({ error: 'Batch not found' }, 404);
++  }
++  const workspace = findWorkspace();
++  if (!workspace || batch.workspaceId !== workspace.id) {
++    return c.json({ error: 'Batch not found' }, 404);
++  }
++  return c.json({ blockers: getExtractorProfileDomainBlockers(batchId) });
++});
++
+ /**
+  * POST /api/onboarding/batches/:id/approve
+  * Bulk approval of reviewed items. Per-item structured outcomes — partial
+diff --git a/src/shared/schemas/onboarding-work-state.ts b/src/shared/schemas/onboarding-work-state.ts
+index 2ed2634..9b4e7c0 100644
+--- a/src/shared/schemas/onboarding-work-state.ts
++++ b/src/shared/schemas/onboarding-work-state.ts
+@@ -240,6 +240,32 @@ export const ApproveItemsResponseSchema = z.object({
+ 
+ export type ApproveItemsResponse = z.infer<typeof ApproveItemsResponseSchema>;
+ 
++// ─── Extractor-profile domain blockers (epic #46 follow-up, phase 5) ──────────
++
++export const ExtractorProfileBlockerSampleSchema = z.object({
++  itemId: z.string(),
++  upc: z.string().optional(),
++  name: z.string(),
++  sourceUrl: z.string().nullable(),
++  errorMessage: z.string(),
++});
++
++export const ExtractorProfileDomainBlockerSchema = z.object({
++  domain: z.string(),
++  blockedItemCount: z.number().int(),
++  batchId: z.string(),
++  itemIds: z.array(z.string()),
++  sampleItems: z.array(ExtractorProfileBlockerSampleSchema),
++  profileExists: z.boolean(),
++});
++
++export const ExtractorProfileBlockersResponseSchema = z.object({
++  blockers: z.array(ExtractorProfileDomainBlockerSchema),
++});
++
++export type ExtractorProfileDomainBlocker = z.infer<typeof ExtractorProfileDomainBlockerSchema>;
++export type ExtractorProfileBlockersResponse = z.infer<typeof ExtractorProfileBlockersResponseSchema>;
++
+ // ─── Domain release response ───────────────────────────────────────────────────
+ 
+ export const DomainReleaseResponseSchema = z.object({
+diff --git a/src/tests/unit/official-domain-ranking.test.ts b/src/tests/unit/official-domain-ranking.test.ts
+new file mode 100644
+index 0000000..a2a54d0
+--- /dev/null
++++ b/src/tests/unit/official-domain-ranking.test.ts
+@@ -0,0 +1,86 @@
++/**
++ * Official-domain-aware discovery ranking (epic #46 follow-up, GPT plan
++ * phase 6). Pure logic — vitest.
++ */
++import { describe, test, expect } from 'vitest';
++import {
++  scoreBrandDomainMatch,
++  normalizeBrandForDomainMatch,
++  domainMatchLabel,
++  GENERIC_BRAND_TOKENS,
++} from '../../onboarding/discovery/official-domain';
++import {
++  isKnownRetailerOrDistributorDomain,
++  KNOWN_RETAILER_OR_DISTRIBUTOR_DOMAINS,
++} from '../../onboarding/discovery/retailer-domain-list';
++import { scoreResult } from '../../onboarding/source-discovery';
++
++function serper(link: string, title = 'Product Page'): Parameters<typeof scoreResult>[0] {
++  return {
++    link,
++    title,
++    snippet: '',
++    position: 1,
++  } as Parameters<typeof scoreResult>[0];
++}
++
++describe('scoreBrandDomainMatch', () => {
++  test('full brand slug in the domain label → 1.0', () => {
++    expect(scoreBrandDomainMatch('Fromm', 'frommfamily.com')).toBe(1);
++    expect(scoreBrandDomainMatch('Primal', 'primalpetfoods.com')).toBe(1);
++    expect(scoreBrandDomainMatch('Blue Buffalo', 'bluebuffalo.com')).toBe(1);
++    expect(scoreBrandDomainMatch('Wellness', 'wellnesspetfood.com')).toBe(1);
++    expect(scoreBrandDomainMatch('Wholesomes', 'wholesomespetfood.com')).toBe(1);
++  });
++
++  test('multi-word brands match word-wise at 0.5', () => {
++    expect(scoreBrandDomainMatch('Blue Buffalo', 'bluebuffalofamily.com')).toBe(1);
++    expect(scoreBrandDomainMatch('Lazy Dog', 'lazydog.com')).toBe(1);
++  });
++
++  test('generic pet-store words never count as brand matches', () => {
++    expect(scoreBrandDomainMatch('Pet', 'petco.com')).toBe(0);
++    expect(scoreBrandDomainMatch('Dog', 'dogkrazy.com')).toBe(0);
++    expect(scoreBrandDomainMatch('Store', 'thepetstore.com')).toBe(0);
++    expect(GENERIC_BRAND_TOKENS.has('pet')).toBe(true);
++  });
++
++  test('mismatched brands score 0', () => {
++    expect(scoreBrandDomainMatch('Fromm', 'chewy.com')).toBe(0);
++    expect(scoreBrandDomainMatch('Nylabone', 'net32.com')).toBe(0);
++  });
++
++  test('normalization helpers', () => {
++    expect(normalizeBrandForDomainMatch('Blue Buffalo')).toBe('bluebuffalo');
++    expect(domainMatchLabel('shop.dogkrazy.com')).toBe('dogkrazy');
++    expect(domainMatchLabel('www.frommfamily.com')).toBe('frommfamily');
++    expect(domainMatchLabel('chewy.com')).toBe('chewy');
++  });
++});
++
++describe('known retailer/distributor demotion list', () => {
++  test('live-batch weak-candidate domains are recognized', () => {
++    for (const domain of ['chewy.com', 'shop.dogkrazy.com', 'theproperpet.com', 'net32.com', 'zeiglersdist.com', 'pood.bluepetfood.eu']) {
++      expect(isKnownRetailerOrDistributorDomain(domain), domain).toBe(true);
++    }
++    expect(isKnownRetailerOrDistributorDomain('frommfamily.com')).toBe(false);
++    expect(isKnownRetailerOrDistributorDomain('www.chewy.com')).toBe(true);
++    expect(KNOWN_RETAILER_OR_DISTRIBUTOR_DOMAINS.size).toBeGreaterThanOrEqual(11);
++  });
++});
++
++describe('scoreResult ranking bias (phase 6)', () => {
++  test('official brand domain outranks a known retailer with identical signals', () => {
++    const official = scoreResult(serper('https://frommfamily.com/products/p', 'Fromm Product'), '012345678905', 'Fromm Product', 'Fromm', 'frommfamily.com', []);
++    const retailer = scoreResult(serper('https://www.chewy.com/fromm-product/dp/012345678905', 'Fromm Product'), '012345678905', 'Fromm Product', 'Fromm', 'chewy.com', []);
++    expect(official).toBeGreaterThan(retailer);
++    // Retailer demotion is a bias, not a discard: the score stays positive.
++    expect(retailer).toBeGreaterThan(0);
++  });
++
++  test('brand-domain boost stacks with the loose segment check', () => {
++    const strong = scoreResult(serper('https://frommfamily.com/products/p'), '012345678905', 'X', 'Fromm', 'frommfamily.com', []);
++    const plain = scoreResult(serper('https://example.com/products/p'), '012345678905', 'X', 'Fromm', 'example.com', []);
++    expect(strong).toBeGreaterThan(plain);
++  });
++});
+diff --git a/src/tests/unit/profile-blockers.test.ts b/src/tests/unit/profile-blockers.test.ts
+new file mode 100644
+index 0000000..7f1d506
+--- /dev/null
++++ b/src/tests/unit/profile-blockers.test.ts
+@@ -0,0 +1,91 @@
++/**
++ * Extractor-profile domain blockers (epic #46 follow-up, GPT plan phase 5).
++ */
++import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
++import fs from 'node:fs';
++import path from 'node:path';
++import os from 'node:os';
++import { initDb, closeDb, getDb } from '../../db/connection';
++import { runMigrations } from '../../db/migrations';
++import { insertWorkspace } from '../../db/repositories/workspace-repo';
++import { createBatch } from '../../db/repositories/onboarding-batch-repo';
++import { insertItems } from '../../db/repositories/onboarding-item-repo';
++import { upsertProfile } from '../../db/repositories/extractor-profile-repo';
++import { getExtractorProfileDomainBlockers } from '../../onboarding/extraction/profile-blockers';
++
++describe('extractor-profile domain blockers (phase 5)', () => {
++  let tempDir: string;
++  let workspaceId: string;
++  let batchId: string;
++
++  beforeEach(() => {
++    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'profile-blockers-test-'));
++    initDb(path.join(tempDir, 'test.db'));
++    runMigrations();
++    workspaceId = 'ws-blockers';
++    insertWorkspace({
++      id: workspaceId,
++      name: 'W',
++      workspacePath: tempDir,
++      gitPath: tempDir + '/.git',
++      createdAt: new Date().toISOString(),
++      updatedAt: new Date().toISOString(),
++      bootstrapStatus: 'complete',
++      baselineCommit: null,
++    });
++    batchId = createBatch({ workspaceId, name: 'B', fileName: 'b.csv', totalItems: 8 }).id;
++  });
++
++  afterEach(() => {
++    closeDb();
++    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
++  });
++
++  function failExtraction(upc: string, name: string, errorMessage: string): string {
++    const [item] = insertItems(batchId, [{ upc, name, rowNumber: 1, stage: 'extraction' }], 'extraction', 1);
++    const domainMatch = /No extractor profile for (\S+)/.exec(errorMessage);
++    getDb().query(
++      "UPDATE onboarding_items SET stage_status = 'failed', error_message = ?, source_url = ? WHERE id = ?",
++    ).run(errorMessage, domainMatch ? `https://${domainMatch[1]}/product/p` : null, item.id);
++    return item.id;
++  }
++
++  test('groups missing-profile failures by domain, sorted by blocked count', () => {
++    const fromm1 = failExtraction('1001', 'Fromm A', 'No extractor profile for frommfamily.com — profile required');
++    const fromm2 = failExtraction('1002', 'Fromm B', 'No extractor profile for frommfamily.com — profile required');
++    const fromm3 = failExtraction('1003', 'Fromm C', 'No extractor profile for frommfamily.com — profile required');
++    failExtraction('1004', 'Primal A', 'No extractor profile for primalpetfoods.com — profile required');
++
++    const blockers = getExtractorProfileDomainBlockers(batchId);
++    expect(blockers.length).toBe(2);
++    expect(blockers[0].domain).toBe('frommfamily.com');
++    expect(blockers[0].blockedItemCount).toBe(3);
++    expect(blockers[0].itemIds.sort()).toEqual([fromm1, fromm2, fromm3].sort());
++    expect(blockers[0].sampleItems.length).toBe(3);
++    expect(blockers[0].sampleItems[0].name).toBe('Fromm A');
++    expect(blockers[1].domain).toBe('primalpetfoods.com');
++    expect(blockers[1].blockedItemCount).toBe(1);
++  });
++
++  test('excludes failures NOT caused by a missing profile', () => {
++    failExtraction('2001', 'HTTP Item', 'Extraction failed: HTTP 500 from upstream');
++    failExtraction('2002', 'Parse Item', 'Extraction failed: no product data found');
++    expect(getExtractorProfileDomainBlockers(batchId)).toEqual([]);
++  });
++
++  test('marks profileExists when an extractor profile is on file', () => {
++    failExtraction('3001', 'Covered A', 'No extractor profile for covered.com — profile required');
++    expect(getExtractorProfileDomainBlockers(batchId)[0].profileExists).toBe(false);
++
++    upsertProfile('covered.com', { titleSelector: 'h1' });
++    const withProfile = getExtractorProfileDomainBlockers(batchId);
++    expect(withProfile[0].profileExists).toBe(true);
++  });
++
++  test('domains are case/whitespace normalized and listed even with a profile present', () => {
++    failExtraction('4001', 'Mixed A', 'No extractor profile for  FrommFamily.COM  — profile required');
++    const blockers = getExtractorProfileDomainBlockers(batchId);
++    expect(blockers.length).toBe(1);
++    expect(blockers[0].domain).toBe('frommfamily.com');
++  });
++});
+diff --git a/src/tests/unit/review-logic.test.ts b/src/tests/unit/review-logic.test.ts
+index 6852325..de14f42 100644
+--- a/src/tests/unit/review-logic.test.ts
++++ b/src/tests/unit/review-logic.test.ts
+@@ -5,6 +5,7 @@
+ import { describe, expect, it } from 'vitest';
+ import {
+   applyQueueFilters,
++  countReviewableSelection,
+   distinctBrands,
+   distinctFamilies,
+   findNextQueuedItem,
+@@ -14,8 +15,11 @@ import {
+   hasActiveQueueFilters,
+   isReviewed,
+   itemDisplayName,
++  pruneQueueSelection,
+   reviewProgress,
++  selectAllVisible,
+   sortForReview,
++  toggleQueueSelection,
+   warningInfoFromDetail,
+   type ReviewQueueFilters,
+ } from '../../client/components/onboarding/review/review-logic';
+@@ -289,4 +293,27 @@ describe('display helpers', () => {
+     expect(isReviewed(b)).toBe(true);
+     expect(isReviewed(d)).toBe(true);
+   });
+-});
+\ No newline at end of file
++});
++describe('bulk review selection (epic #46 follow-up, phase 4)', () => {
++  it('toggleQueueSelection adds and removes order-stably', () => {
++    expect(toggleQueueSelection([], 'x')).toEqual(['x']);
++    expect(toggleQueueSelection(['x', 'y'], 'z')).toEqual(['x', 'y', 'z']);
++    expect(toggleQueueSelection(['x', 'y'], 'x')).toEqual(['y']);
++  });
++
++  it('selectAllVisible dedupes and prunes to the visible set', () => {
++    expect(selectAllVisible(['a', 'b', 'a'])).toEqual(['a', 'b']);
++  });
++
++  it('pruneQueueSelection drops ids that left the queue', () => {
++    expect(pruneQueueSelection(['a', 'b', 'c'], ['a', 'c'])).toEqual(['a', 'c']);
++    expect(pruneQueueSelection([], ['a'])).toEqual([]);
++  });
++
++  it('countReviewableSelection counts only unreviewed selected items', () => {
++    // a = unreviewed, b = reviewed, d = approved (from the shared fixtures)
++    expect(countReviewableSelection(['a', 'b', 'd'], [a, b, d])).toBe(1);
++    expect(countReviewableSelection(['b'], [a, b, d])).toBe(0);
++    expect(countReviewableSelection(['a', 'missing'], [a, b, d])).toBe(1);
++  });
++});
+diff --git a/src/tests/unit/source-discovery.test.ts b/src/tests/unit/source-discovery.test.ts
+index 39d11f5..5276cc2 100644
+--- a/src/tests/unit/source-discovery.test.ts
++++ b/src/tests/unit/source-discovery.test.ts
+@@ -91,7 +91,9 @@ describe('Source Discovery URL Scoring', () => {
+     };
+ 
+     const score = scoreResult(result, upc, name, brandHint, 'support.mywoof.com', knownBrandDomains);
+-    expect(score).toBeLessThan(0.6);
++    // Phase 6 (epic #46 follow-up) adds a +0.1 strong brand-domain boost
++    // ("woof" in "mywoof"); the support-subdomain penalty still dominates.
++    expect(score).toBeLessThan(0.7);
+   });
+ 
+   it('should ignore variant keywords in base matching and use them as tie-breakers', () => {
+diff --git a/vitest.config.ts b/vitest.config.ts
+index 83bab59..0bafb9d 100644
+--- a/vitest.config.ts
++++ b/vitest.config.ts
+@@ -235,6 +235,12 @@ export default defineConfig({
+       // Epic #46 follow-up discovery run-trace suite (bun:sqlite/bun:test —
+       // run under bun test via test:db)
+       'src/tests/unit/discovery-run-trace.test.ts',
++      // Epic #46 follow-up profile-blockers suite (bun:sqlite/bun:test —
++      // run under bun test via test:db)
++      'src/tests/unit/profile-blockers.test.ts',
++      // Epic #46 follow-up official-domain ranking (imports source-discovery,
++      // which pulls bun:sqlite modules — run under bun test via test:db)
++      'src/tests/unit/official-domain-ranking.test.ts',
+       // Epic #46 Phase 1/7/8 + telemetry DB suites (bun:sqlite — run under bun test via test:db)
+       'src/tests/unit/onboarding-work-state.test.ts',
+       'src/tests/unit/onboarding-review-state.test.ts',

@@ -37,3 +37,7 @@ storage/
 HANDOFF.md
 .handoff/
 pi-session-*.html
+
+# ── Parallel-session working docs (excess — never committed) ───────────────
+subagents-reports/
+.analysis/adr0017-review-bundle.md

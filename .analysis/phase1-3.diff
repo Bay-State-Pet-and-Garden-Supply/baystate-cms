@@ -1,0 +1,822 @@
+diff --git a/src/onboarding/normalization/brand.ts b/src/onboarding/normalization/brand.ts
+new file mode 100644
+index 0000000..3eb5302
+--- /dev/null
++++ b/src/onboarding/normalization/brand.ts
+@@ -0,0 +1,15 @@
++/**
++ * Conservative brand comparison normalization (epic #46 batch-analysis
++ * follow-up, GPT plan phase 3).
++ *
++ * Rules: trim, collapse internal whitespace, lowercase — for COMPARISON
++ * ONLY. No punctuation stripping, no fuzzy matching, no aliasing: distinct
++ * brand strings ("Wholesomes" vs "WholesomesFlavor") must STILL conflict so
++ * the operator decides. Raw values are never rewritten.
++ */
++export function normalizeBrandForComparison(value: string): string | null {
++  if (typeof value !== 'string') return null;
++  const trimmed = value.trim();
++  if (!trimmed) return null;
++  return trimmed.replace(/\s+/g, ' ').toLowerCase();
++}
+diff --git a/src/onboarding/normalization/identity.ts b/src/onboarding/normalization/identity.ts
+new file mode 100644
+index 0000000..6da36c5
+--- /dev/null
++++ b/src/onboarding/normalization/identity.ts
+@@ -0,0 +1,55 @@
++/**
++ * Central identity normalization for sourcing conflict classification
++ * (epic #46 batch-analysis follow-up, GPT plan).
++ *
++ * `normalizeIdentityValueForComparison(field, rawValue)` returns the
++ * canonical comparison string for a candidate value:
++ * - `weight` → pounds, two decimals (operator rule; NEVER the title/name)
++ * - `brand` → trimmed/collapsed/lowercased (comparison only)
++ * - `packCount` → unsigned integer canonical form
++ * - anything else → unchanged (caller falls back to its existing
++ *   case-insensitive comparison)
++ *
++ * Raw provider evidence is preserved everywhere; normalization only
++ * determines whether values AGREE. Values that fail normalization return
++ * status 'failed' and compare as their raw form (fail closed: a malformed
++ * value never silently matches a valid one).
++ */
++import { normalizeWeightToLbs } from './weight';
++import { normalizeBrandForComparison } from './brand';
++import { normalizePackCountForComparison } from './pack-count';
++
++/** Bump when normalization rules change (audit/explainability). */
++export const IDENTITY_NORMALIZATION_VERSION = 1;
++
++export interface NormalizedIdentityValue {
++  field: string;
++  rawValue: string;
++  comparisonValue: string;
++  status: 'normalized' | 'failed' | 'unchanged';
++}
++
++export function normalizeIdentityValueForComparison(field: string, rawValue: string): NormalizedIdentityValue {
++  switch (field) {
++    case 'weight': {
++      const normalized = normalizeWeightToLbs(rawValue);
++      return normalized
++        ? { field, rawValue, comparisonValue: normalized, status: 'normalized' }
++        : { field, rawValue, comparisonValue: rawValue, status: 'failed' };
++    }
++    case 'brand': {
++      const normalized = normalizeBrandForComparison(rawValue);
++      return normalized
++        ? { field, rawValue, comparisonValue: normalized, status: 'normalized' }
++        : { field, rawValue, comparisonValue: rawValue, status: 'failed' };
++    }
++    case 'packCount': {
++      const normalized = normalizePackCountForComparison(rawValue);
++      return normalized
++        ? { field, rawValue, comparisonValue: normalized, status: 'normalized' }
++        : { field, rawValue, comparisonValue: rawValue, status: 'failed' };
++    }
++    default:
++      return { field, rawValue, comparisonValue: rawValue, status: 'unchanged' };
++  }
++}
+diff --git a/src/onboarding/normalization/pack-count.ts b/src/onboarding/normalization/pack-count.ts
+new file mode 100644
+index 0000000..48f22f8
+--- /dev/null
++++ b/src/onboarding/normalization/pack-count.ts
+@@ -0,0 +1,17 @@
++/**
++ * Conservative pack-count comparison normalization (epic #46 batch-analysis
++ * follow-up, GPT plan phase 3).
++ *
++ * Accepts only unsigned integer strings; canonicalizes whitespace and
++ * leading zeroes for comparison. Everything else (decimals, ranges, units,
++ * text) fails closed — the existing conflict/manual path stands. `0` is
++ * returned as-is (it may mean unknown/missing and must never be silently
++ * equated with positive counts).
++ */
++export function normalizePackCountForComparison(value: string): string | null {
++  if (typeof value !== 'string') return null;
++  const trimmed = value.trim();
++  if (!trimmed) return null;
++  if (!/^[0-9]+$/.test(trimmed)) return null;
++  return String(parseInt(trimmed, 10));
++}
+diff --git a/src/onboarding/normalization/weight.ts b/src/onboarding/normalization/weight.ts
+new file mode 100644
+index 0000000..980c9d1
+--- /dev/null
++++ b/src/onboarding/normalization/weight.ts
+@@ -0,0 +1,79 @@
++/**
++ * Structured weight normalization (epic #46 batch-analysis follow-up).
++ *
++ * OPERATOR RULE (authoritative): the numerical weight identity field is
++ * ALWAYS pounds (Lbs) and is stored to exactly two decimal places. Every
++ * candidate value is converted to pounds and normalized before hard-conflict
++ * classification and before distributor-record materialization.
++ *
++ * Scope boundaries:
++ * - The product NAME/TITLE is NEVER normalized — "Butcher's Pup 16 oz" stays
++ *   exactly as supplied. Only the structured weight field is canonicalized.
++ * - Raw provider evidence is never rewritten; this module produces the
++ *   canonical comparison/materialization value.
++ * - Fail-closed: unparseable values return `null` and keep the existing
++ *   manual/conflict path — a false parse is worse than a manual conflict.
++ */
++const LB = 1;
++const OZ = 1 / 16;
++const G = 1 / 453.59237;
++const KG = 2.20462262185;
++
++/** Round half away from zero to two decimals (business rounding). */
++export function roundToTwoDecimals(pounds: number): string {
++  const sign = pounds < 0 ? -1 : 1;
++  const rounded = Math.round((Math.abs(pounds) + Number.EPSILON) * 100) / 100;
++  return (sign * rounded).toFixed(2);
++}
++
++export type WeightUnit = 'lb' | 'oz' | 'g' | 'kg' | 'unitless';
++
++export interface WeightNormalizationResult {
++  normalized: string;
++  unit: WeightUnit;
++  numericInput: number;
++  pounds: number;
++}
++
++const UNIT_FACTORS: Array<{ re: RegExp; unit: WeightUnit; factor: number }> = [
++  { re: /^(?:lbs?|pounds?|pound)$/i, unit: 'lb', factor: LB },
++  { re: /^(?:oz|ounce|ounces)$/i, unit: 'oz', factor: OZ },
++  { re: /^(?:g|gram|grams)$/i, unit: 'g', factor: G },
++  { re: /^(?:kg|kilogram|kilograms)$/i, unit: 'kg', factor: KG },
++];
++
++/** Strict scalar weight parse. Accepts unitless (assumed pounds) or a
++ *  recognized unit suffix. Rejects ranges, fractions, multipacks, text,
++ *  zero, and negatives. */
++export function parseWeightToLbs(value: string): WeightNormalizationResult | null {
++  if (typeof value !== 'string') return null;
++  const trimmed = value.trim().replace(/\s+/g, ' ');
++  if (!trimmed) return null;
++
++  const match = /^([0-9]+(?:\.[0-9]+)?|\.[0-9]+)\s*([a-zA-Z]*)$/.exec(trimmed);
++  if (!match) return null;
++
++  const numericInput = parseFloat(match[1]);
++  if (!Number.isFinite(numericInput) || numericInput <= 0) return null;
++
++  const unitRaw = match[2];
++  if (!unitRaw) {
++    // Unitless → pounds per operator rule.
++    return { normalized: roundToTwoDecimals(numericInput), unit: 'unitless', numericInput, pounds: numericInput };
++  }
++
++  for (const { re, unit, factor } of UNIT_FACTORS) {
++    if (re.test(unitRaw)) {
++      const pounds = numericInput * factor;
++      return { normalized: roundToTwoDecimals(pounds), unit, numericInput, pounds };
++    }
++  }
++  return null; // Unknown unit token → fail closed.
++}
++
++/** Canonical structured weight: pounds with exactly two decimals, no unit
++ *  suffix (the field IS pounds). Returns null when unparseable. */
++export function normalizeWeightToLbs(value: string): string | null {
++  const parsed = parseWeightToLbs(value);
++  return parsed ? parsed.normalized : null;
++}
+diff --git a/src/onboarding/sourcing-reconciler.ts b/src/onboarding/sourcing-reconciler.ts
+index 0db800a..6ca4140 100644
+--- a/src/onboarding/sourcing-reconciler.ts
++++ b/src/onboarding/sourcing-reconciler.ts
+@@ -8,6 +8,7 @@ import {
+   isUnknownVariantAxis,
+   normalizeDeclaredVariantAxis,
+ } from './sourcing/contracts';
++import { normalizeIdentityValueForComparison, IDENTITY_NORMALIZATION_VERSION } from './normalization/identity';
+ 
+ /**
+  * Lazy DB require (established pattern: `src/classification/catalog-evidence.ts`).
+@@ -201,7 +202,15 @@ export function evaluateDistributorEvidence(
+   const providerIds = Array.from(new Set(foundAttempts.map((a) => a.providerId)));
+ 
+   for (const [field, candidates] of candidatesByField.entries()) {
+-    const distinctValues = Array.from(new Set(candidates.map((c) => c.value.toLowerCase())));
++    // Epic #46 follow-up (operator weight rule + GPT plan): identity fields
++    // compare on CANONICAL values — weight in pounds to two decimals, brand
++    // case-folded, packCount integer-normalized. Raw provider evidence is
++    // untouched; values that fail normalization compare as-is (fail closed).
++    const comparisonValue = (c: EvaluationConflictCandidate): string => {
++      const normalized = normalizeIdentityValueForComparison(field, c.value);
++      return normalized.status === 'normalized' ? normalized.comparisonValue : c.value.toLowerCase();
++    };
++    const distinctValues = Array.from(new Set(candidates.map(comparisonValue)));
+ 
+     if (distinctValues.length > 1) {
+       const severity = isHardField(field) ? 'hard' : 'soft';
+@@ -222,6 +231,16 @@ export function evaluateDistributorEvidence(
+       conflicts.push({ field, severity, candidates });
+     } else if (candidates.length > 0) {
+       // Coherent value across providers contributes every agreeing attempt.
++      // (Epic #46 follow-up: log when raw values disagreed but canonical
++      // identity agreed — e.g. "0.0600 lb" vs "0.06 lb" — so suppressed
++      // conflicts are explainable.)
++      const rawDistinct = Array.from(new Set(candidates.map((c) => c.value.toLowerCase())));
++      if (rawDistinct.length > 1) {
++        warnings.push(
++          `Identity field '${field}' values agree after normalization (rule v${IDENTITY_NORMALIZATION_VERSION}): ` +
++            `${candidates.map((c) => `${c.providerId}=${c.value}`).join(', ')} → '${distinctValues[0]}'`,
++        );
++      }
+       for (const c of candidates) {
+         acceptedAttemptIds.add(c.attemptId);
+       }
+diff --git a/src/onboarding/sourcing/distributor-record-materializer.ts b/src/onboarding/sourcing/distributor-record-materializer.ts
+index 84c6951..97fc630 100644
+--- a/src/onboarding/sourcing/distributor-record-materializer.ts
++++ b/src/onboarding/sourcing/distributor-record-materializer.ts
+@@ -23,6 +23,39 @@ import {
+   type DistributorRecordProjection,
+   type DistributorRecordProjectionV2,
+ } from './distributor-record-projection';
++import { normalizeWeightToLbs } from '../normalization/weight';
++
++/**
++ * Canonical structured weight for materialization (epic #46 follow-up,
++ * operator rule): pounds, exactly two decimals. The product name/title is
++ * NEVER normalized. Unparseable weights fail closed → the raw value is
++ * preserved (audit) and the caller's validation surfaces the warning.
++ */
++export function canonicalMaterializedWeight(rawWeight: string | null): string | null {
++  if (rawWeight === null || rawWeight === '') return rawWeight;
++  return normalizeWeightToLbs(rawWeight) ?? rawWeight;
++}
++
++/**
++ * Legacy-format tolerance for the idempotency invariant (epic #46
++ * follow-up): rows materialized BEFORE weight canonicalization stored the
++ * raw provider string ("0.0600 lb"). They must still re-verify against the
++ * canonical builder output ("0.06") — weight-only divergence is accepted
++ * when the stored weight normalizes to the expected canonical pounds. All
++ * other keys must match byte-for-byte. Exported for tests.
++ */
++export function payloadsEquivalentAfterWeightNormalization(
++  stored: Record<string, unknown>,
++  expected: Record<string, unknown>,
++): boolean {
++  if (stored.weight === undefined || expected.weight === undefined) return false;
++  if (stored.weight === expected.weight) return false; // identical payloads take the main equality path
++  const normalized = normalizeWeightToLbs(String(stored.weight));
++  if (normalized === null || normalized !== expected.weight) return false;
++  const { weight: _storedWeight, ...storedRest } = stored;
++  const { weight: _expectedWeight, ...expectedRest } = expected;
++  return JSON.stringify(storedRest) === JSON.stringify(expectedRest);
++}
+ import { normalizeGtin } from './contracts';
+ import { SourcingDecisionV2Schema } from '../../shared/schemas/onboarding';
+ import { EvidenceAttemptSchema } from '../../shared/schemas/distributor-evidence';
+@@ -122,7 +155,7 @@ export function buildDistributorExtractionDataV1(
+     primaryImage: null,
+     additionalImages: [],
+     price: null,
+-    weight: p.weight,
++    weight: canonicalMaterializedWeight(p.weight),
+     dimensions: null,
+     seoFileName: null,
+     searchKeywords: null,
+@@ -202,7 +235,7 @@ function buildDistributorExtractionDataV2(
+     primaryImage: null,
+     additionalImages: [],
+     price: null,
+-    weight: p.weight,
++    weight: canonicalMaterializedWeight(p.weight),
+     dimensions: p.dimensions,
+     seoFileName: null,
+     searchKeywords: null,
+@@ -501,7 +534,8 @@ export function materializeDistributorRecordExtraction(
+         existing.sourcing_generation_id !== generation.id ||
+         existing.evidence_hash !== decision.evidenceHash ||
+         !sameSet(rowAcceptedIds, decision.acceptedEvidenceAttemptIds) ||
+-        JSON.stringify(storedData) !== JSON.stringify(expectedData);
++        (JSON.stringify(storedData) !== JSON.stringify(expectedData) &&
++          !payloadsEquivalentAfterWeightNormalization(storedData, expectedData));
+       if (rowDiverged) {
+         return {
+           ok: false as const,
+diff --git a/src/onboarding/sourcing/distributor-record-projection.ts b/src/onboarding/sourcing/distributor-record-projection.ts
+index e735226..d4bb6ab 100644
+--- a/src/onboarding/sourcing/distributor-record-projection.ts
++++ b/src/onboarding/sourcing/distributor-record-projection.ts
+@@ -9,6 +9,7 @@ import {
+   normalizeDeclaredVariantAxis,
+   isUnknownVariantAxis,
+ } from './contracts';
++import { normalizeIdentityValueForComparison } from '../normalization/identity';
+ 
+ /**
+  * Deterministic distributor-record projection (Amendment A).
+@@ -299,7 +300,6 @@ function buildProjectionCore(
+   input: DistributorRecordProjectionInput,
+   merchandising: boolean,
+ ): SourcingProjectionResultV2 {
+-  const version = merchandising ? PROJECTION_VERSION_V2 : PROJECTION_VERSION;
+   const warnings: string[] = [];
+   const reasons = new Set<SourcingProjectionReasonCode>();
+ 
+@@ -626,11 +626,20 @@ function buildProjectionCore(
+   }
+ 
+   // Hard-conflict check on identity-critical fields (post-resolution).
++  // Epic #46 follow-up (operator weight rule): identity fields compare on
++  // CANONICAL values — "16 oz" vs "1.0000 lb" agree as pounds "1.00" and
++  // must not block qualification. Values that fail normalization compare
++  // as raw (fail closed).
+   for (const field of allFields) {
+     const values = fieldValues.get(field) ?? [];
+     if (values.length <= 1) continue;
+-    const distinct = new Set(values.map((v) => v.toLowerCase()));
+-    if (distinct.size > 1 && isHardField(field)) {
++    const comparisonValues = new Set(
++      values.map((v) => {
++        const normalized = normalizeIdentityValueForComparison(field, v);
++        return normalized.status === 'normalized' ? normalized.comparisonValue : v.toLowerCase();
++      }),
++    );
++    if (comparisonValues.size > 1 && isHardField(field)) {
+       reasons.add('open_hard_conflict');
+       warnings.push(`Open hard conflict on identity field '${field}' — unresolved disagreement blocks qualification`);
+     }
+diff --git a/src/tests/unit/distributor-record-materializer.test.ts b/src/tests/unit/distributor-record-materializer.test.ts
+index ca8e3b8..38bb532 100644
+--- a/src/tests/unit/distributor-record-materializer.test.ts
++++ b/src/tests/unit/distributor-record-materializer.test.ts
+@@ -1,4 +1,5 @@
+ import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
++import fs from 'node:fs';
+ import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
+ import { runMigrations } from '../../db/migrations';
+ import { insertWorkspace } from '../../db/repositories/workspace-repo';
+@@ -26,7 +27,6 @@ import { SOURCING_ENTRY_POLICY_VERSION } from '../../onboarding/sourcing/entry-p
+ import {
+   buildDistributorRecordProjection,
+   buildDistributorRecordProjectionV1,
+-  type DistributorRecordProjection,
+ } from '../../onboarding/sourcing/distributor-record-projection';
+ import {
+   buildDistributorExtractionDataV1,
+@@ -34,6 +34,8 @@ import {
+ import {
+   materializeDistributorRecordExtraction,
+   DISTRIBUTOR_MATERIALIZATION_ERROR_CODES,
++  canonicalMaterializedWeight,
++  payloadsEquivalentAfterWeightNormalization,
+ } from '../../onboarding/sourcing/distributor-record-materializer';
+ import type { SourcingDecisionV2 } from '../../shared/schemas/onboarding';
+ import type { EvidenceAttempt } from '../../shared/schemas/distributor-evidence';
+@@ -50,7 +52,6 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+   const WORKSPACE = 'w1';
+   const FOREIGN_WS = 'w2';
+   const UPC = '012345678901';
+-  let batchId: string;
+   let itemId: string;
+   let generationId: string;
+ 
+@@ -80,7 +81,6 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+     } as Workspace);
+ 
+     const batch = createBatch({ workspaceId: WORKSPACE, name: 'B', fileName: 'b.csv', totalItems: 1 });
+-    batchId = batch.id;
+     const [item] = insertItems(
+       batch.id,
+       [{ upc: UPC, name: 'Pet Kibble', rowNumber: 1, stage: 'sourcing' }],
+@@ -215,7 +215,8 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+     const data = item?.extractionData as Record<string, unknown>;
+     expect(data?.title).toBe('Pet Kibble 5lb');
+     expect(data?.brand).toBe('Brand A');
+-    expect(data?.weight).toBe('10 lbs');
++    // Epic #46 follow-up (operator weight rule): canonical pounds, 2dp.
++    expect(data?.weight).toBe('10.00');
+     expect(data?.distributorSku).toBe('SKU-1');
+     expect(data?.manufacturerPartNumber).toBe('MPN-1');
+     // Amendment B (M5): merchandising-depth materialization.
+@@ -300,7 +301,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+   test('multiple agreeing providers qualify; all appear in provenance', () => {
+     const a1 = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
+     const a2 = makeFoundAttempt('unfi', { brand: 'Brand A', weight: '10 lbs' });
+-    const decision = routeQualified([a1, a2]);
++    routeQualified([a1, a2]);
+     claimForExtraction();
+ 
+     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+@@ -316,7 +317,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+   test('found + provider error: qualified record materializes, error attempt is not accepted', () => {
+     const att = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
+     makeFoundAttempt('unfi', {}, { outcome: 'source_error', errorCode: 'timeout' });
+-    const decision = routeQualified([att]);
++    routeQualified([att]);
+     claimForExtraction();
+ 
+     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+@@ -335,7 +336,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+     });
+     // Built-in axes normalize from identity attributes WITHOUT any connector
+     // declaration (size/count/packCount/flavor/formula are canonical).
+-    const decision = routeQualified([att]);
++    routeQualified([att]);
+     claimForExtraction();
+ 
+     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+@@ -352,7 +353,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+ 
+   test('idempotent retry: same generation/hash reuses the existing row, no divergent insert', () => {
+     const att = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
+-    const decision = routeQualified([att]);
++    routeQualified([att]);
+     claimForExtraction();
+ 
+     const first = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+@@ -858,7 +859,9 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+     if (!result.ok) return;
+     const item = findItemById(itemId);
+     const data = item?.extractionData as Record<string, unknown>;
+-    expect(data?.weight).toBe('11 lbs');
++    // Epic #46 follow-up (operator weight rule): structured weight is
++    // canonical pounds, two decimals — never the raw provider string.
++    expect(data?.weight).toBe('11.00');
+     const provenance = data?.distributorRecordProvenance as Record<string, unknown>;
+     expect(provenance?.evidenceHash).toBe(decision.evidenceHash);
+     expect(findItemById(itemId)?.stageStatus).toBe('completed');
+@@ -935,7 +938,7 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+     // SUPPLEMENT — structural guarantee: the module graph itself stays on the
+     // allowed import surface (db repos, shared schemas, sourcing/projection),
+     // and no network / machine-vision / DOM APIs appear anywhere in the body.
+-    const source = require('node:fs').readFileSync(
++    const source = fs.readFileSync(
+       'src/onboarding/sourcing/distributor-record-materializer.ts',
+       'utf8',
+     );
+@@ -950,6 +953,9 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+       const allowed =
+         from.startsWith('../../db/') ||
+         from.startsWith('../../shared/') ||
++        // Pure, dependency-free identity normalization (epic #46 follow-up):
++        // no DB, network, or model machinery — safe for the boundary.
++        from.startsWith('../normalization/') ||
+         from.startsWith('./');
+       expect(allowed, `disallowed import source in materializer: ${from}`).toBe(true);
+     }
+@@ -957,6 +963,31 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
+       expect(source).not.toContain(needle);
+     }
+   });
++describe('canonical structured weight (epic #46 follow-up, operator rule)', () => {
++  test('canonicalMaterializedWeight converts to pounds with two decimals', () => {
++    expect(canonicalMaterializedWeight('16 oz')).toBe('1.00');
++    expect(canonicalMaterializedWeight('0.0600 lb')).toBe('0.06');
++    expect(canonicalMaterializedWeight('10 lbs')).toBe('10.00');
++    expect(canonicalMaterializedWeight('0.25')).toBe('0.25');
++  });
++  test('null/empty pass through; malformed fails closed to the raw value (never silent bad canonical)', () => {
++    expect(canonicalMaterializedWeight(null)).toBeNull();
++    expect(canonicalMaterializedWeight('')).toBe('');
++    expect(canonicalMaterializedWeight('approx 1 lb')).toBe('approx 1 lb');
++  });
++  test('payloadsEquivalentAfterWeightNormalization accepts legacy raw weight formats only', () => {
++    const expected = { title: 'Pet Kibble', weight: '1.00', brand: 'Brand A' };
++    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: '1.0000 lb' }, expected)).toBe(true);
++    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: '16 oz' }, expected)).toBe(true);
++    // Identical payloads take the main equality path.
++    expect(payloadsEquivalentAfterWeightNormalization(expected, expected)).toBe(false);
++    // Real divergence anywhere else is NOT tolerated.
++    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: '1.00', brand: 'Brand B' }, expected)).toBe(false);
++    // Unparseable stored weight is never silently equivalent.
++    expect(payloadsEquivalentAfterWeightNormalization({ ...expected, weight: 'approx 1 lb' }, expected)).toBe(false);
++  });
++});
++
+ describe('Distributor-record materializer v1/v2 authority dispatch (Amendment B, M5)', () => {
+   test('a pre-deployment v1 decision fails closed with projection_version_mismatch (no silent upgrade)', () => {
+     const att = makeFoundAttempt('phillips', { brand: 'Brand A', description: 'Copy' });
+@@ -1106,7 +1137,7 @@ describe('Distributor-record materializer v1/v2 authority dispatch (Amendment B,
+       features: ['grain free'],
+       images: ['https://cdn.example.com/b.jpg'],
+     });
+-    const decision = routeQualified([att1, att2]);
++    routeQualified([att1, att2]);
+     claimForExtraction();
+ 
+     const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+diff --git a/src/tests/unit/onboarding-automation.test.ts b/src/tests/unit/onboarding-automation.test.ts
+index 09959dd..13b18bd 100644
+--- a/src/tests/unit/onboarding-automation.test.ts
++++ b/src/tests/unit/onboarding-automation.test.ts
+@@ -598,7 +598,6 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
+     // (waiting) cohort.
+     refreshCandidateCohorts(workspaceId, batch.id);
+     expect(liveCohortForMember(batch.id, members[0])?.status).toBe('waiting');
+-
+     // Phase 2: every member terminally fails (missing profile) → the family
+     // is dead: superseded (not eternal 'waiting'), reason preserved for
+     // audit, and never re-created by subsequent refreshes.
+@@ -640,9 +639,9 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
+     refreshCandidateCohorts(workspaceId, batch.id);
+ 
+     const recovered = liveCohortForMember(batch.id, members[0]);
+-    expect(recovered).toBeDefined();
+-    expect(recovered.status).toBe('waiting');
+-    expect(recovered.blocked_reason).toContain('Member failed');
++    expect(recovered).not.toBeNull();
++    expect(recovered!.status).toBe('waiting');
++    expect(recovered!.blocked_reason).toContain('Member failed');
+   });
+ 
+   test('mixed family (one failed, one in progress) stays waiting with the blocked reason', async () => {
+@@ -654,8 +653,9 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
+     refreshCandidateCohorts(workspaceId, batch.id);
+ 
+     const live = liveCohortForMember(batch.id, members[0]);
+-    expect(live.status).toBe('waiting');
+-    expect(live.blocked_reason).toContain('Member failed');
++    expect(live).not.toBeNull();
++    expect(live!.status).toBe('waiting');
++    expect(live!.blocked_reason).toContain('Member failed');
+   });
+ 
+   test('family barrier never holds singletons or ready-cohort members', async () => {
+diff --git a/src/tests/unit/onboarding-normalization.test.ts b/src/tests/unit/onboarding-normalization.test.ts
+new file mode 100644
+index 0000000..6a13815
+--- /dev/null
++++ b/src/tests/unit/onboarding-normalization.test.ts
+@@ -0,0 +1,144 @@
++/**
++ * Identity normalization (epic #46 batch-analysis follow-up).
++ *
++ * The operator rule: the structured weight field is ALWAYS pounds, stored to
++ * exactly two decimals, converted from any accepted unit — and NEVER applied
++ * to the product name/title. Brand + packCount normalize for comparison only.
++ */
++import { describe, test, expect } from 'vitest';
++import { normalizeWeightToLbs, parseWeightToLbs, roundToTwoDecimals } from '../../onboarding/normalization/weight';
++import { normalizeBrandForComparison } from '../../onboarding/normalization/brand';
++import { normalizePackCountForComparison } from '../../onboarding/normalization/pack-count';
++import { normalizeIdentityValueForComparison } from '../../onboarding/normalization/identity';
++
++describe('normalizeWeightToLbs — canonical pounds, two decimals', () => {
++  const cases: Array<[string, string]> = [
++    // Live-batch formats
++    ['0.0600 lb', '0.06'],
++    ['0.06 lb', '0.06'],
++    ['0.1700 lb', '0.17'],
++    ['0.17 lb', '0.17'],
++    ['0.3771 lb', '0.38'],
++    ['0.25', '0.25'],
++    ['0.01 lb', '0.01'],
++    ['0.1000 lb', '0.10'],
++    ['0.2080 lb', '0.21'],
++    ['0.2800 lb', '0.28'],
++    ['0.4330 lb', '0.43'],
++    ['0.5116 lb', '0.51'],
++    ['0.4380 lb', '0.44'],
++    ['0.1100 lb', '0.11'],
++    ['0.4100 lb', '0.41'],
++    ['0.4200 lb', '0.42'],
++    ['0.3900 lb', '0.39'],
++    ['0.3600 lb', '0.36'],
++    ['0.4400 lb', '0.44'],
++    ['0.3100 lb', '0.31'],
++    ['0.3 lb', '0.30'],
++    ['0.4 lb', '0.40'],
++    // Unit conversions
++    ['16 oz', '1.00'],
++    ['16 ounce', '1.00'],
++    ['16 ounces', '1.00'],
++    ['453.59237 g', '1.00'],
++    ['0.45359237 kg', '1.00'],
++    ['1 kg', '2.20'],
++    // Case/whitespace tolerance
++    ['1 LB', '1.00'],
++    ['1 lbs', '1.00'],
++    ['1 pound', '1.00'],
++    ['1 pounds', '1.00'],
++    ['  0.0600   lb  ', '0.06'],
++    // Unitless → pounds (operator rule)
++    ['1', '1.00'],
++    ['1.5', '1.50'],
++    ['.5 lb', '0.50'],
++  ];
++  for (const [input, expected] of cases) {
++    test(`${JSON.stringify(input)} → ${expected}`, () => {
++      expect(normalizeWeightToLbs(input)).toBe(expected);
++    });
++  }
++});
++
++describe('normalizeWeightToLbs — fail closed on unparseable values', () => {
++  const rejects = ['', ' ', 'unknown', 'N/A', 'varies', 'approx 1 lb', 'about 1 lb', '1-2 lb', '1 to 2 lb', '1/2 lb', '½ lb', '6 x 4 oz', 'case of 12', '12 ct', 'lb', 'oz', '-1 lb', '0 lb', '0', 'NaN', 'Infinity', '1,000 g', '1,5 lb'];
++  for (const input of rejects) {
++    test(`${JSON.stringify(input)} → null`, () => {
++      expect(normalizeWeightToLbs(input)).toBeNull();
++    });
++  }
++});
++
++test('roundToTwoDecimals rounds half away from zero', () => {
++  expect(roundToTwoDecimals(0.3771)).toBe('0.38');
++  expect(roundToTwoDecimals(0.375)).toBe('0.38');
++  expect(roundToTwoDecimals(1.004)).toBe('1.00');
++  expect(roundToTwoDecimals(2.205)).toBe('2.21');
++});
++
++test('parseWeightToLbs exposes unit + numeric details for diagnostics', () => {
++  const parsed = parseWeightToLbs('16 oz')!;
++  expect(parsed.unit).toBe('oz');
++  expect(parsed.numericInput).toBe(16);
++  expect(parsed.pounds).toBeCloseTo(1, 5);
++  expect(parsed.normalized).toBe('1.00');
++  expect(parseWeightToLbs('0.25')!.unit).toBe('unitless');
++});
++
++describe('normalizeBrandForComparison — case/whitespace only, never merges distinct brands', () => {
++  test('casing + whitespace collapse for comparison', () => {
++    expect(normalizeBrandForComparison('WHOLESOMES')).toBe('wholesomes');
++    expect(normalizeBrandForComparison('Wholesomes')).toBe('wholesomes');
++    expect(normalizeBrandForComparison('  Whole   Somes  ')).toBe('whole somes');
++  });
++  test('distinct strings stay distinct (no fuzzy matching, no aliasing)', () => {
++    expect(normalizeBrandForComparison('WholesomesFlavor')).toBe('wholesomesflavor');
++    expect(normalizeBrandForComparison('Wholesomes') !== normalizeBrandForComparison('WholesomesFlavor')).toBe(true);
++  });
++  test('blank fails closed', () => {
++    expect(normalizeBrandForComparison('')).toBeNull();
++    expect(normalizeBrandForComparison('   ')).toBeNull();
++  });
++});
++
++describe('normalizePackCountForComparison — unsigned integers only', () => {
++  test('whitespace and leading zeroes canonicalize', () => {
++    expect(normalizePackCountForComparison(' 1 ')).toBe('1');
++    expect(normalizePackCountForComparison('01')).toBe('1');
++    expect(normalizePackCountForComparison('12')).toBe('12');
++  });
++  test('non-integer shapes fail closed', () => {
++    expect(normalizePackCountForComparison('12 ct')).toBeNull();
++    expect(normalizePackCountForComparison('1.0')).toBeNull();
++    expect(normalizePackCountForComparison('1-2')).toBeNull();
++  });
++  test('zero is preserved (never silently equated with positive counts)', () => {
++    expect(normalizePackCountForComparison('0')).toBe('0');
++  });
++});
++
++describe('normalizeIdentityValueForComparison — field routing', () => {
++  test('weight normalizes to canonical pounds', () => {
++    const r = normalizeIdentityValueForComparison('weight', '0.0600 lb');
++    expect(r.status).toBe('normalized');
++    expect(r.comparisonValue).toBe('0.06');
++    expect(r.rawValue).toBe('0.0600 lb');
++  });
++  test('brand normalizes for comparison', () => {
++    expect(normalizeIdentityValueForComparison('brand', 'WHOLESOMES').comparisonValue).toBe('wholesomes');
++  });
++  test('packCount normalizes for comparison', () => {
++    expect(normalizeIdentityValueForComparison('packCount', '01').comparisonValue).toBe('1');
++  });
++  test('unknown fields pass through unchanged (existing lowercase comparison)', () => {
++    const r = normalizeIdentityValueForComparison('flavor', 'Chicken');
++    expect(r.status).toBe('unchanged');
++    expect(r.comparisonValue).toBe('Chicken');
++  });
++  test('malformed weight fails closed: compares as raw, never silently matches', () => {
++    const r = normalizeIdentityValueForComparison('weight', 'approx 1 lb');
++    expect(r.status).toBe('failed');
++    expect(r.comparisonValue).toBe('approx 1 lb');
++  });
++});
+diff --git a/src/tests/unit/sourcing-default-on-e2e.test.ts b/src/tests/unit/sourcing-default-on-e2e.test.ts
+index 3d2d31c..7e49c7f 100644
+--- a/src/tests/unit/sourcing-default-on-e2e.test.ts
++++ b/src/tests/unit/sourcing-default-on-e2e.test.ts
+@@ -469,6 +469,33 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
+     expect(findItemById(item.id)?.stageStatus).toBe('completed');
+   });
+ 
++  // 7b. Equivalent weight formatting/units across providers → NO conflict
++  // (operator weight rule + GPT plan): the item qualifies, the structured
++  // weight materializes as canonical pounds (2dp), and the NAME keeps its
++  // original units.
++  test('7b. equivalent weights (16 oz vs 1.0000 lb) → no conflict, canonical weight, name untouched', async () => {
++    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
++    const { item } = makeItem('012345678906', "Butcher's Pup 16 oz");
++    const gen = startSourcingGeneration(item.id, 'automatic_policy');
++    seedQualified(item.id, item.upc, gen.id, 'phillips', { name: "Butcher's Pup 16 oz", weight: '16 oz' });
++    seedQualified(item.id, item.upc, gen.id, 'bci', { name: "Butcher's Pup 16 oz", weight: '1.0000 lb' });
++
++    const worker = fixtureWorker(workspaceId, tempDir);
++    await settle(worker); // Sourcing: qualified — formatting disagreement is NOT a conflict
++    const routed = findItemById(item.id);
++    expect(routed?.stage).toBe('extraction');
++    expect(routed?.stageStatus).toBe('pending');
++    expect(routed?.sourcingDecision?.route).toBe('distributor_record_to_extraction');
++    expect(routed?.sourcingDecision?.conflicts).toEqual([]);
++
++    await settle(worker); // Extraction materializes
++    const done = findItemById(item.id);
++    expect(done?.stageStatus).toBe('completed');
++    expect(done?.extractionData?.weight).toBe('1.00');
++    // The operator rule: NEVER normalize the name/title.
++    expect(done?.extractionData?.title).toBe("Butcher's Pup 16 oz");
++  });
++
+   // 7. Two agreeing providers → both accepted → extraction.
+   test('7. two agreeing providers: both accepted, qualified, route to Extraction', async () => {
+     overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
+diff --git a/src/tests/unit/sourcing-reconciler.test.ts b/src/tests/unit/sourcing-reconciler.test.ts
+index e9fa0f3..c51e932 100644
+--- a/src/tests/unit/sourcing-reconciler.test.ts
++++ b/src/tests/unit/sourcing-reconciler.test.ts
+@@ -90,6 +90,81 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
+     expect(conflicts[0].candidates.length).toBe(2);
+   });
+ 
++  // Epic #46 follow-up (operator weight rule): "0.0600 lb" vs "0.06 lb" are
++  // the SAME pounds value — formatting-only disagreement must not create a
++  // hard conflict.
++  test('equivalent weight formatting (0.0600 lb vs 0.06 lb) is NOT a conflict', async () => {
++    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '0.0600 lb' });
++    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '0.06 lb' });
++
++    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
++
++    expect(result.hasHardIdentityConflict).toBe(false);
++    expect(result.hardConflictCount).toBe(0);
++    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
++    expect(listConflictsForItem(itemId)).toEqual([]);
++    // Suppression is EXPLAINABLE: the warning records the canonical agreement.
++    expect(result.warnings.some((w) => w.includes('agree after normalization'))).toBe(true);
++  });
++
++  test('equivalent weight units (16 oz vs 1.0000 lb) are NOT a conflict', async () => {
++    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '16 oz' });
++    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '1.0000 lb' });
++
++    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
++
++    expect(result.hasHardIdentityConflict).toBe(false);
++    expect(result.hardConflictCount).toBe(0);
++    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
++    expect(listConflictsForItem(itemId)).toEqual([]);
++  });
++
++  test('rounding-equivalent weights (0.3771 lb vs 0.38 lb) are NOT a conflict', async () => {
++    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '0.3771 lb' });
++    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '0.38 lb' });
++
++    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
++
++    expect(result.hasHardIdentityConflict).toBe(false);
++    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
++  });
++
++  test('true weight mismatch still produces a hard conflict', async () => {
++    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '0.25 lb' });
++    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '0.50 lb' });
++
++    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
++
++    expect(result.hasHardIdentityConflict).toBe(true);
++    expect(result.hardConflictCount).toBe(1);
++    expect(result.acceptedAttemptIds).toEqual([]);
++  });
++
++  test('malformed weight fails closed: no auto-resolution against a valid value', async () => {
++    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: 'approx 1 lb' });
++    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '1.00 lb' });
++
++    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
++
++    // Fail closed: the malformed value compares as its raw form → conflict stands.
++    expect(result.hasHardIdentityConflict).toBe(true);
++    expect(listConflictsForItem(itemId).length).toBe(1);
++  });
++
++  test('brand casing-only disagreement is NOT a conflict; distinct brands still are', async () => {
++    const caseA = makeAttempt('c1', 'phillips', { upc: '012345678905', brand: 'WHOLESOMES', weight: '5 lb' });
++    const caseB = makeAttempt('c2', 'bci', { upc: '012345678905', brand: 'Wholesomes', weight: '5 lb' });
++    const caseResult = await reconcileDistributorEvidence(itemId, [caseA, caseB], generationId);
++    expect(caseResult.hasHardIdentityConflict).toBe(false);
++    expect(caseResult.acceptedAttemptIds.sort()).toEqual(['c1', 'c2']);
++
++    const distinctA = makeAttempt('d1', 'phillips', { upc: '012345678905', brand: 'Wholesomes', weight: '5 lb' });
++    const distinctB = makeAttempt('d2', 'bci', { upc: '012345678905', brand: 'WholesomesFlavor', weight: '5 lb' });
++    const distinctResult = await reconcileDistributorEvidence(itemId, [distinctA, distinctB], generationId);
++    expect(distinctResult.hasHardIdentityConflict).toBe(true);
++    expect(distinctResult.acceptedAttemptIds).toEqual([]);
++  });
++
+   test('soft copy disagreement persists a soft conflict but never blocks acceptance', async () => {
+     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', description: 'Chicken recipe' });
+     const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', description: 'Chicken & rice recipe' });
