@@ -76,8 +76,8 @@ export type PageAssignmentPolicyV2 = z.infer<typeof PageAssignmentPolicyV2Schema
  * v4 hierarchy node (bay-state-v4). SEMANTICALLY RAGGED depth (ChatGPT v4
  * review): L1 department roots (parentId null, classifiable false), browse
  * nodes (species/dimension: dog, cat, pet-health-wellness) and family nodes
- * (dog-food, cat-food, wild-bird) — all classifiable false — plus 73
- * classifiable leaf nodes (one per v3 type).
+ * (dog-food, cat-food, wild-bird, fish) — all classifiable false — plus 74
+ * classifiable leaf nodes (73 migrated v3 types plus native fish-food).
  */
 export const V4HierarchyNodeSchema = z.object({
   id: ClassificationSlugSchema,
@@ -198,6 +198,7 @@ export const V4ManifestSchema = z.object({
     nodes: z.number().int(),
     departments: z.number().int(),
     types: z.number().int(),
+    nativeLeaves: z.number().int().nonnegative(),
     attributes: z.number().int(),
     facetProfiles: z.number().int(),
     pages: z.number().int(),
@@ -834,6 +835,59 @@ const V4_RELEASE_FILES = [
  * Parse a v4 envelope file through a V4 schema; null when the file is missing
  * or fails schema validation (the caller adds the finding once).
  */
+function computeEffectiveFacetDescriptor(
+  attr: ProductAttributeConfigV2 | undefined,
+  cardinality: string,
+  facetOrder: number,
+): string {
+  const kind = attr?.exportDisposition?.kind;
+  const valueMode = attr?.valueMode ?? 'freeText';
+  const controlType = valueMode === 'measured' ? 'range' : valueMode === 'controlled' ? 'select' : 'text';
+  return JSON.stringify({
+    attributeId: attr?.id ?? 'UNKNOWN',
+    facetEnabled: kind === 'shopsite',
+    searchIndexable: kind === 'shopsite',
+    facetOrder,
+    valueSortMode: 'alphabetical',
+    displayLabel: attr?.name ?? 'UNKNOWN',
+    controlType,
+    facetSelection: cardinality === 'multiple' ? 'multi' : 'single',
+    multiValueOperator: 'or',
+  });
+}
+
+/** Recompute the v3-side fingerprint from immutable sibling release inputs. */
+function computeV3ProfileFingerprint(
+  profile: AttributeProfileConfigV2,
+  attributes: ProductAttributeConfigV2[],
+): string {
+  const parts = profile.attributes
+    .map(attribute => {
+      const attr = attributes.find(candidate => candidate.id === attribute.attributeId);
+      const behavior = attr
+        ? JSON.stringify({
+            valueMode: attr.valueMode,
+            canonicalUnit: attr.canonicalUnit ?? null,
+            allowedValues: [...(attr.allowedValues ?? [])].sort(),
+            valueAliases: [...(attr.valueAliases ?? [])].sort(),
+            isUniversal: attr.isUniversal ?? false,
+            isClaim: attr.isClaim ?? false,
+            isCompositionAttribute: attr.isCompositionAttribute ?? false,
+            visualEvidenceEligibility: attr.visualEvidenceEligibility ?? null,
+            group: attr.group ?? null,
+            exportKind: attr.exportDisposition?.kind ?? null,
+            exportField: attr.exportDisposition?.kind === 'shopsite' ? attr.exportDisposition.catalogField : null,
+          })
+        : 'MISSING';
+      const facetOrder = profile.attributes.findIndex(candidate => candidate.attributeId === attribute.attributeId);
+      const facet = computeEffectiveFacetDescriptor(attr, attribute.cardinality, facetOrder);
+      return `${attribute.attributeId}|req:${attribute.required ? 1 : 0}|card:${attribute.cardinality ?? 'single'}|${behavior}|facet:${facet}`;
+    })
+    .sort()
+    .join(';');
+  return crypto.createHash('sha256').update(parts).digest('hex').slice(0, 24);
+}
+
 function parseV4Envelope<T extends { entries: unknown[]; bundleOrigin: unknown }>(
   raw: unknown,
   schema: { safeParse(v: unknown): { success: true; data: T } | { success: false } },
@@ -1157,6 +1211,41 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
     }
   }
 
+  // ── Rule 5d: independently recompute v3 profile fingerprints ────────────
+  // Stored fingerprints are claims emitted by the builder. Recompute the
+  // source-side value from the immutable v3 sibling release so a consistently
+  // wrong v3Fingerprint/v4Fingerprint pair cannot pass Rule 5c.
+  {
+    const v3DirForProfiles = path.resolve(path.dirname(dir), 'bay-state-v3');
+    const v3ProfilesFile = path.join(v3DirForProfiles, 'attribute-profiles.json');
+    const v3AttributesFile = path.join(v3DirForProfiles, 'attributes.json');
+    if (!fs.existsSync(v3ProfilesFile) || !fs.existsSync(v3AttributesFile)) {
+      fail('v3_profile_fingerprint_source_missing', 'Cannot independently recompute profile fingerprints: v3 attributes.json or attribute-profiles.json is missing.');
+    } else {
+      try {
+        const parsedProfiles = AttributeProfilesFileV2Schema.safeParse(JSON.parse(fs.readFileSync(v3ProfilesFile, 'utf8')));
+        const parsedAttributes = AttributesFileV2Schema.safeParse(JSON.parse(fs.readFileSync(v3AttributesFile, 'utf8')));
+        if (!parsedProfiles.success || !parsedAttributes.success) {
+          fail('v3_profile_fingerprint_source_invalid', 'Cannot independently recompute profile fingerprints: v3 source files failed schema validation.');
+        } else {
+          const mappingsByV3Id = new Map(
+            legacyMappings.filter(m => m.kind === 'profile_map').map(m => [m.v3ProfileId, m]),
+          );
+          for (const profile of parsedProfiles.data.entries) {
+            const mapping = mappingsByV3Id.get(profile.id);
+            if (!mapping) continue; // Rule 5c reports the missing map.
+            const recomputed = computeV3ProfileFingerprint(profile, parsedAttributes.data.entries);
+            if (mapping.v3Fingerprint !== recomputed) {
+              fail('profile_v3_fingerprint_untrusted', `profile_map "${profile.id}" v3Fingerprint does not match independently recomputed source behavior (${mapping.v3Fingerprint} vs ${recomputed}).`);
+            }
+          }
+        }
+      } catch (err) {
+        fail('v3_profile_fingerprint_source_read_error', `Cannot independently recompute profile fingerprints: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
   // ── Rule 6: leaf bijection with v3 product-types.json ────────────────────
   {
     const leafNodes = hierarchy.filter(n => n.classifiable);
@@ -1308,6 +1397,7 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
         nodes: hierarchy.length,
         departments: hierarchy.filter(n => n.parentId === null).length,
         types: hierarchy.filter(n => n.classifiable).length,
+        nativeLeaves: hierarchy.filter(n => n.classifiable && n.derivation === 'type_native').length,
         attributes: attributes.length,
         facetProfiles: facetProfiles.length,
         pages: pageProjections.length,
@@ -1392,13 +1482,10 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
     }
   }
 
-  // ── Rule 10: species-safety cross-check (best effort) ────────────────────
-  // The v4 release does not yet carry per-node species metadata, so a strict
-  // species-safety verification is not assertable from the release data alone.
-  // We verify the structural prerequisite instead: the leaf→group assignment
-  // is bijective (Rule 6), so no v3 type can be classified under two different
-  // species groups. When species metadata is added to hierarchy nodes in a
-  // future release, a per-node species-safety rule must be enforced here.
+  // ── Rule 10: species-safety cross-check ──────────────────────────────────
+  // Scope metadata is part of the v4 hierarchy contract. The legacy-type
+  // bijection remains a second structural safeguard against cross-species
+  // duplication.
   {
     const dogGroup = hierarchy.find(n => n.id === 'dog');
     const catGroup = hierarchy.find(n => n.id === 'cat');
@@ -1420,8 +1507,8 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   // family).
   {
     const nodeByIdMap = new Map(hierarchy.map(n => [n.id, n]));
-    const declaredScope = (n: V4HierarchyNode): string | null => n.scope?.animalDomain ?? null;
-    const effectiveScope = (n: V4HierarchyNode): string | null => {
+    const declaredScope = (n: V4HierarchyNode | undefined): string | null => n?.scope?.animalDomain ?? null;
+    const effectiveScope = (n: V4HierarchyNode | undefined): string | null => {
       let cursor: V4HierarchyNode | undefined = n;
       const visited = new Set<string>();
       while (cursor) {
@@ -1435,9 +1522,10 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
     };
     for (const node of hierarchy) {
       const own = declaredScope(node);
-      const inherited = effectiveScope(node);
-      if (own && inherited && own !== inherited) {
-        fail('scope_conflict', `Node "${node.id}" declares scope ${own} but inherits ${inherited} from its ancestor.`);
+      const ancestorScope = node.parentId ? effectiveScope(nodeByIdMap.get(node.parentId)!) : null;
+      const inherited = own ?? ancestorScope;
+      if (own && ancestorScope && own !== ancestorScope) {
+        fail('scope_conflict', `Node "${node.id}" declares scope ${own} but inherits ${ancestorScope} from its ancestor.`);
       }
       // Classifiable leaves must not escape their branch's species.
       if (node.classifiable && inherited === 'dog' && !isDescendantOf(node.id, 'dog', nodeByIdMap)) {

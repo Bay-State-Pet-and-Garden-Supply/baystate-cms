@@ -193,6 +193,17 @@ describe('negative cases (temp copies)', () => {
     expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
   });
 
+  it('rejects a descendant scope that contradicts its ancestor', () => {
+    const dir = freshCopy();
+    const hierarchy = readJson(dir, 'hierarchy.json');
+    const dogLeaf = hierarchy.entries.find((e: any) => e.id === 'dog-food-dry');
+    dogLeaf.scope = { animalDomain: 'cat' };
+    writeJson(dir, 'hierarchy.json', hierarchy);
+    const report = validateTaxonomyReleaseV4(dir);
+    expectFinding(report, 'scope_conflict');
+    expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
+  });
+
   it('rejects a facet profile referencing an unknown attribute', () => {
     const dir = freshCopy();
     const profiles = readJson(dir, 'facet-profiles.json');
@@ -344,6 +355,23 @@ describe('negative cases (temp copies)', () => {
     writeJson(dir, 'legacy-mappings.json', legacy);
     const report = validateTaxonomyReleaseV4(dir);
     expectFinding(report, 'profile_behavior_mismatch');
+    expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('rejects self-consistent but independently incorrect profile fingerprints', () => {
+    const dir = freshCopy();
+    const legacy = readJson(dir, 'legacy-mappings.json');
+    const profiles = readJson(dir, 'facet-profiles.json');
+    const map = legacy.entries.find((e: any) => e.kind === 'profile_map');
+    const target = profiles.entries.find((e: any) => e.id === map.v4ProfileId);
+    const bogus = 'b'.repeat(24);
+    map.v3Fingerprint = bogus;
+    map.v4Fingerprint = bogus;
+    target.behaviorFingerprint = bogus;
+    writeJson(dir, 'legacy-mappings.json', legacy);
+    writeJson(dir, 'facet-profiles.json', profiles);
+    const report = validateTaxonomyReleaseV4(dir);
+    expectFinding(report, 'profile_v3_fingerprint_untrusted');
     expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
   });
 
