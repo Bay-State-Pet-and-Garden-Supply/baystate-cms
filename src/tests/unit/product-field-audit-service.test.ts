@@ -179,6 +179,53 @@ describe('ProductField Audit Service', () => {
     expect(bounded.transportTruncated).toBe(true);
   });
 
+  it('rechecks the byte ceiling after adding transportTruncated at the boundary', () => {
+    const budget = 28 * 1024;
+    const makeResult = (length: number) => ({
+      field: 'ProductField99',
+      proposalCount: 1,
+      affectedProductCount: 1,
+      proposals: [{
+        id: 'boundary',
+        field: 'ProductField99',
+        oldValue: 'x'.repeat(length),
+        newValue: 'y',
+        affectedSkus: ['SKU-1', 'SKU-2', 'SKU-3', 'SKU-4', 'SKU-5', 'SKU-6'],
+        affectedCount: 1,
+        reason: 'boundary',
+        confidence: 0.9,
+        safeAutoApply: false,
+      }],
+    });
+    const fiveSkuResult = (length: number) => ({
+      ...makeResult(length),
+      proposals: [{ ...makeResult(length).proposals[0], affectedSkus: ['SKU-1', 'SKU-2', 'SKU-3', 'SKU-4', 'SKU-5'] }],
+    });
+
+    let low = 1;
+    let high = 30_000;
+    let boundaryLength = -1;
+    while (low <= high) {
+      const length = Math.floor((low + high) / 2);
+      const afterMarker = Buffer.byteLength(JSON.stringify({ ...fiveSkuResult(length), transportTruncated: true }), 'utf8');
+      if (afterMarker > budget) {
+        boundaryLength = length;
+        high = length - 1;
+      } else {
+        low = length + 1;
+      }
+    }
+    expect(boundaryLength).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(fiveSkuResult(boundaryLength)), 'utf8')).toBeLessThanOrEqual(budget);
+
+    const bounded = boundNormalizationProposalResultForTransport(makeResult(boundaryLength));
+    expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(budget);
+    expect(bounded.proposalCount).toBe(1);
+    expect(bounded.affectedProductCount).toBe(1);
+    expect(bounded.transportTruncated).toBe(true);
+    expect(bounded.proposals).toEqual([]);
+  });
+
   it('should cap groups and keep result under the byte budget for large datasets', () => {
     const now = new Date().toISOString();
     // Insert 500 unique singleton values into a different field to avoid

@@ -439,6 +439,11 @@ export function boundNormalizationProposalResultForTransport(result: Normalizati
     bounded.proposals = [];
     truncated = true;
   }
+  // Set the marker before the final check: the marker itself contributes to
+  // the transport size and must be included in the hard-limit decision.
   if (truncated) bounded.transportTruncated = true;
+  if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > AUDIT_RESULT_BYTE_BUDGET) {
+    bounded.proposals = [];
+  }
   return bounded;
 }
