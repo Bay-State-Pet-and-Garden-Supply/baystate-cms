@@ -29,6 +29,7 @@ export * from './budgets';
 export * from './retention';
 export * from './tools';
 export * from './assets';
+export * from './specialists';
 
 export * from './evaluation/gold';
 export * from './evaluation/metrics';
