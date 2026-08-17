@@ -17,6 +17,7 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import {
+  ArtifactProvenanceSchema,
   SpecialistArtifactSchemaRegistry,
   finalizeSpecialistArtifact,
   isSchemaVersionCompatible,
@@ -242,6 +243,29 @@ describe('typed artifacts schema versions', () => {
 });
 
 describe('specialist artifact envelope integrity', () => {
+  it('requires immutable code/build provenance and never finalizes a null codeCommit', () => {
+    const base = {
+      specialist: 'identity_verifier',
+      specialistVersion: '1.0.0',
+      policyConfigId: null,
+      durationMs: 0,
+      createdAt: '2026-08-10T00:00:00.000Z',
+    };
+    expect(ArtifactProvenanceSchema.safeParse(base).success).toBe(false);
+    expect(ArtifactProvenanceSchema.safeParse({ ...base, codeCommit: null }).success).toBe(false);
+
+    // The documented fallback is the configured build identity or checked-out
+    // HEAD; this test runs in the repository and therefore must never produce null.
+    const artifact = finalizeSpecialistArtifact({
+      artifactType: 'identity_input',
+      payload: { gtin: '012345678905', registerName: 'fixture' },
+      payloadSchema: identityInputSchema,
+      provenance: { specialist: 'identity_verifier', specialistVersion: '1.0.0' },
+    });
+    expect(artifact.provenance.codeCommit).toEqual(expect.any(String));
+    expect(artifact.provenance.codeCommit.length).toBeGreaterThan(0);
+  });
+
   it('round-trips through canonical JSON preserving lineage and provenance', () => {
     const input = finalizeSpecialistArtifact({
       artifactType: 'identity_input',
@@ -398,6 +422,7 @@ describe('specialist result validation', () => {
       provenance: {
         specialist: 'identity_verifier',
         specialistVersion: '1.0.0',
+        codeCommit: 'fixture-build-49',
         createdAt: '2026-08-10T00:00:00.000Z',
       },
       contentHash: 'f'.repeat(64),

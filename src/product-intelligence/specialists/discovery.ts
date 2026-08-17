@@ -123,7 +123,8 @@ export const DiscoveryIdentifierSchema = z.object({
 export type DiscoveryIdentifier = z.infer<typeof DiscoveryIdentifierSchema>;
 
 export const DiscoveryCandidateSchema = z.object({
-  rank: z.number().int().positive(),
+  /** Null for unresolved/unverified candidates; only rankable candidates are ranked. */
+  rank: z.number().int().positive().nullable(),
   score: z.number().finite().min(0).max(1),
   /** Score is for ordering; it is not model confidence or authority. */
   scoreMeaning: z.literal('ranking_only'),
@@ -323,6 +324,11 @@ function classifyPage(result: PageExtractionResult | null, expectedSku: string):
   return 'unresolved_lead';
 }
 
+/** Only verified, resolved page identities receive a positive rank. */
+function isRankableCandidate(candidate: Pick<DiscoveryCandidate, 'pageKind' | 'extractionStatus'>): boolean {
+  return candidate.extractionStatus === 'verified' && (candidate.pageKind === 'exact_pdp' || candidate.pageKind === 'probable_pdp');
+}
+
 function nextEvidenceFor(candidates: DiscoveryCandidate[]): DiscoveryNextEvidence[] {
   const next: DiscoveryNextEvidence[] = [];
   if (candidates.some((c) => c.pageKind === 'exact_pdp' || c.signals.some((s) => s.kind === 'exact_gtin'))) next.push('selected_variant');
@@ -419,31 +425,49 @@ export class DiscoverySpecialist {
       const nameMatch = tokenOverlap(input.productSeed.name, extractedName ?? source.title ?? '');
       if (nameMatch.score >= 0.25) add(nameMatch.abbreviated ? 'abbreviated_name_alignment' : 'name_alignment', `${Math.round(nameMatch.score * 100)}% token alignment`, Math.min(0.20, nameMatch.score * 0.20));
       const extractedSku = page?.sku ?? page?.fields.find((field) => field.field === 'sku')?.value ?? null;
-      if (extractedSku && normalize(extractedSku) === normalize(input.productSeed.sku)) add('sku_match', 'extracted SKU equals ProductSeed SKU', 0.18);
       const extractedGtins = page?.gtins.map((gtin) => gtin.value.replace(/\D/gu, '')) ?? [];
+      /**
+       * Identifier scoring is fail-closed: page-level candidate evidence and
+       * artifactRef are not enough to establish where an identifier came from.
+       * Every scored identifier must carry its own method, path, artifact, and
+       * durable evidence ids.
+       */
       const identifierEvidence = (entry: {
+        method?: string;
         sourcePath?: string;
         sourceArtifactId?: string | null;
         evidenceIds?: string[];
-      }, fallbackArtifactId: string | null): Pick<DiscoveryIdentifier, 'sourcePath' | 'sourceArtifactId' | 'evidenceIds'> | null => {
+      }): Pick<DiscoveryIdentifier, 'sourcePath' | 'sourceArtifactId' | 'evidenceIds'> | null => {
+        const method = entry.method?.trim();
         const sourcePath = entry.sourcePath?.trim();
-        const sourceArtifactId = entry.sourceArtifactId?.trim() || fallbackArtifactId?.trim();
+        const sourceArtifactId = entry.sourceArtifactId?.trim();
         const ownEvidenceIds = entry.evidenceIds?.map((id) => id.trim()).filter(Boolean) ?? [];
-        if (!sourcePath || !sourceArtifactId || ownEvidenceIds.length === 0) return null;
+        if (!method || !sourcePath || !sourceArtifactId || ownEvidenceIds.length === 0) return null;
         return { sourcePath, sourceArtifactId, evidenceIds: [...new Set(ownEvidenceIds)].slice(0, MAX_EVIDENCE_IDS) };
       };
+      const trustedGtins = (page?.gtins ?? []).flatMap((gtin) => {
+        const provenance = identifierEvidence(gtin);
+        return provenance ? [gtin.value.replace(/\D/gu, '')] : [];
+      });
+      const skuField = extractedSku
+        ? page?.fields.find((field) => field.field === 'sku' && field.value === extractedSku)
+        : undefined;
+      const skuEvidence = page?.skuEvidence && extractedSku && normalize(page.skuEvidence.value) === normalize(extractedSku)
+        ? page.skuEvidence
+        : skuField;
+      const trustedSku = extractedSku && identifierEvidence(skuEvidence ?? {}) ? extractedSku : null;
+      if (trustedSku && normalize(trustedSku) === normalize(input.productSeed.sku)) add('sku_match', 'extracted SKU equals ProductSeed SKU', 0.18);
       const identifiers: DiscoveryIdentifier[] = [
         ...(page?.gtins ?? []).flatMap((gtin) => {
-          const provenance = identifierEvidence(gtin, page?.artifactRef ?? null);
+          const provenance = identifierEvidence(gtin);
           return provenance ? [{ kind: 'gtin' as const, value: gtin.value.replace(/\D/gu, ''), method: gtin.method, ...provenance }] : [];
         }),
         ...(extractedSku ? (() => {
-          const skuField = page?.fields.find((field) => field.field === 'sku' && field.value === extractedSku);
-          const provenance = identifierEvidence(page?.skuEvidence ?? skuField ?? {}, page?.artifactRef ?? null);
-          return provenance ? [{ kind: 'sku' as const, value: extractedSku, method: page?.skuEvidence?.method ?? skuField?.method ?? 'page_extraction', ...provenance }] : [];
+          const provenance = identifierEvidence(skuEvidence ?? {});
+          return provenance ? [{ kind: 'sku' as const, value: extractedSku, method: skuEvidence?.method ?? 'page_extraction', ...provenance }] : [];
         })() : []),
       ].slice(0, 20);
-      if (input.discoveredGtin && extractedGtins.includes(input.discoveredGtin)) add('exact_gtin', 'discovered GTIN occurs in extracted page evidence', 0.42);
+      if (input.discoveredGtin && trustedGtins.includes(input.discoveredGtin.replace(/\D/gu, ''))) add('exact_gtin', 'discovered GTIN occurs in extracted page evidence', 0.42);
       if (page && extractedGtins.length > 1 && input.discoveredGtin && !extractedGtins.includes(input.discoveredGtin)) add('gtin_conflict', 'page exposes GTINs but not the requested GTIN', -0.35);
       const expectedSize = extractSize(input.productSeed.name);
       const pageSize = page?.size ?? page?.fields.find((field) => field.field === 'size')?.value ?? null;
@@ -483,8 +507,17 @@ export class DiscoverySpecialist {
       });
     }
 
-    candidates.sort((left, right) => right.score - left.score || left.source.url.localeCompare(right.source.url));
-    candidates.forEach((candidate, index) => { candidate.rank = index + 1; });
+    // Keep rankable candidates first, then sort each partition deterministically.
+    // Non-rankable leads remain visible for follow-up but never receive a
+    // positive rank value.
+    candidates.sort((left, right) => {
+      const rankability = Number(isRankableCandidate(right)) - Number(isRankableCandidate(left));
+      return rankability || right.score - left.score || left.source.url.localeCompare(right.source.url);
+    });
+    let nextRank = 1;
+    candidates.forEach((candidate) => {
+      candidate.rank = isRankableCandidate(candidate) ? nextRank++ : null;
+    });
     const top = candidates[0];
     const distinctBrands = new Set(candidates.map((candidate) => normalize(candidate.extracted.brand ?? '')).filter(Boolean));
     const ambiguous = candidates.length > 1 && (Math.abs(top.score - candidates[1].score) <= 0.08 || distinctBrands.size > 1);

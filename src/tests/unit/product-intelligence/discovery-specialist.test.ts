@@ -18,7 +18,7 @@ const policy = {
 };
 const context: SpecialistContext = { runId: 'run-49', workspaceId: 'ws-49', workspacePath: '/tmp/ws-49', policy, seq: 1 };
 
-function source(url: string, sourceType: 'manufacturer' | 'retailer' | 'search' = 'search') {
+function source(url: string, sourceType: 'manufacturer' | 'supplier' | 'retailer' | 'search' = 'search') {
   return { url, sourceType, sourceRef: `${sourceType}:fixture`, sourceMethod: 'golden_fixture', evidenceIds: [`fixture:${url}`] };
 }
 
@@ -57,6 +57,7 @@ describe('Discovery / Identity specialist (#49)', () => {
     expect(result.output.candidates[0].pageKind).toBe('probable_pdp');
     expect(result.output.candidates[0].source.sourceRef).toBe('manufacturer:fixture');
     expect(result.output.candidates[0].signals.some((s) => s.kind === 'name_alignment')).toBe(true);
+    expect(result.output.candidates.map((candidate) => candidate.rank)).toEqual([1]);
     expect(result.output.authority).toBe('none');
     expect(result.artifact.provenance.codeCommit).toBeTruthy();
   });
@@ -85,17 +86,48 @@ describe('Discovery / Identity specialist (#49)', () => {
     expect(result.output.candidates[0].extracted.identifiers[0].sourceArtifactId).toBe('fixture-artifact-sku');
   });
 
-  it('ranks a real supplier abbreviation and marks the alignment explicitly', async () => {
+  it('does not score identifiers from generic candidate evidence or incomplete identifier provenance', async () => {
+    const untrusted = page(candidate.url, {
+      artifactRef: 'generic-page-artifact',
+      gtins: [{ value: '012345678905', method: 'fixture' }],
+      sku: seed.sku,
+      fields: [
+        { field: 'product_name', value: 'ACME Chicken Broth 16 oz', method: 'fixture', sourcePath: 'fixture.name' },
+        { field: 'sku', value: seed.sku, method: 'fixture' },
+      ],
+    });
+    const baseline = await specialist(new Map([[candidate.url, page(candidate.url)]])).discover({ productSeed: seed, discoveredGtin: '012345678905', sourceCandidates: [candidate] }, context);
+    const result = await specialist(new Map([[candidate.url, untrusted]])).discover({ productSeed: seed, discoveredGtin: '012345678905', sourceCandidates: [candidate] }, context);
+    if (!('artifact' in baseline) || !('artifact' in result)) throw new Error('expected discovery artifacts');
+    const signals = result.output.candidates[0].signals;
+    expect(signals.some((signal) => signal.kind === 'exact_gtin' || signal.kind === 'sku_match')).toBe(false);
+    expect(result.output.candidates[0].extracted.identifiers).toEqual([]);
+    expect(result.output.candidates[0].score).toBe(baseline.output.candidates[0].score);
+  });
+
+  it('ranks a clearly labeled imported supplier fixture abbreviation and marks the alignment explicitly', async () => {
     const abbreviatedSeed = { ...seed, name: 'Acme WS Salmon 5 oz' };
-    const abbreviated = source('https://acme.example/products/wild-salmon-5oz', 'manufacturer');
+    const abbreviated = {
+      ...source('https://supplier.example/acme/wild-salmon-5oz', 'supplier'),
+      sourceRef: 'supplier:golden_fixture:acme-ws-salmon',
+      evidenceIds: ['supplier-evidence:acme-ws-salmon'],
+    };
     const unrelated = source('https://other.example/products/salmon-5oz', 'manufacturer');
+    const supplierArtifactId = 'supplier-artifact:acme-ws-salmon';
     const pages = new Map([
-      [abbreviated.url, page(abbreviated.url, { productName: 'Acme Wild Salmon 5 oz', brand: 'Acme', size: '5 oz' })],
+      [abbreviated.url, page(abbreviated.url, {
+        artifactRef: supplierArtifactId,
+        productName: 'Acme Wild Salmon 5 oz',
+        brand: 'Acme',
+        size: '5 oz',
+        fields: [{ field: 'product_name', value: 'Acme Wild Salmon 5 oz', method: 'supplier_import', sourcePath: 'supplier_export.rows[0].product_name', sourceArtifactId: supplierArtifactId, evidenceIds: ['supplier-evidence:acme-ws-salmon:name'] }],
+      })],
       [unrelated.url, page(unrelated.url, { productName: 'Other Salmon 5 oz', brand: 'Other', size: '5 oz' })],
     ]);
     const result = await specialist(pages).discover({ productSeed: abbreviatedSeed, sourceCandidates: [unrelated, abbreviated] }, context);
     if (!('artifact' in result)) throw new Error('expected discovery artifact');
     expect(result.output.candidates[0].source.url).toBe(abbreviated.url);
+    expect(result.output.candidates[0].source.sourceRef).toBe('supplier:golden_fixture:acme-ws-salmon');
     expect(result.output.candidates[0].signals.some((s) => s.kind === 'abbreviated_name_alignment')).toBe(true);
   });
 
@@ -105,6 +137,7 @@ describe('Discovery / Identity specialist (#49)', () => {
     expect(unavailable.output.disposition).toBe('needs_targeted_evidence');
     expect(unavailable.output.nextEvidence.length).toBeGreaterThan(0);
     expect(unavailable.output.candidates[0].extractionStatus).toBe('unverified');
+    expect(unavailable.output.candidates[0].rank).toBeNull();
     expect(unavailable.artifact.provenance.codeCommit).toBe('test-build-49');
 
     const exhausted = await specialist(new Map([[candidate.url, page(candidate.url)]],), { maxVerificationRequests: 0 }).discover({ productSeed: seed, sourceCandidates: [candidate] }, context);
@@ -131,13 +164,18 @@ describe('Discovery / Identity specialist (#49)', () => {
     const exact = source('https://brand.example/products/chicken-broth-16oz', 'manufacturer');
     const wrong = source('https://retailer.example/products/chicken-broth-4oz', 'retailer');
     const pages = new Map([
-      [exact.url, page(exact.url, { gtins: [{ value: '012345678905', method: 'fixture' }], identityStatus: 'exact_match' })],
+      [exact.url, page(exact.url, {
+        gtins: [{ value: '012345678905', method: 'fixture', sourcePath: 'supplier_export.rows[0].gtin', sourceArtifactId: 'fixture-artifact:exact-gtin', evidenceIds: ['fixture-evidence:exact-gtin'] }],
+        identityStatus: 'exact_match',
+      })],
       [wrong.url, page(wrong.url, { productName: 'ACME Chicken Broth 4 oz', size: '4 oz', identityStatus: 'wrong_variant', identityReasons: ['size mismatch'] })],
     ]);
     const result = await specialist(pages).discover({ productSeed: seed, discoveredGtin: '012345678905', sourceCandidates: [wrong, exact] }, context);
     if (!('artifact' in result)) throw new Error('expected discovery artifact');
     expect(result.output.candidates.map((c) => c.pageKind)).toEqual(['exact_pdp', 'wrong_variant']);
     expect(result.output.candidates[1].signals.some((s) => s.kind === 'size_conflict')).toBe(true);
+    expect(result.output.candidates.map((candidate) => candidate.rank)).toEqual([1, null]);
+    expect(result.output.candidates[0].signals.some((s) => s.kind === 'exact_gtin')).toBe(true);
   });
 
   it('distinguishes a family page and asks for selected-variant evidence', async () => {
@@ -175,6 +213,7 @@ describe('Discovery / Identity specialist (#49)', () => {
     if (!('artifact' in result)) throw new Error('expected discovery artifact');
     expect(result.output.budget.verificationRequestsUsed).toBe(2);
     expect(result.output.budget.verificationRequestsAllowed).toBe(2);
+    expect(result.output.candidates.map((candidate) => candidate.rank)).toEqual([1, 2, null, null]);
     expect(DiscoverySpecialistInputSchema.safeParse({ productSeed: seed }).success).toBe(true);
     expect(DiscoverySpecialistOutputSchema.safeParse(result.output).success).toBe(true);
     const schemas = registerDiscoverySpecialistSchemas(new SpecialistArtifactSchemaRegistry());

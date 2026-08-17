@@ -110,7 +110,7 @@ export const ArtifactProvenanceSchema = z.object({
    */
   invokedBy: z.string().min(1).max(128).default('orchestrator'),
   /** CMS code commit captured at execution time. */
-  codeCommit: z.string().min(1).max(64).nullish(),
+  codeCommit: z.string().trim().min(1).max(64),
   /** Immutable policy snapshot id the specialist executed under (PI-5 governance). */
   policyConfigId: z.string().min(1).max(128).nullish(),
   durationMs: z.number().int().nonnegative().default(0),
@@ -217,7 +217,12 @@ export function finalizeSpecialistArtifact(input: FinalizeArtifactInput): Specia
     specialistVersion: input.provenance.specialistVersion,
     executor: input.provenance.executor ?? null,
     invokedBy: input.provenance.invokedBy ?? 'orchestrator',
-    codeCommit: input.provenance.codeCommit ?? null,
+    // Finalized artifacts must identify the immutable code/build that
+    // produced them. Prefer explicit execution provenance, then use the
+    // configured deployment value or checked-out HEAD. Never persist null.
+    codeCommit: input.provenance.codeCommit?.trim() || captureSpecialistCodeCommit() || (() => {
+      throw new Error('artifact provenance requires codeCommit or a configured/build checkout identifier');
+    })(),
     policyConfigId: input.provenance.policyConfigId ?? null,
     durationMs: input.provenance.durationMs ?? 0,
     createdAt: input.provenance.createdAt ?? new Date().toISOString(),
