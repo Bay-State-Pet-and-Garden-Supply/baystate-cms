@@ -1,0 +1,26 @@
+{
+  "releaseId": "bay-state-v3",
+  "revision": "bay-state-v3",
+  "createdAt": "2026-08-16T00:00:00.000Z",
+  "schemaVersion": 2,
+  "compatibilityVersion": 2,
+  "lifecycle": "release",
+  "sourceBaseline": "bay-state-v2-effective-2026-08-16",
+  "fileVersions": {
+    "departments.json": "a76b240023acd534cc2a33e286d0ecc5bca8236b66bb9e46883c0a2631398d2f",
+    "product-types.json": "16c9d143dad674b70f752046655942ea797aceaad326dd9c514608eecdfa06e4",
+    "attributes.json": "49b73365bd2c6f54a76e1666bd87165afc06216b76c579170d919ee02228ad6b",
+    "attribute-profiles.json": "eaef95a5fe97a11dce029eb163b6c80c7ffeaf81652e2654c88cf9c2c445778c",
+    "export-mappings.json": "1c52ee95eb65e4b5ee43043d18f7b83a91febb581d454c7887f5be9b3f98f542",
+    "guidance.json": "fa0d26ea6ae4245304ed49c1e3bd22b6328959a85155cf2c822c1b26f4faf924",
+    "page-assignment-policy.json": "64eafc38fcf9a9ba074f18a33c7026396642f3458a503419552686ba2285c7db"
+  },
+  "counts": {
+    "productTypes": 73,
+    "attributes": 25,
+    "attributeProfiles": 73,
+    "departments": 10,
+    "mappings": 17,
+    "guidance": 3
+  }
+}

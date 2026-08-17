@@ -1,0 +1,163 @@
+{
+  "bundleOrigin": {
+    "kind": "release",
+    "releaseId": "bay-state-v3",
+    "createdAt": "2026-08-16T00:00:00.000Z"
+  },
+  "schemaVersion": 2,
+  "entries": [
+    {
+      "id": "pet-supplies",
+      "name": "Pet Supplies",
+      "description": "Dog and cat food, treats, toys, crates, litter, grooming, and pet care supplies.",
+      "sortOrder": 0,
+      "typeIds": [
+        "dog-food-dry",
+        "dog-food-wet",
+        "dog-treats",
+        "dog-toys",
+        "dog-crates-kennels",
+        "dog-waste-bags",
+        "cat-food-dry",
+        "cat-food-wet",
+        "cat-treats",
+        "cat-toys",
+        "cat-litter",
+        "pet-beds",
+        "grooming",
+        "supplements",
+        "collars-leashes",
+        "flea-tick-treatment",
+        "small-animal-feed-bedding"
+      ]
+    },
+    {
+      "id": "livestock-farm-animals",
+      "name": "Livestock & Farm Animals",
+      "description": "Feed, coops, waterers, feeders, health care, and bedding for livestock and farm animals.",
+      "sortOrder": 1,
+      "typeIds": [
+        "poultry-feed",
+        "bee-supplies",
+        "poultry-coops-equipment",
+        "cattle-feed",
+        "goat-sheep-feed",
+        "pig-swine-feed",
+        "stock-tanks-waterers",
+        "livestock-feeders",
+        "livestock-health-dewormers",
+        "fly-insect-control-livestock",
+        "stall-mats-bedding"
+      ]
+    },
+    {
+      "id": "equine-horse-care",
+      "name": "Equine / Horse Care",
+      "description": "Horse feed, treats, supplements, fly control, grooming, hoof care, blankets, and tack.",
+      "sortOrder": 2,
+      "typeIds": [
+        "horse-feed",
+        "horse-treats-supplements",
+        "fly-control-equine",
+        "equine-grooming-hoof",
+        "horse-blankets-tack"
+      ]
+    },
+    {
+      "id": "fencing-agriculture-containment",
+      "name": "Fencing & Agriculture Containment",
+      "description": "Electric fence chargers, wire, posts, gates, insulators, and fencing tools.",
+      "sortOrder": 3,
+      "typeIds": [
+        "electric-fence-chargers",
+        "fence-wire-mesh",
+        "t-posts-wooden-posts",
+        "corral-panels-gates",
+        "electric-fence-insulators",
+        "fencing-tools"
+      ]
+    },
+    {
+      "id": "heating-fuel-climate-control",
+      "name": "Heating, Fuel & Climate Control",
+      "description": "Wood pellets, firewood, propane heaters, barn heaters, heat lamps, and chimney care.",
+      "sortOrder": 4,
+      "typeIds": [
+        "heating-pellets-wood",
+        "firewood-kindling",
+        "propane-heaters",
+        "garage-barn-heaters",
+        "coop-barn-heat-lamps",
+        "stove-pipe-chimney-care"
+      ]
+    },
+    {
+      "id": "lawn-garden-landscaping",
+      "name": "Lawn, Garden & Landscaping",
+      "description": "Fertilizer, grass seed, weed control, pest control, soil, tools, hoses, and sprinklers.",
+      "sortOrder": 5,
+      "typeIds": [
+        "lawn-fertilizer",
+        "grass-seed",
+        "weed-control",
+        "insect-control",
+        "potting-soil",
+        "hand-tools",
+        "garden-hoses-reels",
+        "sprinklers-nozzles",
+        "plant-food-fertilizer"
+      ]
+    },
+    {
+      "id": "power-equipment-tools",
+      "name": "Power Equipment & Tools",
+      "description": "Mowers, trimmers, chainsaws, pressure washers, and power tool accessories.",
+      "sortOrder": 6,
+      "typeIds": [
+        "lawn-mowers",
+        "string-trimmers-edgers",
+        "chainsaws-log-splitters",
+        "pressure-washers",
+        "power-tool-accessories",
+        "air-compressors-hoses"
+      ]
+    },
+    {
+      "id": "trailer-towing-equipment",
+      "name": "Trailer & Towing Equipment",
+      "description": "Trailer hitches, balls, couplers, jacks, lights, wiring, straps, and chains.",
+      "sortOrder": 7,
+      "typeIds": [
+        "trailer-hitches-balls",
+        "towing-couplers-jacks",
+        "trailer-lights-wiring",
+        "tie-down-straps-chains"
+      ]
+    },
+    {
+      "id": "wild-bird-wildlife",
+      "name": "Wild Bird & Wildlife",
+      "description": "Wild bird food, suet, feeders, houses, baths, and deer/wildlife feed.",
+      "sortOrder": 8,
+      "typeIds": [
+        "bird-food",
+        "suet-cakes",
+        "wild-bird-feeders",
+        "bird-houses-baths",
+        "deer-wildlife-feed"
+      ]
+    },
+    {
+      "id": "apparel-workwear",
+      "name": "Apparel & Workwear",
+      "description": "Work boots, gloves, outerwear, and overalls/coveralls.",
+      "sortOrder": 9,
+      "typeIds": [
+        "work-boots",
+        "work-gloves",
+        "workwear-outerwear",
+        "overalls-coveralls"
+      ]
+    }
+  ]
+}
