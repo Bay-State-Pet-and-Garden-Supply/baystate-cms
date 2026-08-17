@@ -1388,6 +1388,10 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
         }
       }
     }
+    const unresolvedPages = pageProjections.filter(page => page.role === 'needs_review');
+    if (unresolvedPages.length > 0) {
+      fail('page_projection_needs_review', `${unresolvedPages.length} page projection(s) remain needs_review: ${unresolvedPages.map(page => page.pageName).join(', ')}.`);
+    }
   }
 
   // ── Rule 9: manifest counts + identity ───────────────────────────────────

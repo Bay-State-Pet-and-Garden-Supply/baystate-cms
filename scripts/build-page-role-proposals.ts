@@ -21,6 +21,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { PAGE_ROLE_RATIFICATIONS } from './page-role-ratifications';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const RELEASE_DIR = path.join(ROOT, 'src', 'classification', 'releases', 'bay-state-v4');
@@ -272,7 +273,19 @@ function matchCanonical(pageName: string): { role: string; nodeId: string | null
 // ─── Assemble proposals ─────────────────────────────────────────────────────────
 
 const proposals = projection.map(page => {
+  const curated = PAGE_ROLE_RATIFICATIONS[page.pageName];
   const detected = detectRole(page.pageName);
+  if (curated) {
+    return {
+      pageName: page.pageName,
+      productCount: page.productCount,
+      proposedRole: curated.role,
+      proposedNodeId: curated.nodeId,
+      confidence: 'ratified',
+      evidence: ['human-ratified page projection decision', `role=${curated.role}`, `nodeId=${curated.nodeId ?? 'null'}`],
+      alternatives: [],
+    };
+  }
   if (page.role !== 'needs_review') {
     return {
       pageName: page.pageName,

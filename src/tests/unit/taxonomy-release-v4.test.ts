@@ -89,6 +89,7 @@ describe('committed bay-state-v4 release', () => {
     expect(bundle.attributes.length).toBe(27);
     expect(bundle.manifest.counts.attributes).toBe(27);
     expect(bundle.pageProjections.length).toBe(153);
+    expect(bundle.pageProjections.filter(page => page.role === 'needs_review')).toHaveLength(0);
     expect(bundle.manifest.counts.pages).toBe(153);
     expect(bundle.exportMappings.length).toBe(19);
     expect(bundle.manifest.counts.mappings).toBe(19);
@@ -252,6 +253,19 @@ describe('negative cases (temp copies)', () => {
     writeJson(dir, 'shopsite-projection.json', projection);
     const report = validateTaxonomyReleaseV4(dir);
     expectFinding(report, 'canonical_leaf_node_not_classifiable');
+    expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('rejects an unresolved needs_review page projection', () => {
+    const dir = freshCopy();
+    const projection = readJson(dir, 'shopsite-projection.json');
+    const page = projection.entries[0];
+    page.role = 'needs_review';
+    page.nodeId = null;
+    page.facetProfileId = null;
+    writeJson(dir, 'shopsite-projection.json', projection);
+    const report = validateTaxonomyReleaseV4(dir);
+    expectFinding(report, 'page_projection_needs_review');
     expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
   });
 

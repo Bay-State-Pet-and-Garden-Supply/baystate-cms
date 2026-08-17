@@ -48,6 +48,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { PAGE_ROLE_RATIFICATIONS } from './page-role-ratifications';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const V3_DIR = path.join(ROOT, 'src', 'classification', 'releases', 'bay-state-v3');
@@ -566,11 +567,21 @@ function roleForPage(pageName: string): {
 }
 
 const pageProjections = livePages.map(page => {
-  const { role, nodeId, facetProfileId } = roleForPage(page.pageName);
+  const curated = PAGE_ROLE_RATIFICATIONS[page.pageName];
+  const detected = roleForPage(page.pageName);
+  const decision = curated ?? detected;
+  let facetProfileId: string | null = null;
+  if (decision.role === 'canonical_leaf') {
+    const node = hierarchyNodes.find(n => n.id === decision.nodeId);
+    if (!node || !node.classifiable) {
+      throw new Error(`Ratified canonical page "${page.pageName}" references non-classifiable/unknown node "${decision.nodeId}"`);
+    }
+    facetProfileId = node.facetProfileId;
+  }
   return {
     pageName: page.pageName,
-    role,
-    nodeId,
+    role: decision.role,
+    nodeId: decision.nodeId,
     childPages: [] as string[],
     facetProfileId,
     productCount: page.productCount,
@@ -823,7 +834,7 @@ for (const [fileName, content] of Object.entries(files)) {
   fileVersions[fileName] = createHash('sha256').update(text).digest('hex');
 }
 
-const needsReviewCount = pageRoleEntries.filter(p => p.role === 'needs_review').length;
+const needsReviewCount = pageRoleEntries.filter(p => (p.role as string) === 'needs_review').length;
 const canonicalLeafCount = pageRoleEntries.filter(p => p.role === 'canonical_leaf').length;
 const shopAllCount = pageRoleEntries.filter(p => p.role === 'shop_all_aggregate').length;
 const merchandisingCount = pageRoleEntries.filter(p => p.role === 'merchandising').length;

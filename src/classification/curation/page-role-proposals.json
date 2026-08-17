@@ -32,6 +32,58 @@
       "alternatives": []
     },
     {
+      "pageName": "Apparel",
+      "productCount": 178,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "apparel-workwear",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=apparel-workwear"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Baby Chicks",
+      "productCount": 113,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "livestock-farm-animals",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=livestock-farm-animals"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Barn Supplies Buckets & Feeders",
+      "productCount": 132,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "livestock-farm-animals",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=livestock-farm-animals"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Barn Supplies Farm Gates & Fencing",
+      "productCount": 166,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "corral-panels-gates",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=corral-panels-gates"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Barn Supplies Shop All",
       "productCount": 426,
       "proposedRole": "shop_all_aggregate",
@@ -43,6 +95,19 @@
       "alternatives": []
     },
     {
+      "pageName": "Barn Supplies Tools & Equipment",
+      "productCount": 324,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "livestock-farm-animals",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=livestock-farm-animals"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Bay State Country Gift Shop",
       "productCount": 431,
       "proposedRole": "merchandising",
@@ -50,6 +115,32 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Beekeeping",
+      "productCount": 80,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "bee-supplies",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=bee-supplies"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Boots",
+      "productCount": 82,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "work-boots",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=work-boots"
       ],
       "alternatives": []
     },
@@ -109,6 +200,58 @@
       "alternatives": []
     },
     {
+      "pageName": "Cage Bird Cages & Accessories",
+      "productCount": 70,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Canary & Finch",
+      "productCount": 121,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Cockatiel",
+      "productCount": 131,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Food",
+      "productCount": 136,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Caged Bird Food & Supplies Shop All",
       "productCount": 203,
       "proposedRole": "shop_all_aggregate",
@@ -116,6 +259,162 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Healthcare",
+      "productCount": 30,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Litter & Nesting",
+      "productCount": 13,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Parakeet",
+      "productCount": 111,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Parrot",
+      "productCount": 144,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Pigeon",
+      "productCount": 23,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Toys",
+      "productCount": 79,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Caged Bird Treats",
+      "productCount": 77,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Beds & Carriers",
+      "productCount": 30,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "cat",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=cat"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Bowls & Feeders",
+      "productCount": 74,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "cat",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=cat"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Flea & Tick",
+      "productCount": 41,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "flea-tick-treatment",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=flea-tick-treatment"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Food Dry",
+      "productCount": 282,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "cat-food-dry",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=cat-food-dry"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Food Raw",
+      "productCount": 65,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "cat-food",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=cat-food"
       ],
       "alternatives": []
     },
@@ -131,6 +430,71 @@
       "alternatives": []
     },
     {
+      "pageName": "Cat Food Wet",
+      "productCount": 456,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "cat-food-wet",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=cat-food-wet"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Grooming",
+      "productCount": 115,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "grooming",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=grooming"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Healthcare",
+      "productCount": 186,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pet-health-wellness",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pet-health-wellness"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Leashes Collars & Harnesses",
+      "productCount": 7,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "collars-leashes",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=collars-leashes"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Litter & Litter Boxes",
+      "productCount": 144,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "cat-litter",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=cat-litter"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Cat Supplies Shop All",
       "productCount": 711,
       "proposedRole": "shop_all_aggregate",
@@ -138,6 +502,19 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Cat Toys & Scratchers",
+      "productCount": 303,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "cat-toys",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=cat-toys"
       ],
       "alternatives": []
     },
@@ -164,6 +541,123 @@
       "alternatives": []
     },
     {
+      "pageName": "Dog Beds",
+      "productCount": 103,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pet-beds",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pet-beds"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Bowls & Feeders",
+      "productCount": 117,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Cleanup",
+      "productCount": 178,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Clothing & Accessories",
+      "productCount": 144,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Crates & Carriers",
+      "productCount": 73,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "dog-crates-kennels",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=dog-crates-kennels"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Dental Treats",
+      "productCount": 174,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "dog-treats",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=dog-treats"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Flea & Tick",
+      "productCount": 79,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "flea-tick-treatment",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=flea-tick-treatment"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Food Dry",
+      "productCount": 701,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "dog-food-dry",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=dog-food-dry"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Food Raw",
+      "productCount": 390,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog-food",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog-food"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Dog Food Shop All",
       "productCount": 1505,
       "proposedRole": "shop_all_aggregate",
@@ -171,6 +665,58 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Food Wet",
+      "productCount": 557,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "dog-food-wet",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=dog-food-wet"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Grooming",
+      "productCount": 291,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "grooming",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=grooming"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Healthcare",
+      "productCount": 395,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pet-health-wellness",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pet-health-wellness"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Leashes Collars & Harnesses",
+      "productCount": 724,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "collars-leashes",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=collars-leashes"
       ],
       "alternatives": []
     },
@@ -197,6 +743,45 @@
       "alternatives": []
     },
     {
+      "pageName": "Dog Treats Bakery",
+      "productCount": 302,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog-treats",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog-treats"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Treats Biscuits Cookies & Crunchy Treats",
+      "productCount": 627,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog-treats",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog-treats"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Treats Bones Bully Sticks & Natural Chews",
+      "productCount": 613,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog-treats",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog-treats"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Dog Treats Shop All",
       "productCount": 2103,
       "proposedRole": "shop_all_aggregate",
@@ -204,6 +789,84 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Dog Treats Soft & Chewy",
+      "productCount": 423,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog-treats",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog-treats"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Farm Animal Chicken & Poultry",
+      "productCount": 369,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "livestock-farm-animals",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=livestock-farm-animals"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Farm Animal Cow",
+      "productCount": 171,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "cattle-feed",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=cattle-feed"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Farm Animal Llama & Alpaca",
+      "productCount": 145,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "livestock-farm-animals",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=livestock-farm-animals"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Farm Animal Pig",
+      "productCount": 146,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pig-swine-feed",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pig-swine-feed"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Farm Animal Sheep & Goat",
+      "productCount": 178,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "goat-sheep-feed",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=goat-sheep-feed"
       ],
       "alternatives": []
     },
@@ -241,6 +904,58 @@
       "alternatives": []
     },
     {
+      "pageName": "Fencing & Gates",
+      "productCount": 31,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "corral-panels-gates",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=corral-panels-gates"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Fish Food Betta",
+      "productCount": 20,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "fish-food",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=fish-food"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Fish Food Goldfish",
+      "productCount": 19,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "fish-food",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=fish-food"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Fish Food Koi & Pond Fish",
+      "productCount": 27,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "fish-food",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=fish-food"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Fish Food Shop All",
       "productCount": 73,
       "proposedRole": "shop_all_aggregate",
@@ -248,6 +963,32 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Fish Food Tropical",
+      "productCount": 38,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "fish-food",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=fish-food"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Fish Pond Supplies",
+      "productCount": 76,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "fish",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=fish"
       ],
       "alternatives": []
     },
@@ -263,6 +1004,45 @@
       "alternatives": []
     },
     {
+      "pageName": "Fish Tanks & Accessories",
+      "productCount": 89,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "fish",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=fish"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Fish Water Treatments & Test Kits",
+      "productCount": 23,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "fish",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=fish"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Flowers & Plants",
+      "productCount": 78,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "lawn-garden-landscaping",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=lawn-garden-landscaping"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Food Candy & Refreshments",
       "productCount": 176,
       "proposedRole": "merchandising",
@@ -270,6 +1050,32 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Gardening Tools & Supplies",
+      "productCount": 802,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "lawn-garden-landscaping",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=lawn-garden-landscaping"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Gloves",
+      "productCount": 99,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "work-gloves",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=work-gloves"
       ],
       "alternatives": []
     },
@@ -296,6 +1102,32 @@
       "alternatives": []
     },
     {
+      "pageName": "Hay",
+      "productCount": 55,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "livestock-farm-animals",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=livestock-farm-animals"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Heating",
+      "productCount": 49,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "heating-fuel-climate-control",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=heating-fuel-climate-control"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Home Shop All",
       "productCount": 1347,
       "proposedRole": "shop_all_aggregate",
@@ -303,6 +1135,19 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Horse Dewormers",
+      "productCount": 19,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "equine-horse-care",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=equine-horse-care"
       ],
       "alternatives": []
     },
@@ -329,6 +1174,45 @@
       "alternatives": []
     },
     {
+      "pageName": "Horse First Aid",
+      "productCount": 116,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "equine-horse-care",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=equine-horse-care"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Horse Fly Control",
+      "productCount": 60,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "fly-control-equine",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=fly-control-equine"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Horse Grooming",
+      "productCount": 172,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "equine-grooming-hoof",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=equine-grooming-hoof"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Horse Health & Wellness Shop All",
       "productCount": 342,
       "proposedRole": "shop_all_aggregate",
@@ -336,6 +1220,45 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Horse Treats",
+      "productCount": 98,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "horse-treats-supplements",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=horse-treats-supplements"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Horse Vitamins & Supplements",
+      "productCount": 138,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "horse-treats-supplements",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=horse-treats-supplements"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Jerky Dog Treats",
+      "productCount": 137,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "dog-treats",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=dog-treats"
       ],
       "alternatives": []
     },
@@ -362,6 +1285,19 @@
       "alternatives": []
     },
     {
+      "pageName": "Lawn Care",
+      "productCount": 333,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "lawn-garden-landscaping",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=lawn-garden-landscaping"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Lawn Equipment Rental",
       "productCount": 11,
       "proposedRole": "navigation",
@@ -369,6 +1305,58 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Mulch & Loam",
+      "productCount": 18,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "potting-soil",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=potting-soil"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Pest Control",
+      "productCount": 189,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Pest Control & Animal Repellents",
+      "productCount": 153,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Plants",
+      "productCount": 60,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "lawn-garden-landscaping",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=lawn-garden-landscaping"
       ],
       "alternatives": []
     },
@@ -384,6 +1372,32 @@
       "alternatives": []
     },
     {
+      "pageName": "Reptile Bearded Dragon",
+      "productCount": 71,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Bedding & Substrate",
+      "productCount": 13,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Reptile Food & Supplies Shop All",
       "productCount": 99,
       "proposedRole": "shop_all_aggregate",
@@ -391,6 +1405,97 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Food & Treats",
+      "productCount": 46,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Frog",
+      "productCount": 48,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Heating & Lighting",
+      "productCount": 58,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Lizard",
+      "productCount": 71,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Snake",
+      "productCount": 56,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Tanks & Accessories",
+      "productCount": 56,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Reptile Turtle",
+      "productCount": 61,
+      "proposedRole": "merchandising",
+      "proposedNodeId": null,
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=null"
       ],
       "alternatives": []
     },
@@ -417,6 +1522,58 @@
       "alternatives": []
     },
     {
+      "pageName": "Seeds & Seed Starting",
+      "productCount": 350,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "lawn-garden-landscaping",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=lawn-garden-landscaping"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Shavings & Bedding",
+      "productCount": 44,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "livestock-farm-animals",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=livestock-farm-animals"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Bedding & Litter",
+      "productCount": 43,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "small-animal-feed-bedding",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=small-animal-feed-bedding"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Food",
+      "productCount": 116,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "small-animal-feed-bedding",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=small-animal-feed-bedding"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Small Pet Food & Supplies Shop All",
       "productCount": 341,
       "proposedRole": "shop_all_aggregate",
@@ -424,6 +1581,123 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Grooming & Health",
+      "productCount": 29,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pet-health-wellness",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pet-health-wellness"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Guinea Pig",
+      "productCount": 185,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "small-animal-feed-bedding",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=small-animal-feed-bedding"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Habitats & Accessories",
+      "productCount": 94,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pet-supplies",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pet-supplies"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Hamster",
+      "productCount": 162,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "small-animal-feed-bedding",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=small-animal-feed-bedding"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Hay",
+      "productCount": 47,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "small-animal-feed-bedding",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=small-animal-feed-bedding"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Mouse & Rat",
+      "productCount": 145,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "small-animal-feed-bedding",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=small-animal-feed-bedding"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Rabbit",
+      "productCount": 223,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "small-animal-feed-bedding",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=small-animal-feed-bedding"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Toys & Chews",
+      "productCount": 79,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pet-supplies",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pet-supplies"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Small Pet Treats",
+      "productCount": 72,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "pet-supplies",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=pet-supplies"
       ],
       "alternatives": []
     },
@@ -483,6 +1757,19 @@
       "alternatives": []
     },
     {
+      "pageName": "Wild Bird Baths",
+      "productCount": 48,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "bird-houses-baths",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=bird-houses-baths"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Wild Bird Feeders",
       "productCount": 266,
       "proposedRole": "canonical_leaf",
@@ -505,6 +1792,58 @@
       "alternatives": []
     },
     {
+      "pageName": "Wild Bird Hangers Poles & Baffles",
+      "productCount": 67,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "wild-bird-feeders",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=wild-bird-feeders"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Wild Bird Houses",
+      "productCount": 55,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "bird-houses-baths",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=bird-houses-baths"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Wild Bird Seed & Seed Mixes",
+      "productCount": 175,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "bird-food",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=bird-food"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Wild Bird Suet & Mealworms",
+      "productCount": 144,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "wild-bird",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=wild-bird"
+      ],
+      "alternatives": []
+    },
+    {
       "pageName": "Wild Bird Supplies Shop All",
       "productCount": 315,
       "proposedRole": "shop_all_aggregate",
@@ -512,6 +1851,32 @@
       "confidence": "ratified",
       "evidence": [
         "current release role"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Wildlife Deer Food",
+      "productCount": 38,
+      "proposedRole": "canonical_leaf",
+      "proposedNodeId": "deer-wildlife-feed",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=deer-wildlife-feed"
+      ],
+      "alternatives": []
+    },
+    {
+      "pageName": "Wildlife Squirrel Food",
+      "productCount": 18,
+      "proposedRole": "merchandising",
+      "proposedNodeId": "deer-wildlife-feed",
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=merchandising",
+        "nodeId=deer-wildlife-feed"
       ],
       "alternatives": []
     },
@@ -527,2153 +1892,15 @@
       "alternatives": []
     },
     {
-      "pageName": "Caged Bird Food",
-      "productCount": 136,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "bird-food",
-      "confidence": "exact",
-      "evidence": [
-        "species:bird",
-        "family:food",
-        "overlap:bird,food"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Litter & Litter Boxes",
-      "productCount": 144,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "cat-litter",
-      "confidence": "exact",
-      "evidence": [
-        "species:cat",
-        "family:litter",
-        "overlap:cat,litter"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Toys & Scratchers",
-      "productCount": 303,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "cat-toys",
-      "confidence": "exact",
-      "evidence": [
-        "species:cat",
-        "family:toys",
-        "overlap:cat,toys"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Dental Treats",
-      "productCount": 174,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-treats",
-      "confidence": "exact",
-      "evidence": [
-        "species:dog",
-        "family:treats",
-        "overlap:dog,treats"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Treats Bakery",
-      "productCount": 302,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-treats",
-      "confidence": "exact",
-      "evidence": [
-        "species:dog",
-        "family:treats",
-        "overlap:dog,treats"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Horse Treats",
-      "productCount": 98,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "horse-treats-supplements",
-      "confidence": "exact",
-      "evidence": [
-        "species:horse",
-        "family:treats",
-        "overlap:horse,treats",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "horse-blankets-tack",
-          "score": 8
-        },
-        {
-          "nodeId": "horse-feed",
-          "score": 8
-        }
-      ]
-    },
-    {
-      "pageName": "Horse Vitamins & Supplements",
-      "productCount": 138,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "horse-treats-supplements",
-      "confidence": "exact",
-      "evidence": [
-        "species:horse",
-        "family:supplements",
-        "overlap:horse,and,supplements"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "horse-blankets-tack",
-          "score": 7
-        },
-        {
-          "nodeId": "equine-grooming-hoof",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Wild Bird Seed & Seed Mixes",
-      "productCount": 175,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "bird-food",
-      "confidence": "exact",
-      "evidence": [
-        "species:bird",
-        "family:seed",
-        "overlap:wild,bird,seed,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 7
-        }
-      ]
-    },
-    {
-      "pageName": "Wildlife Deer Food",
-      "productCount": 38,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "deer-wildlife-feed",
-      "confidence": "exact",
-      "evidence": [
-        "species:wildlife",
-        "overlap:wildlife,deer",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": []
-    },
-    {
       "pageName": "Wood Pellets",
       "productCount": 15,
       "proposedRole": "canonical_leaf",
       "proposedNodeId": "heating-pellets-wood",
-      "confidence": "exact",
-      "evidence": [
-        "species:heating",
-        "overlap:wood,pellets",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "coop-barn-heat-lamps",
-          "score": 5
-        },
-        {
-          "nodeId": "firewood-kindling",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Boots",
-      "productCount": 82,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "work-boots",
-      "confidence": "high",
-      "evidence": [
-        "species:apparel",
-        "overlap:boots",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "overalls-coveralls",
-          "score": 5
-        },
-        {
-          "nodeId": "work-gloves",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Food Dry",
-      "productCount": 282,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "cat-food-dry",
-      "confidence": "high",
-      "evidence": [
-        "species:cat",
-        "family:food",
-        "overlap:cat,food,dry",
-        "no-distinctive-remainder",
-        "legacy-partial:cat_food_dry"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-food",
-          "score": 11
-        },
-        {
-          "nodeId": "cat-food-wet",
-          "score": 11
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Food Wet",
-      "productCount": 456,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "cat-food-wet",
-      "confidence": "high",
-      "evidence": [
-        "species:cat",
-        "family:food",
-        "overlap:cat,food,wet",
-        "no-distinctive-remainder",
-        "legacy-partial:cat_food_wet"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-food",
-          "score": 11
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 11
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Crates & Carriers",
-      "productCount": 73,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-crates-kennels",
-      "confidence": "high",
-      "evidence": [
-        "species:dog",
-        "overlap:dog,crates,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Food Dry",
-      "productCount": 701,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-food-dry",
-      "confidence": "high",
-      "evidence": [
-        "species:dog",
-        "family:food",
-        "overlap:dog,food,dry",
-        "no-distinctive-remainder",
-        "legacy-partial:dog_food_dry"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-food",
-          "score": 11
-        },
-        {
-          "nodeId": "dog-food-wet",
-          "score": 11
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Food Wet",
-      "productCount": 557,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-food-wet",
-      "confidence": "high",
-      "evidence": [
-        "species:dog",
-        "family:food",
-        "overlap:dog,food,wet",
-        "no-distinctive-remainder",
-        "legacy-partial:dog_food_wet"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-food",
-          "score": 11
-        },
-        {
-          "nodeId": "dog-food-dry",
-          "score": 11
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Treats Biscuits Cookies & Crunchy Treats",
-      "productCount": 627,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-treats",
-      "confidence": "high",
-      "evidence": [
-        "species:dog",
-        "family:treats",
-        "overlap:dog,treats"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 7
-        },
-        {
-          "nodeId": "dog",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Treats Bones Bully Sticks & Natural Chews",
-      "productCount": 613,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-treats",
-      "confidence": "high",
-      "evidence": [
-        "species:dog",
-        "family:treats",
-        "overlap:dog,treats"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 7
-        },
-        {
-          "nodeId": "dog",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Treats Soft & Chewy",
-      "productCount": 423,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "dog-treats",
-      "confidence": "high",
-      "evidence": [
-        "species:dog",
-        "family:treats",
-        "overlap:dog,treats"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 7
-        },
-        {
-          "nodeId": "dog",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Gloves",
-      "productCount": 99,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "work-gloves",
-      "confidence": "high",
-      "evidence": [
-        "species:apparel",
-        "overlap:gloves",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "overalls-coveralls",
-          "score": 5
-        },
-        {
-          "nodeId": "work-boots",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Heating",
-      "productCount": 49,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "heating-pellets-wood",
-      "confidence": "high",
-      "evidence": [
-        "species:heating",
-        "overlap:heating",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "coop-barn-heat-lamps",
-          "score": 5
-        },
-        {
-          "nodeId": "firewood-kindling",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Wildlife Squirrel Food",
-      "productCount": 18,
-      "proposedRole": "canonical_leaf",
-      "proposedNodeId": "deer-wildlife-feed",
-      "confidence": "high",
-      "evidence": [
-        "species:wildlife",
-        "overlap:wildlife"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Apparel",
-      "productCount": 178,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:apparel"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "overalls-coveralls",
-          "score": 5
-        },
-        {
-          "nodeId": "work-boots",
-          "score": 5
-        },
-        {
-          "nodeId": "work-gloves",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Barn Supplies Buckets & Feeders",
-      "productCount": 132,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:feeders",
-        "overlap:feeders"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "livestock-feeders",
-          "score": 4
-        },
-        {
-          "nodeId": "wild-bird-feeders",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Barn Supplies Farm Gates & Fencing",
-      "productCount": 166,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "overlap:farm,gates,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "corral-panels-gates",
-          "score": 3
-        }
-      ]
-    },
-    {
-      "pageName": "Beekeeping",
-      "productCount": 80,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:livestock"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bee-supplies",
-          "score": 5
-        },
-        {
-          "nodeId": "fly-insect-control-livestock",
-          "score": 5
-        },
-        {
-          "nodeId": "goat-sheep-feed",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Canary & Finch",
-      "productCount": 121,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bird-food",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 7
-        },
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Cockatiel",
-      "productCount": 131,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Healthcare",
-      "productCount": 30,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Litter & Nesting",
-      "productCount": 13,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bird-food",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 7
-        },
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Parakeet",
-      "productCount": 111,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Parrot",
-      "productCount": 144,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Pigeon",
-      "productCount": 23,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Toys",
-      "productCount": 79,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Caged Bird Treats",
-      "productCount": 77,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 6
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Beds & Carriers",
-      "productCount": 30,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:cat",
-        "overlap:cat"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Bowls & Feeders",
-      "productCount": 74,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:cat",
-        "overlap:cat"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Flea & Tick",
-      "productCount": 41,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:cat",
-        "overlap:cat",
-        "legacy-partial:flea_tick_control"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 7
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 7
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 7
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Food Raw",
-      "productCount": 65,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:cat",
-        "family:food",
-        "overlap:cat,food"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-food",
-          "score": 10
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 10
-        },
-        {
-          "nodeId": "cat-food-wet",
-          "score": 10
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Grooming",
-      "productCount": 115,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:cat",
-        "overlap:cat",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 8
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 8
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 8
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Healthcare",
-      "productCount": 186,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:cat",
-        "overlap:cat"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Cat Leashes Collars & Harnesses",
-      "productCount": 7,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:cat",
-        "overlap:cat"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 6
-        },
-        {
-          "nodeId": "cat-food-dry",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Beds",
-      "productCount": 103,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog",
-          "score": 8
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 8
-        },
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 8
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Bowls & Feeders",
-      "productCount": 117,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 7
-        },
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Cleanup",
-      "productCount": 178,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Clothing & Accessories",
-      "productCount": 144,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 7
-        },
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Flea & Tick",
-      "productCount": 79,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog,and",
-        "legacy-partial:flea_tick_control"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 8
-        },
-        {
-          "nodeId": "dog",
-          "score": 7
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 7
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Food Raw",
-      "productCount": 390,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "family:food",
-        "overlap:dog,food"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-food",
-          "score": 10
-        },
-        {
-          "nodeId": "dog-food-dry",
-          "score": 10
-        },
-        {
-          "nodeId": "dog-food-wet",
-          "score": 10
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Grooming",
-      "productCount": 291,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog",
-          "score": 8
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 8
-        },
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 8
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Healthcare",
-      "productCount": 395,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Dog Leashes Collars & Harnesses",
-      "productCount": 724,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:dog",
-        "overlap:dog,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-crates-kennels",
-          "score": 7
-        },
-        {
-          "nodeId": "dog",
-          "score": 6
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Farm Animal Sheep & Goat",
-      "productCount": 178,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "overlap:sheep,and,goat"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "goat-sheep-feed",
-          "score": 3
-        }
-      ]
-    },
-    {
-      "pageName": "Fencing & Gates",
-      "productCount": 31,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:fencing",
-        "overlap:and,gates"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "corral-panels-gates",
-          "score": 7
-        },
-        {
-          "nodeId": "fencing-tools",
-          "score": 7
-        },
-        {
-          "nodeId": "fence-wire-mesh",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Fish Food Betta",
-      "productCount": 20,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:food",
-        "overlap:food"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-food",
-          "score": 4
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 4
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Fish Food Goldfish",
-      "productCount": 19,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:food",
-        "overlap:food"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-food",
-          "score": 4
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 4
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Fish Food Koi & Pond Fish",
-      "productCount": 27,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:food",
-        "overlap:food,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bird-food",
-          "score": 5
-        },
-        {
-          "nodeId": "plant-food-fertilizer",
-          "score": 5
-        },
-        {
-          "nodeId": "cat-food",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Fish Food Tropical",
-      "productCount": 38,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:food",
-        "overlap:food"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-food",
-          "score": 4
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 4
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Gardening Tools & Supplies",
-      "productCount": 802,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:lawn",
-        "overlap:and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "garden-hoses-reels",
-          "score": 6
-        },
-        {
-          "nodeId": "hand-tools",
-          "score": 6
-        },
-        {
-          "nodeId": "insect-control",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Horse Dewormers",
-      "productCount": 19,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:horse",
-        "overlap:horse"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "horse-blankets-tack",
-          "score": 6
-        },
-        {
-          "nodeId": "horse-feed",
-          "score": 6
-        },
-        {
-          "nodeId": "horse-treats-supplements",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Horse First Aid",
-      "productCount": 116,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:horse",
-        "overlap:horse"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "horse-blankets-tack",
-          "score": 6
-        },
-        {
-          "nodeId": "horse-feed",
-          "score": 6
-        },
-        {
-          "nodeId": "horse-treats-supplements",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Horse Fly Control",
-      "productCount": 60,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:horse",
-        "overlap:fly,control"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "fly-control-equine",
-          "score": 7
-        },
-        {
-          "nodeId": "horse-blankets-tack",
-          "score": 6
-        },
-        {
-          "nodeId": "horse-feed",
-          "score": 6
-        }
-      ]
-    },
-    {
-      "pageName": "Horse Grooming",
-      "productCount": 172,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:horse",
-        "family:grooming",
-        "overlap:grooming"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "equine-grooming-hoof",
-          "score": 9
-        },
-        {
-          "nodeId": "horse-blankets-tack",
-          "score": 8
-        },
-        {
-          "nodeId": "horse-feed",
-          "score": 8
-        }
-      ]
-    },
-    {
-      "pageName": "Jerky Dog Treats",
-      "productCount": 137,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:treats",
-        "overlap:dog,treats"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "dog-treats",
-          "score": 5
-        },
-        {
-          "nodeId": "cat-treats",
-          "score": 4
-        },
-        {
-          "nodeId": "horse-treats-supplements",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Lawn Care",
-      "productCount": 333,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:lawn",
-        "overlap:lawn"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "lawn-fertilizer",
-          "score": 6
-        },
-        {
-          "nodeId": "lawn-mowers",
-          "score": 6
-        },
-        {
-          "nodeId": "garden-hoses-reels",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Pest Control",
-      "productCount": 189,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "overlap:pest,control",
-        "no-distinctive-remainder"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "fly-control-equine",
-          "score": 4
-        },
-        {
-          "nodeId": "fly-insect-control-livestock",
-          "score": 4
-        },
-        {
-          "nodeId": "insect-control",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Pest Control & Animal Repellents",
-      "productCount": 153,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "overlap:pest,control,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "fly-control-equine",
-          "score": 3
-        },
-        {
-          "nodeId": "fly-insect-control-livestock",
-          "score": 3
-        },
-        {
-          "nodeId": "insect-control",
-          "score": 3
-        }
-      ]
-    },
-    {
-      "pageName": "Plants",
-      "productCount": 60,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:lawn"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "garden-hoses-reels",
-          "score": 5
-        },
-        {
-          "nodeId": "grass-seed",
-          "score": 5
-        },
-        {
-          "nodeId": "hand-tools",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Reptile Food & Treats",
-      "productCount": 46,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:food",
-        "overlap:food,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bird-food",
-          "score": 5
-        },
-        {
-          "nodeId": "horse-treats-supplements",
-          "score": 5
-        },
-        {
-          "nodeId": "plant-food-fertilizer",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Seeds & Seed Starting",
-      "productCount": 350,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:seed",
-        "overlap:and,seed"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bird-food",
-          "score": 5
-        },
-        {
-          "nodeId": "grass-seed",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Small Pet Bedding & Litter",
-      "productCount": 43,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:litter",
-        "overlap:litter"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-litter",
-          "score": 4
-        },
-        {
-          "nodeId": "small-animal-feed-bedding",
-          "score": 3
-        }
-      ]
-    },
-    {
-      "pageName": "Small Pet Food",
-      "productCount": 116,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:food",
-        "overlap:food"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-food",
-          "score": 4
-        },
-        {
-          "nodeId": "dog-food",
-          "score": 4
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Small Pet Grooming & Health",
-      "productCount": 29,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:health",
-        "overlap:pet,and,health"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "pet-health-wellness",
-          "score": 6
-        },
-        {
-          "nodeId": "equine-grooming-hoof",
-          "score": 5
-        },
-        {
-          "nodeId": "livestock-health-dewormers",
-          "score": 5
-        }
-      ]
-    },
-    {
-      "pageName": "Small Pet Toys & Chews",
-      "productCount": 79,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:toys",
-        "overlap:toys"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-toys",
-          "score": 4
-        },
-        {
-          "nodeId": "dog-toys",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Small Pet Treats",
-      "productCount": 72,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "family:treats",
-        "overlap:treats"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "cat-treats",
-          "score": 4
-        },
-        {
-          "nodeId": "dog-treats",
-          "score": 4
-        },
-        {
-          "nodeId": "horse-treats-supplements",
-          "score": 4
-        }
-      ]
-    },
-    {
-      "pageName": "Wild Bird Baths",
-      "productCount": 48,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:wild,bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 7
-        }
-      ]
-    },
-    {
-      "pageName": "Wild Bird Hangers Poles & Baffles",
-      "productCount": 67,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:wild,bird,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bird-food",
-          "score": 8
-        },
-        {
-          "nodeId": "wild-bird",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 7
-        }
-      ]
-    },
-    {
-      "pageName": "Wild Bird Houses",
-      "productCount": 55,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:wild,bird"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "wild-bird",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-food",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 7
-        }
-      ]
-    },
-    {
-      "pageName": "Wild Bird Suet & Mealworms",
-      "productCount": 144,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "ambiguous",
-      "evidence": [
-        "species:bird",
-        "overlap:wild,bird,and"
-      ],
-      "alternatives": [
-        {
-          "nodeId": "bird-food",
-          "score": 8
-        },
-        {
-          "nodeId": "wild-bird",
-          "score": 7
-        },
-        {
-          "nodeId": "bird-houses-baths",
-          "score": 7
-        }
-      ]
-    },
-    {
-      "pageName": "Baby Chicks",
-      "productCount": 113,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Barn Supplies Tools & Equipment",
-      "productCount": 324,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Cage Bird Cages & Accessories",
-      "productCount": 70,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Farm Animal Chicken & Poultry",
-      "productCount": 369,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Farm Animal Cow",
-      "productCount": 171,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Farm Animal Llama & Alpaca",
-      "productCount": 145,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Farm Animal Pig",
-      "productCount": 146,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Fish Pond Supplies",
-      "productCount": 76,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Fish Tanks & Accessories",
-      "productCount": 89,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Fish Water Treatments & Test Kits",
-      "productCount": 23,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Flowers & Plants",
-      "productCount": 78,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Hay",
-      "productCount": 55,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Mulch & Loam",
-      "productCount": 18,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Bearded Dragon",
-      "productCount": 71,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Bedding & Substrate",
-      "productCount": 13,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Frog",
-      "productCount": 48,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Heating & Lighting",
-      "productCount": 58,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Lizard",
-      "productCount": 71,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Snake",
-      "productCount": 56,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Tanks & Accessories",
-      "productCount": 56,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Reptile Turtle",
-      "productCount": 61,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Shavings & Bedding",
-      "productCount": 44,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Small Pet Guinea Pig",
-      "productCount": 185,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Small Pet Habitats & Accessories",
-      "productCount": 94,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Small Pet Hamster",
-      "productCount": 162,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Small Pet Hay",
-      "productCount": 47,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Small Pet Mouse & Rat",
-      "productCount": 145,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
-      ],
-      "alternatives": []
-    },
-    {
-      "pageName": "Small Pet Rabbit",
-      "productCount": 223,
-      "proposedRole": "needs_review",
-      "proposedNodeId": null,
-      "confidence": "unmatched",
-      "evidence": [
-        "no candidate scored >= 3"
+      "confidence": "ratified",
+      "evidence": [
+        "human-ratified page projection decision",
+        "role=canonical_leaf",
+        "nodeId=heating-pellets-wood"
       ],
       "alternatives": []
     }
