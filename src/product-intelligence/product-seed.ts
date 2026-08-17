@@ -39,6 +39,9 @@ export const BatchContextSchema = z.object({
   batchId: z.string().trim().min(1).max(128).nullish(),
   batchName: z.string().max(256).nullish(),
   itemIndex: z.number().int().nonnegative().nullish(),
+  /** Provenance stamped by deterministic batch analysis; never an authority claim. */
+  contextVersion: z.string().trim().min(1).max(32).nullish(),
+  contextHash: z.string().regex(/^[a-f0-9]{64}$/).nullish(),
   siblingSkus: z.array(z.string().trim().min(1).max(256)).max(1000).default([]),
   hints: z.record(z.string(), z.string().max(512)).default({}),
 }).strict();

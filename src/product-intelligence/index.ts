@@ -30,6 +30,8 @@ export * from './retention';
 export * from './tools';
 export * from './assets';
 export * from './specialists';
+export * from './product-seed';
+export * from './batch-context';
 
 export * from './evaluation/gold';
 export * from './evaluation/metrics';
