@@ -445,12 +445,12 @@
     {
       "pageName": "Cat Grooming",
       "productCount": 115,
-      "proposedRole": "canonical_leaf",
+      "proposedRole": "merchandising",
       "proposedNodeId": "grooming",
       "confidence": "ratified",
       "evidence": [
         "human-ratified page projection decision",
-        "role=canonical_leaf",
+        "role=merchandising",
         "nodeId=grooming"
       ],
       "alternatives": []
@@ -608,12 +608,12 @@
     {
       "pageName": "Dog Dental Treats",
       "productCount": 174,
-      "proposedRole": "canonical_leaf",
+      "proposedRole": "merchandising",
       "proposedNodeId": "dog-treats",
       "confidence": "ratified",
       "evidence": [
         "human-ratified page projection decision",
-        "role=canonical_leaf",
+        "role=merchandising",
         "nodeId=dog-treats"
       ],
       "alternatives": []
@@ -710,12 +710,12 @@
     {
       "pageName": "Dog Leashes Collars & Harnesses",
       "productCount": 724,
-      "proposedRole": "canonical_leaf",
+      "proposedRole": "merchandising",
       "proposedNodeId": "collars-leashes",
       "confidence": "ratified",
       "evidence": [
         "human-ratified page projection decision",
-        "role=canonical_leaf",
+        "role=merchandising",
         "nodeId=collars-leashes"
       ],
       "alternatives": []
@@ -1226,12 +1226,12 @@
     {
       "pageName": "Horse Treats",
       "productCount": 98,
-      "proposedRole": "canonical_leaf",
+      "proposedRole": "merchandising",
       "proposedNodeId": "horse-treats-supplements",
       "confidence": "ratified",
       "evidence": [
         "human-ratified page projection decision",
-        "role=canonical_leaf",
+        "role=merchandising",
         "nodeId=horse-treats-supplements"
       ],
       "alternatives": []

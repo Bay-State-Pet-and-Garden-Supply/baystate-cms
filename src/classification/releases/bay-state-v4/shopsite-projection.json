@@ -288,10 +288,10 @@
     },
     {
       "pageName": "Cat Grooming",
-      "role": "canonical_leaf",
+      "role": "merchandising",
       "nodeId": "grooming",
       "childPages": [],
-      "facetProfileId": "profile-accessories",
+      "facetProfileId": null,
       "productCount": 115
     },
     {
@@ -392,10 +392,10 @@
     },
     {
       "pageName": "Dog Dental Treats",
-      "role": "canonical_leaf",
+      "role": "merchandising",
       "nodeId": "dog-treats",
       "childPages": [],
-      "facetProfileId": "profile-pet-food",
+      "facetProfileId": null,
       "productCount": 174
     },
     {
@@ -456,10 +456,10 @@
     },
     {
       "pageName": "Dog Leashes Collars & Harnesses",
-      "role": "canonical_leaf",
+      "role": "merchandising",
       "nodeId": "collars-leashes",
       "childPages": [],
-      "facetProfileId": "profile-accessories",
+      "facetProfileId": null,
       "productCount": 724
     },
     {
@@ -792,10 +792,10 @@
     },
     {
       "pageName": "Horse Treats",
-      "role": "canonical_leaf",
+      "role": "merchandising",
       "nodeId": "horse-treats-supplements",
       "childPages": [],
-      "facetProfileId": "profile-livestock-equipment",
+      "facetProfileId": null,
       "productCount": 98
     },
     {
