@@ -50,6 +50,8 @@ export interface NormalizationProposalResult {
   proposalCount: number;
   affectedProductCount: number;
   proposals: NormalizationProposal[];
+  /** True when transport-safe serialization omitted proposal detail. */
+  transportTruncated?: boolean;
 }
 
 /**
@@ -430,8 +432,13 @@ export function boundNormalizationProposalResultForTransport(result: Normalizati
     bounded.proposals = bounded.proposals.slice(0, Math.ceil(bounded.proposals.length / 2));
     truncated = true;
   }
-  if (truncated) {
-    (bounded as NormalizationProposalResult & { transportTruncated?: boolean }).transportTruncated = true;
+  // A single proposal can itself contain arbitrarily large product values.
+  // Drop only its detail as the final hard fallback; aggregate counts remain
+  // authoritative and the explicit flag tells callers the detail is partial.
+  if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > AUDIT_RESULT_BYTE_BUDGET) {
+    bounded.proposals = [];
+    truncated = true;
   }
+  if (truncated) bounded.transportTruncated = true;
   return bounded;
 }

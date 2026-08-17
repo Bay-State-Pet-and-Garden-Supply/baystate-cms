@@ -7,6 +7,7 @@ import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import {
   getProductFieldAudit,
   boundProductFieldAuditForTransport,
+  boundNormalizationProposalResultForTransport,
   proposeProductFieldNormalization,
   validateFieldName,
 } from '../../server/services/product-field-audit-service';
@@ -150,6 +151,32 @@ describe('ProductField Audit Service', () => {
     const safeProposals = proposeProductFieldNormalization('ProductField24', 'safe_duplicates');
     expect(safeProposals.proposals.every(p => p.safeAutoApply)).toBe(true);
     expect(safeProposals.proposals.map(p => p.oldValue)).toContain(' Dog Food');
+  });
+
+  it('hard-bounds a single oversized multibyte normalization proposal while preserving counts', () => {
+    const huge = '配送'.repeat(20_000);
+    const bounded = boundNormalizationProposalResultForTransport({
+      field: 'ProductField99',
+      proposalCount: 1,
+      affectedProductCount: 7,
+      proposals: [{
+        id: 'oversized',
+        field: 'ProductField99',
+        oldValue: huge,
+        newValue: huge,
+        affectedSkus: ['SKU-1'],
+        affectedCount: 7,
+        reason: huge,
+        confidence: 0.9,
+        safeAutoApply: false,
+      }],
+    });
+
+    expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(28 * 1024);
+    expect(bounded.proposalCount).toBe(1);
+    expect(bounded.affectedProductCount).toBe(7);
+    expect(bounded.proposals).toEqual([]);
+    expect(bounded.transportTruncated).toBe(true);
   });
 
   it('should cap groups and keep result under the byte budget for large datasets', () => {
