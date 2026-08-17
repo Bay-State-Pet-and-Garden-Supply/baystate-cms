@@ -65,6 +65,24 @@ describe('deterministic batch intelligence (#57)', () => {
     expect(result.payload.signals.some((signal) => signal.kind === 'near_duplicate_rows')).toBe(true);
   });
 
+  it('requires a matching family prefix for abbreviation expansion', () => {
+    const result = deriveBatchIntelligence({
+      batchId: 'abbreviation-family',
+      batchVersion: '1',
+      rows: [
+        row('acme-expanded', 'AC-100', 'Acme Wild Salmon 5 oz', 9.99),
+        row('acme-abbreviated', 'AC-101', 'Acme WS 10 oz', 14.99),
+        row('other-brand', 'BB-200', 'BetterBone Wild Salmon 15 oz', 19.99),
+      ],
+    });
+
+    expect(result.payload.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rowId: 'acme-expanded', relatedRowId: 'acme-abbreviated', kind: 'likely_variant' }),
+    ]));
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'acme-expanded' && relation.relatedRowId === 'other-brand')).toBe(false);
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'other-brand' && relation.relatedRowId === 'acme-expanded')).toBe(false);
+  });
+
   it('recognizes SKU sequences but never promotes a numeric-looking SKU to identity', () => {
     const result = deriveBatchIntelligence({
       batchId: 'sequence',
@@ -103,6 +121,27 @@ describe('deterministic batch intelligence (#57)', () => {
       expect(result.payload.relationships.some((relation) => relation.rowId === left && relation.relatedRowId === right)).toBe(false);
       expect(result.payload.relationships.some((relation) => relation.rowId === right && relation.relatedRowId === left)).toBe(false);
     }
+  });
+
+  it('does not link different brands behind an unknown leading adjective', () => {
+    const result = deriveBatchIntelligence({
+      batchId: 'unknown-leading-adjective',
+      batchVersion: '1',
+      rows: [
+        row('acme-small', 'AC-100', 'Organic Acme Wild Salmon 5 oz', 9.99),
+        row('acme-large', 'AC-101', 'Organic Acme Wild Salmon 10 oz', 14.99),
+        row('betterbone', 'BB-200', 'Organic BetterBone Wild Salmon 15 oz', 19.99),
+      ],
+    });
+
+    expect(result.payload.signals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'repeated_brand_token', value: 'organic' }),
+    ]));
+    expect(result.payload.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rowId: 'acme-small', relatedRowId: 'acme-large', kind: 'likely_variant' }),
+    ]));
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'acme-small' && relation.relatedRowId === 'betterbone')).toBe(false);
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'betterbone' && relation.relatedRowId === 'acme-small')).toBe(false);
   });
 
   it('filters generic leading words before deriving brand cues', () => {

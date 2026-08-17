@@ -176,6 +176,8 @@ type ParsedRow = {
   meaningfulTokens: string[];
   sizeTokens: string[];
   familyTokens: string[];
+  /** Normalized family/base name after measured and size variants are removed. */
+  normalizedFamilyName: string;
   /** Identity-oriented tokens exclude generic merchandising language. */
   identityTokens: string[];
   /** The first identity-oriented token is only a bounded brand cue, never a fact. */
@@ -271,6 +273,7 @@ function parseRow(row: BatchSeedRow): ParsedRow {
   // Family tokens intentionally exclude only generic merchandising words and
   // measured variants. They are clues for grouping, never product facts.
   const familyTokens = meaningfulTokens.filter((token) => !VARIANT_WORDS.has(token));
+  const normalizedFamilyName = familyTokens.join(' ');
   const identityTokens = familyTokens.filter((token) => !GENERIC_FAMILY_WORDS.has(token));
   // Generic merchandising words cannot establish a brand cue. Only an
   // identity-oriented leading token may participate in brand isolation.
@@ -283,6 +286,7 @@ function parseRow(row: BatchSeedRow): ParsedRow {
     meaningfulTokens,
     sizeTokens: sizes,
     familyTokens,
+    normalizedFamilyName,
     identityTokens,
     brandToken,
     skuPrefix: sku?.prefix ?? null,
@@ -333,7 +337,32 @@ function abbreviationPairs(rows: ParsedRow[]): Array<{ abbreviation: string; fam
   return result.sort((a, b) => a.abbreviation.localeCompare(b.abbreviation) || a.family.localeCompare(b.family));
 }
 
-function relationFor(left: ParsedRow, right: ParsedRow, repeatedBrandTokens: Set<string>, abbreviations: Array<{ abbreviation: string; family: string }>): BatchRelationship | null {
+function hasExplicitAbbreviationExpansion(left: ParsedRow, right: ParsedRow, abbreviations: Array<{ abbreviation: string; family: string }>): boolean {
+  for (const entry of abbreviations) {
+    const phraseTokens = entry.family.split(' ');
+    for (let leftIndex = 0; leftIndex < left.identityTokens.length; leftIndex += 1) {
+      const leftAbbreviation = left.identityTokens[leftIndex] === entry.abbreviation;
+      const leftExpansion = phraseTokens.every((token, offset) => left.identityTokens[leftIndex + offset] === token);
+      for (let rightIndex = 0; rightIndex < right.identityTokens.length; rightIndex += 1) {
+        const rightAbbreviation = right.identityTokens[rightIndex] === entry.abbreviation;
+        const rightExpansion = phraseTokens.every((token, offset) => right.identityTokens[rightIndex + offset] === token);
+        if ((leftAbbreviation && rightExpansion) || (rightAbbreviation && leftExpansion)) {
+          // The tokens before the abbreviation/expansion are a stronger
+          // family cue than a shared inferred brand token. Requiring the
+          // prefixes to match prevents `Organic Acme WS` from linking to
+          // `Organic BetterBone Wild Salmon` merely because both start with
+          // the unknown adjective `Organic`.
+          const leftPrefix = left.identityTokens.slice(0, leftIndex);
+          const rightPrefix = right.identityTokens.slice(0, rightIndex);
+          if (leftPrefix.length > 0 && leftPrefix.join(' ') === rightPrefix.join(' ')) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function relationFor(left: ParsedRow, right: ParsedRow, abbreviations: Array<{ abbreviation: string; family: string }>): BatchRelationship | null {
   if (left.row.rowId === right.row.rowId) return null;
   const reasons: BatchRelationshipReason[] = [];
   const shared = setIntersection(left.identityTokens, right.identityTokens);
@@ -342,45 +371,39 @@ function relationFor(left: ParsedRow, right: ParsedRow, repeatedBrandTokens: Set
     right.identityTokens.filter((token) => token !== right.brandToken),
   );
   const sameName = left.normalizedName === right.normalizedName;
+  const sameNormalizedFamily = left.identityTokens.length >= 2 && right.identityTokens.length >= 2 &&
+    left.normalizedFamilyName.length > 0 && left.normalizedFamilyName === right.normalizedFamilyName;
   const overlap = jaccard(left.identityTokens, right.identityTokens);
   const differentSize = left.sizeTokens.join('|') !== right.sizeTokens.join('|') && (left.sizeTokens.length > 0 || right.sizeTokens.length > 0);
   const skuSequence = left.skuPrefix !== null && left.skuPrefix === right.skuPrefix && left.skuNumber !== null && right.skuNumber !== null && Math.abs(left.skuNumber - right.skuNumber) <= 3;
-  const sameRepeatedBrand = left.brandToken !== null && left.brandToken === right.brandToken && repeatedBrandTokens.has(left.brandToken);
-  const distinctBrandCue = left.brandToken !== null && right.brandToken !== null && left.brandToken !== right.brandToken;
-  const abbreviatedFamily = abbreviations.some((entry) => {
-    const phraseTokens = entry.family.split(' ');
-    const leftAbbreviation = left.identityTokens.includes(entry.abbreviation);
-    const rightAbbreviation = right.identityTokens.includes(entry.abbreviation);
-    const leftExpansion = phraseTokens.every((token) => left.identityTokens.includes(token));
-    const rightExpansion = phraseTokens.every((token) => right.identityTokens.includes(token));
-    return (leftAbbreviation && rightExpansion) || (rightAbbreviation && leftExpansion);
-  });
-  // A one-token family overlap is only meaningful when the batch supplies the
-  // same repeated leading brand cue. Two semantic family tokens can stand on
-  // their own, but differing leading brand cues keep mixed rows isolated.
-  const meaningfulFamilyIdentity = !distinctBrandCue && (
-    sharedSemantic.length >= 2 ||
-    (sharedSemantic.length >= 1 && sameRepeatedBrand) ||
-    (sameRepeatedBrand && abbreviatedFamily)
-  );
+  const leadingBrandMismatch = left.brandToken !== right.brandToken;
+  const abbreviatedFamily = hasExplicitAbbreviationExpansion(left, right, abbreviations);
+  // A relationship cannot be based on an inferred brand token or generic
+  // token overlap. Exact family/base identity, a two-token semantic family
+  // prefix, or an explicit abbreviation/expansion is required. The prefix
+  // requirement is deliberately stronger than `brandToken`: it isolates
+  // rows such as `Organic Acme ...` from `Organic BetterBone ...` without an
+  // unbounded adjective denylist.
+  const sharedFamilyPrefix = left.identityTokens.length >= 2 && right.identityTokens.length >= 2 &&
+    left.identityTokens.slice(0, 2).join(' ') === right.identityTokens.slice(0, 2).join(' ');
+  const meaningfulFamilyIdentity = sameNormalizedFamily ||
+    (sharedSemantic.length >= 2 && sharedFamilyPrefix) ||
+    abbreviatedFamily;
+  if (leadingBrandMismatch) return null;
   if (sameName) reasons.push('same_normalized_name');
-  if (overlap >= 0.6 && !sameName) reasons.push('high_name_overlap');
+  if (overlap >= 0.6 && !sameName && meaningfulFamilyIdentity) reasons.push('high_name_overlap');
   if (shared.length > 0) reasons.push('shared_family_tokens');
   if (differentSize) reasons.push('different_size_or_pack');
   if (skuSequence) reasons.push('sku_sequence');
-  if (sameRepeatedBrand) reasons.push('shared_repeated_brand_token');
   if (abbreviatedFamily) reasons.push('abbreviated_family');
   if (left.price !== null && left.price === right.price && differentSize) reasons.push('same_price_pattern');
 
   let kind: BatchRelationshipKind | null = null;
-  // Once both rows provide distinct identity-oriented brand cues, no
-  // relationship type may bridge them, including the broad overlap fallback.
-  if (distinctBrandCue) return null;
   if (sameName) kind = 'duplicate';
   else if (meaningfulFamilyIdentity && differentSize) kind = 'likely_variant';
-  else if (overlap >= 0.67 || (meaningfulFamilyIdentity && (skuSequence || abbreviatedFamily))) kind = 'near_duplicate';
+  else if (meaningfulFamilyIdentity) kind = 'near_duplicate';
   if (!kind) return null;
-  const score = Math.min(1, Math.max(overlap, shared.length > 0 ? 0.45 : 0) + (differentSize ? 0.08 : 0) + (skuSequence ? 0.08 : 0));
+  const score = Math.min(1, Math.max(overlap, sameNormalizedFamily ? 0.75 : 0) + (differentSize ? 0.08 : 0) + (skuSequence ? 0.08 : 0));
   return {
     rowId: left.row.rowId,
     relatedRowId: right.row.rowId,
@@ -411,12 +434,11 @@ export function deriveBatchIntelligence(input: BatchIntelligenceInput, options: 
     rows: rows.map((row) => row.row),
   });
   const brandTokens = commonFirstTokens(rows);
-  const repeatedBrandTokens = new Set(brandTokens.keys());
   const abbreviations = abbreviationPairs(rows);
   const relationships: BatchRelationship[] = [];
   for (let index = 0; index < rows.length; index += 1) {
     for (let next = index + 1; next < rows.length; next += 1) {
-      const relation = relationFor(rows[index], rows[next], repeatedBrandTokens, abbreviations);
+      const relation = relationFor(rows[index], rows[next], abbreviations);
       if (relation && relationships.length + 2 <= MAX_BATCH_RELATIONSHIPS) {
         relationships.push(relation);
         relationships.push({ ...relation, rowId: relation.relatedRowId, relatedRowId: relation.rowId });
