@@ -11,7 +11,7 @@
     "facet-profiles.json": "db325fdd4c9197dda2b6166fb573d87cfb015b0d510b7241c4e0a4c9c2aa027f",
     "legacy-mappings.json": "b1d826eb032348037ccea2f019209035d956055dcfff6c6c59a2f80ce2e1e36a",
     "attributes.json": "14a88494e7d5d54929dc36790281cb7f672844b073b8374da9708c5eb2eb9d9c",
-    "shopsite-projection.json": "5f617f9c1c140bd344da508a9da4c47a648bc00f150366722772cadb5b5042b6",
+    "shopsite-projection.json": "d9b455d5bd3ac34aa5683fa147b7c908e83823c1bd2adc22d1af3d4a9b293013",
     "export-mappings.json": "cbd4dc1f917ae424e577f280605a1239ce92521af1a770a17ecc58e8f09df4cd",
     "guidance.json": "3c8230dee5a3d4f2d5979c881531ee19fc9175825bf749cb260cafc3251f1ee4",
     "page-assignment-policy.json": "64eafc38fcf9a9ba074f18a33c7026396642f3458a503419552686ba2285c7db"
@@ -33,7 +33,7 @@
     "Facet profiles: the 73 v3 attribute profiles deduplicated by BEHAVIORAL FINGERPRINT (attribute ids + required + cardinality + attribute valueMode/units/allowedValues/aliases/universal/claim/composition/export disposition + effective facet behavior including order/control/selection) into 9 shared profiles. Every profile carries sourceV3ProfileIds + canonicalNodeIds (blast radius) + behaviorFingerprint; every profile_map entry in legacy-mappings.json is verified equivalent:true (build fails otherwise).",
     "attributes.json carries 25 v3 attributes plus 2 compiled projection attributes: canonical-category-id (ProductField13) and canonical-breadcrumb (ProductField14).",
     "export-mappings.json carries the 17 v3 mappings plus canonical-category-id-mapping (PF13) and canonical-breadcrumb-mapping (PF14).",
-    "ShopSite page projection: 153 live pages assigned roles deterministically — canonical_leaf=25, shop_all_aggregate=18, merchandising=100, navigation=10, needs_review=0 (canonical_browse=0 in this pass; remaining pages require human curation — needs_review must reach 0 before the compiler phase).",
+    "ShopSite page projection: 153 live pages assigned roles deterministically — canonical_leaf=21, shop_all_aggregate=18, merchandising=104, navigation=10, needs_review=0 (canonical_browse=0 in this pass; remaining pages require human curation — needs_review must reach 0 before the compiler phase).",
     "Shop All aggregation pages are page projections, NOT hierarchy nodes (documented in the hybrid plan).",
     "Legacy v1 taxonomy (src/classification/taxonomy/*.json) is still referenced by this builder but remains otherwise dead code pending the P6 removal phase."
   ]
