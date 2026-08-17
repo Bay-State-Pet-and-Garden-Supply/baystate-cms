@@ -453,6 +453,23 @@ describe('ladder contract adapter + helpers', () => {
     expect(result.fields.every((f) => f.method.length > 0)).toBe(true);
   });
 
+  it('fails closed for rendered profiles instead of static-fetching them', async () => {
+    const fetchPage = vi.fn(async () => fetched('<html><body><h1>Generic fallback title</h1></body></html>', 'https://rendered.example.com/p/x'));
+    const contract = createLadderExtractionContract({ fetchPage });
+    const result = await contract.extractWithProfile!({
+      url: 'https://rendered.example.com/p/x',
+      expected: { name: 'Generic fallback title' },
+      signal: new AbortController().signal,
+      timeoutMs: 5000,
+      profile: { runtime: 'rendered', selectors: { titleSelector: 'h1' } },
+    });
+    expect(result.identityStatus).toBe('insufficient_evidence');
+    expect(result.fetchModes).toEqual(['profile_unsupported']);
+    expect(result.conflicts).toEqual([expect.objectContaining({ field: '_profile' })]);
+    expect(result.identityReasons.join(' ')).toMatch(/rendered profile runtime is unsupported/i);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
   it('fetchPageHtml records the final URL, status, and content hash', async () => {
     const fetchMock = vi.fn(async () => new Response('<html>fixture</html>', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);

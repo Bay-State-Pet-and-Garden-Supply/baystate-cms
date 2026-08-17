@@ -715,7 +715,32 @@ export function createLadderExtractionContract(options: LadderOptions = {}): Pag
     }): Promise<PageExtractionResult> {
       // This is the deterministic profile-runner seam: unlike `extract`, it
       // never invokes the ladder's fallback layers and only reports values
-      // selected by the supplied profile.
+      // selected by the supplied profile. The static Cheerio runner below is
+      // intentionally not valid for rendered profiles: a rendered profile
+      // requires the extraction worker's browser profile runner, and silently
+      // issuing a static fetch would make a healthy result non-authoritative.
+      if (request.profile.runtime === 'rendered') {
+        return {
+          requestedUrl: request.url,
+          finalUrl: request.url,
+          fetchModes: ['profile_unsupported'],
+          contentHash: null,
+          artifactRef: null,
+          fields: [],
+          gtins: [],
+          sku: null,
+          brand: null,
+          productName: null,
+          variant: null,
+          size: null,
+          packCount: null,
+          images: [],
+          conflicts: [{ field: '_profile', summary: 'rendered profile requires the browser profile runner; unsupported by this ladder seam' }],
+          identityStatus: 'insufficient_evidence',
+          identityReasons: ['rendered profile runtime is unsupported by this static ladder seam'],
+          deterministicOnly: true,
+        };
+      }
       const page = await (options.fetchPage ?? fetchPageHtml)(request.url, request.signal, request.timeoutMs);
       const $ = cheerio.load(page.html);
       const selector = (key: string): string | null => request.profile.selectors[key] ?? null;

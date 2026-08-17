@@ -41,15 +41,42 @@ describe('Profile Engineer specialist (#51)', () => {
         gtins: [], sku: null, brand: 'ACME', productName: 'ACME Chicken Broth 16 oz', variant: null, size: '16 oz', packCount: null,
         images: [], conflicts: [], identityStatus: 'exact_match', identityReasons: [], deterministicOnly: true,
       }),
+      extractWithProfile: async ({ url }: { url: string }) => ({
+        requestedUrl: url, finalUrl: url, fetchModes: ['profile_selector'], contentHash: 'a'.repeat(64), artifactRef: `artifact:${url}`,
+        fields: [{ field: 'product_name', value: 'ACME Chicken Broth 16 oz', method: 'profile_selector', sourcePath: 'profile:title' }],
+        gtins: [], sku: null, brand: 'ACME', productName: 'ACME Chicken Broth 16 oz', variant: null, size: '16 oz', packCount: null,
+        images: [], conflicts: [], identityStatus: 'exact_match', identityReasons: [], deterministicOnly: true,
+      }),
     };
     const health = await evaluateExistingProfile(
       { version: 1, selectors: { titleSelector: 'h1' }, runtime: 'rendered' },
-      [sample('https://acme.example/p')],
+      [sample('https://acme.example/p1'), sample('https://acme.example/p2')],
       extraction,
       new AbortController().signal,
       1000,
     );
     expect(health.healthy).toBe(true);
+  });
+
+  it('fails closed when the profile health check has fewer than two samples', async () => {
+    const extraction: PageExtractionContract = {
+      name: 'fixture-profile-runner',
+      version: '1.0.0',
+      extract: vi.fn(),
+      extractWithProfile: vi.fn(async ({ url }) => ({
+        requestedUrl: url, finalUrl: url, fetchModes: ['profile_selector'], contentHash: null, artifactRef: null,
+        fields: [{ field: 'product_name', value: 'ACME Chicken Broth 16 oz', method: 'profile_selector' }],
+        gtins: [], sku: null, brand: null, productName: 'ACME Chicken Broth 16 oz', variant: null, size: null, packCount: null,
+        images: [], conflicts: [], identityStatus: 'exact_match' as const, identityReasons: [], deterministicOnly: true,
+      })),
+    };
+    const health = await evaluateExistingProfile(
+      { version: 1, selectors: { titleSelector: 'h1' }, runtime: 'static' },
+      [sample('https://acme.example/only')], extraction,
+      new AbortController().signal, 1000,
+    );
+    expect(health).toMatchObject({ healthy: false, reason: 'insufficient_representative_samples', failure: { code: 'insufficient_representative_samples' } });
+    expect(extraction.extractWithProfile).not.toHaveBeenCalled();
   });
 
   it('reuses a healthy active profile without claiming a workflow', async () => {
@@ -79,7 +106,30 @@ describe('Profile Engineer specialist (#51)', () => {
       [sample('https://acme.example/p1'), sample('https://acme.example/p2')], extraction,
       new AbortController().signal, 1000,
     );
-    expect(health).toMatchObject({ healthy: false, reason: 'profile_incompatible:https://acme.example/p1' });
+    expect(health).toMatchObject({ healthy: false, reason: 'profile_runner_unavailable', failure: { code: 'profile_runner_unavailable' } });
+  });
+
+  it('never falls back to a successful generic extraction after profile selectors fail', async () => {
+    const genericExtract = vi.fn(async ({ url }: { url: string }) => ({
+      requestedUrl: url, finalUrl: url, fetchModes: ['json_ld'], contentHash: 'a'.repeat(64), artifactRef: null,
+      fields: [{ field: 'product_name', value: 'ACME Chicken Broth 16 oz', method: 'json_ld', sourcePath: 'jsonld:name' }],
+      gtins: [], sku: null, brand: null, productName: 'ACME Chicken Broth 16 oz', variant: null, size: null, packCount: null,
+      images: [], conflicts: [], identityStatus: 'exact_match' as const, identityReasons: [], deterministicOnly: true,
+    }));
+    const profileExtract = vi.fn(async () => { throw new Error('profile selectors failed'); });
+    const health = await evaluateExistingProfile(
+      { version: 1, selectors: { titleSelector: '.missing-title' }, runtime: 'static' },
+      [sample('https://acme.example/p1'), sample('https://acme.example/p2')],
+      { name: 'profile-and-fallback', version: '1.0.0', extract: genericExtract, extractWithProfile: profileExtract },
+      new AbortController().signal, 1000,
+    );
+    expect(health).toMatchObject({
+      healthy: false,
+      reason: 'profile_probe_failed:https://acme.example/p1',
+      failure: { code: 'profile_probe_failed', url: 'https://acme.example/p1' },
+    });
+    expect(profileExtract).toHaveBeenCalledTimes(1);
+    expect(genericExtract).not.toHaveBeenCalled();
   });
 
   it('uses JSON-LD/platform evidence before proposing selectors and preserves exact artifacts', async () => {

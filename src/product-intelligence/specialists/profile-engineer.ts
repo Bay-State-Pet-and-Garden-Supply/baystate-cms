@@ -156,6 +156,11 @@ export function registerProfileEngineerSchemas(registry: SpecialistArtifactSchem
 export interface ProfileEngineerHealth {
   healthy: boolean;
   reason?: string;
+  /** Machine-readable probe outcome retained for routing/audit consumers. */
+  failure?: {
+    code: 'cancelled' | 'no_representative_samples' | 'insufficient_representative_samples' | 'profile_runner_unavailable' | 'profile_probe_failed' | 'profile_incompatible';
+    url?: string;
+  };
 }
 
 export interface ProfileEngineerWorkflowMutation {
@@ -284,36 +289,55 @@ export async function evaluateExistingProfile(
   timeoutMs: number,
 ): Promise<ProfileEngineerHealth> {
   if (!profile) return { healthy: false, reason: 'profile_missing' };
-  if (samples.length === 0) return { healthy: false, reason: 'no_representative_samples' };
+  if (samples.length < 2) {
+    return {
+      healthy: false,
+      reason: samples.length === 0 ? 'no_representative_samples' : 'insufficient_representative_samples',
+      failure: { code: samples.length === 0 ? 'no_representative_samples' : 'insufficient_representative_samples' },
+    };
+  }
+  // A generic extraction result is never evidence that an active profile is
+  // healthy. In particular, do not call extract() when the explicit runner is
+  // absent: doing so can fetch a page successfully and obscure that the
+  // profile cannot be exercised by this contract.
+  if (!extraction.extractWithProfile) {
+    return {
+      healthy: false,
+      reason: 'profile_runner_unavailable',
+      failure: { code: 'profile_runner_unavailable' },
+    };
+  }
   const profileRequest = {
     selectors: profile.selectors,
     runtime: profile.runtime,
   };
   for (const sample of samples) {
-    if (signal.aborted) return { healthy: false, reason: 'cancelled' };
+    if (signal.aborted) return { healthy: false, reason: 'cancelled', failure: { code: 'cancelled', url: sample.url } };
     try {
-      const request = {
+      const result = await extraction.extractWithProfile({
         url: sample.url,
         expected: { name: sample.expectedName ?? undefined, gtin: sample.expectedGtin ?? undefined },
         signal,
         timeoutMs,
         profile: profileRequest,
-      };
-      // Never use the generic ladder for this check when an explicit profile
-      // runner is available. The fallback path is accepted only when the
-      // returned evidence proves that the supplied profile actually ran.
-      const result = extraction.extractWithProfile
-        ? await extraction.extractWithProfile(request)
-        : await extraction.extract(request);
+      });
       const profileFields = result.fields.filter((field) => field.method === 'profile_selector');
       const title = profileFields.find((field) => field.field === 'product_name')?.value
         ?? profileFields.find((field) => field.field === 'title')?.value;
       const usedProfile = result.fetchModes.includes('profile_selector') && profileFields.length > 0;
       if (!usedProfile || !title?.trim() || result.identityStatus === 'wrong_variant' || result.identityStatus === 'conflicting_identity') {
-        return { healthy: false, reason: `profile_incompatible:${sample.url}` };
+        return {
+          healthy: false,
+          reason: `profile_incompatible:${sample.url}`,
+          failure: { code: 'profile_incompatible', url: sample.url },
+        };
       }
     } catch {
-      return { healthy: false, reason: `profile_probe_failed:${sample.url}` };
+      return {
+        healthy: false,
+        reason: `profile_probe_failed:${sample.url}`,
+        failure: { code: 'profile_probe_failed', url: sample.url },
+      };
     }
   }
   return { healthy: true, reason: 'all_representative_pages_passed' };
