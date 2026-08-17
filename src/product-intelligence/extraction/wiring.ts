@@ -140,7 +140,11 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
         signal: AbortSignal,
         _timeoutMs: number,
         expected?: { gtin?: string; name?: string; brandHint?: string | null },
-      ): Promise<{ fields: ExtractedFieldEvidence[]; images: Array<{ url: string; sourcePath?: string }> } | null> {
+      ): Promise<{
+        fields: ExtractedFieldEvidence[];
+        images: Array<{ url: string; sourcePath?: string }>;
+        profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered' };
+      } | null> {
         if (signal.aborted) return null;
         try {
           const parsed = new URL(url);
@@ -252,7 +256,15 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
             sourcePath: `profile:${profile.id}:${index === 0 ? 'primaryImage' : 'additionalImages'}`,
           }));
 
-          return { fields, images };
+          return {
+            fields,
+            images,
+            profile: {
+              id: profile.id,
+              version: profile.updatedAt ? Math.floor(new Date(profile.updatedAt).getTime() / 1000) : 0,
+              runtime: profile.runtime,
+            },
+          };
         } catch {
           return null;
         }

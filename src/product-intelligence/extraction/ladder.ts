@@ -43,13 +43,21 @@ export interface LadderOptions {
    */
   profiles?: Array<{
     name: string;
+    /** Optional durable identity/version for provenance bundles. */
+    id?: string;
+    version?: string | number;
+    runtime?: 'static' | 'rendered';
     matches(url: string): boolean;
     extract(
       url: string,
       signal: AbortSignal,
       timeoutMs: number,
       expected?: { gtin?: string; name?: string; brandHint?: string | null },
-    ): Promise<{ fields: ExtractedFieldEvidence[]; images: Array<{ url: string; sourcePath?: string }> } | null>;
+    ): Promise<{
+      fields: ExtractedFieldEvidence[];
+      images: Array<{ url: string; sourcePath?: string }>;
+      profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered' };
+    } | null>;
   }>;
   /** Layer 5: rendered browser with network capture (injected worker client). */
   browser?: { snapshot: BrowserSnapshotFn } | null;
@@ -64,6 +72,8 @@ export interface LadderOptions {
 export interface LadderRun {
   result: PageExtractionResult;
   layersUsed: string[];
+  /** Approved profile selected by the ladder, when one matched. */
+  profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered' } | null;
 }
 
 /** Digits-only comparison of expected vs extracted GTINs. */
@@ -84,7 +94,7 @@ export async function runExtractionLadder(
   const layersUsed: string[] = [];
   const fields: ExtractedFieldEvidence[] = [];
   const images: ExtractedImageCandidate[] = [];
-  const gtins: Array<{ value: string; method: string }> = [];
+  const gtins: Array<{ value: string; method: string; sourcePath?: string }> = [];
   const conflicts: Array<{ field: string; summary: string }> = [];
   const fetchModes: string[] = [];
   const variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }> = [];
@@ -135,15 +145,15 @@ export async function runExtractionLadder(
     fields.push({ field, value: trimmed.slice(0, 2000), method, sourcePath });
   };
 
-  const addGtin = (value: string, method: string): void => {
+  const addGtin = (value: string, method: string, sourcePath?: string): void => {
     const digits = value.replace(/\D/g, '');
     if (digits.length < 6) return;
-    if (gtins.some((g) => g.value.replace(/\D/g, '') === digits)) return;
+    if (gtins.some((g) => g.value.replace(/\D/g, '') === digits && g.method === method)) return;
     const existing = gtins.find((g) => g.value.replace(/\D/g, '') !== digits);
     if (existing) {
       conflicts.push({ field: 'gtin', summary: `conflicting GTIN evidence: ${existing.value} vs ${digits}` });
     }
-    gtins.push({ value: digits, method });
+    gtins.push({ value: digits, method, sourcePath });
   };
 
   // Layer 1 + 2: one HTTP fetch, then parse every embedded structured signal.
@@ -175,6 +185,7 @@ export async function runExtractionLadder(
         deterministicOnly: true,
       },
       layersUsed: ['http'],
+      profile: null,
     };
   }
   layersUsed.push('http', 'structured_data');
@@ -189,7 +200,7 @@ export async function runExtractionLadder(
     if (product.name) addField('product_name', product.name, 'json_ld', 'JSON-LD Product.name');
     if (product.sku) addField('sku', product.sku, 'json_ld', 'JSON-LD Product.sku');
     if (product.brand) addField('brand', product.brand, 'json_ld', 'JSON-LD Product.brand');
-    if (product.gtin) addGtin(product.gtin, 'json_ld');
+    if (product.gtin) addGtin(product.gtin, 'json_ld', 'JSON-LD Product.gtin');
     if (product.size) addField('size', product.size, 'json_ld', 'JSON-LD Product.size');
     for (const image of product.images) {
       if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: 'JSON-LD Product.image' });
@@ -222,7 +233,7 @@ export async function runExtractionLadder(
           addField('product_name', productJson.title, 'platform_api', 'Shopify product JSON');
           addField('brand', productJson.vendor ?? undefined, 'platform_api', 'Shopify product JSON vendor');
           const gtin = gtinFromAny(productJson as unknown as Record<string, unknown>);
-          if (gtin) addGtin(gtin, 'platform_api');
+          if (gtin) addGtin(gtin, 'platform_api', 'Shopify product JSON gtin');
           productName ??= productJson.title;
           brand ??= productJson.vendor ?? null;
           if (productJson.variants.length > 1) {
@@ -260,7 +271,7 @@ export async function runExtractionLadder(
             addField('product_name', product.title as string | undefined, 'platform_api', '__NEXT_DATA__ product');
             if (typeof product.sku === 'string') addField('sku', product.sku, 'platform_api', '__NEXT_DATA__ product.sku');
             const fallbackGtin = gtinFromAny(product);
-            if (fallbackGtin) addGtin(fallbackGtin, 'platform_api');
+            if (fallbackGtin) addGtin(fallbackGtin, 'platform_api', '__NEXT_DATA__ product.gtin');
             productName ??= typeof product.title === 'string' ? product.title : null;
             sku ??= typeof product.sku === 'string' ? product.sku : null;
             if (Array.isArray(product.variants)) {
@@ -287,7 +298,7 @@ export async function runExtractionLadder(
               addField('product_name', product.title as string | undefined, 'platform_api', '__NUXT__ product');
               if (typeof product.sku === 'string') addField('sku', product.sku, 'platform_api', '__NUXT__ product.sku');
               const fallbackGtin = gtinFromAny(product);
-              if (fallbackGtin) addGtin(fallbackGtin, 'platform_api');
+              if (fallbackGtin) addGtin(fallbackGtin, 'platform_api', '__NUXT__ product.gtin');
               productName ??= typeof product.title === 'string' ? product.title : null;
               sku ??= typeof product.sku === 'string' ? product.sku : null;
             }
@@ -324,7 +335,7 @@ export async function runExtractionLadder(
         addField('product_name', product.title as string | undefined, 'platform_api', '__NEXT_DATA__ product');
         if (typeof product.sku === 'string') addField('sku', product.sku, 'platform_api', '__NEXT_DATA__ product.sku');
         const gtin = gtinFromAny(product);
-        if (gtin) addGtin(gtin, 'platform_api');
+        if (gtin) addGtin(gtin, 'platform_api', '__NEXT_DATA__ product.gtin');
         productName ??= typeof product.title === 'string' ? product.title : null;
         sku ??= typeof product.sku === 'string' ? product.sku : null;
         brand ??= typeof product.brand === 'string' ? product.brand : typeof product.vendor === 'string' ? product.vendor : null;
@@ -366,7 +377,7 @@ export async function runExtractionLadder(
         addField('product_name', product.title as string | undefined, 'platform_api', '__NUXT__ product');
         if (typeof product.sku === 'string') addField('sku', product.sku, 'platform_api', '__NUXT__ product.sku');
         const gtin = gtinFromAny(product);
-        if (gtin) addGtin(gtin, 'platform_api');
+        if (gtin) addGtin(gtin, 'platform_api', '__NUXT__ product.gtin');
         productName ??= typeof product.title === 'string' ? product.title : null;
         sku ??= typeof product.sku === 'string' ? product.sku : null;
         brand ??= typeof product.brand === 'string' ? product.brand : null;
@@ -407,14 +418,17 @@ export async function runExtractionLadder(
 
   // Layer 4: registered domain profiles (CSS selector extractors).
   let profileMatched = false;
+  let selectedProfile: LadderRun['profile'] = null;
   for (const profile of options.profiles ?? []) {
     if (!profile.matches(finalUrl)) continue;
     profileMatched = true;
+    if (profile.id && profile.version !== undefined) selectedProfile = { id: profile.id, version: profile.version, runtime: profile.runtime };
     layersUsed.push('profile_selector');
     fetchModes.push('profile_selector');
     try {
       const out = await profile.extract(finalUrl, signal, timeoutMs, expected);
       if (out) {
+        if (out.profile) selectedProfile = out.profile;
         for (const f of out.fields) addField(f.field, f.value, 'profile_selector', f.sourcePath);
         for (const image of out.images) {
           if (!images.some((i) => i.url === image.url)) {
@@ -451,6 +465,7 @@ export async function runExtractionLadder(
     return {
       result: assembleResult(false),
       layersUsed: [...new Set(layersUsed)],
+      profile: selectedProfile,
     };
   }
 
@@ -652,6 +667,7 @@ export async function runExtractionLadder(
   return {
     result: assembleResult(llmContributed),
     layersUsed: [...new Set(layersUsed)],
+    profile: selectedProfile,
   };
 
   function assembleResult(llmContributed = false): PageExtractionResult {
