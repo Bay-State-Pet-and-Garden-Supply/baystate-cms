@@ -28,7 +28,7 @@ export interface ProfileRunnerOptions {
 }
 
 export type ProfileRunnerResult =
-  | { ok: true; data: ExtractionData; warnings: string[]; sourceContentHash?: string | null; sourceArtifactId?: string | null }
+  | { ok: true; data: ExtractionData; warnings: string[]; fieldProvenance: Record<string, string>; fieldProvenanceDetails?: Record<string, { method: string; sourcePath: string }>; sourceContentHash?: string | null; sourceArtifactId?: string | null }
   | { ok: false; error: string; warnings: string[] };
 
 /**
@@ -106,6 +106,8 @@ export async function runProfileExtraction(
     ok: true,
     data: ext,
     warnings: response.warnings ?? [],
+    fieldProvenance: response.fieldProvenance ?? ext.fieldProvenance ?? {},
+    fieldProvenanceDetails: response.fieldProvenanceDetails ?? {},
     sourceContentHash: response.sourceContentHash ?? null,
     sourceArtifactId: response.sourceArtifactId ?? null,
   };

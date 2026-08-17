@@ -222,6 +222,8 @@ describe('extraction ladder', () => {
     expect(result.identityStatus).toBe('exact_match');
     expect(result.productName).toBe('Catnip Toy Mouse');
     expect(result.brand).toBe('Paws Inc');
+    expect(result.variant?.id).toBe('1');
+    expect(result.fields.find((field) => field.field === 'sku' && field.variantRef === '1')).toMatchObject({ value: 'CT-1', variantRef: '1' });
   });
 
   it('runs the registered profile layer and merges its evidence', async () => {
@@ -467,6 +469,21 @@ describe('ladder contract adapter + helpers', () => {
     expect(result.fetchModes).toEqual(['profile_unsupported']);
     expect(result.conflicts).toEqual([expect.objectContaining({ field: '_profile' })]);
     expect(result.identityReasons.join(' ')).toMatch(/rendered profile runtime is unsupported/i);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('requires an authorized transport for static profile extraction', async () => {
+    const fetchPage = vi.fn(async () => fetched('<html><body><h1>must not fetch</h1></body></html>'));
+    const contract = createLadderExtractionContract({ fetchPage });
+    const result = await contract.extractWithProfile!({
+      url: 'https://profiled.example.com/p/x',
+      expected: { name: 'must not fetch' },
+      signal: new AbortController().signal,
+      timeoutMs: 5000,
+      profile: { runtime: 'static', selectors: { titleSelector: 'h1' } },
+    });
+    expect(result.identityStatus).toBe('insufficient_evidence');
+    expect(result.conflicts[0]).toMatchObject({ field: '_profile' });
     expect(fetchPage).not.toHaveBeenCalled();
   });
 

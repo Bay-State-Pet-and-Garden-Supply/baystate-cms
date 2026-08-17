@@ -174,7 +174,7 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
               sourceUrl: string;
               profile: typeof profile;
               expected: { name: string; brandHint?: string | null; price?: string | null };
-            }) => Promise<{ ok: boolean; data?: import('../../shared/schemas/onboarding').ExtractionData; error?: string; sourceContentHash?: string | null; sourceArtifactId?: string | null }>;
+            }) => Promise<{ ok: boolean; data?: import('../../shared/schemas/onboarding').ExtractionData; fieldProvenance?: Record<string, string>; fieldProvenanceDetails?: Record<string, { method: string; sourcePath: string }>; error?: string; sourceContentHash?: string | null; sourceArtifactId?: string | null }>;
           };
           if (!runner.runProfileExtraction) return null;
 
@@ -188,85 +188,83 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
           });
 
           if (!res.ok || !res.data) return null;
+          // A profile result without retained source metadata cannot support
+          // durable selector evidence. Never relabel fallback values as a
+          // profile selector merely because an approved profile was matched.
+          const sourceContentHash = res.sourceContentHash ?? null;
+          const sourceArtifactId = res.sourceArtifactId ?? null;
+          if (!sourceContentHash && !sourceArtifactId) return null;
           const data = res.data;
+          const provenance = res.fieldProvenance ?? data.fieldProvenance ?? {};
+          const provenanceDetails = res.fieldProvenanceDetails ?? {};
           const fields: ExtractedFieldEvidence[] = [];
-
-          if (data.title) {
-            fields.push({
-              field: 'product_name',
-              value: data.title,
-              method: 'profile_selector',
-              sourcePath: `profile:${profile.id}:title`,
-            });
-          }
-          if (data.description) {
-            fields.push({
-              field: 'description',
-              value: data.description,
-              method: 'profile_selector',
-              sourcePath: `profile:${profile.id}:description`,
-            });
-          }
-          if (data.brand) {
-            fields.push({
-              field: 'brand',
-              value: data.brand,
-              method: 'profile_selector',
-              sourcePath: `profile:${profile.id}:brand`,
-            });
-          }
-          if (data.price) {
-            fields.push({
-              field: 'price',
-              value: data.price,
-              method: 'profile_selector',
-              sourcePath: `profile:${profile.id}:price`,
-            });
-          }
-          const sizeVal = data.packageSize || data.weight;
-          if (sizeVal) {
-            fields.push({
-              field: 'size',
-              value: typeof sizeVal === 'string' ? sizeVal : JSON.stringify(sizeVal),
-              method: 'profile_selector',
-              sourcePath: `profile:${profile.id}:size`,
-            });
-          }
-          if (data.ingredients) {
-            fields.push({
-              field: 'ingredients',
-              value: typeof data.ingredients === 'string' ? data.ingredients : JSON.stringify(data.ingredients),
-              method: 'profile_selector',
-              sourcePath: `profile:${profile.id}:ingredients`,
-            });
-          }
-          if (data.guaranteedAnalysis) {
-            fields.push({
-              field: 'guaranteed_analysis',
-              value: typeof data.guaranteedAnalysis === 'string' ? data.guaranteedAnalysis : JSON.stringify(data.guaranteedAnalysis),
-              method: 'profile_selector',
-              sourcePath: `profile:${profile.id}:guaranteed_analysis`,
-            });
-          }
-          if (Array.isArray(data.variants) && data.variants.length > 0) {
-            const firstSku = data.variants[0]?.sku;
-            if (firstSku) {
-              fields.push({
-                field: 'sku',
-                value: firstSku,
-                method: 'profile_selector',
-                sourcePath: `profile:${profile.id}:variants[0].sku`,
-              });
+          const source = { sourceArtifactId, sourceContentHash };
+          const provenanceFor = (field: string, selectorPath: string): { method: string; sourcePath: string } => {
+            const detail = provenanceDetails[field];
+            if (detail && (detail.method === 'profile_selector' || detail.method === 'profile-selector')) {
+              return { method: 'profile_selector', sourcePath: detail.sourcePath };
             }
+            if (detail) return { method: detail.method, sourcePath: detail.sourcePath };
+            const declared = String(provenance[field] ?? '').trim().toLowerCase();
+            if (declared === 'profile-selector' || declared === 'profile_selector') {
+              return { method: 'profile_selector', sourcePath: selectorPath };
+            }
+            if (declared.startsWith('json-ld') || declared === 'json_ld') return { method: 'json_ld', sourcePath: `json-ld:${field}` };
+            if (declared.startsWith('meta')) return { method: 'meta', sourcePath: `meta:${field}` };
+            if (declared.startsWith('microdata')) return { method: 'microdata', sourcePath: `microdata:${field}` };
+            if (declared === 'spreadsheet-import' || declared === 'expected') return { method: 'expected_value', sourcePath: `expected:${field}` };
+            // Unknown provenance is retained as an explicit method, never
+            // upgraded to profile_selector. The field path remains stable and
+            // source-bound to the worker's retained response.
+            return { method: declared || 'profile_fallback', sourcePath: declared || `fallback:${field}` };
+          };
+          const addField = (field: string, value: unknown, selectorPath: string): void => {
+            if (value === null || value === undefined || String(value).trim() === '') return;
+            const method = provenanceFor(field, selectorPath);
+            fields.push({ field, value: typeof value === 'string' ? value : JSON.stringify(value), ...method, ...source });
+          };
+
+          addField('product_name', data.title, `profile:${profile.id}:title`);
+          addField('description', data.description, `profile:${profile.id}:description`);
+          addField('brand', data.brand, `profile:${profile.id}:brand`);
+          addField('price', data.price, `profile:${profile.id}:price`);
+          addField('size', data.packageSize || data.weight, `profile:${profile.id}:size`);
+          addField('ingredients', data.ingredients, `profile:${profile.id}:ingredients`);
+          addField('guaranteed_analysis', data.guaranteedAnalysis, `profile:${profile.id}:guaranteed_analysis`);
+
+          // Profile worker variants are already linked to the selected page
+          // bytes. Preserve each variant reference for SKU/GTIN and product
+          // fields instead of flattening all values to variants[0].
+          const variants = (data as typeof data & { variants?: Array<Record<string, unknown>> }).variants;
+          if (Array.isArray(variants)) {
+            variants.forEach((variant, index) => {
+              const variantRef = variant.id === null || variant.id === undefined ? null : String(variant.id);
+              const variantSource = { ...source, variantRef };
+              const variantPath = `profile:${profile.id}:variants[${index}]`;
+              const addVariant = (field: string, value: unknown, key: string): void => {
+                if (value === null || value === undefined || String(value).trim() === '') return;
+                const method = provenanceFor(field, `${variantPath}.${key}`);
+                fields.push({ field, value: typeof value === 'string' ? value : JSON.stringify(value), ...method, ...variantSource });
+              };
+              addVariant('variant_name', variant.title ?? variant.name, 'title');
+              addVariant('sku', variant.sku, 'sku');
+              addVariant('gtin', variant.gtin ?? variant.barcode ?? variant.upc, 'gtin');
+              addVariant('product_name', variant.productName ?? variant.product_name, 'productName');
+            });
           }
 
           const rawImages = [data.primaryImage, ...(data.additionalImages ?? [])].filter(
             (img): img is string => typeof img === 'string' && img.length > 0,
           );
-          const images = rawImages.map((imgUrl, index) => ({
-            url: imgUrl,
-            sourcePath: `profile:${profile.id}:${index === 0 ? 'primaryImage' : 'additionalImages'}`,
-          }));
+          const images = rawImages.map((imgUrl, index) => {
+            const field = index === 0 ? 'primaryImage' : 'additionalImages';
+            const imageProvenance = provenanceFor(field, `profile:${profile.id}:${index === 0 ? 'primaryImage' : 'additionalImages'}`);
+            return {
+              url: imgUrl,
+              sourcePath: imageProvenance.sourcePath,
+              ...source,
+            };
+          });
 
           return {
             fields,

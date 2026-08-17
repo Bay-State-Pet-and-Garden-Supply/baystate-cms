@@ -59,6 +59,8 @@ export function configureCrawleeStorage(): void {
 
 export interface RenderedPageInput {
   url: string;
+  /** Optional per-request guard installed before navigation (SSRF/policy). */
+  networkGuard?: (url: string) => Promise<boolean>;
   /** Per-URL navigation timeout override (ms). */
   navigationTimeoutMs?: number;
   /** Per-URL dwell time override (ms). */
@@ -119,6 +121,13 @@ export async function runRenderedPage<T>(
 
   const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConfig,
+    preNavigationHooks: input.networkGuard ? [async ({ page }) => {
+      await page.route('**/*', async (route) => {
+        const allowed = await input.networkGuard!(route.request().url());
+        if (allowed) await route.continue();
+        else await route.abort('blockedbyclient');
+      });
+    }] : undefined,
     maxConcurrency: 1,
     useSessionPool: true,
     persistCookiesPerSession: true,

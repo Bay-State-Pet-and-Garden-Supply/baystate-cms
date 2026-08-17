@@ -325,11 +325,14 @@ function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
     const body = await response.text();
     const sourceContentHash = sha256Hex(body);
+    const sourceUrl = response.url || url;
+    const sourceArtifactId = persistPageArtifact(ctx.runId, sourceUrl, body, sourceContentHash, 'platform_json');
     return {
       ...JSON.parse(body) as ShopifyProductJson,
+      sourceArtifactId,
       sourceContentHash,
       sourcePath: 'Shopify product JSON payload',
-      sourceUrl: response.url || url,
+      sourceUrl,
     };
   };
   return options;
@@ -386,28 +389,38 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
         // durable id) so persistence stores value + method + source path per
         // row. The page-level aggregate entry is kept for consumers that cite
         // the coarse id (bundle identity evidenceIds).
-        const fieldEvidence: FieldEvidenceEntry[] = result.fields.map((f) => ({
-          id: fieldEvidenceId('extract_product_page', result.finalUrl, f.field, f.sourcePath ?? f.value ?? ''),
-          field: f.field,
-          value: f.value,
-          method: f.method,
-          path: f.sourcePath,
-          snippet: f.value ? String(f.value).slice(0, 200) : undefined,
-          url: result.finalUrl,
-          domain: pageDomain,
-          contentHash: result.contentHash ?? undefined,
-        }));
+        // Field-level provenance is authoritative. A page hash is not a
+        // substitute for the Shopify payload, browser capture, or profile
+        // artifact that actually supplied an observation. Observations with
+        // no retained source metadata remain in the normalized result for
+        // diagnostic display, but are not emitted as durable field evidence.
+        const fieldEvidence: FieldEvidenceEntry[] = result.fields
+          .filter((f) => !!f.sourceContentHash || !!f.sourceArtifactId)
+          .map((f) => ({
+            id: fieldEvidenceId('extract_product_page', result.finalUrl, f.field, f.sourcePath ?? f.value ?? ''),
+            field: f.field,
+            value: f.value,
+            method: f.method,
+            path: f.sourcePath,
+            snippet: f.value ? String(f.value).slice(0, 200) : undefined,
+            url: result.finalUrl,
+            domain: pageDomain,
+            contentHash: f.sourceContentHash ?? undefined,
+            artifactId: f.sourceArtifactId ?? undefined,
+          }));
         for (const g of result.gtins) {
+          if (!g.sourceContentHash && !g.sourceArtifactId) continue;
           fieldEvidence.push({
             id: fieldEvidenceId('extract_product_page', result.finalUrl, 'gtin', `${g.method}:${g.value}`),
             field: 'gtin',
             value: g.value,
             method: g.method,
-            path: g.method,
+            path: g.sourcePath ?? g.method,
             snippet: g.value.slice(0, 40),
             url: result.finalUrl,
             domain: pageDomain,
-            contentHash: result.contentHash ?? undefined,
+            contentHash: g.sourceContentHash ?? undefined,
+            artifactId: g.sourceArtifactId ?? undefined,
           });
         }
         return okResult(
@@ -420,9 +433,9 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
             // Round-9 (P1-1/P1-5): the durable artifact id for this page —
             // discover_image_candidates({ artifactId }) loads the retained
             // bytes server-side; the agent never supplies artifact content.
-            artifactId: pageArtifactIdForRun(ctx.runId, result.finalUrl, result.contentHash),
+            artifactId: result.artifactRef ?? pageArtifactIdForRun(ctx.runId, result.finalUrl, result.contentHash),
             // Round-10 (P1-6): the retained artifact is TYPED 'page_html'.
-            artifactType: pageArtifactIdForRun(ctx.runId, result.finalUrl, result.contentHash) ? 'page_html' : null,
+            artifactType: result.artifactRef || pageArtifactIdForRun(ctx.runId, result.finalUrl, result.contentHash) ? 'page_html' : null,
             identityStatus: result.identityStatus,
             identityReasons: result.identityReasons,
             fields: result.fields,

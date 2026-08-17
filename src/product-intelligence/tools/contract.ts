@@ -91,6 +91,8 @@ export interface FieldEvidenceEntry {
   domain?: string;
   /** Content hash of the artifact the field was extracted from. */
   contentHash?: string;
+  /** Artifact containing this exact field observation, when retained. */
+  artifactId?: string;
   /** Legacy compatibility fields (serializers read them; field entries leave them unset). */
   kind?: string;
   retrievedAt?: string;

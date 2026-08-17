@@ -253,6 +253,7 @@ export async function runExtractionLadder(
         try {
           await authorizeNetwork(jsonUrl);
           const productJson = await (options.fetchShopify ?? fetchShopifyProductJson)(jsonUrl, signal, timeoutMs);
+          if (productJson.sourceUrl && options.networkGate) await authorizeNetwork(productJson.sourceUrl);
           layersUsed.push('shopify');
           const platformSource: SourceMetadata = {
             artifactId: productJson.sourceArtifactId,
@@ -433,7 +434,12 @@ export async function runExtractionLadder(
               name: typeof firstVariant.title === 'string' ? firstVariant.title : typeof firstVariant.name === 'string' ? firstVariant.name : undefined,
               sku: typeof firstVariant.sku === 'string' ? firstVariant.sku : undefined,
             };
-            if (typeof firstVariant.sku === 'string') addField('sku', firstVariant.sku, 'platform_api', '__NUXT__ product.variants[0].sku');
+            const variantRef = typeof firstVariant.id === 'string' || typeof firstVariant.id === 'number' ? String(firstVariant.id) : undefined;
+            const variantSource: SourceMetadata = { ...pageSource(), variantRef };
+            if (typeof firstVariant.title === 'string') addField('variant_name', firstVariant.title, 'platform_api', '__NUXT__ product.variants[0].title', variantSource);
+            if (typeof firstVariant.sku === 'string') addField('sku', firstVariant.sku, 'platform_api', '__NUXT__ product.variants[0].sku', variantSource);
+            const variantGtin = gtinFromAny(firstVariant);
+            if (variantGtin) addGtin(variantGtin, 'platform_api', '__NUXT__ product.variants[0].barcode', variantSource);
             if (product.variants.length > 1) {
               variantSignals.push({ kind: 'parent_page' });
             } else if (product.variants.length === 1) {
@@ -733,7 +739,9 @@ export async function runExtractionLadder(
       finalUrl,
       fetchModes: [...new Set(fetchModes)],
       contentHash,
-      artifactRef: null,
+      // The page artifact is the source only for fields explicitly attached
+      // to page bytes. Platform/profile observations carry their own metadata.
+      artifactRef: pageArtifactId,
       fields,
       gtins,
       sku,
@@ -776,10 +784,31 @@ export function createLadderExtractionContract(options: LadderOptions = {}): Pag
     }): Promise<PageExtractionResult> {
       // This is the deterministic profile-runner seam: unlike `extract`, it
       // never invokes the ladder's fallback layers and only reports values
-      // selected by the supplied profile. The static Cheerio runner below is
-      // intentionally not valid for rendered profiles: a rendered profile
-      // requires the extraction worker's browser profile runner, and silently
-      // issuing a static fetch would make a healthy result non-authoritative.
+      // selected by the supplied profile. A profile fetch is a privileged
+      // network operation: callers must provide both an authorized gate and
+      // an explicitly injected transport. Never fall back to global fetch.
+      if (request.profile.runtime !== 'rendered' && (!options.networkGate || !options.fetchPage)) {
+        return {
+          requestedUrl: request.url,
+          finalUrl: request.url,
+          fetchModes: ['profile_unsupported'],
+          contentHash: null,
+          artifactRef: null,
+          fields: [],
+          gtins: [],
+          sku: null,
+          brand: null,
+          productName: null,
+          variant: null,
+          size: null,
+          packCount: null,
+          images: [],
+          conflicts: [{ field: '_profile', summary: 'profile extraction requires an authorized network gate and transport' }],
+          identityStatus: 'insufficient_evidence',
+          identityReasons: ['profile extraction transport is not policy-authorized'],
+          deterministicOnly: true,
+        };
+      }
       if (request.profile.runtime === 'rendered') {
         return {
           requestedUrl: request.url,
@@ -802,7 +831,40 @@ export function createLadderExtractionContract(options: LadderOptions = {}): Pag
           deterministicOnly: true,
         };
       }
-      const page = await (options.fetchPage ?? fetchPageHtml)(request.url, request.signal, request.timeoutMs);
+      const profileFetchPage = options.fetchPage;
+      const authorizeProfileNetwork = async (destination: string): Promise<void> => {
+        const decision = await options.networkGate!(destination, request.signal);
+        if (!decision.allowed) throw new Error(`network denied${decision.code ? `: ${decision.code}` : ''}${decision.detail ? ` (${decision.detail})` : ''}`);
+      };
+      await authorizeProfileNetwork(request.url);
+      const page = await profileFetchPage!(request.url, request.signal, request.timeoutMs);
+      // A gateway-bound transport validates redirects itself. For arbitrary
+      // injected transports, still authorize the observed final hop before
+      // accepting or exposing any selector value.
+      if (page.finalUrl !== request.url) await authorizeProfileNetwork(page.finalUrl);
+      if (!page.contentHash || !/^[0-9a-f]{64}$/u.test(page.contentHash) || !page.artifactId && !page.contentHash) {
+        return {
+          requestedUrl: request.url,
+          finalUrl: page.finalUrl,
+          fetchModes: ['profile_failed'],
+          contentHash: null,
+          artifactRef: null,
+          fields: [],
+          gtins: [],
+          sku: null,
+          brand: null,
+          productName: null,
+          variant: null,
+          size: null,
+          packCount: null,
+          images: [],
+          conflicts: [{ field: '_profile', summary: 'profile source bytes were not retained with a valid content hash' }],
+          identityStatus: 'insufficient_evidence',
+          identityReasons: ['profile source provenance unavailable'],
+          deterministicOnly: true,
+        };
+      }
+      const source = { sourceArtifactId: page.artifactId ?? null, sourceContentHash: page.contentHash };
       const $ = cheerio.load(page.html);
       const selector = (key: string): string | null => request.profile.selectors[key] ?? null;
       const text = (key: string): string | null => {
@@ -812,19 +874,19 @@ export function createLadderExtractionContract(options: LadderOptions = {}): Pag
       };
       const productName = text('titleSelector');
       const fields: ExtractedFieldEvidence[] = productName
-        ? [{ field: 'product_name', value: productName, method: 'profile_selector', sourcePath: selector('titleSelector') ?? undefined }]
+        ? [{ field: 'product_name', value: productName, method: 'profile_selector', sourcePath: selector('titleSelector') ?? undefined, ...source }]
         : [];
       const description = text('descriptionSelector');
-      if (description) fields.push({ field: 'description', value: description, method: 'profile_selector', sourcePath: selector('descriptionSelector') ?? undefined });
+      if (description) fields.push({ field: 'description', value: description, method: 'profile_selector', sourcePath: selector('descriptionSelector') ?? undefined, ...source });
       const brand = text('brandSelector');
-      if (brand) fields.push({ field: 'brand', value: brand, method: 'profile_selector', sourcePath: selector('brandSelector') ?? undefined });
+      if (brand) fields.push({ field: 'brand', value: brand, method: 'profile_selector', sourcePath: selector('brandSelector') ?? undefined, ...source });
       const images: ExtractedImageCandidate[] = [];
       const imageSelector = selector('imagesSelector');
       if (imageSelector) {
         try {
           $(imageSelector).find('img').each((_index, element) => {
             const src = $(element).attr('src') ?? $(element).attr('data-src');
-            if (src) images.push({ url: new URL(src, page.finalUrl).toString(), sourcePath: imageSelector });
+            if (src) images.push({ url: new URL(src, page.finalUrl).toString(), sourcePath: imageSelector, ...source });
           });
         } catch { /* invalid selectors are an incompatible profile */ }
       }
@@ -836,8 +898,8 @@ export function createLadderExtractionContract(options: LadderOptions = {}): Pag
         requestedUrl: request.url,
         finalUrl: page.finalUrl,
         fetchModes: ['profile_selector'],
-        contentHash: null,
-        artifactRef: null,
+        contentHash: page.contentHash,
+        artifactRef: page.artifactId ?? null,
         fields,
         gtins: [],
         sku: null,

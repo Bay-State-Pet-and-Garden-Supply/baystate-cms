@@ -205,7 +205,12 @@ export function persistToolEvidence(
       extractionMethod: entry.method ?? null,
       snippet: entry.snippet ?? null,
       metadata: isFieldEntry
-        ? { toolEvidenceId: entry.id, path: entry.path ?? null, contentHash: entry.contentHash ?? null }
+        ? {
+            toolEvidenceId: entry.id,
+            path: entry.path ?? null,
+            contentHash: entry.contentHash ?? null,
+            artifactId: 'artifactId' in entry ? entry.artifactId ?? null : null,
+          }
         : { toolEvidenceId: entry.id },
     });
     alreadyPersisted.add(entry.id);

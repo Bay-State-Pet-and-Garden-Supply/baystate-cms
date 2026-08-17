@@ -229,7 +229,15 @@ export function createExtractionProvenanceAdapter(context: ProvenanceAdapterCont
       const path = [...new Map(
         [...result.fields, ...result.gtins].map((entry) => {
           const source = sourcePathFor(entry, entry.method);
-          return [source.path, { layer: entry.method, method: entry.method, sourcePath: source.quality === 'exact_path' ? source.path : null, artifactId: entry.sourceArtifactId ?? context.artifactId ?? null }];
+          return [source.path, {
+            layer: entry.method,
+            method: entry.method,
+            sourcePath: source.quality === 'exact_path' ? source.path : null,
+            // Do not borrow the retained page artifact for a platform,
+            // browser, or profile observation. The source metadata on the
+            // observation is the only authority.
+            artifactId: entry.sourceArtifactId ?? null,
+          }];
         }),
       ).values()];
       const variantReference = result.variant?.id ?? result.variant?.sku ?? null;
@@ -240,7 +248,11 @@ export function createExtractionProvenanceAdapter(context: ProvenanceAdapterCont
         finalUrl: result.finalUrl,
         retrievedAt: context.retrievedAt ?? new Date().toISOString(),
         contentHash: validContentHash(result.contentHash),
-        artifactRefs: [...new Set([context.artifactId, result.artifactRef].filter((ref): ref is string => !!ref))].slice(0, 32),
+        artifactRefs: [...new Set([
+          context.artifactId,
+          result.artifactRef,
+          ...allObservations.map((observation) => observation.artifactId),
+        ].filter((ref): ref is string => !!ref))].slice(0, 32),
         profile: context.profile ?? null,
         extractionPath: path.slice(0, 128),
         observations: [...allObservations, ...imageObservations].slice(0, 256),

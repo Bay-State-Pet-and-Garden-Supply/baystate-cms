@@ -266,6 +266,9 @@ export const ExtractResponseSchema = z.object({
   ok: z.boolean(),
   extractionData: ExtractionDataSchema.optional(),
   fieldProvenance: z.record(z.string(), z.string()).default(() => ({})),
+  /** Exact method/path for each returned field; unlike fieldProvenance's
+   * legacy method labels this retains selector/structured-data paths. */
+  fieldProvenanceDetails: z.record(z.string(), z.object({ method: z.string(), sourcePath: z.string() })).default(() => ({})),
   profileRuntime: z.enum(['static', 'rendered']),
   profileId: z.string(),
   profileVersion: z.number().int(),

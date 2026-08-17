@@ -32,6 +32,9 @@ import {
 import { ExtractionDataSchema } from '../../shared/schemas/onboarding';
 import type { ExtractionData } from '../../shared/schemas/onboarding';
 import { sha256Hex } from '../../shared/stable-id';
+import { lookup } from 'node:dns/promises';
+import { classifyIp } from '../../product-intelligence/policy/policy-gateway';
+import { extractDomainFromUrl, generateJobId, resolveArtifactDir, writeArtifact } from '../artifacts';
 
 // ─── HTTP constants (sourced from page-extractor.ts) ──────────────────────────
 
@@ -325,6 +328,66 @@ function makePlaywrightEmbeddedExtractor(): string {
 
 // ─── Static extraction ────────────────────────────────────────────────────────
 
+const MAX_PROFILE_REDIRECTS = 5;
+
+type FieldProvenanceDetail = { method: string; sourcePath: string };
+
+function retainProfileSource(sourceUrl: string, html: string): { sourceContentHash: string; sourceArtifactId: string | null } {
+  const sourceContentHash = sha256Hex(html);
+  try {
+    const domain = extractDomainFromUrl(sourceUrl);
+    const dir = resolveArtifactDir(domain, generateJobId());
+    const sourceArtifactId = writeArtifact(dir, 'page.html', html);
+    return { sourceContentHash, sourceArtifactId };
+  } catch {
+    return { sourceContentHash, sourceArtifactId: null };
+  }
+}
+
+/**
+ * Worker-side profile transport. The worker is a separate process and cannot
+ * receive the Pi policy gateway, so static profile fetches use the same SSRF
+ * floor locally: DNS is resolved before every request, redirects are manual
+ * and revalidated hop-by-hop, and only web ports are accepted.
+ */
+async function assertSafeProfileDestination(currentUrl: string): Promise<void> {
+  const parsed = new URL(currentUrl);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('profile fetch requires http(s)');
+  if (parsed.username || parsed.password) throw new Error('profile fetch rejects credentialed URLs');
+  const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+  if (port !== '80' && port !== '443') throw new Error('profile fetch rejects non-web ports');
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (hostname === 'localhost' || classifyIp(hostname) === 'private' || classifyIp(hostname) === 'link_local') {
+    throw new Error('profile fetch denied private or link-local destination');
+  }
+  const addresses = await lookup(hostname, { all: true });
+  if (addresses.length === 0 || addresses.some(({ address }) => {
+    const kind = classifyIp(address);
+    return kind === 'private' || kind === 'link_local' || kind === 'unknown';
+  })) {
+    throw new Error('profile fetch denied private or link-local DNS destination');
+  }
+}
+
+async function safeProfileFetch(sourceUrl: string, signal: AbortSignal): Promise<Response> {
+  let currentUrl = sourceUrl;
+  for (let redirectCount = 0; ; redirectCount += 1) {
+    await assertSafeProfileDestination(currentUrl);
+    const response = await fetch(currentUrl, {
+      headers: HTTP_EXTRACTION_HEADERS,
+      signal,
+      redirect: 'manual',
+    });
+    const location = response.headers.get('location');
+    if (response.status >= 300 && response.status < 400 && location) {
+      if (redirectCount >= MAX_PROFILE_REDIRECTS) throw new Error('profile fetch redirect limit exceeded');
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    return response;
+  }
+}
+
 interface ExtractedFields {
   title: string | null;
   brand: string | null;
@@ -342,6 +405,8 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   data: ExtractionData;
   warnings: string[];
   sourceContentHash?: string | null;
+  sourceArtifactId?: string | null;
+  fieldProvenanceDetails?: Record<string, FieldProvenanceDetail>;
 }> {
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
@@ -351,11 +416,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   let response: Response;
   let html: string;
   try {
-    response = await fetch(sourceUrl, {
-      headers: HTTP_EXTRACTION_HEADERS,
-      signal: AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS),
-      redirect: 'follow',
-    });
+    response = await safeProfileFetch(sourceUrl, AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS));
     if (!response.ok) {
       warnings.push(`HTTP fetch returned ${response.status} ${response.statusText}`);
     }
@@ -589,7 +650,23 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
     data.customFields = customFields;
   }
 
-  return { data, warnings, sourceContentHash: sha256Hex(html) };
+  const retained = retainProfileSource(finalUrl, html);
+  const fieldProvenanceDetails: Record<string, FieldProvenanceDetail> = {};
+  const detail = (field: string, declared: string, selector: string | null, fallbackPath: string): void => {
+    if (!provenance[field]) return;
+    fieldProvenanceDetails[field] = {
+      method: declared === 'profile-selector' ? 'profile_selector' : declared === 'json-ld' ? 'json_ld' : declared,
+      sourcePath: declared === 'profile-selector' && selector ? selector : fallbackPath,
+    };
+  };
+  detail('title', titleProvenance, titleSelector, 'json-ld:Product.name');
+  detail('brand', brandProvenance, brandSelector, 'json-ld:Product.brand');
+  detail('description', descriptionProvenance, descriptionSelector, 'json-ld:Product.description');
+  detail('price', priceProvenance, priceSelector, 'json-ld:Product.offers.price');
+  detail('primaryImage', imageProvenance, imagesSelector, 'json-ld:Product.image');
+  if (additionalImages.length > 0) detail('additionalImages', imageProvenance, imagesSelector, 'json-ld:Product.image');
+  for (const key of Object.keys(customFields)) detail(`custom.${key}`, 'profile-selector', profile.customSelectors?.[key] ?? null, `custom:${key}`);
+  return { data, warnings, sourceContentHash: retained.sourceContentHash, sourceArtifactId: retained.sourceArtifactId, fieldProvenanceDetails };
 }
 
 // ─── Rendered extraction ──────────────────────────────────────────────────────
@@ -601,10 +678,18 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   data: ExtractionData;
   warnings: string[];
   sourceContentHash?: string | null;
+  sourceArtifactId?: string | null;
+  fieldProvenanceDetails?: Record<string, FieldProvenanceDetail>;
 }> {
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
   const selectors = profile.selectors || {};
+  try {
+    await assertSafeProfileDestination(sourceUrl);
+  } catch (error) {
+    warnings.push(`Rendered network denied: ${error instanceof Error ? error.message : String(error)}`);
+    return buildFailedResult(request, warnings);
+  }
 
   // The runner + extractor is wrapped so we can lazily pull selectors into
   // the Playwright callback without serialising the whole request object.
@@ -613,6 +698,14 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   const result = await runRenderedPage(
     {
       url: sourceUrl,
+      networkGuard: async (url) => {
+        try {
+          await assertSafeProfileDestination(url);
+          return true;
+        } catch {
+          return false;
+        }
+      },
       navigationTimeoutMs: RENDERED_NAVIGATE_TIMEOUT_MS,
       dwellMs: RENDERED_DWELL_MS,
     },
@@ -977,6 +1070,25 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       provenance.profileRuntime = 'rendered';
       if (Object.keys(customFields).length > 0) provenance.customFields = 'profile-selector';
 
+      // Retain the exact rendered DOM after all deterministic selectors have
+      // run. Selector values are not authoritative without this source hash
+      // (and artifact reference) attached to the response.
+      const retained = retainProfileSource(finalUrl, await page.content());
+      const fieldProvenanceDetails: Record<string, FieldProvenanceDetail> = {};
+      const detail = (field: string, declared: string, selector: string | null, fallbackPath: string): void => {
+        if (!provenance[field]) return;
+        fieldProvenanceDetails[field] = {
+          method: declared === 'profile-selector' ? 'profile_selector' : declared === 'json-ld' ? 'json_ld' : declared,
+          sourcePath: declared === 'profile-selector' && selector ? selector : fallbackPath,
+        };
+      };
+      detail('title', titleProvenance[0] ?? '', titleSelector, 'json-ld:Product.name');
+      detail('brand', brandProvenance, brandSelector, 'json-ld:Product.brand');
+      detail('description', descriptionProvenance, descriptionSelector, 'json-ld:Product.description');
+      detail('price', priceProvenance, priceSelector, 'json-ld:Product.offers.price');
+      detail('primaryImage', imageProvenance, imagesSelector, 'json-ld:Product.image');
+      if (additionalImages.length > 0) detail('additionalImages', imageProvenance, imagesSelector, 'json-ld:Product.image');
+      for (const key of Object.keys(customFields)) detail(`custom.${key}`, 'profile-selector', profile.customSelectors?.[key] ?? null, `custom:${key}`);
       return {
         blocked: false as const,
         title: title ?? null,
@@ -986,6 +1098,9 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         primaryImage: primaryImage ?? null,
         additionalImages,
         provenance,
+        fieldProvenanceDetails,
+        sourceContentHash: retained.sourceContentHash,
+        sourceArtifactId: retained.sourceArtifactId,
         customFields,
       };
     },
@@ -1017,6 +1132,11 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
     return buildFailedResult(request, warnings);
   }
 
+  if (!extracted.sourceContentHash || !extracted.sourceArtifactId) {
+    warnings.push('Rendered source artifact retention unavailable — failing closed');
+    return buildFailedResult(request, warnings);
+  }
+
   const data = buildExtractionData(
     {
       title,
@@ -1036,7 +1156,7 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
     (data as ExtractionData).customFields = extracted.customFields;
   }
 
-  return { data, warnings };
+  return { data, warnings, sourceContentHash: extracted.sourceContentHash, sourceArtifactId: extracted.sourceArtifactId, fieldProvenanceDetails: extracted.fieldProvenanceDetails };
 }
 
 // ─── Build ExtractionData from extracted fields ───────────────────────────────
@@ -1190,9 +1310,10 @@ export function handleExtract(req: IncomingMessage, res: ServerResponse): void {
 
       // ── Run extraction ────────────────────────────────────────────────
       const isRendered = request.profile.runtime === 'rendered';
-      const { data, warnings, sourceContentHash } = isRendered
+      const extraction = isRendered
         ? await doRenderedExtract(request)
         : await doStaticExtract(request);
+      const { data, warnings, sourceContentHash, sourceArtifactId, fieldProvenanceDetails } = extraction;
 
       // ── Build response ────────────────────────────────────────────────
       const ok = data.title != null && data.title.length > 0;
@@ -1202,11 +1323,12 @@ export function handleExtract(req: IncomingMessage, res: ServerResponse): void {
         ok,
         extractionData: ok ? data : undefined,
         fieldProvenance: data.fieldProvenance || {},
+        fieldProvenanceDetails: fieldProvenanceDetails ?? {},
         profileRuntime: request.profile.runtime,
         profileId: request.profileId,
         profileVersion: request.profileVersion,
         sourceContentHash: sourceContentHash ?? null,
-        sourceArtifactId: null,
+        sourceArtifactId: sourceArtifactId ?? null,
         warnings,
       };
 
