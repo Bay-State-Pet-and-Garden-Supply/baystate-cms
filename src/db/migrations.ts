@@ -4251,6 +4251,34 @@ export function runMigrations(): void {
     console.log('[Migrations] Cohort shadow observations schema migration complete.');
   }
 
+  // ── Profile Engineer domain workflow leases (epic #47, issue #51) ───────
+  // One durable row per normalized source domain prevents concurrent blocked
+  // products from starting duplicate proposal/validation workflows. The row is
+  // proposal state only; extractor_profiles remains governed by Profile Builder
+  // and the existing profile promoter.
+  const profileEngineerVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('profile_engineer_workflow_schema_version') as { value: string } | undefined;
+  if (!profileEngineerVersion) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS profile_engineer_domain_workflows (
+        id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+        run_id TEXT NOT NULL,
+        lease_expires_at TEXT,
+        generation_id TEXT,
+        artifact_json TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_profile_engineer_workflows_status
+        ON profile_engineer_domain_workflows(status, lease_expires_at);
+    `);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('profile_engineer_workflow_schema_version', '1');");
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;
