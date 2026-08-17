@@ -1,12 +1,30 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { listFieldRegistry, updateFieldRegistryEntry, getConnection, saveConnection, testConnection } from '../api';
 import { ViewHeader } from './common/ViewHeader';
+import { AiComputePanel } from './AiComputePanel';
 import { colors } from '../theme';
+
+/** Store Settings tab (deep-linked via `?view=settings&tab=ai|catalog`). */
+type SettingsTab = 'general' | 'ai' | 'catalog';
+
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
+  { id: 'general', label: 'General' },
+  { id: 'ai', label: 'AI Compute' },
+  { id: 'catalog', label: 'Catalog' },
+];
+
+function getInitialSettingsTab(): SettingsTab {
+  const tab = new URLSearchParams(window.location.search).get('tab');
+  if (tab === 'ai' || tab === 'catalog') return tab;
+  return 'general';
+}
 
 export function Settings() {
   const [fieldRegistry, setFieldRegistry] = useState<any[]>([]);
   const [loadingFields, setLoadingFields] = useState(false);
   const [savingFields, setSavingFields] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(getInitialSettingsTab);
+  const tabRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement | null>>>({});
 
   // Connection settings state
   const [cgiBaseUrl, setCgiBaseUrl] = useState('');
@@ -49,6 +67,65 @@ export function Settings() {
     void loadConnection();
   }, []);
 
+  // App owns browser history for view navigation. Keep the local tab state in
+  // sync when Back/Forward changes the URL while Settings stays mounted.
+  useEffect(() => {
+    const handlePopState = () => {
+      const tab = new URLSearchParams(window.location.search).get('tab');
+      setSettingsTab(tab === 'ai' || tab === 'catalog' ? tab : 'general');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const handleSettingsTabChange = (next: SettingsTab) => {
+    if (next === settingsTab) return;
+    setSettingsTab(next);
+    // Keep the URL as the source of truth for the active tab so deep links
+    // (`?view=settings&tab=ai`) stay live. replaceState avoids history spam.
+    const url = new URL(window.location.href);
+    if (next === 'general') {
+      url.searchParams.delete('tab');
+    } else {
+      url.searchParams.set('tab', next);
+    }
+    window.history.replaceState(null, '', url.toString());
+  };
+
+  const focusSettingsTab = (next: SettingsTab) => {
+    tabRefs.current[next]?.focus();
+  };
+
+  const handleTablistKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const focusedTab = (event.target as HTMLElement).closest<HTMLButtonElement>('[role="tab"]')?.dataset.settingsTab as SettingsTab | undefined;
+    if (event.key === 'Enter' || event.key === ' ') {
+      if (!focusedTab) return;
+      event.preventDefault();
+      handleSettingsTabChange(focusedTab);
+      focusSettingsTab(focusedTab);
+      return;
+    }
+
+    const currentTab = focusedTab ?? settingsTab;
+    const currentIndex = SETTINGS_TABS.findIndex((tab) => tab.id === currentTab);
+    let nextIndex: number | null = null;
+
+    if (event.key === 'ArrowLeft') {
+      nextIndex = currentIndex === 0 ? SETTINGS_TABS.length - 1 : currentIndex - 1;
+    } else if (event.key === 'ArrowRight') {
+      nextIndex = currentIndex === SETTINGS_TABS.length - 1 ? 0 : currentIndex + 1;
+    } else if (event.key === 'Home') {
+      nextIndex = 0;
+    } else if (event.key === 'End') {
+      nextIndex = SETTINGS_TABS.length - 1;
+    }
+
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextTab = SETTINGS_TABS[nextIndex].id;
+    handleSettingsTabChange(nextTab);
+    focusSettingsTab(nextTab);
+  };
   const handleSaveConnection = async () => {
     if (!cgiBaseUrl.trim() || !merchantId.trim()) {
       setConnError('CGI URL and merchant ID are required.');
@@ -86,18 +163,56 @@ export function Settings() {
     success: { color: '#16a34a', padding: 12, background: '#f0fdf4', borderRadius: 6, marginBottom: 20, fontSize: 14 },
     hint: { fontSize: 13, color: '#6b7280', margin: '0 0 16px' },
     empty: { fontSize: 14, color: '#9ca3af', fontStyle: 'italic' as const },
+    tabBar: { display: 'flex', gap: 4, borderBottom: '1px solid #e5e7eb', marginBottom: 20 },
+    tab: { padding: '8px 16px', fontSize: 14, fontWeight: 500, color: '#4b5563', background: 'transparent', border: 'none', borderBottom: '2px solid transparent', cursor: 'pointer' },
+    tabActive: { color: '#111827', fontWeight: 600, borderBottom: `2px solid ${colors.uniformGreen}` },
   };
 
   return (
     <div style={styles.container}>
       <ViewHeader
         title="Store Settings"
-        description="Manage ShopSite CGI API connection, merchant credentials, and catalog Field Registry definitions."
+        description="Manage ShopSite CGI API connection, merchant credentials, global AI compute & provider routing, and catalog Field Registry definitions."
       />
+
+      {/* Store Settings tab bar (General / AI Compute / Catalog) */}
+      <div
+        style={styles.tabBar}
+        role="tablist"
+        aria-label="Store Settings sections"
+        onKeyDown={handleTablistKeyDown}
+      >
+        {SETTINGS_TABS.map((t) => (
+          <button
+            key={t.id}
+            ref={(node) => {
+              tabRefs.current[t.id] = node;
+            }}
+            type="button"
+            role="tab"
+            id={`settings-tab-${t.id}`}
+            data-settings-tab={t.id}
+            aria-selected={settingsTab === t.id}
+            aria-controls={`settings-tabpanel-${t.id}`}
+            tabIndex={settingsTab === t.id ? 0 : -1}
+            style={{ ...styles.tab, ...(settingsTab === t.id ? styles.tabActive : {}) }}
+            onClick={() => handleSettingsTabChange(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
       {error && <div style={styles.error}>{error}</div>}
 
-      {/* Connection & Credentials Section */}
+      {/* Connection & Credentials Section (General) */}
+      <div
+        role="tabpanel"
+        id="settings-tabpanel-general"
+        aria-labelledby="settings-tab-general"
+        hidden={settingsTab !== 'general'}
+        style={{ display: settingsTab === 'general' ? 'block' : 'none' }}
+      >
       <div style={styles.section}>
         <h2 style={styles.sectionTitle}>ShopSite Connection & Credentials</h2>
         <p style={styles.hint}>
@@ -146,8 +261,27 @@ export function Settings() {
           </button>
         </div>
       </div>
+      </div>
 
-      {/* Catalog Field Display Labels Section */}
+      {/* AI Compute Section — canonical global AI infrastructure surface */}
+      <div
+        role="tabpanel"
+        id="settings-tabpanel-ai"
+        aria-labelledby="settings-tab-ai"
+        hidden={settingsTab !== 'ai'}
+        style={{ display: settingsTab === 'ai' ? 'block' : 'none' }}
+      >
+        <AiComputePanel onChange={() => setError('')} />
+      </div>
+
+      {/* Catalog Field Display Labels Section (Catalog) */}
+      <div
+        role="tabpanel"
+        id="settings-tabpanel-catalog"
+        aria-labelledby="settings-tab-catalog"
+        hidden={settingsTab !== 'catalog'}
+        style={{ display: settingsTab === 'catalog' ? 'block' : 'none' }}
+      >
       <div style={styles.section}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
@@ -273,6 +407,7 @@ export function Settings() {
             </table>
           </div>
         )}
+      </div>
       </div>
     </div>
   );

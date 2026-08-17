@@ -37,6 +37,17 @@ export function Onboarding() {
     return tab === 'general' || tab === 'llm' || tab === 'curation' || tab === 'profiles' ? tab : null;
   })();
   useEffect(() => {
+    if (settingsDeepLinkTab === 'llm') {
+      // Migrate the removed onboarding-owned editor to the canonical global
+      // AI Compute surface while keeping existing bookmarks actionable.
+      const url = new URL(window.location.href);
+      url.searchParams.set('view', 'settings');
+      url.searchParams.set('tab', 'ai');
+      url.searchParams.delete('settingsTab');
+      window.history.replaceState({ view: 'settings' }, '', url.toString());
+      window.dispatchEvent(new PopStateEvent('popstate'));
+      return;
+    }
     if (settingsDeepLinkTab) {
       setShowSettings(true);
     }
@@ -419,7 +430,7 @@ export function Onboarding() {
             window.history.replaceState(null, '', url.toString());
           }
         }}
-        initialTab={settingsDeepLinkTab ?? undefined}
+        initialTab={settingsDeepLinkTab === 'llm' ? undefined : settingsDeepLinkTab ?? undefined}
       />
     );
   }

@@ -156,6 +156,18 @@ function App() {
     setView(newView);
     const url = new URL(window.location.href);
     url.searchParams.delete('settingsTab');
+    // Store Settings tab deep link (`?view=settings&tab=ai|catalog`): keep a
+    // valid one when (re-)entering settings so deep links survive navigation,
+    // drop it otherwise. The top-nav Settings link stays canonical and never
+    // forces a specific tab.
+    if (newView === 'settings') {
+      const settingsTab = url.searchParams.get('tab');
+      if (settingsTab !== 'ai' && settingsTab !== 'catalog') {
+        url.searchParams.delete('tab');
+      }
+    } else {
+      url.searchParams.delete('tab');
+    }
     if (newView === 'setup') {
       url.searchParams.delete('view');
     } else {

@@ -1363,7 +1363,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
             {/* Model selection dropdown */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <label style={{ fontSize: '12px', fontWeight: 700, color: colors.ledgerCharcoal }}>Model:</label>
+              <label style={{ fontSize: '12px', fontWeight: 700, color: colors.ledgerCharcoal }}>AI Model:</label>
               <div style={{ position: 'relative' }}>
                 <select
                   value={modelDropdownValue}
@@ -1388,14 +1388,14 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     <option value="">No models</option>
                   ) : (
                     <>
-                      <option value={MODEL_ROUTE_DEFAULT_VALUE}>Auto (configured route)</option>
+                      <option value={MODEL_ROUTE_DEFAULT_VALUE} title="Uses the Store Manager route configured in AI Compute.">Use configured Store Manager route</option>
                       {modelOptions.map(opt => (
                         <option
                           key={`${opt.provider}::${opt.id}`}
                           value={`${opt.provider}::${opt.id}`}
-                          title={opt.capabilitySummary}
+                          title={`Override: ${opt.capabilitySummary}`}
                         >
-                          {opt.providerLabel} · {opt.id} ({formatModelPricing(opt)})
+                          Override: {opt.providerLabel} · {opt.id} ({formatModelPricing(opt)})
                         </option>
                       ))}
                     </>
@@ -1416,6 +1416,18 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 </div>
               </div>
             </div>
+
+            <a
+              href="/?view=settings&tab=ai"
+              style={{
+                fontSize: '11px',
+                fontWeight: 700,
+                color: colors.signetBurgundy,
+                textDecoration: 'none',
+              }}
+            >
+              Manage AI Compute →
+            </a>
 
             <div style={{ fontSize: '11px', fontWeight: 700, color: colors.uniformGreen, display: 'flex', alignItems: 'center', gap: 4 }}>
               <span>Cost:</span>
@@ -2232,7 +2244,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             onChange={e => setInput(e.target.value)}
             placeholder={
               !selectedModel
-                ? 'No usable AI model configured. Check Settings → LLM Providers.'
+                ? 'No usable AI model configured. Configure AI Compute in Settings.'
                 : selectedProducts.length > 0
                   ? "Ask a question about the attached product(s)..."
                   : "Ask about your catalog, product fields, health, or proposals..."

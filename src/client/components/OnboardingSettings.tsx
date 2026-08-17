@@ -3,9 +3,6 @@ import {
   getApiKeys,
   updateApiKey,
   deleteApiKey,
-  getDeepseekModels,
-  getOllamaModels,
-  getOpenaiModels,
   getCurationTargets,
   getClassificationReadiness,
   getOnboardingCapabilities,
@@ -16,9 +13,7 @@ import {
 import { downloadPagesImport, activatePagesImport } from '../api';
 import { readinessViewFromReport } from '../classification-readiness-view';
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
-import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
-import { LocalAiStatusPanel } from './LocalAiStatusPanel';
-import { AiComputePanel } from './AiComputePanel';
+import { AiRouteSummary } from './common/AiRouteSummary';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
@@ -26,7 +21,7 @@ import { ViewHeader } from './common/ViewHeader';
 import { colors } from '../theme';
 import { DistributorConnectionsPanel } from './onboarding-settings/DistributorConnectionsPanel';
 
-type OnboardingSettingsTab = 'general' | 'llm' | 'curation' | 'profiles' | 'distributors';
+type OnboardingSettingsTab = 'general' | 'curation' | 'profiles' | 'distributors';
 
 interface OnboardingSettingsProps {
   onBack: () => void;
@@ -39,29 +34,8 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   const [_loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Provider key states
+  // Discovery-owned API key state (AI provider configuration lives in Store Settings).
   const [serperKey, setSerperKey] = useState('');
-  const [deepseekKey, setDeepseekKey] = useState('');
-  const [deepseekBaseUrl, setDeepseekBaseUrl] = useState('');
-  const [deepseekModel, setDeepseekModel] = useState('');
-  const [openaiKey, setOpenaiKey] = useState('');
-  const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
-  const [openaiModel, setOpenaiModel] = useState('');
-  const [ollamaKey, setOllamaKey] = useState('ollama-default');
-  const [ollamaBaseUrl, setOllamaBaseUrl] = useState('http://localhost:11434/v1');
-  const [ollamaModel, setOllamaModel] = useState('llama3');
-
-  // Model lists
-  const [deepseekModels, setDeepseekModels] = useState<string[]>([]);
-  const [loadingDeepseekModels, setLoadingDeepseekModels] = useState(false);
-  const [openaiModels, setOpenaiModels] = useState<string[]>([]);
-  const [loadingOpenaiModels, setLoadingOpenaiModels] = useState(false);
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  const [loadingOllamaModels, setLoadingOllamaModels] = useState(false);
-
-  // VLM states
-  const [vlmEnabled, setVlmEnabled] = useState(false);
-  const [vlmModel, setVlmModel] = useState('qwen2.5vl:latest');
 
   // Manager-selected curation classification targets.
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
@@ -90,58 +64,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       .then((caps) => setSourcingEngineEnabled(caps.sourcing.engineEnabled))
       .catch(() => setSourcingEngineEnabled(false));
   }, []);
-
-  // ─── Model fetchers ─────────────────────────────────────────────────────
-
-  const loadDeepseekModels = async (keyVal?: string) => {
-    const key = keyVal || deepseekKey;
-    if (!key || key.startsWith('••••')) return;
-    setLoadingDeepseekModels(true);
-    try {
-      const res = await getDeepseekModels(key, deepseekBaseUrl);
-      setDeepseekModels(res.models);
-      if (res.models.length > 0 && !deepseekModel) {
-        setDeepseekModel(res.models[0]);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoadingDeepseekModels(false);
-    }
-  };
-
-  const loadOpenaiModels = async (keyVal?: string) => {
-    const key = keyVal || openaiKey;
-    if (!key || key.startsWith('••••')) return;
-    setLoadingOpenaiModels(true);
-    try {
-      const res = await getOpenaiModels(key, openaiBaseUrl);
-      setOpenaiModels(res.models);
-      if (res.models.length > 0 && !openaiModel) {
-        setOpenaiModel(res.models[0]);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoadingOpenaiModels(false);
-    }
-  };
-
-  const loadOllamaModels = async (baseUrlVal?: string) => {
-    const baseUrl = baseUrlVal || ollamaBaseUrl;
-    setLoadingOllamaModels(true);
-    try {
-      const res = await getOllamaModels(baseUrl);
-      setOllamaModels(res.models);
-      if (res.models.length > 0 && !ollamaModel) {
-        setOllamaModel(res.models[0]);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoadingOllamaModels(false);
-    }
-  };
 
   // ─── Data loading ───────────────────────────────────────────────────────
 
@@ -180,46 +102,9 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
 
       void loadCurationTargets();
 
-      // Populate form fields from DB
+      // Only discovery-owned credentials are edited in onboarding settings.
       const serper = keysRes.keys.find(k => k.service === 'serper');
       if (serper) setSerperKey(serper.apiKey);
-
-      const deepseek = keysRes.keys.find(k => k.service === 'deepseek');
-      if (deepseek) {
-        setDeepseekKey(deepseek.apiKey);
-        setDeepseekBaseUrl(deepseek.baseUrl || 'https://api.deepseek.com');
-        setDeepseekModel(deepseek.model || 'deepseek-v4-flash');
-        if (deepseek.apiKey && !deepseek.apiKey.startsWith('••••')) {
-          getDeepseekModels(deepseek.apiKey, deepseek.baseUrl || 'https://api.deepseek.com')
-            .then(res => setDeepseekModels(res.models)).catch(() => { });
-        }
-      }
-
-      const openai = keysRes.keys.find(k => k.service === 'openai');
-      if (openai) {
-        setOpenaiKey(openai.apiKey);
-        setOpenaiBaseUrl(openai.baseUrl || 'https://api.openai.com/v1');
-        setOpenaiModel(openai.model || 'gpt-4o-mini');
-        if (openai.apiKey && !openai.apiKey.startsWith('••••')) {
-          getOpenaiModels(openai.apiKey, openai.baseUrl || 'https://api.openai.com/v1')
-            .then(res => setOpenaiModels(res.models)).catch(() => { });
-        }
-      }
-
-      const ollama = keysRes.keys.find(k => k.service === 'ollama');
-      if (ollama) {
-        setOllamaKey(ollama.apiKey);
-        setOllamaBaseUrl(ollama.baseUrl || 'http://localhost:11434/v1');
-        setOllamaModel(ollama.model || 'llama3');
-        getOllamaModels(ollama.baseUrl || 'http://localhost:11434/v1')
-          .then(res => setOllamaModels(res.models)).catch(() => { });
-      }
-
-      const ollamaVlm = keysRes.keys.find(k => k.service === 'ollama_vlm');
-      if (ollamaVlm) {
-        setVlmEnabled(ollamaVlm.apiKey === 'enabled');
-        setVlmModel(ollamaVlm.model || 'qwen2.5vl:latest');
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -290,6 +175,8 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
 
   // ─── Shared styles ──────────────────────────────────────────────────────
 
+  const savedKey = (service: string) => keys.find(k => k.service === service);
+
   const styles: Record<string, React.CSSProperties> = {
     container: { padding: 24 },
     header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
@@ -326,118 +213,23 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
     empty: { fontSize: 14, color: '#9ca3af', fontStyle: 'italic' as const },
   };
 
-  const savedKey = (service: string) => keys.find(k => k.service === service);
-
-  // ─── Provider subsection renderer ───────────────────────────────────────
-
-  const renderProviderSubsection = (
-    label: string,
-    color: string,
-    service: string,
-    keyState: string,
-    setKeyState: (v: string) => void,
-    baseUrlState: string,
-    setBaseUrlState: (v: string) => void,
-    modelState: string,
-    setModelState: (v: string) => void,
-    models: string[],
-    loadingModels: boolean,
-    loadModels: () => void,
-    defaultModel: string,
-    keyPlaceholder: string,
-    needsKey: boolean,
-  ) => {
-    const isSaved = !!savedKey(service);
-    return (
-      <div key={service} style={styles.subsection}>
-        <div style={styles.subsectionHeader}>
-          <span style={{ ...styles.providerBadge, background: color }}>{label}</span>
-          {isSaved && <span style={{ fontSize: 12, color: '#16a34a' }}>✓ Configured</span>}
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          {needsKey && (
-            <div style={styles.formGroup}>
-              <label style={styles.label}>API Key</label>
-              <input
-                style={styles.input}
-                type="password"
-                placeholder={keyPlaceholder}
-                value={keyState.startsWith('••••') ? '' : keyState}
-                onChange={(e) => setKeyState(e.target.value)}
-              />
-            </div>
-          )}
-          <div style={styles.formGroup}>
-            <label style={styles.label}>Base URL</label>
-            <input
-              style={styles.input}
-              type="text"
-              value={baseUrlState}
-              onChange={(e) => setBaseUrlState(e.target.value)}
-            />
-          </div>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'end' }}>
-          <div style={styles.formGroup}>
-            <label style={styles.label}>Model</label>
-            <div style={styles.inputRow}>
-              <select
-                style={{ ...styles.select, flex: 1 }}
-                value={modelState}
-                onChange={(e) => setModelState(e.target.value)}
-                disabled={loadingModels}
-              >
-                {models.length === 0 ? (
-                  <option value={defaultModel}>{defaultModel} (default)</option>
-                ) : (
-                  models.map(m => <option key={m} value={m}>{m}</option>)
-                )}
-              </select>
-              <button
-                style={styles.secondaryBtn}
-                onClick={loadModels}
-                disabled={loadingModels || (needsKey && (!keyState || keyState.startsWith('••••')))}
-              >
-                {loadingModels ? 'Loading…' : 'Fetch'}
-              </button>
-            </div>
-          </div>
-        </div>
-        <div style={styles.buttonRow}>
-          <button
-            style={styles.primaryBtn}
-            onClick={() => handleSaveApiKey(service, keyState, baseUrlState, modelState)}
-          >
-            Save {label}
-          </button>
-          {isSaved && (
-            <button
-              style={styles.deleteBtn}
-              onClick={() => handleDeleteApiKey(service)}
-            >
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  };
 
   return (
     <div style={styles.container}>
       <ViewHeader
         title="Onboarding Pipeline Settings"
-        description="Configure discovery sources, AI model routing, curation targets, and site extractor profiles."
+        description="Configure discovery sources, curation targets, and site extractor profiles."
         actions={<button style={styles.backBtn} onClick={onBack}>← Back to Batches</button>}
       />
 
       {error && <div style={styles.error}>{error}</div>}
 
+      <AiRouteSummary />
+
       {/* ─── Tab Bar ─── */}
       <div style={{ display: 'flex', gap: 0, marginBottom: 24, borderBottom: '1px solid #dee2e6' }}>
         {[
           { id: 'general', label: 'General' },
-          { id: 'llm', label: 'LLM Providers' },
           { id: 'curation', label: 'Curation' },
           { id: 'profiles', label: 'Extractor Profiles' },
           { id: 'distributors', label: 'Distributors' },
@@ -492,10 +284,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           </button>
         </div>
       </div>
-      </div>
-
-      <div style={{ display: settingsTab === 'llm' ? 'block' : 'none' }}>
-        <AiComputePanel onChange={() => setError('')} />
       </div>
 
       <div style={{ display: settingsTab === 'curation' ? 'block' : 'none' }}>
