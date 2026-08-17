@@ -70,12 +70,20 @@ export const ProductResearchInputSchema = z.object({
 
 export type ProductResearchInput = z.infer<typeof ProductResearchInputSchema>;
 
+/**
+ * Strict API-only historical shape. The general input schema remains
+ * non-strict because it also parses persisted historical/replay inputs, but
+ * launch discrimination must not strip v2 fields before falling back here.
+ */
+export const ProductResearchLegacyInputSchema = ProductResearchInputSchema.strict();
+export type ProductResearchLegacyInput = z.infer<typeof ProductResearchLegacyInputSchema>;
+
 /** API launch input: v2 seed forms first, with the historical GTIN-first
  * contract retained as a readable/replayable compatibility branch. */
 export const ProductResearchLaunchInputSchema = z.union([
   ProductResearchV2InputSchema,
   ProductSeedLaunchSchema,
-  ProductResearchInputSchema,
+  ProductResearchLegacyInputSchema,
 ]);
 export type ProductResearchLaunchInput = z.infer<typeof ProductResearchLaunchInputSchema>;
 /** Alias used by callers that refer to a run rather than a research launch. */

@@ -9,7 +9,11 @@ import {
   priceEvidenceStrength,
   productSeedToLegacyInput,
 } from '../../../product-intelligence/product-seed';
-import { ProductResearchInputSchema } from '../../../product-intelligence/contracts';
+import {
+  ProductResearchInputSchema,
+  ProductResearchLaunchInputSchema,
+  ProductResearchLegacyInputSchema,
+} from '../../../product-intelligence/contracts';
 
 const seed = { sku: 'SUP-001', name: 'Acme Treats', price: 4.99 };
 
@@ -41,9 +45,32 @@ describe('ProductSeed v2 input contract (#50)', () => {
   });
 
   it('keeps the historical GTIN-first input contract valid and readable', () => {
-    expect(ProductResearchInputSchema.safeParse({
+    const legacy = {
       gtin: '036000291452',
       registerName: 'Historical Treats',
+      price: '4.99',
+    };
+    expect(ProductResearchInputSchema.safeParse(legacy).success).toBe(true);
+    expect(ProductResearchLegacyInputSchema.safeParse(legacy).success).toBe(true);
+    expect(ProductResearchLaunchInputSchema.safeParse(legacy).success).toBe(true);
+  });
+
+  it('fails closed for mixed v2 and legacy launch shapes', () => {
+    const mixed = {
+      sku: 'SUP-001',
+      name: 'Seed Treats',
+      gtin: '036000291452',
+      registerName: 'Historical Treats',
+    };
+    for (const input of [mixed, { ...mixed, discoveredGtin: 'not-a-gtin' }]) {
+      expect(ProductResearchLaunchInputSchema.safeParse(input).success).toBe(false);
+      expect(ProductResearchLegacyInputSchema.safeParse(input).success).toBe(false);
+    }
+    expect(ProductResearchLaunchInputSchema.safeParse({
+      sku: 'SUP-001',
+      name: 'Seed Treats',
+      price: 4.99,
+      discoveredGtin: '036000291452',
     }).success).toBe(true);
   });
 

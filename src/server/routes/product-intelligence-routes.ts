@@ -12,6 +12,7 @@ import { Hono } from 'hono';
 import {
   ProductIntelligencePolicySchema,
   ProductResearchInputSchema,
+  ProductResearchLegacyInputSchema,
   ProductResearchV2InputSchema,
   ProductSeedLaunchSchema,
   type ProductIntelligencePolicy,
@@ -159,7 +160,11 @@ router.post('/product-intelligence/runs', async (c) => {
   const parsed = (body as { input?: unknown }).input;
   const v2Wrapped = ProductResearchV2InputSchema.safeParse(parsed);
   const v2Direct = ProductSeedLaunchSchema.safeParse(parsed);
-  const legacy = ProductResearchInputSchema.safeParse(parsed);
+  // Keep the legacy executor's general input schema permissive for persisted
+  // historical/replay data, but use its strict API shape here. Otherwise a
+  // malformed v2 payload mixed with valid legacy fields can be accepted as
+  // legacy after Zod silently strips the v2 fields.
+  const legacy = ProductResearchLegacyInputSchema.safeParse(parsed);
   let inputResult: { data: ReturnType<typeof ProductResearchInputSchema.parse> };
   let productSeed: import('../../product-intelligence/product-seed').ProductSeed | null = null;
   let discoveredGtin: string | null = null;
