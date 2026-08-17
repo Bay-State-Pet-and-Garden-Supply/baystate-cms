@@ -409,7 +409,7 @@ function mapDomainEventType(type: string): string {
 // ---------------------------------------------------------------------------
 
 export interface StartPiRunInput {
-  /** Normalized executor input; v2 callers also provide productSeed below. */
+  /** Valid historical executor input; v2 callers must provide a discovered GTIN compatibility result. */
   input: ProductResearchInput;
   /** Immutable v2 seed, persisted separately from historical inputJson. */
   productSeed?: ProductSeed | null;
@@ -477,11 +477,9 @@ export async function startProductIntelligenceRun(
 ): Promise<StartPiRunResult> {
   const productSeed = input.productSeed == null ? null : ProductSeedSchema.parse(input.productSeed);
   const batchContext = input.batchContext == null ? null : BatchContextSchema.parse(input.batchContext);
-  // The executor still receives the historical shape, but v2 deliberately
-  // carries an empty GTIN sentinel rather than promoting SKU to an identifier.
-  const parsedInput = productSeed
-    ? ({ ...ProductResearchInputSchema.omit({ gtin: true }).parse(input.input), gtin: '' } as ProductResearchInput)
-    : ProductResearchInputSchema.parse(input.input);
+  // The executor only receives a schema-valid historical shape. ProductSeed
+  // callers must resolve a discovered GTIN before reaching this boundary.
+  const parsedInput = ProductResearchInputSchema.parse(input.input);
   const existingIdentity = input.existingIdentity == null ? null : ExistingIdentityAttachmentSchema.parse(input.existingIdentity);
   const policy = ProductIntelligencePolicySchema.parse(input.policy ?? buildDefaultPiPolicy());
   const mode = input.mode ?? 'shadow';
@@ -1516,6 +1514,9 @@ export async function replayPiRun(
   const historicalInput = historicalV2Seed
     ? productSeedToLegacyInput(historicalV2Seed)
     : ProductResearchInputSchema.parse(JSON.parse(origin.inputJson));
+  if (!historicalInput) {
+    throw new Error('Cannot rerun a ProductSeed run without a valid discovered GTIN for historical executor compatibility');
+  }
   const started = await startProductIntelligenceRun(
     options.executor,
     {

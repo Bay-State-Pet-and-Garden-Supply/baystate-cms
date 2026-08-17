@@ -69,12 +69,21 @@ export function seedPriceToString(price: ProductSeed['price']): string {
 
 /**
  * Compatibility adapter for executors that still consume the historical
- * GTIN-first input shape. Empty GTIN is an explicit "not supplied" sentinel;
- * the SKU is never copied into it.
+ * GTIN-first input shape.
+ *
+ * ProductSeed does not require a GTIN, so a seed cannot always be represented
+ * as ProductResearchInput. Callers must provide a discovered, normalized GTIN
+ * before this adapter returns the historical shape; the SKU is never copied
+ * into it. A missing or invalid discovered GTIN fails closed with null.
  */
-export function productSeedToLegacyInput(seed: ProductSeed): ProductResearchInput {
+export function productSeedToLegacyInput(
+  seed: ProductSeed,
+  discoveredGtin?: string | null,
+): ProductResearchInput | null {
+  if (discoveredGtin == null || !/^\d{8,14}$/.test(discoveredGtin)) return null;
+
   return {
-    gtin: '',
+    gtin: discoveredGtin,
     registerName: seed.name,
     price: seedPriceToString(seed.price),
   };

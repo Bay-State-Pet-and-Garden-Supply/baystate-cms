@@ -33,12 +33,12 @@ describe('ProductSeed run persistence (#50)', () => {
     try { unlinkSync(dbPath); } catch { /* best effort */ }
   });
 
-  it('starts v2 without a GTIN and keeps seed/context separately inspectable', async () => {
+  it('starts a v2 seed with explicit discovered GTIN compatibility and keeps seed/context separately inspectable', async () => {
     const executor: ProductIntelligenceExecutor = {
       name: 'legacy',
       version: '1.0.0',
       async startResearch(input: ProductResearchInput, context: ProductResearchContext, events: ExecutionEventSink): Promise<ProductResearchResult> {
-        expect(input.gtin).toBe('');
+        expect(input.gtin).toBe('036000291452');
         events.emit('run_started', { data: { seedSku: 'SUP-2' } });
         return {
           runId: context.runId,
@@ -55,7 +55,7 @@ describe('ProductSeed run persistence (#50)', () => {
       },
     };
     const started = await startProductIntelligenceRun(executor, {
-      input: { gtin: '', registerName: 'Treats', price: '2.5' } as ProductResearchInput,
+      input: { gtin: '036000291452', registerName: 'Treats', price: '2.5' },
       productSeed: { sku: 'SUP-2', name: 'Treats', price: 2.5 },
       batchContext: { schemaVersion: 1, authoritative: false, batchId: 'b2', siblingSkus: [], hints: {} },
       policy: buildDefaultPiPolicy(),

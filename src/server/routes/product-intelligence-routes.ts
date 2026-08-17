@@ -168,12 +168,20 @@ router.post('/product-intelligence/runs', async (c) => {
     productSeed = v2Wrapped.data.productSeed;
     batchContext = v2Wrapped.data.batchContext ?? null;
     existingIdentity = v2Wrapped.data.existingIdentity ?? null;
-    inputResult = { data: productSeedToLegacyInput(productSeed) };
+    const legacyInput = productSeedToLegacyInput(productSeed);
+    if (!legacyInput) {
+      return c.json({ error: 'ProductSeed has no valid discovered GTIN for the historical executor compatibility path' }, 400);
+    }
+    inputResult = { data: legacyInput };
   } else if (v2Direct.success) {
     productSeed = ProductSeedSchema.parse(v2Direct.data);
     batchContext = v2Direct.data.batchContext ?? null;
     existingIdentity = v2Direct.data.existingIdentity ?? null;
-    inputResult = { data: productSeedToLegacyInput(productSeed) };
+    const legacyInput = productSeedToLegacyInput(productSeed);
+    if (!legacyInput) {
+      return c.json({ error: 'ProductSeed has no valid discovered GTIN for the historical executor compatibility path' }, 400);
+    }
+    inputResult = { data: legacyInput };
   } else if (legacy.success) {
     inputResult = { data: legacy.data };
   } else {

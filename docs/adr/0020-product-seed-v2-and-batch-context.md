@@ -22,14 +22,17 @@ for inspection and replay.
 ## Compatibility
 
 The historical GTIN-first input contract remains readable and replayable. A
-small compatibility adapter supplies the legacy executor shape with an empty
-GTIN sentinel for v2 runs; it never substitutes the SKU. Existing raw and
+small compatibility adapter supplies the legacy executor shape only when a
+valid discovered GTIN is explicitly provided; otherwise it returns a
+fail-closed null outcome. It never substitutes the SKU. Existing raw and
 normalized identity evidence may be attached as evidence without expanding the
-minimal seed contract.
+minimal seed contract. API callers must reject a v2 launch that cannot provide
+this valid historical compatibility input.
 
 ## Consequences
 
-- Research and terminal validation must tolerate a missing seed GTIN.
+- Research and terminal validation must tolerate a missing seed GTIN without
+  pretending it is a valid historical GTIN-first input.
 - Existing v1 bundles and run records retain their GTIN equality checks.
 - Discovery and batch intelligence remain separate follow-up capabilities;
   this ADR defines their input boundary only.
