@@ -218,8 +218,39 @@ profileEntries.push(beeSuppliesProfile);
 const beeType = productTypeEntries.find((t: any) => t.id === 'bee-supplies');
 if (beeType) beeType.attributeProfileId = 'bee-supplies-profile';
 
-// ─── 6. Build export-mappings.json (same entries as snapshot) ───────────────
-const exportMappingEntries = snapshotMappings.entries.map((m: any) => JSON.parse(JSON.stringify(m)));
+// ─── 6. Build export-mappings.json (DERIVED from attributes' exportDisposition) ─
+// FIX 3: `exportDisposition` on each attribute is the AUTHORITATIVE source of
+// the exported-attribute relation. export-mappings.json is a deterministic
+// derived index: every attribute with kind 'shopsite' yields exactly one
+// mapping whose catalogField equals the disposition's field. The mapping id
+// and serialization are carried from the snapshot (they are not taxonomy
+// identity), so the derived set never independently diverges from the
+// dispositions.
+const snapshotMappingByAttribute = new Map<string, any>(
+  snapshotMappings.entries.map((m: any) => [m.attributeId, m]),
+);
+const exportMappingEntries = attributeEntries
+  .filter((a: any) => a.exportDisposition.kind === 'shopsite')
+  .map((a: any) => {
+    const src = snapshotMappingByAttribute.get(a.id);
+    const entry: Record<string, unknown> = {
+      attributeId: a.id,
+      catalogField: a.exportDisposition.catalogField,
+      id: src?.id ?? `${a.id}-mapping`,
+      isStale: src?.isStale ?? false,
+      serialization: src?.serialization
+        ? JSON.parse(JSON.stringify(src.serialization))
+        : { kind: 'scalar', prefix: '', suffix: '' },
+    };
+    return entry;
+  });
+// Sanity: the derived set must match the snapshot's shopsite mappings exactly
+// (17 in the reviewed snapshot), so the release never silently drops one.
+if (exportMappingEntries.length !== snapshotMappings.entries.length) {
+  throw new Error(
+    `Derived export mappings (${exportMappingEntries.length}) do not match snapshot mappings (${snapshotMappings.entries.length}).`,
+  );
+}
 
 // ─── 7. Build guidance.json (port the three preset rules) ───────────────────
 // The preset conforms to GuidanceConfigV2Schema (strict: id, scope, scopeId,

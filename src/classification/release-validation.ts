@@ -115,10 +115,31 @@ export interface TaxonomyReleaseBundle {
 
 // ─── Path helpers ──────────────────────────────────────────────────────────────
 
-/** Resolve a release directory name or absolute path under src/classification/releases. */
+/**
+ * True when a value is a valid taxonomy release id / revision / department id:
+ * lowercase kebab-case (letters, digits, single hyphens), e.g. `bay-state-v3`.
+ * Used to validate `activeTaxonomyRevision`-style identifiers before they are
+ * resolved to a directory (path-traversal guard at the loader boundary).
+ */
+export function isValidReleaseId(id: string): boolean {
+  return SLUG_RELEASE_ID_RE.test(id);
+}
+
+/**
+ * Resolve a release directory name or absolute path under src/classification/releases.
+ * Relative release ids are resolved inside the releases root and must NOT escape
+ * it (`../` traversal is rejected). Absolute paths (temp copies used by tests,
+ * or an explicit checked-in path) pass through unchanged.
+ */
 export function resolveReleaseDir(releaseDir: string): string {
   if (path.isAbsolute(releaseDir)) return releaseDir;
-  return path.resolve(__dirname, 'releases', releaseDir);
+  const releasesRoot = path.resolve(__dirname, 'releases');
+  const dir = path.resolve(releasesRoot, releaseDir);
+  const relative = path.relative(releasesRoot, dir);
+  if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+    throw new Error(`Release directory "${releaseDir}" resolves outside the releases root.`);
+  }
+  return dir;
 }
 
 const RELEASE_FILES = [
@@ -255,9 +276,21 @@ export function validateTaxonomyRelease(releaseDir: string): ReleaseValidationRe
     }
   }
 
-  // ── Rule 3: every product type's departmentId exists in departments ──────
+  // ── Rule 3: departments are unique, well-formed, and every product type's
+  //    departmentId resolves ────────────────────────────────────────────────
   {
     const departmentIds = new Set(departments.map(d => d.id));
+    // FIX 4: department ids must be unique and match the kebab-case release-id format.
+    const seenDepartments = new Set<string>();
+    for (const dept of departments) {
+      if (!SLUG_RELEASE_ID_RE.test(dept.id)) {
+        fail('invalid_department_id_format', `Department id "${dept.id}" must match /^[a-z0-9]+(-[a-z0-9]+)*$/.`);
+      }
+      if (seenDepartments.has(dept.id)) {
+        fail('duplicate_department_id', `Duplicate department id "${dept.id}".`);
+      }
+      seenDepartments.add(dept.id);
+    }
     for (const pt of productTypes) {
       if (pt.departmentId === undefined) {
         fail('missing_department_id', `Product type "${pt.id}" has no departmentId.`);
@@ -382,6 +415,58 @@ export function validateTaxonomyRelease(releaseDir: string): ReleaseValidationRe
     }
   }
 
+  // ── Rule 8b (FIX 2): export duality SET-EQUALITY invariant ──────────────
+  // export-mappings.json must equal EXACTLY the projection of attributes whose
+  // exportDisposition.kind === 'shopsite' onto (attributeId, catalogField):
+  //   ExpectedMappings = { (a.id, a.exportDisposition.catalogField) | a.kind == 'shopsite' }
+  //   ActualMappings   = { (m.attributeId, m.catalogField) | m in exportMappings }
+  //   ActualMappings == ExpectedMappings
+  {
+    const expectedByAttribute = new Map<string, string>();
+    for (const attr of attributes) {
+      if (attr.exportDisposition?.kind === 'shopsite') {
+        expectedByAttribute.set(attr.id, attr.exportDisposition.catalogField);
+      }
+    }
+
+    const actualByAttribute = new Map<string, string[]>();
+    for (const mapping of mappings) {
+      const existing = actualByAttribute.get(mapping.attributeId) ?? [];
+      existing.push(mapping.catalogField);
+      actualByAttribute.set(mapping.attributeId, existing);
+    }
+
+    // Every shopsite-disposition attribute must have EXACTLY ONE mapping with
+    // the SAME catalogField.
+    for (const [attributeId, expectedField] of expectedByAttribute) {
+      const actualFields = actualByAttribute.get(attributeId);
+      if (!actualFields || actualFields.length === 0) {
+        fail('export_mapping_missing', `Attribute "${attributeId}" has a shopsite exportDisposition but no export mapping.`);
+      } else if (actualFields.length > 1) {
+        fail('duplicate_export_mapping', `Attribute "${attributeId}" has ${actualFields.length} export mappings; exactly one is required.`);
+      } else if (actualFields[0] !== expectedField) {
+        fail('export_mapping_mismatch', `Attribute "${attributeId}" maps to "${actualFields[0]}" but exportDisposition declares "${expectedField}".`);
+      }
+    }
+
+    // Every mapping must correspond to a shopsite-disposition attribute with a
+    // matching catalogField; not_exported/unknown attributes must have ZERO
+    // mappings (forbidden).
+    for (const [attributeId, actualFields] of actualByAttribute) {
+      const attr = attributes.find(a => a.id === attributeId);
+      if (!attr) continue; // unknown attributes already flagged by mapping_unknown_attribute
+      if (attr.exportDisposition?.kind !== 'shopsite') {
+        fail('export_mapping_forbidden', `Attribute "${attributeId}" has ${actualFields.length} export mapping(s) but disposition is "${attr.exportDisposition?.kind ?? 'missing'}".`);
+        continue;
+      }
+      for (const field of actualFields) {
+        if (field !== attr.exportDisposition.catalogField) {
+          fail('export_mapping_mismatch', `Attribute "${attributeId}" maps to "${field}" but exportDisposition declares "${attr.exportDisposition.catalogField}".`);
+        }
+      }
+    }
+  }
+
   // ── Rule 9: guidance ids unique; structured refs known where applicable ──
   {
     const seen = new Set<string>();
@@ -452,6 +537,22 @@ export function validateTaxonomyRelease(releaseDir: string): ReleaseValidationRe
   {
     if (manifest && (!manifest.releaseId || !manifest.revision)) {
       fail('invalid_release_manifest', 'manifest.json must include releaseId and revision.');
+    }
+    // FIX 5: release identity binding — releaseId and revision must match the
+    // kebab-case id format, and the manifest releaseId must equal the basename
+    // of the release directory being validated (an activeTaxonomyRevision must
+    // resolve to exactly one immutable release).
+    if (manifest) {
+      if (!isValidReleaseId(manifest.releaseId)) {
+        fail('invalid_release_id_format', `manifest.releaseId "${manifest.releaseId}" must match /^[a-z0-9]+(-[a-z0-9]+)*$/.`);
+      }
+      if (!isValidReleaseId(manifest.revision)) {
+        fail('invalid_release_id_format', `manifest.revision "${manifest.revision}" must match /^[a-z0-9]+(-[a-z0-9]+)*$/.`);
+      }
+      const dirBasename = path.basename(dir);
+      if (manifest.releaseId !== dirBasename) {
+        fail('release_id_mismatch', `manifest.releaseId "${manifest.releaseId}" does not match the release directory basename "${dirBasename}".`);
+      }
     }
     // Envelope origin consistency: every focused file must declare the same
     // release bundle origin, matching the manifest releaseId when present.

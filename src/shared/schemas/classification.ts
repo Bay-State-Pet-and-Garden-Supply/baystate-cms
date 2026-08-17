@@ -428,8 +428,28 @@ export const ProductTypeConfigV2Schema = z.object({
   description: z.string().nullable(),
   attributeProfileId: ClassificationSlugSchema.nullable(),
   oldIdAliases: z.array(ClassificationSlugSchema),
+  /** Department grouping (bay-state-v3 release). Optional for v2 workspace bundles. */
+  departmentId: ClassificationSlugSchema.optional(),
 }).strict();
 export type ProductTypeConfigV2 = z.infer<typeof ProductTypeConfigV2Schema>;
+
+/**
+ * Export disposition for a taxonomy attribute (bay-state-v3 release).
+ * `shopsite` attributes persist to a ShopSite catalog field; `not_exported`
+ * attributes are canonical classification data with no ShopSite destination.
+ * Optional in the schema so v2 workspace bundles still parse; the release
+ * validator requires it on every attribute.
+ */
+export const ExportDispositionV2Schema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('shopsite'),
+    catalogField: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal('not_exported'),
+  }).strict(),
+]);
+export type ExportDispositionV2 = z.infer<typeof ExportDispositionV2Schema>;
 
 export const ProductAttributeConfigV2Schema = z.object({
   id: ClassificationSlugSchema,
@@ -450,6 +470,8 @@ export const ProductAttributeConfigV2Schema = z.object({
   isUniversal: z.boolean(),
   evidencePolicy: AttributeEvidencePolicySchema,
   oldIdAliases: z.array(ClassificationSlugSchema),
+  /** Export disposition (bay-state-v3 release). Optional for v2 workspace bundles. */
+  exportDisposition: ExportDispositionV2Schema.optional(),
 }).strict();
 export type ProductAttributeConfigV2 = z.infer<typeof ProductAttributeConfigV2Schema>;
 
@@ -581,12 +603,22 @@ export const ClassificationBundleOriginV2Schema = z.discriminatedUnion('kind', [
     kind: z.literal('migrated_v1'),
     sourceConfigHash: Sha256HexSchema,
   }).strict(),
+  z.object({
+    kind: z.literal('release'),
+    releaseId: ClassificationSlugSchema,
+    createdAt: StrictIsoDateTimeStringSchema,
+  }).strict(),
 ]);
 export type ClassificationBundleOriginV2 = z.infer<typeof ClassificationBundleOriginV2Schema>;
 
 export const ClassificationMigrationProvenanceV2Schema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('reviewed_generation'),
+  }).strict(),
+  z.object({
+    kind: z.literal('release'),
+    releaseId: ClassificationSlugSchema,
+    createdAt: StrictIsoDateTimeStringSchema,
   }).strict(),
   z.object({
     kind: z.literal('migrated_v1'),
@@ -642,6 +674,23 @@ export const BrandsFileV2Schema = entriesEnvelopeV2(BrandConfigV2Schema);
 export const GuidanceFileV2Schema = entriesEnvelopeV2(GuidanceConfigV2Schema);
 export const ModelPolicyFileV2Schema = policyEnvelopeV2(ModelPolicyConfigV2Schema);
 export const DataSharingFileV2Schema = policyEnvelopeV2(DataSharingConfigV2Schema);
+
+/**
+ * Department grouping for a taxonomy release (bay-state-v3). Departments are
+ * canonical browse/reporting groups; a product type's department membership
+ * never renames the type id.
+ */
+export const DepartmentConfigV2Schema = z.object({
+  id: ClassificationSlugSchema,
+  name: z.string().min(1),
+  description: z.string().nullable(),
+  sortOrder: z.number().int().nonnegative(),
+  /** Product type ids that belong to this department. */
+  typeIds: z.array(ClassificationSlugSchema),
+}).strict();
+export type DepartmentConfigV2 = z.infer<typeof DepartmentConfigV2Schema>;
+
+export const DepartmentsFileV2Schema = entriesEnvelopeV2(DepartmentConfigV2Schema);
 
 export const ClassificationConfigBundleV2Schema = z.object({
   manifest: ClassificationManifestV2Schema,

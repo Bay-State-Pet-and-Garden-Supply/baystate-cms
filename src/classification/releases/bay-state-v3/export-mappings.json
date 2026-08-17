@@ -117,20 +117,9 @@
       }
     },
     {
-      "attributeId": "product-feature",
-      "catalogField": "ProductField26",
-      "id": "product-feature-mapping",
-      "isStale": false,
-      "serialization": {
-        "kind": "scalar",
-        "prefix": "",
-        "suffix": ""
-      }
-    },
-    {
-      "attributeId": "size",
-      "catalogField": "ProductField27",
-      "id": "size-mapping",
+      "attributeId": "packaging-type",
+      "catalogField": "ProductField30",
+      "id": "packaging-type-mapping",
       "isStale": false,
       "serialization": {
         "kind": "scalar",
@@ -161,9 +150,20 @@
       }
     },
     {
-      "attributeId": "packaging-type",
-      "catalogField": "ProductField30",
-      "id": "packaging-type-mapping",
+      "attributeId": "size",
+      "catalogField": "ProductField27",
+      "id": "size-mapping",
+      "isStale": false,
+      "serialization": {
+        "kind": "scalar",
+        "prefix": "",
+        "suffix": ""
+      }
+    },
+    {
+      "attributeId": "product-feature",
+      "catalogField": "ProductField26",
+      "id": "product-feature-mapping",
       "isStale": false,
       "serialization": {
         "kind": "scalar",

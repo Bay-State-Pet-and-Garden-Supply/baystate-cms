@@ -15,15 +15,21 @@ import {
   loadTaxonomyRelease,
   ReleaseValidationError,
   validateTaxonomyRelease,
+  isValidReleaseId,
   type ReleaseValidationReport,
 } from '../../classification/release-validation';
+import { PET_AND_GARDEN_PRESET } from '../../classification/presets/preset-pet-and-garden';
 
 const RELEASE_DIR = path.resolve(__dirname, '../../classification/releases/bay-state-v3');
 
 function tempReleaseCopy(name: string): string {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `taxonomy-release-test-${name}-`));
-  fs.cpSync(RELEASE_DIR, tmpRoot, { recursive: true });
-  return tmpRoot;
+  // Nest the copy under a `bay-state-v3` subdirectory so the release-id
+  // binding check (releaseId == directory basename) stays satisfied and each
+  // negative test isolates a single cause.
+  const releaseDir = path.join(tmpRoot, 'bay-state-v3');
+  fs.cpSync(RELEASE_DIR, releaseDir, { recursive: true });
+  return releaseDir;
 }
 
 const tmpDirs: string[] = [];
@@ -87,6 +93,70 @@ describe('taxonomy release validation — committed bay-state-v3', () => {
 
   it('assertReleaseValid passes for the committed release', () => {
     expect(() => assertReleaseValid(RELEASE_DIR)).not.toThrow();
+  });
+
+  it('FIX 1: release guidance has exhaustive parity with the reviewed preset (both directions, semantic equality)', () => {
+    const bundle = loadTaxonomyRelease(RELEASE_DIR);
+    const releaseGuidance = bundle.guidance;
+
+    // (a) Every preset rule must be present in the release with semantically
+    // equal content (structured body, freeForm, manualReviewRequirement,
+    // scope, scopeId).
+    for (const rule of PET_AND_GARDEN_PRESET) {
+      const release = releaseGuidance.find(g => g.id === rule.id);
+      expect(release, `preset rule "${rule.id}" missing from release guidance`).toBeDefined();
+      if (!release) continue;
+      expect(release.scope).toEqual(rule.scope);
+      expect(release.scopeId).toEqual(rule.scopeId);
+      expect(release.structured).toEqual(rule.structured);
+      expect(release.freeForm).toEqual(rule.freeForm);
+      expect(release.manualReviewRequirement).toEqual(rule.manualReviewRequirement);
+    }
+
+    // (b) The release must contain NO guidance id that is not in the preset
+    // (inventory parity in the reverse direction).
+    const presetIds = new Set(PET_AND_GARDEN_PRESET.map(r => r.id));
+    for (const g of releaseGuidance) {
+      expect(presetIds.has(g.id), `release guidance "${g.id}" not present in preset`).toBe(true);
+    }
+
+    // Both directions agree, so the counts must match exactly.
+    expect(releaseGuidance.length).toBe(PET_AND_GARDEN_PRESET.length);
+  });
+
+  it('FIX 2: export mappings are set-equal to the shopsite-disposition projection', () => {
+    const bundle = loadTaxonomyRelease(RELEASE_DIR);
+    const expected = new Map<string, string>();
+    for (const attr of bundle.attributes) {
+      if (attr.exportDisposition?.kind === 'shopsite') {
+        expected.set(attr.id, attr.exportDisposition.catalogField);
+      }
+    }
+    const actual = new Map<string, string[]>();
+    for (const m of bundle.exportMappings) {
+      const arr = actual.get(m.attributeId) ?? [];
+      arr.push(m.catalogField);
+      actual.set(m.attributeId, arr);
+    }
+    expect(actual.size).toBe(expected.size);
+    for (const [attributeId, expectedField] of expected) {
+      expect(actual.get(attributeId)).toEqual([expectedField]);
+    }
+    // Every mapping belongs to a shopsite attribute (no mapping for not_exported).
+    const shopsiteIds = new Set(expected.keys());
+    for (const attributeId of actual.keys()) {
+      expect(shopsiteIds.has(attributeId), `mapping for non-shopsite attribute "${attributeId}"`).toBe(true);
+    }
+  });
+
+  it('FIX 4/5: department ids and release id satisfy the kebab-case format, and releaseId binds to the directory basename', () => {
+    const bundle = loadTaxonomyRelease(RELEASE_DIR);
+    for (const dept of bundle.departments) {
+      expect(isValidReleaseId(dept.id), `department id "${dept.id}" not kebab-case`).toBe(true);
+    }
+    expect(isValidReleaseId(bundle.manifest.releaseId)).toBe(true);
+    expect(isValidReleaseId(bundle.manifest.revision)).toBe(true);
+    expect(bundle.manifest.releaseId).toBe(path.basename(RELEASE_DIR));
   });
 });
 
@@ -251,5 +321,107 @@ describe('taxonomy release validation — negative cases (temp copies)', () => {
       expect((err as ReleaseValidationError).code).toBe('release_invalid');
       expect((err as ReleaseValidationError).report.ok).toBe(false);
     }
+  });
+
+  it('FIX 2: rejects when a shopsite attribute loses its export mapping', () => {
+    const dir = trackedTempReleaseCopy('missing-mapping');
+    const mappings = readJson<{ entries: Array<Record<string, unknown>> }>(dir, 'export-mappings.json');
+    // Drop the first mapping (brand -> ProductField16 is shopsite-dispositioned).
+    mappings.entries = mappings.entries.filter(m => m.attributeId !== 'brand');
+    writeJson(dir, 'export-mappings.json', mappings);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('export_mapping_missing');
+    expect(() => loadTaxonomyRelease(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('FIX 2: rejects when a not_exported attribute gains an export mapping', () => {
+    const dir = trackedTempReleaseCopy('forbidden-mapping');
+    const mappings = readJson<{ entries: Array<Record<string, unknown>> }>(dir, 'export-mappings.json');
+    // npk-ratio is not_exported; a mapping for it must be forbidden.
+    mappings.entries.push({
+      id: 'npk-ratio-mapping',
+      attributeId: 'npk-ratio',
+      catalogField: 'ProductField99',
+      serialization: { kind: 'scalar', prefix: '', suffix: '' },
+      isStale: false,
+    });
+    writeJson(dir, 'export-mappings.json', mappings);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('export_mapping_forbidden');
+    expect(() => assertReleaseValid(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('FIX 2: rejects when a mapping catalogField differs from the disposition', () => {
+    const dir = trackedTempReleaseCopy('mismatch-field');
+    const mappings = readJson<{ entries: Array<Record<string, unknown>> }>(dir, 'export-mappings.json');
+    for (const m of mappings.entries) {
+      if (m.attributeId === 'brand') {
+        m.catalogField = 'ProductField999';
+        break;
+      }
+    }
+    writeJson(dir, 'export-mappings.json', mappings);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('export_mapping_mismatch');
+    expect(() => loadTaxonomyRelease(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('FIX 2: rejects duplicate export mappings for the same attribute', () => {
+    const dir = trackedTempReleaseCopy('dup-mapping');
+    const mappings = readJson<{ entries: Array<Record<string, unknown>> }>(dir, 'export-mappings.json');
+    mappings.entries.push({ ...mappings.entries[0] });
+    writeJson(dir, 'export-mappings.json', mappings);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('duplicate_export_mapping');
+    expect(() => assertReleaseValid(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('FIX 4: rejects duplicate department ids', () => {
+    const dir = trackedTempReleaseCopy('dup-dept');
+    const departments = readJson<{ entries: Array<Record<string, unknown>> }>(dir, 'departments.json');
+    departments.entries.push({ ...departments.entries[0] });
+    writeJson(dir, 'departments.json', departments);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('duplicate_department_id');
+    expect(() => loadTaxonomyRelease(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('FIX 4: rejects a department id that is not kebab-case', () => {
+    const dir = trackedTempReleaseCopy('bad-dept-format');
+    const departments = readJson<{ entries: Array<Record<string, unknown>> }>(dir, 'departments.json');
+    for (const dept of departments.entries) {
+      if (dept.id === 'pet-supplies') {
+        // pet_supplies passes the shared slug schema (underscores allowed) but
+        // fails the stricter kebab-case release-id/department format.
+        dept.id = 'pet_supplies';
+        break;
+      }
+    }
+    writeJson(dir, 'departments.json', departments);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('invalid_department_id_format');
+    expect(() => assertReleaseValid(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('FIX 5: rejects when manifest releaseId does not match the directory basename', () => {
+    const dir = trackedTempReleaseCopy('release-id-mismatch');
+    const manifest = readJson<{ releaseId: string }>(dir, 'manifest.json');
+    manifest.releaseId = 'some-other-release';
+    writeJson(dir, 'manifest.json', manifest);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('release_id_mismatch');
+    expect(() => loadTaxonomyRelease(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('FIX 5: rejects a manifest releaseId that is not kebab-case', () => {
+    const dir = trackedTempReleaseCopy('bad-release-id');
+    const manifest = readJson<{ releaseId: string }>(dir, 'manifest.json');
+    // bay_state_v3 is a valid slug per ClassificationSlugSchema (parses fine)
+    // but fails the stricter kebab-case release-id format.
+    manifest.releaseId = 'bay_state_v3';
+    writeJson(dir, 'manifest.json', manifest);
+    const report = validateTaxonomyRelease(dir);
+    expect(errorCodes(report)).toContain('invalid_release_id_format');
+    expect(() => assertReleaseValid(dir)).toThrow(ReleaseValidationError);
   });
 });
