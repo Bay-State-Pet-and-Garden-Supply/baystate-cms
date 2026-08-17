@@ -82,6 +82,29 @@ describe('deterministic batch intelligence (#57)', () => {
     expect(JSON.stringify(result)).not.toContain('mpn');
   });
 
+  it('keeps unrelated mixed-batch rows isolated even with generic family overlap', () => {
+    const rows = [
+      row('acme-small', 'AC-100', 'Acme Classic Chicken Recipe 5 lb', 9.99),
+      row('acme-large', 'AC-101', 'Acme Classic Chicken Recipe 10 lb', 14.99),
+      row('other-brand', 'BB-200', 'BetterBone Classic Chicken Recipe 15 lb', 14.99),
+      row('other-family', 'AC-102', 'Acme Garden Hose Classic 20 oz', 14.99),
+    ];
+    const result = deriveBatchIntelligence({ batchId: 'mixed', batchVersion: '1', rows });
+    expect(result.payload.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rowId: 'acme-small', relatedRowId: 'acme-large', kind: 'likely_variant' }),
+    ]));
+    for (const [left, right] of [
+      ['acme-small', 'other-brand'],
+      ['acme-large', 'other-brand'],
+      ['acme-small', 'other-family'],
+      ['acme-large', 'other-family'],
+      ['other-brand', 'other-family'],
+    ]) {
+      expect(result.payload.relationships.some((relation) => relation.rowId === left && relation.relatedRowId === right)).toBe(false);
+      expect(result.payload.relationships.some((relation) => relation.rowId === right && relation.relatedRowId === left)).toBe(false);
+    }
+  });
+
   it('keeps unrelated mixed batches out of row context and bounds the projection', () => {
     const rows = Array.from({ length: 20 }, (_, index) => row(`row-${index}`, `SKU-${index}`, `Brand${index} Unique Product ${index} oz`, index + 1));
     const result = deriveBatchIntelligence({ batchId: 'mixed', batchVersion: '1', rows });
@@ -97,12 +120,20 @@ describe('deterministic batch intelligence (#57)', () => {
     const input = {
       batchId: 'stable',
       batchVersion: 'v7',
+      batchName: 'Supplier upload A',
       rows: [row('b', 'B-2', 'Acme Two 12 oz', 2), row('a', 'A-1', 'Acme One 12 oz', 2)],
     };
     const first = deriveBatchIntelligence(input, { createdAt: '2026-01-01T00:00:00.000Z' });
     const second = deriveBatchIntelligence({ ...input, rows: [...input.rows].reverse() }, { createdAt: '2027-01-01T00:00:00.000Z' });
+    const renamed = deriveBatchIntelligence({ ...input, batchName: 'Supplier upload B' }, { createdAt: '2026-01-01T00:00:00.000Z' });
     expect(first.payload.inputHash).toBe(second.payload.inputHash);
     expect(first.batchContextHash).toBe(second.batchContextHash);
+    expect(first.payload.inputHash).not.toBe(renamed.payload.inputHash);
+    expect(first.batchContextHash).not.toBe(renamed.batchContextHash);
+    expect(first.artifact.contentHash).not.toBe(renamed.artifact.contentHash);
+    expect(first.payload.batchName).toBe('Supplier upload A');
+    expect(contextForBatchRow(first, 'a')?.batchName).toBe('Supplier upload A');
+    expect(renamed.payload.batchName).toBe('Supplier upload B');
     expect(first.batchContextVersion).toBe('1.0.0');
     expect(first.payload.batchVersion).toBe('v7');
     expect(BatchContextArtifactPayloadSchema.safeParse(first.payload).success).toBe(true);

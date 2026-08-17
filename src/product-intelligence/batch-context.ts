@@ -121,6 +121,7 @@ export const BatchContextArtifactPayloadSchema = z.object({
   authoritative: z.literal(false),
   batchId: z.string().min(1).max(128),
   batchVersion: z.string().min(1).max(128),
+  batchName: z.string().trim().max(256).nullish(),
   inputHash: z.string().regex(/^[a-f0-9]{64}$/),
   /** Canonical seed snapshot makes the artifact self-contained and replayable. */
   rows: z.array(BatchSeedRowSchema).min(1).max(MAX_BATCH_ROWS),
@@ -137,6 +138,7 @@ export const BatchContextArtifactPayloadSchema = z.object({
   const expectedInputHash = hashCanonicalJson({
     batchId: payload.batchId,
     batchVersion: payload.batchVersion,
+    batchName: payload.batchName ?? null,
     rows: [...payload.rows].sort((a, b) => a.rowId.localeCompare(b.rowId)),
   });
   if (expectedInputHash !== payload.inputHash) {
@@ -174,6 +176,10 @@ type ParsedRow = {
   meaningfulTokens: string[];
   sizeTokens: string[];
   familyTokens: string[];
+  /** Identity-oriented tokens exclude generic merchandising language. */
+  identityTokens: string[];
+  /** The first meaningful token is only a bounded brand cue, never a fact. */
+  brandToken: string | null;
   skuPrefix: string | null;
   skuNumber: number | null;
   price: number | null;
@@ -187,6 +193,18 @@ const VARIANT_WORDS = new Set([
   'small', 'medium', 'large', 'mini', 'regular', 'assorted', 'original',
   'size', 'count', 'ct', 'pack', 'pk', 'case', 'oz', 'ounce', 'ounces',
   'lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'ml', 'l',
+]);
+/**
+ * These words are useful display hints but are too generic to establish a
+ * family relationship. Keeping them out of identity cues prevents a mixed
+ * supplier batch from linking rows merely because they say "classic" or
+ * "product" alongside a different size.
+ */
+const GENERIC_FAMILY_WORDS = new Set([
+  'blend', 'classic', 'collection', 'complete', 'daily', 'deluxe', 'essential',
+  'formula', 'flavor', 'flavour', 'item', 'natural', 'new', 'original',
+  'premium', 'product', 'recipe', 'select', 'series', 'standard', 'style',
+  'ultimate', 'variety',
 ]);
 
 function normalizeText(value: string): string {
@@ -253,6 +271,8 @@ function parseRow(row: BatchSeedRow): ParsedRow {
   // Family tokens intentionally exclude only generic merchandising words and
   // measured variants. They are clues for grouping, never product facts.
   const familyTokens = meaningfulTokens.filter((token) => !VARIANT_WORDS.has(token));
+  const identityTokens = familyTokens.filter((token) => !GENERIC_FAMILY_WORDS.has(token));
+  const brandToken = meaningfulTokens[0] ?? null;
   const sku = skuParts(row.productSeed.sku);
   return {
     row,
@@ -261,6 +281,8 @@ function parseRow(row: BatchSeedRow): ParsedRow {
     meaningfulTokens,
     sizeTokens: sizes,
     familyTokens,
+    identityTokens,
+    brandToken,
     skuPrefix: sku?.prefix ?? null,
     skuNumber: sku?.number ?? null,
     price: numericPrice(row.productSeed.price),
@@ -285,7 +307,7 @@ function commonFirstTokens(rows: ParsedRow[]): Map<string, string[]> {
 function abbreviationPairs(rows: ParsedRow[]): Array<{ abbreviation: string; family: string; rowIds: string[] }> {
   const candidates = new Map<string, { family: string; rowIds: string[] }>();
   for (const row of rows) {
-    const tokens = row.familyTokens;
+    const tokens = row.identityTokens;
     for (let start = 0; start < tokens.length; start += 1) {
       for (let length = 2; length <= Math.min(4, tokens.length - start); length += 1) {
         const phraseTokens = tokens.slice(start, start + length);
@@ -300,7 +322,7 @@ function abbreviationPairs(rows: ParsedRow[]): Array<{ abbreviation: string; fam
   }
   const result: Array<{ abbreviation: string; family: string; rowIds: string[] }> = [];
   for (const [abbreviation, entry] of candidates) {
-    const matchingRows = rows.filter((row) => row.familyTokens.includes(abbreviation)).map((row) => row.row.rowId);
+    const matchingRows = rows.filter((row) => row.identityTokens.includes(abbreviation)).map((row) => row.row.rowId);
     const allIds = [...new Set([...entry.rowIds, ...matchingRows])];
     if (matchingRows.length > 0 && entry.family.length > abbreviation.length) {
       result.push({ abbreviation, family: entry.family, rowIds: allIds.sort() });
@@ -312,31 +334,46 @@ function abbreviationPairs(rows: ParsedRow[]): Array<{ abbreviation: string; fam
 function relationFor(left: ParsedRow, right: ParsedRow, repeatedBrandTokens: Set<string>, abbreviations: Array<{ abbreviation: string; family: string }>): BatchRelationship | null {
   if (left.row.rowId === right.row.rowId) return null;
   const reasons: BatchRelationshipReason[] = [];
-  const shared = setIntersection(left.familyTokens, right.familyTokens);
+  const shared = setIntersection(left.identityTokens, right.identityTokens);
+  const sharedSemantic = setIntersection(
+    left.identityTokens.filter((token) => token !== left.brandToken),
+    right.identityTokens.filter((token) => token !== right.brandToken),
+  );
   const sameName = left.normalizedName === right.normalizedName;
-  const overlap = jaccard(left.meaningfulTokens, right.meaningfulTokens);
+  const overlap = jaccard(left.identityTokens, right.identityTokens);
   const differentSize = left.sizeTokens.join('|') !== right.sizeTokens.join('|') && (left.sizeTokens.length > 0 || right.sizeTokens.length > 0);
   const skuSequence = left.skuPrefix !== null && left.skuPrefix === right.skuPrefix && left.skuNumber !== null && right.skuNumber !== null && Math.abs(left.skuNumber - right.skuNumber) <= 3;
+  const sameRepeatedBrand = left.brandToken !== null && left.brandToken === right.brandToken && repeatedBrandTokens.has(left.brandToken);
+  const distinctBrandCue = left.brandToken !== null && right.brandToken !== null && left.brandToken !== right.brandToken;
   const abbreviatedFamily = abbreviations.some((entry) => {
-    const leftHas = left.familyTokens.includes(entry.abbreviation);
-    const rightHas = right.familyTokens.some((token) => entry.family.split(' ').includes(token));
-    return leftHas !== rightHas;
+    const phraseTokens = entry.family.split(' ');
+    const leftAbbreviation = left.identityTokens.includes(entry.abbreviation);
+    const rightAbbreviation = right.identityTokens.includes(entry.abbreviation);
+    const leftExpansion = phraseTokens.every((token) => left.identityTokens.includes(token));
+    const rightExpansion = phraseTokens.every((token) => right.identityTokens.includes(token));
+    return (leftAbbreviation && rightExpansion) || (rightAbbreviation && leftExpansion);
   });
+  // A one-token family overlap is only meaningful when the batch supplies the
+  // same repeated leading brand cue. Two semantic family tokens can stand on
+  // their own, but differing leading brand cues keep mixed rows isolated.
+  const meaningfulFamilyIdentity = !distinctBrandCue && (
+    sharedSemantic.length >= 2 ||
+    (sharedSemantic.length >= 1 && sameRepeatedBrand) ||
+    (sameRepeatedBrand && abbreviatedFamily)
+  );
   if (sameName) reasons.push('same_normalized_name');
   if (overlap >= 0.6 && !sameName) reasons.push('high_name_overlap');
   if (shared.length > 0) reasons.push('shared_family_tokens');
   if (differentSize) reasons.push('different_size_or_pack');
   if (skuSequence) reasons.push('sku_sequence');
-  if (setIntersection(left.meaningfulTokens, right.meaningfulTokens).some((token) => repeatedBrandTokens.has(token))) {
-    reasons.push('shared_repeated_brand_token');
-  }
+  if (sameRepeatedBrand) reasons.push('shared_repeated_brand_token');
   if (abbreviatedFamily) reasons.push('abbreviated_family');
   if (left.price !== null && left.price === right.price && differentSize) reasons.push('same_price_pattern');
 
   let kind: BatchRelationshipKind | null = null;
   if (sameName) kind = 'duplicate';
-  else if (shared.length > 0 && differentSize && (overlap >= 0.3 || skuSequence || abbreviatedFamily)) kind = 'likely_variant';
-  else if (overlap >= 0.67 || (shared.length >= 2 && (skuSequence || abbreviatedFamily))) kind = 'near_duplicate';
+  else if (meaningfulFamilyIdentity && differentSize) kind = 'likely_variant';
+  else if (overlap >= 0.67 || (meaningfulFamilyIdentity && (skuSequence || abbreviatedFamily))) kind = 'near_duplicate';
   if (!kind) return null;
   const score = Math.min(1, Math.max(overlap, shared.length > 0 ? 0.45 : 0) + (differentSize ? 0.08 : 0) + (skuSequence ? 0.08 : 0));
   return {
@@ -365,6 +402,7 @@ export function deriveBatchIntelligence(input: BatchIntelligenceInput, options: 
   const inputHash = hashCanonicalJson({
     batchId: parsed.batchId,
     batchVersion: parsed.batchVersion,
+    batchName: parsed.batchName ?? null,
     rows: rows.map((row) => row.row),
   });
   const brandTokens = commonFirstTokens(rows);
@@ -454,6 +492,7 @@ export function deriveBatchIntelligence(input: BatchIntelligenceInput, options: 
     authoritative: false,
     batchId: parsed.batchId,
     batchVersion: parsed.batchVersion,
+    batchName: parsed.batchName ?? null,
     inputHash,
     rows: rows.map((row) => row.row),
     relationships,
