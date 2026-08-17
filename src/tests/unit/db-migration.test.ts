@@ -57,6 +57,51 @@ describe('SQLite Migration', () => {
     expect(rows.cnt).toBe(1);
   });
 
+  it('repairs duplicate active discovery runs before creating unique indexes', () => {
+    const db = getDb();
+    const workspaceId = `migration-discovery-ws-${randomUUID()}`;
+    insertWorkspace({
+      id: workspaceId,
+      name: 'Discovery Migration Workspace',
+      workspacePath: `/tmp/${workspaceId}`,
+      gitPath: `/tmp/${workspaceId}/.git`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const batch = createBatch({ workspaceId, name: 'Discovery Migration Batch', fileName: 'migration.csv', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: 'migration-upc', name: 'Migration Item', rowNumber: 1 }]);
+
+    db.exec('DROP INDEX IF EXISTS idx_discovery_runs_one_running');
+    db.exec('DROP INDEX IF EXISTS idx_discovery_runs_one_queued');
+    db.exec("DELETE FROM app_meta WHERE key = 'onboarding_discovery_runs_schema_version'");
+    const insertRun = (id: string, status: 'running' | 'queued', createdAt: string) => {
+      db.query(`
+        INSERT INTO onboarding_discovery_runs
+          (id, item_id, trigger, status, request_json, current_step, created_at)
+        VALUES (?, ?, 'automatic', ?, '{}', 'preflight', ?)
+      `).run(id, item.id, status, createdAt);
+    };
+    insertRun('migration-running-old', 'running', '2026-01-01T00:00:00.000Z');
+    insertRun('migration-running-new', 'running', '2026-01-02T00:00:00.000Z');
+    insertRun('migration-queued-old', 'queued', '2026-01-01T00:00:00.000Z');
+    insertRun('migration-queued-new', 'queued', '2026-01-02T00:00:00.000Z');
+
+    expect(() => runMigrations()).not.toThrow();
+    const rows = db.query(
+      `SELECT id, status FROM onboarding_discovery_runs
+       WHERE item_id = ? ORDER BY id`,
+    ).all(item.id) as Array<{ id: string; status: string }>;
+    expect(rows).toEqual([
+      { id: 'migration-queued-new', status: 'queued' },
+      { id: 'migration-queued-old', status: 'failed' },
+      { id: 'migration-running-new', status: 'running' },
+      { id: 'migration-running-old', status: 'failed' },
+    ]);
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'onboarding_discovery_runs_schema_version'").get()).toEqual({ value: '2' });
+  });
+
   it('should add decision revision columns and the global action-token unique index', () => {
     const db = getDb();
 

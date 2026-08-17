@@ -103,16 +103,42 @@ export function runMigrations(): void {
     .get('onboarding_discovery_runs_schema_version') as { value: string } | undefined;
   if (discoveryRunsV2?.value !== '2') {
     console.log('[Migrations] Restoring discovery-runs one-active-run-per-item indexes...');
-    db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_runs_one_running
-        ON onboarding_discovery_runs(item_id) WHERE status = 'running';
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_runs_one_queued
-        ON onboarding_discovery_runs(item_id) WHERE status = 'queued';
-    `);
-    db.exec(`
-      INSERT INTO app_meta (key, value) VALUES ('onboarding_discovery_runs_schema_version', '2')
-      ON CONFLICT(key) DO UPDATE SET value = '2';
-    `);
+    // Legacy databases could already contain duplicate queued/running rows
+    // because v1 did not enforce the invariant. Clean those rows before
+    // creating the unique partial indexes; otherwise CREATE UNIQUE INDEX
+    // aborts startup before the migration can repair the state.
+    db.transaction(() => {
+      db.exec(`
+        UPDATE onboarding_discovery_runs AS stale
+        SET status = 'failed',
+            outcome = 'failed',
+            outcome_message = 'Superseded during discovery-runs index migration',
+            completed_at = COALESCE(completed_at, datetime('now')),
+            claim_token = NULL,
+            claimed_at = NULL
+        WHERE stale.status IN ('queued', 'running')
+          AND EXISTS (
+            SELECT 1
+            FROM onboarding_discovery_runs AS newer
+            WHERE newer.item_id = stale.item_id
+              AND newer.status = stale.status
+              AND (
+                newer.created_at > stale.created_at
+                OR (newer.created_at = stale.created_at AND newer.rowid > stale.rowid)
+              )
+          );
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_runs_one_running
+          ON onboarding_discovery_runs(item_id) WHERE status = 'running';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_runs_one_queued
+          ON onboarding_discovery_runs(item_id) WHERE status = 'queued';
+      `);
+      db.exec(`
+        INSERT INTO app_meta (key, value) VALUES ('onboarding_discovery_runs_schema_version', '2')
+        ON CONFLICT(key) DO UPDATE SET value = '2';
+      `);
+    })();
     console.log('[Migrations] Discovery-runs indexes complete.');
   }
 

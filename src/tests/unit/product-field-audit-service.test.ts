@@ -6,6 +6,7 @@ import { runMigrations } from '../../db/migrations';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import {
   getProductFieldAudit,
+  boundProductFieldAuditForTransport,
   proposeProductFieldNormalization,
   validateFieldName,
 } from '../../server/services/product-field-audit-service';
@@ -179,14 +180,18 @@ describe('ProductField Audit Service', () => {
       });
     }
 
-    const audit = getProductFieldAudit('ProductField99', 100);
+    const fullAudit = getProductFieldAudit('ProductField99', 100);
+    const audit = boundProductFieldAuditForTransport(fullAudit);
 
-    // Serialized result must stay under the 28 KB byte budget
-    const serializedSize = JSON.stringify(audit).length;
+    // Transport serialization stays under the 28 KB UTF-8 byte budget; the
+    // service-level audit remains complete for normalization computation.
+    const serializedSize = Buffer.byteLength(JSON.stringify(audit), 'utf8');
     expect(serializedSize).toBeLessThanOrEqual(28 * 1024);
 
     // Total counts reflect the uncapped totals
-    expect(audit.totalSuspiciousGroupCount).toBeGreaterThanOrEqual(500);
+    expect(fullAudit.totalSuspiciousGroupCount).toBeGreaterThanOrEqual(500);
+    expect(fullAudit.suspiciousGroups.length).toBe(100);
+    expect(audit.totalSuspiciousGroupCount).toBe(fullAudit.totalSuspiciousGroupCount);
     // Suspicious groups array should be capped (at most 100 = limit)
     expect(audit.suspiciousGroups.length).toBeLessThanOrEqual(100);
     // Top values should be capped

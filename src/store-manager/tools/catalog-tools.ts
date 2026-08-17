@@ -13,7 +13,9 @@ import { getDashboardStatsData } from '../../server/services/dashboard-service';
 import { getCatalogHealthReport, listProductIndex } from '../../server/services/product-service';
 import {
   getProductFieldAudit,
+  boundProductFieldAuditForTransport,
   proposeProductFieldNormalization,
+  boundNormalizationProposalResultForTransport,
 } from '../../server/services/product-field-audit-service';
 import { listProposals } from '../../server/services/product-field-refactor-service';
 
@@ -281,7 +283,7 @@ export const getProductFieldAuditAdapter: StoreManagerToolAdapter = {
     if (!effectiveField) {
       return policyDenied('invalid_input', 'getProductFieldAudit requires a field or a pinned product_field scope.');
     }
-    return okResult(getProductFieldAudit(effectiveField, Number(limit)));
+    return okResult(boundProductFieldAuditForTransport(getProductFieldAudit(effectiveField, Number(limit))));
   },
 };
 
@@ -317,7 +319,9 @@ export const previewProductFieldNormalizationAdapter: StoreManagerToolAdapter = 
     if (!effectiveField) {
       return policyDenied('invalid_input', 'preview_product_field_normalization requires a field or a pinned product_field scope.');
     }
-    return okResult(proposeProductFieldNormalization(effectiveField, strategy as never, Number(limit)));
+    return okResult(boundNormalizationProposalResultForTransport(
+      proposeProductFieldNormalization(effectiveField, strategy as never, Number(limit)),
+    ));
   },
 };
 

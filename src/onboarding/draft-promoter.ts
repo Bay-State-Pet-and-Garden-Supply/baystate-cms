@@ -28,7 +28,10 @@ import {
 import { findDistributorRecordExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { listResolvedConflictResolutions } from '../db/repositories/onboarding-conflict-repo';
 import { buildDistributorRecordProjection, buildDistributorRecordProjectionV1 } from './sourcing/distributor-record-projection';
-import { reconstructDistributorExtractionPayload } from './sourcing/distributor-record-materializer';
+import {
+  reconstructDistributorExtractionPayload,
+  payloadsEquivalentForDistributorRecord,
+} from './sourcing/distributor-record-materializer';
 import { verifyDistributorImageryForItem } from './distributor-imagery';
 import { SourcingDecisionV2Schema } from '../shared/schemas/onboarding';
 import { getCohortRunById,
@@ -423,11 +426,10 @@ function checkDistributorPromotionProvenance(
   // blocked at the API, so any divergence is a post-materialization tamper
   // (description, image candidate, provenance, or arbitrary field) and blocks
   // drafting fail-closed.
-  const expectedPayloadJson = JSON.stringify(expectedPayload);
-  if (JSON.stringify(parseStoredExtractionData(extraction.extraction_data_json)) !== expectedPayloadJson) {
+  if (!payloadsEquivalentForDistributorRecord(parseStoredExtractionData(extraction.extraction_data_json), expectedPayload)) {
     return { ok: false, reason: 'Distributor promotion blocked: materialization payload diverged (row tampered)' };
   }
-  if (item.extractionData == null || JSON.stringify(item.extractionData) !== expectedPayloadJson) {
+  if (item.extractionData == null || !payloadsEquivalentForDistributorRecord(item.extractionData, expectedPayload)) {
     return { ok: false, reason: 'Distributor promotion blocked: materialization payload diverged (item payload tampered)' };
   }
 

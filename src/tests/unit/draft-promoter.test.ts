@@ -1975,6 +1975,7 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
    */
   function seedQualifiedDistributorItem(options: {
     merchandising?: { description?: string; features?: string[]; category?: string };
+    legacyV2?: boolean;
   } = {}): { item: { id: string; upc: string }; decision: SourcingDecisionV2 } {
     const sku = '200000000002';
     const batch = createBatch({ workspaceId: wsId, name: 'ME Distributor Gate', fileName: 'me-dist.xlsx', totalItems: 1 });
@@ -2050,6 +2051,16 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     updateItemStageStatus(item.id, 'in_progress');
     const materialized = materializeDistributorRecordExtraction(item.id, wsId);
     if (!materialized.ok) throw new Error(`materialization failed: ${materialized.code}`);
+    if (options.legacyV2) {
+      // Simulate a v2 row/item written before distributorReferenceValues was
+      // introduced; promotion must accept and remain tamper-safe.
+      const extractionRow = db.query('SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ?').get(item.id) as { extraction_data_json: string };
+      const historical = JSON.parse(extractionRow.extraction_data_json) as Record<string, unknown>;
+      delete historical.distributorReferenceValues;
+      const historicalJson = JSON.stringify(historical);
+      db.query('UPDATE onboarding_extractions SET extraction_data_json = ? WHERE item_id = ?').run(historicalJson, item.id);
+      db.query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(historicalJson, item.id);
+    }
     // Advance to promotion/pending with curation data + gate-ready proposals.
     // The materialized v2 payload is KEPT as-is (Amendment B M5b-2): the
     // deep-compare gate requires the item payload to equal the reconstructed
@@ -2092,6 +2103,17 @@ const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [i
     expect(promoteRes.failures[0].error).not.toContain('Distributor promotion blocked');
     expect(promoteRes.failures[0].error).toContain('Primary Image');
     void decision;
+  });
+
+  it('a historical v2 payload missing distributorReferenceValues remains promotable', async () => {
+    const { item } = seedQualifiedDistributorItem({ legacyV2: true });
+    const batch = getDb().query('SELECT batch_id FROM onboarding_items WHERE id = ?').get(item.id) as { batch_id: string };
+    seedApproved(item.id, batch.batch_id);
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).not.toContain('Distributor promotion blocked');
+    expect(promoteRes.failures[0].error).not.toContain('materialization payload diverged');
   });
 
   it('a TAMPERED extraction evidence hash blocks promotion (stale materialization cannot draft)', async () => {

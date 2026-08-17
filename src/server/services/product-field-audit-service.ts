@@ -29,6 +29,8 @@ export interface ProductFieldAuditResult {
   totalDuplicateGroupCount: number;
   suspiciousGroups: SuspiciousGroup[];
   totalSuspiciousGroupCount: number;
+  /** True when a transport-safe view omitted samples/groups but counts remain authoritative. */
+  transportTruncated?: boolean;
 }
 
 export interface NormalizationProposal {
@@ -239,7 +241,7 @@ export function getProductFieldAudit(field: string, limit: number = 100): Produc
   allSuspiciousGroups.sort((a, b) => b.count - a.count);
   const cappedSuspiciousGroups = allSuspiciousGroups.slice(0, limit);
 
-  const result: ProductFieldAuditResult = {
+  return {
     field,
     totalProductsScanned,
     missingCount,
@@ -250,20 +252,26 @@ export function getProductFieldAudit(field: string, limit: number = 100): Produc
     suspiciousGroups: cappedSuspiciousGroups,
     totalSuspiciousGroupCount,
   };
-
-  // Byte-budget safety valve: progressively strip data if still too large
-  return applyByteBudget(result);
 }
 
 /**
  * Progressively strip payload until result fits within the byte budget.
  * Stripping order: suspicious SKUs → duplicate SKUs → suspicious groups → top values.
  */
+export function boundProductFieldAuditForTransport(result: ProductFieldAuditResult): ProductFieldAuditResult {
+  const bounded = JSON.parse(JSON.stringify(result)) as ProductFieldAuditResult;
+  bounded.transportTruncated = false;
+  applyByteBudget(bounded);
+  return bounded;
+}
+
 function applyByteBudget(result: ProductFieldAuditResult): ProductFieldAuditResult {
-  const measure = () => JSON.stringify(result).length;
+  const measure = () => Buffer.byteLength(JSON.stringify(result), 'utf8');
+  const markTruncated = () => { result.transportTruncated = true; };
 
   // Pass 1: strip SKUs from suspicious groups
   if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    markTruncated();
     for (const g of result.suspiciousGroups) {
       g.skus = g.skus.slice(0, 1);
     }
@@ -271,6 +279,7 @@ function applyByteBudget(result: ProductFieldAuditResult): ProductFieldAuditResu
 
   // Pass 2: strip SKUs from duplicate group values
   if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    markTruncated();
     for (const g of result.duplicateGroups) {
       for (const v of g.values) {
         v.skus = v.skus.slice(0, 1);
@@ -280,17 +289,25 @@ function applyByteBudget(result: ProductFieldAuditResult): ProductFieldAuditResu
 
   // Pass 3: halve suspicious groups
   if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    markTruncated();
     result.suspiciousGroups = result.suspiciousGroups.slice(0, Math.max(10, result.suspiciousGroups.length >> 1));
   }
 
   // Pass 4: halve top values
   if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    markTruncated();
     result.topValues = result.topValues.slice(0, Math.max(10, result.topValues.length >> 1));
   }
 
   // Pass 5: clear suspicious groups entirely
   if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    markTruncated();
     result.suspiciousGroups = [];
+  }
+  if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    markTruncated();
+    result.duplicateGroups = [];
+    result.topValues = [];
   }
 
   return result;
@@ -397,4 +414,24 @@ export function proposeProductFieldNormalization(
     affectedProductCount,
     proposals,
   };
+}
+
+/** Bound only the transport view; normalization proposals use the full audit internally. */
+export function boundNormalizationProposalResultForTransport(result: NormalizationProposalResult): NormalizationProposalResult {
+  const bounded = JSON.parse(JSON.stringify(result)) as NormalizationProposalResult;
+  let truncated = false;
+  for (const proposal of bounded.proposals) {
+    if (proposal.affectedSkus.length > 5) {
+      proposal.affectedSkus = proposal.affectedSkus.slice(0, 5);
+      truncated = true;
+    }
+  }
+  while (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > AUDIT_RESULT_BYTE_BUDGET && bounded.proposals.length > 1) {
+    bounded.proposals = bounded.proposals.slice(0, Math.ceil(bounded.proposals.length / 2));
+    truncated = true;
+  }
+  if (truncated) {
+    (bounded as NormalizationProposalResult & { transportTruncated?: boolean }).transportTruncated = true;
+  }
+  return bounded;
 }

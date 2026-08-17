@@ -57,6 +57,51 @@ export function payloadsEquivalentAfterWeightNormalization(
   const { weight: _expectedWeight, ...expectedRest } = expected;
   return JSON.stringify(storedRest) === JSON.stringify(expectedRest);
 }
+
+/**
+ * Normalize the one additive field introduced after distributor_record_v2
+ * shipped. A historical v2 payload legitimately has no
+ * distributorReferenceValues key; its absence is not tampering. The expected
+ * freshly-built value is used for the compatibility projection so retries can
+ * backfill the durable row and item payload deterministically.
+ */
+export function normalizeHistoricalDistributorRecordV2Payload(
+  stored: Record<string, unknown>,
+  expected: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    !Object.prototype.hasOwnProperty.call(stored, 'distributorReferenceValues') &&
+    Object.prototype.hasOwnProperty.call(expected, 'distributorReferenceValues')
+  ) {
+    // Rebuild in expected-key order so the existing byte-stable JSON
+    // invariant remains meaningful after the additive field is backfilled.
+    const normalized: Record<string, unknown> = {};
+    for (const key of Object.keys(expected)) {
+      if (key === 'distributorReferenceValues') {
+        normalized[key] = expected[key];
+      } else if (Object.prototype.hasOwnProperty.call(stored, key)) {
+        normalized[key] = stored[key];
+      }
+    }
+    for (const key of Object.keys(stored)) {
+      if (!Object.prototype.hasOwnProperty.call(normalized, key)) normalized[key] = stored[key];
+    }
+    return normalized;
+  }
+  return stored;
+}
+
+/** Compare a distributor payload with the additive v2 compatibility rule. */
+export function payloadsEquivalentForDistributorRecord(
+  stored: Record<string, unknown>,
+  expected: Record<string, unknown>,
+): boolean {
+  const normalizedStored = normalizeHistoricalDistributorRecordV2Payload(stored, expected);
+  return (
+    JSON.stringify(normalizedStored) === JSON.stringify(expected) ||
+    payloadsEquivalentAfterWeightNormalization(normalizedStored, expected)
+  );
+}
 import { normalizeGtin } from './contracts';
 import { SourcingDecisionV2Schema } from '../../shared/schemas/onboarding';
 import {
@@ -590,8 +635,7 @@ export function materializeDistributorRecordExtraction(
         existing.sourcing_generation_id !== generation.id ||
         existing.evidence_hash !== decision.evidenceHash ||
         !sameSet(rowAcceptedIds, decision.acceptedEvidenceAttemptIds) ||
-        (JSON.stringify(storedData) !== JSON.stringify(expectedData) &&
-          !payloadsEquivalentAfterWeightNormalization(storedData, expectedData));
+        !payloadsEquivalentForDistributorRecord(storedData, expectedData);
       if (rowDiverged) {
         return {
           ok: false as const,
@@ -600,15 +644,24 @@ export function materializeDistributorRecordExtraction(
         };
       }
       const now = new Date().toISOString();
+      // Re-emit the canonical payload when a historical v2 row was missing
+      // distributorReferenceValues (or carried a legacy raw weight). This
+      // upgrades both durable copies atomically while retaining idempotency.
+      const restoredPayload = existing.extraction_method === 'distributor_record_v2'
+        ? JSON.stringify(expectedData)
+        : existing.extraction_data_json;
+      db.query(
+        'UPDATE onboarding_extractions SET extraction_data_json = ? WHERE id = ?',
+      ).run(restoredPayload, existing.id);
       db.query(
         'UPDATE onboarding_items SET extraction_data_json = ?, updated_at = ? WHERE id = ?',
-      ).run(existing.extraction_data_json, now, itemId);
+      ).run(restoredPayload, now, itemId);
       updateItemStageStatus(itemId, 'completed');
       return {
         ok: true as const,
         extractionId: existing.id,
         idempotent: true,
-        extractionData: storedData,
+        extractionData: JSON.parse(restoredPayload) as Record<string, unknown>,
       };
     }
 

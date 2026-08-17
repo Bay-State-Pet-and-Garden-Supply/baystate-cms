@@ -424,6 +424,48 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     expect(retried?.extractionData).not.toBeNull();
   });
 
+  test('idempotent retry upgrades a historical v2 payload missing distributorReferenceValues', () => {
+    const att = makeFoundAttempt('phillips', {
+      brand: 'Brand A',
+      distributorSku: 'SKU-OLD',
+      distributorUpc: '000123456789',
+      weight: '10 lbs',
+    });
+    routeQualified([att]);
+    claimForExtraction();
+
+    const first = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    // Recreate the pre-feature v2 shape in both durable copies.
+    const row = getDb()
+      .query("SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ? AND extraction_method = 'distributor_record_v2'")
+      .get(itemId) as { extraction_data_json: string };
+    const historical = JSON.parse(row.extraction_data_json) as Record<string, unknown>;
+    delete historical.distributorReferenceValues;
+    const historicalJson = JSON.stringify(historical);
+    getDb().query('UPDATE onboarding_extractions SET extraction_data_json = ? WHERE item_id = ?').run(historicalJson, itemId);
+    getDb().query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(historicalJson, itemId);
+
+    claimForExtraction();
+    const retry = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.idempotent).toBe(true);
+    expect(retry.extractionData.distributorReferenceValues).toEqual({
+      distributorSku: ['SKU-OLD'],
+      distributorUpc: ['000123456789'],
+      name: ['Pet Kibble 5lb'],
+    });
+
+    const upgradedRow = getDb()
+      .query('SELECT extraction_data_json FROM onboarding_extractions WHERE item_id = ?')
+      .get(itemId) as { extraction_data_json: string };
+    const upgraded = JSON.parse(upgradedRow.extraction_data_json) as Record<string, unknown>;
+    expect(upgraded.distributorReferenceValues).toBeDefined();
+  });
+
   test('idempotent retry fails closed when the stored payload was altered outside the materializer', () => {
     const att = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
     routeQualified([att]);
