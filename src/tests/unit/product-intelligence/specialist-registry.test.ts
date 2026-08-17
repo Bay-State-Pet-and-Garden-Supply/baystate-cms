@@ -29,6 +29,8 @@ import { SpecialistRegistry } from '../../../product-intelligence/specialists/re
 import {
   SpecialistCapabilitySchema,
   SpecialistResultSchema,
+  invokeSpecialistWithValidation,
+  validateSpecialistInput,
   validateSpecialistResult,
   type SpecialistCapability,
   type SpecialistResult,
@@ -117,6 +119,11 @@ function contextFixture(seq = 0): SpecialistContext {
     policy: signedPolicy(),
     seq,
   };
+}
+
+/** A schema-valid input payload for identity_verifier. */
+function validInput(): { gtin: string; registerName: string } {
+  return { gtin: '012345678905', registerName: 'STELLA CHKN BROTH 16OZ' };
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +372,87 @@ describe('specialist result validation', () => {
     expect(check.issues.some((issue) => issue.includes("failed 'identity_report' schema"))).toBe(true);
   });
 
+  it('rejects a succeeded result whose envelope contentHash does not match the recomputed canonical hash', () => {
+    // Tamper with the payload but keep the stale hash. The payload stays
+    // schema-valid, so only the result gate's contentHash self-check (a
+    // recomputation over the canonical payload+lineage) can catch it.
+    const artifact = finalizeSpecialistArtifact({
+      artifactType: 'identity_report',
+      payload: { gtin: '012345678905', matchStatus: 'exact' },
+      provenance: { specialist: 'identity_verifier', specialistVersion: '1.0.0' },
+    });
+    const tampered = { ...artifact, payload: { gtin: '999999999999', matchStatus: 'exact' } };
+    const check = evaluate({ specialist: 'identity_verifier', outcome: 'succeeded', output: tampered });
+    expect(check.valid).toBe(false);
+    expect(check.issues.some((issue) => issue.includes('contentHash mismatch'))).toBe(true);
+  });
+
+  it('fails closed when an artifact payload is not canonical-JSON serializable', () => {
+    // `undefined` passes z.unknown() but is not canonical JSON — the gate
+    // must surface an issue instead of throwing out of validation.
+    const nonCanonical: Record<string, unknown> = {
+      artifactType: 'identity_report',
+      schemaVersion: '1.0.0',
+      payload: { gtin: '012345678905', matchStatus: 'exact', bad: undefined },
+      lineage: {},
+      provenance: {
+        specialist: 'identity_verifier',
+        specialistVersion: '1.0.0',
+        createdAt: '2026-08-10T00:00:00.000Z',
+      },
+      contentHash: 'f'.repeat(64),
+    };
+    const check = evaluate({ specialist: 'identity_verifier', outcome: 'succeeded', output: nonCanonical });
+    expect(check.valid).toBe(false);
+    expect(check.issues.some((issue) => issue.includes('not canonical-JSON serializable'))).toBe(true);
+  });
+
+  it('rejects an envelope whose claimed schemaVersion is incompatible with the declared output contract version', () => {
+    const artifact = finalizeSpecialistArtifact({
+      artifactType: 'identity_report',
+      payload: { gtin: '012345678905', matchStatus: 'exact' },
+      provenance: { specialist: 'identity_verifier', specialistVersion: '1.0.0' },
+    });
+    // The registry DOES register the capability-declared version (2.0.0), so
+    // the only way to reject this envelope is to compare its claimed 1.0.0
+    // schemaVersion against the 2.0.0 output contract — without that gate a
+    // payload would be silently accepted under the wrong schema generation.
+    const v2Schemas = new SpecialistArtifactSchemaRegistry()
+      .register({ name: 'identity_report', version: '2.0.0', schema: identityReportSchema })
+      .register({ name: 'identity_input', version: '1.0.0', schema: identityInputSchema });
+    const v2Capability: SpecialistCapability = {
+      ...identityVerifierCapability,
+      output: { schemaName: 'identity_report', schemaVersion: '2.0.0' },
+    };
+    const check = validateSpecialistResult({
+      result: { specialist: 'identity_verifier', outcome: 'succeeded', output: artifact },
+      capability: v2Capability,
+      artifactSchemas: v2Schemas,
+    });
+    expect(check.valid).toBe(false);
+    expect(check.issues.some((issue) => issue.includes('incompatible with the declared output contract version'))).toBe(true);
+  });
+
+  it('honors same-major compatibility between the envelope claim and the capability output contract', () => {
+    const artifact = finalizeSpecialistArtifact({
+      artifactType: 'identity_report',
+      payload: { gtin: '012345678905', matchStatus: 'exact' },
+      provenance: { specialist: 'identity_verifier', specialistVersion: '1.0.0' },
+    });
+    // Envelope claims 1.0.0, capability declares 1.2.0: same major, so the
+    // payload is validated against the registered schema and accepted.
+    const minorBumpCapability: SpecialistCapability = {
+      ...identityVerifierCapability,
+      output: { schemaName: 'identity_report', schemaVersion: '1.2.0' },
+    };
+    const check = validateSpecialistResult({
+      result: { specialist: 'identity_verifier', outcome: 'succeeded', output: artifact },
+      capability: minorBumpCapability,
+      artifactSchemas: buildArtifactSchemas(),
+    });
+    expect(check.valid).toBe(true);
+  });
+
   it('rejects an output produced under an incompatible capability schema version', () => {
     const artifact = finalizeSpecialistArtifact({
       artifactType: 'identity_report',
@@ -446,6 +534,116 @@ describe('specialist result validation', () => {
     expect(
       SpecialistResultSchema.safeParse({ specialist: 'identity_verifier', outcome: 'succeeded', output: 'free prose' }).success,
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Specialist input validation (capability invocation gate)
+// ---------------------------------------------------------------------------
+
+describe('specialist input validation (capability invocation gate)', () => {
+  const validInputPayload = { gtin: '012345678905', registerName: 'STELLA CHKN BROTH 16OZ' };
+
+  function evaluateInput(
+    payload: unknown,
+    capability: SpecialistCapability = identityVerifierCapability,
+    artifactSchemas = buildArtifactSchemas(),
+  ) {
+    return validateSpecialistInput({ capability, artifactSchemas, payload });
+  }
+
+  it('accepts a payload satisfying the declared input contract', () => {
+    expect(evaluateInput(validInputPayload)).toEqual({ valid: true, issues: [] });
+  });
+
+  it('rejects an input payload that violates the registered input schema', () => {
+    const check = evaluateInput({ gtin: 'not-a-gtin', registerName: '' });
+    expect(check.valid).toBe(false);
+    expect(check.issues.some((issue) => issue.includes("failed 'identity_input' schema"))).toBe(true);
+  });
+
+  it('rejects prose through the input slot (prose is never a valid input contract)', () => {
+    expect(evaluateInput('please verify gtin 012345678905').valid).toBe(false);
+  });
+
+  it('fails closed when the input schema is not registered', () => {
+    const check = evaluateInput(validInputPayload, {
+      ...identityVerifierCapability,
+      input: { schemaName: 'unregistered_input', schemaVersion: '1.0.0' },
+    });
+    expect(check.valid).toBe(false);
+    expect(check.issues.some((issue) => issue.includes("input schema 'unregistered_input' is not registered"))).toBe(true);
+  });
+
+  it('rejects a version-incompatible input contract', () => {
+    const check = evaluateInput(validInputPayload, {
+      ...identityVerifierCapability,
+      input: { schemaName: 'identity_input', schemaVersion: '2.0.0' },
+    });
+    expect(check.valid).toBe(false);
+    expect(check.issues.some((issue) => issue.includes('major-incompatible'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic capability invocation (input gate → execute → result gate)
+// ---------------------------------------------------------------------------
+
+describe('specialist capability invocation (validation path)', () => {
+  it('validates input before execute — an invalid input never reaches the specialist', async () => {
+    let executed = false;
+    const outcome = await invokeSpecialistWithValidation({
+      capability: identityVerifierCapability,
+      artifactSchemas: buildArtifactSchemas(),
+      context: contextFixture(),
+      input: { gtin: 'nope' },
+      execute: async () => {
+        executed = true;
+        return validSucceededResult();
+      },
+    });
+    expect(executed).toBe(false);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.stage).toBe('input');
+      expect(outcome.issues.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('validates the produced result before durable handoff', async () => {
+    const artifact = finalizeSpecialistArtifact({
+      artifactType: 'identity_report',
+      payload: { gtin: '012345678905', matchStatus: 'exact' },
+      provenance: { specialist: 'identity_verifier', specialistVersion: '1.0.0' },
+    });
+    // A forged hash: the execute step ran, but the result gate must refuse.
+    const forged = { ...artifact, contentHash: 'f'.repeat(64) };
+    const outcome = await invokeSpecialistWithValidation({
+      capability: identityVerifierCapability,
+      artifactSchemas: buildArtifactSchemas(),
+      context: contextFixture(),
+      input: validInput(),
+      execute: () => ({ specialist: 'identity_verifier', outcome: 'succeeded', output: forged, durationMs: 0 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.stage).toBe('result');
+      expect(outcome.issues.some((issue) => issue.includes('contentHash mismatch'))).toBe(true);
+    }
+  });
+
+  it('returns the validated result when both gates pass', async () => {
+    const outcome = await invokeSpecialistWithValidation({
+      capability: identityVerifierCapability,
+      artifactSchemas: buildArtifactSchemas(),
+      context: contextFixture(),
+      input: validInput(),
+      execute: () => validSucceededResult(),
+    });
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.result.outcome).toBe('succeeded');
+    }
   });
 });
 

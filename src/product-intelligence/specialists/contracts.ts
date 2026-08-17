@@ -14,18 +14,24 @@
  * agent; the contract only pins what crosses the boundary.
  *
  * The durable handoff invariant: every specialist input and output is
- * schema-validated. Ordinary specialist prose is never a durable handoff —
- * the only thing that survives is a typed artifact envelope (artifacts.ts)
- * whose payload validates against the specialist's declared output contract.
+ * schema-validated. Inputs are checked against the capability's declared
+ * input contract (validateSpecialistInput / invokeSpecialistWithValidation)
+ * before execution; outputs are checked against the declared output contract
+ * (validateSpecialistResult) before durable handoff. Ordinary specialist
+ * prose is never a durable handoff — the only thing that survives is a typed
+ * artifact envelope (artifacts.ts) whose payload validates against the
+ * specialist's declared output contract.
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/48
  */
 import { z } from 'zod';
 import {
+  artifactContentHash,
+  isSchemaVersionCompatible,
   SpecialistArtifactEnvelopeSchema,
   type SpecialistArtifactEnvelope,
+  type SpecialistArtifactSchemaRegistry,
 } from './artifacts';
-import type { SpecialistArtifactSchemaRegistry } from './artifacts';
 import type { ProductIntelligencePolicy } from '../contracts';
 
 // ---------------------------------------------------------------------------
@@ -223,15 +229,42 @@ export function validateSpecialistResult(input: {
       );
       continue;
     }
+    // The schema version the envelope claims must be same-major compatible
+    // with the version the capability declared — an envelope never silently
+    // switches payload-schema generations behind the contract's back.
+    if (!isSchemaVersionCompatible(envelope.schemaVersion, input.capability.output.schemaVersion)) {
+      issues.push(
+        `artifact schema version '${envelope.schemaVersion}' is incompatible with the declared output contract version '${input.capability.output.schemaVersion}'`,
+      );
+    }
     if (!input.artifactSchemas.isVersionCompatible(envelope.artifactType, input.capability.output.schemaVersion)) {
       issues.push(
         `artifact schema '${envelope.artifactType}' version '${input.capability.output.schemaVersion}' is not registered or major-incompatible`,
       );
       continue;
     }
+    // contentHash self-check: recompute the canonical payload+lineage hash
+    // with the established canonicalization and reject any mismatch — a
+    // stale or forged hash is not a durable handoff.
+    let expectedContentHash: string;
+    try {
+      expectedContentHash = artifactContentHash(envelope);
+    } catch (error) {
+      issues.push(
+        `artifact payload is not canonical-JSON serializable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      continue;
+    }
+    if (expectedContentHash !== envelope.contentHash) {
+      issues.push(
+        `artifact contentHash mismatch: envelope declares ${envelope.contentHash.slice(0, 12)}… but ${expectedContentHash.slice(0, 12)}… was recomputed from its payload + lineage via canonical JSON`,
+      );
+    }
+    // Validate the payload against the schema version the envelope claims to
+    // conform to — never the "closest" registered schema.
     const payloadCheck = input.artifactSchemas.validatePayload(
       envelope.artifactType,
-      input.capability.output.schemaVersion,
+      envelope.schemaVersion,
       envelope.payload,
     );
     if (!payloadCheck.valid) {
@@ -240,4 +273,104 @@ export function validateSpecialistResult(input: {
   }
 
   return { valid: issues.length === 0, issues };
+}
+
+// ---------------------------------------------------------------------------
+// Input validation + deterministic capability invocation path
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministic gate applied BEFORE a specialist executes: the raw input
+ * payload must satisfy the capability's declared input contract (registered
+ * schema name, major-compatible schema version, schema-valid payload). The
+ * orchestrator runs this gate before handing the payload to the specialist,
+ * so a malformed or unregistered input never reaches the implementation.
+ */
+export function validateSpecialistInput(input: {
+  capability: SpecialistCapability;
+  artifactSchemas: SpecialistArtifactSchemaRegistry;
+  /** The raw input payload being handed to the specialist. */
+  payload: unknown;
+}): SpecialistValidationResult {
+  const contract = input.capability.input;
+  const issues: string[] = [];
+
+  if (!input.artifactSchemas.has(contract.schemaName)) {
+    return { valid: false, issues: [`input schema '${contract.schemaName}' is not registered`] };
+  }
+  if (!input.artifactSchemas.isVersionCompatible(contract.schemaName, contract.schemaVersion)) {
+    return {
+      valid: false,
+      issues: [
+        `input schema '${contract.schemaName}' version '${contract.schemaVersion}' is not registered or major-incompatible`,
+      ],
+    };
+  }
+  const payloadCheck = input.artifactSchemas.validatePayload(contract.schemaName, contract.schemaVersion, input.payload);
+  if (!payloadCheck.valid) {
+    issues.push(...payloadCheck.issues);
+  }
+  return { valid: issues.length === 0, issues };
+}
+
+/** The gateway stage that failed during a validated invocation. */
+export const SpecialistValidationStageSchema = z.enum(['input', 'result']);
+export type SpecialistValidationStage = z.infer<typeof SpecialistValidationStageSchema>;
+
+/** Successful invocation: the validated result may become durable state. */
+export interface SpecialistInvocationSuccess {
+  ok: true;
+  result: SpecialistResult;
+}
+
+/** Failed gate: which contract the input or the produced result violated. */
+export interface SpecialistInvocationFailure {
+  ok: false;
+  stage: SpecialistValidationStage;
+  issues: string[];
+}
+
+export type SpecialistInvocationOutcome = SpecialistInvocationSuccess | SpecialistInvocationFailure;
+
+/**
+ * Deterministic capability invocation/validation path (provider-neutral).
+ *
+ * The orchestrator calls this instead of invoking a specialist directly:
+ * 1. the raw input is validated against the capability's declared input
+ *    contract BEFORE `execute` runs (invalid input never reaches the
+ *    specialist);
+ * 2. the produced result is validated against the declared output contract
+ *    (typed envelopes, registered payload schema, schema-version gates, and
+ *    the canonical contentHash self-check) BEFORE the caller may treat it as
+ *    a durable handoff.
+ *
+ * `execute` is supplied by the orchestrator — this path never routes or
+ * selects a specialist (ADR 0018); it only validates the boundary crossing.
+ */
+export async function invokeSpecialistWithValidation(input: {
+  capability: SpecialistCapability;
+  artifactSchemas: SpecialistArtifactSchemaRegistry;
+  context: SpecialistContext;
+  /** The raw specialist input payload (validated against the input contract first). */
+  input: unknown;
+  execute: (input: unknown, context: SpecialistContext) => SpecialistResult | Promise<SpecialistResult>;
+}): Promise<SpecialistInvocationOutcome> {
+  const inputGate = validateSpecialistInput({
+    capability: input.capability,
+    artifactSchemas: input.artifactSchemas,
+    payload: input.input,
+  });
+  if (!inputGate.valid) {
+    return { ok: false, stage: 'input', issues: inputGate.issues };
+  }
+  const result = await input.execute(input.input, input.context);
+  const resultGate = validateSpecialistResult({
+    result,
+    capability: input.capability,
+    artifactSchemas: input.artifactSchemas,
+  });
+  if (!resultGate.valid) {
+    return { ok: false, stage: 'result', issues: resultGate.issues };
+  }
+  return { ok: true, result };
 }
