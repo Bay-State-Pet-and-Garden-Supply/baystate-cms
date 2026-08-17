@@ -346,16 +346,22 @@ function hasExplicitAbbreviationExpansion(left: ParsedRow, right: ParsedRow, abb
       for (let rightIndex = 0; rightIndex < right.identityTokens.length; rightIndex += 1) {
         const rightAbbreviation = right.identityTokens[rightIndex] === entry.abbreviation;
         const rightExpansion = phraseTokens.every((token, offset) => right.identityTokens[rightIndex + offset] === token);
-        if ((leftAbbreviation && rightExpansion) || (rightAbbreviation && leftExpansion)) {
-          // The tokens before the abbreviation/expansion are a stronger
-          // family cue than a shared inferred brand token. Requiring the
-          // prefixes to match prevents `Organic Acme WS` from linking to
-          // `Organic BetterBone Wild Salmon` merely because both start with
-          // the unknown adjective `Organic`.
-          const leftPrefix = left.identityTokens.slice(0, leftIndex);
-          const rightPrefix = right.identityTokens.slice(0, rightIndex);
-          if (leftPrefix.length > 0 && leftPrefix.join(' ') === rightPrefix.join(' ')) return true;
-        }
+        const oppositeForms = (leftAbbreviation && rightExpansion) || (rightAbbreviation && leftExpansion);
+        if (!oppositeForms) continue;
+
+        // Abbreviation evidence is safe only for the same explicit family
+        // cue. Require the cue before the abbreviation/expansion to match,
+        // and require the remaining identity tokens to match as well. This
+        // keeps the expanded family anchored at the same prefix and rejects
+        // a conflicting suffix instead of treating any shared token as a
+        // family relation.
+        const leftPrefix = left.identityTokens.slice(0, leftIndex);
+        const rightPrefix = right.identityTokens.slice(0, rightIndex);
+        if (leftPrefix.length === 0 || leftPrefix.join(' ') !== rightPrefix.join(' ')) continue;
+        const leftSuffix = left.identityTokens.slice(leftAbbreviation ? leftIndex + 1 : leftIndex + phraseTokens.length);
+        const rightSuffix = right.identityTokens.slice(rightAbbreviation ? rightIndex + 1 : rightIndex + phraseTokens.length);
+        if (leftSuffix.join(' ') !== rightSuffix.join(' ')) continue;
+        return true;
       }
     }
   }
@@ -366,10 +372,6 @@ function relationFor(left: ParsedRow, right: ParsedRow, abbreviations: Array<{ a
   if (left.row.rowId === right.row.rowId) return null;
   const reasons: BatchRelationshipReason[] = [];
   const shared = setIntersection(left.identityTokens, right.identityTokens);
-  const sharedSemantic = setIntersection(
-    left.identityTokens.filter((token) => token !== left.brandToken),
-    right.identityTokens.filter((token) => token !== right.brandToken),
-  );
   const sameName = left.normalizedName === right.normalizedName;
   const sameNormalizedFamily = left.identityTokens.length >= 2 && right.identityTokens.length >= 2 &&
     left.normalizedFamilyName.length > 0 && left.normalizedFamilyName === right.normalizedFamilyName;
@@ -378,17 +380,12 @@ function relationFor(left: ParsedRow, right: ParsedRow, abbreviations: Array<{ a
   const skuSequence = left.skuPrefix !== null && left.skuPrefix === right.skuPrefix && left.skuNumber !== null && right.skuNumber !== null && Math.abs(left.skuNumber - right.skuNumber) <= 3;
   const leadingBrandMismatch = left.brandToken !== right.brandToken;
   const abbreviatedFamily = hasExplicitAbbreviationExpansion(left, right, abbreviations);
-  // A relationship cannot be based on an inferred brand token or generic
-  // token overlap. Exact family/base identity, a two-token semantic family
-  // prefix, or an explicit abbreviation/expansion is required. The prefix
-  // requirement is deliberately stronger than `brandToken`: it isolates
-  // rows such as `Organic Acme ...` from `Organic BetterBone ...` without an
-  // unbounded adjective denylist.
-  const sharedFamilyPrefix = left.identityTokens.length >= 2 && right.identityTokens.length >= 2 &&
-    left.identityTokens.slice(0, 2).join(' ') === right.identityTokens.slice(0, 2).join(' ');
-  const meaningfulFamilyIdentity = sameNormalizedFamily ||
-    (sharedSemantic.length >= 2 && sharedFamilyPrefix) ||
-    abbreviatedFamily;
+  // A relationship cannot be based on an inferred brand token, generic token
+  // overlap, or a shared prefix. Exact normalized family/base identity or a
+  // strict, prefix-anchored abbreviation/expansion is required. This keeps
+  // `Organic Blue Buffalo ...` and `Organic Blue Wilderness ...` isolated
+  // without an unbounded adjective denylist.
+  const meaningfulFamilyIdentity = sameNormalizedFamily || abbreviatedFamily;
   if (leadingBrandMismatch) return null;
   if (sameName) reasons.push('same_normalized_name');
   if (overlap >= 0.6 && !sameName && meaningfulFamilyIdentity) reasons.push('high_name_overlap');

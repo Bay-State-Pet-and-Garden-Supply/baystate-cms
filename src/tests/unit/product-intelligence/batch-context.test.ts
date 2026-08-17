@@ -47,7 +47,7 @@ describe('deterministic batch intelligence (#57)', () => {
     expect(context?.hints).toEqual(expect.objectContaining({ repeated_brand_token_1: 'acme' }));
   });
 
-  it('detects duplicate and near-duplicate rows as inspectable relationships', () => {
+  it('keeps exact duplicates inspectable without promoting a different family base', () => {
     const result = deriveBatchIntelligence({
       batchId: 'dupes',
       batchVersion: '1',
@@ -59,10 +59,11 @@ describe('deterministic batch intelligence (#57)', () => {
     });
     expect(result.payload.relationships).toEqual(expect.arrayContaining([
       expect.objectContaining({ rowId: 'one', relatedRowId: 'two', kind: 'duplicate' }),
-      expect.objectContaining({ rowId: 'one', relatedRowId: 'three', kind: 'near_duplicate' }),
     ]));
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'one' && relation.relatedRowId === 'three')).toBe(false);
     expect(result.payload.signals.some((signal) => signal.kind === 'duplicate_rows')).toBe(true);
-    expect(result.payload.signals.some((signal) => signal.kind === 'near_duplicate_rows')).toBe(true);
+    expect(result.payload.signals.some((signal) => signal.kind === 'near_duplicate_rows')).toBe(false);
+    expect(contextForBatchRow(result, 'one')?.hints).toEqual(expect.objectContaining({ family_token_3: 'bright paws chicken' }));
   });
 
   it('requires a matching family prefix for abbreviation expansion', () => {
@@ -72,6 +73,7 @@ describe('deterministic batch intelligence (#57)', () => {
       rows: [
         row('acme-expanded', 'AC-100', 'Acme Wild Salmon 5 oz', 9.99),
         row('acme-abbreviated', 'AC-101', 'Acme WS 10 oz', 14.99),
+        row('acme-conflicting', 'AC-102', 'Acme WS Tuna 15 oz', 19.99),
         row('other-brand', 'BB-200', 'BetterBone Wild Salmon 15 oz', 19.99),
       ],
     });
@@ -79,6 +81,8 @@ describe('deterministic batch intelligence (#57)', () => {
     expect(result.payload.relationships).toEqual(expect.arrayContaining([
       expect.objectContaining({ rowId: 'acme-expanded', relatedRowId: 'acme-abbreviated', kind: 'likely_variant' }),
     ]));
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'acme-expanded' && relation.relatedRowId === 'acme-conflicting')).toBe(false);
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'acme-conflicting' && relation.relatedRowId === 'acme-expanded')).toBe(false);
     expect(result.payload.relationships.some((relation) => relation.rowId === 'acme-expanded' && relation.relatedRowId === 'other-brand')).toBe(false);
     expect(result.payload.relationships.some((relation) => relation.rowId === 'other-brand' && relation.relatedRowId === 'acme-expanded')).toBe(false);
   });
@@ -142,6 +146,29 @@ describe('deterministic batch intelligence (#57)', () => {
     ]));
     expect(result.payload.relationships.some((relation) => relation.rowId === 'acme-small' && relation.relatedRowId === 'betterbone')).toBe(false);
     expect(result.payload.relationships.some((relation) => relation.rowId === 'betterbone' && relation.relatedRowId === 'acme-small')).toBe(false);
+  });
+
+  it('does not link Blue Buffalo and Blue Wilderness through shared prefix and semantic tokens', () => {
+    const result = deriveBatchIntelligence({
+      batchId: 'blue-brand-adversarial',
+      batchVersion: '1',
+      rows: [
+        row('blue-buffalo-small', 'BB-100', 'Organic Blue Buffalo Wild Salmon 5 oz', 9.99),
+        row('blue-buffalo-large', 'BB-101', 'Organic Blue Buffalo Wild Salmon 10 oz', 14.99),
+        row('blue-wilderness', 'BW-200', 'Organic Blue Wilderness Wild Salmon 15 oz', 19.99),
+      ],
+    });
+
+    expect(result.payload.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rowId: 'blue-buffalo-small', relatedRowId: 'blue-buffalo-large', kind: 'likely_variant' }),
+    ]));
+    for (const [left, right] of [
+      ['blue-buffalo-small', 'blue-wilderness'],
+      ['blue-buffalo-large', 'blue-wilderness'],
+    ]) {
+      expect(result.payload.relationships.some((relation) => relation.rowId === left && relation.relatedRowId === right)).toBe(false);
+      expect(result.payload.relationships.some((relation) => relation.rowId === right && relation.relatedRowId === left)).toBe(false);
+    }
   });
 
   it('filters generic leading words before deriving brand cues', () => {
