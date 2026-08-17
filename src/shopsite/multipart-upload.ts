@@ -34,8 +34,10 @@ export function isValidXmlTagName(name: string): boolean {
 /**
  * Escape CDATA terminators inside CDATA blocks.
  */
-export function escapeCdata(value: string): string {
-  return value.replace(/]]>/g, ']]]]><![CDATA[>');
+export function escapeCdata(value: unknown): string {
+  if (value == null) return '';
+  const str = Array.isArray(value) ? value.join(', ') : String(value);
+  return str.replace(/]]>/g, ']]]]><![CDATA[>');
 }
 
 /**

@@ -18,6 +18,8 @@ import { hashJson } from '../../git/deterministic-json';
 import { skuToProductFilePath } from '../../git/product-file-path';
 import { getDb } from '../../db/connection';
 import { createImagesZip } from '../../shopsite/zip-generator';
+import { ShopSiteHttpClient } from '../../shopsite/shopsite-http-client';
+import { preflightPagesSync } from '../../shopsite/page-sync-preflight';
 import type { Product } from '../../shared/types';
 
 const route = new Hono();
@@ -227,6 +229,31 @@ async function runDirectSync(options: {
   });
 
   try {
+    // 1. Pages preflight — verify and reconcile category catalog before pushing products
+    addSyncJobEvent({
+      syncJobId: job.id,
+      level: 'info',
+      message: 'Running ShopSite Pages preflight verification...',
+    });
+
+    const client = new ShopSiteHttpClient({
+      cgiBaseUrl: config.cgiBaseUrl,
+      merchantId: config.merchantId,
+      password: config.password,
+    });
+
+    const preflight = await preflightPagesSync({
+      workspaceId: options.workspaceId,
+      client,
+      activatedBy: `sync-job-${job.id}`,
+    });
+
+    addSyncJobEvent({
+      syncJobId: job.id,
+      level: 'info',
+      message: preflight.message,
+    });
+
     const products = productsFromApprovedItems(items);
     const xml = buildProductsXml(products);
     addSyncJobEvent({ syncJobId: job.id, level: 'info', message: `Generated XML for ${products.length} product(s)` });

@@ -144,7 +144,10 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
 
   // SEO - escape CDATA terminators
   if (product.core.seo.searchKeywords) {
-    lines.push(`  <SearchKeywords><![CDATA[${escapeCdata(product.core.seo.searchKeywords)}]]></SearchKeywords>`);
+    const kwText = escapeCdata(product.core.seo.searchKeywords);
+    if (kwText.trim().length > 0) {
+      lines.push(`  <SearchKeywords><![CDATA[${kwText}]]></SearchKeywords>`);
+    }
   }
 
   // ProductField mappings from customFields - validate tag names. Custom
@@ -260,8 +263,9 @@ function extractPageNames(product: Product): string[] {
   return Array.from(names);
 }
 
-function escapeXml(str: string): string {
-  return str
+function escapeXml(str: unknown): string {
+  if (str == null) return '';
+  return String(str)
     .replace(/&(?!#(?:[0-9]+|x[0-9a-fA-F]+);|[a-zA-Z0-9]+;)/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

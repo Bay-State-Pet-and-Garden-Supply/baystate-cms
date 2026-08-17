@@ -43,8 +43,9 @@ export function mergeProductOnPages(
   return buildProductOnPagesFragment(merged);
 }
 
-function escapeXml(str: string): string {
-  return str
+function escapeXml(str: unknown): string {
+  if (str == null) return '';
+  return String(str)
     .replace(/&(?!#(?:[0-9]+|x[0-9a-fA-F]+);|[a-zA-Z0-9]+;)/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
