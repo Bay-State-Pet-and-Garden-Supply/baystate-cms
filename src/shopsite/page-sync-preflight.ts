@@ -108,6 +108,11 @@ export function reconcileProductsToActivePages(
     if (assignments.length === 0) {
       throw new Error(`Product "${product.sku}" has ProductOnPages data without verified Page identity assignments.`);
     }
+    const assignmentNames = new Set(assignments.map(assignment => assignment.pageName));
+    const orphanedFragments = fragmentNames.filter(name => !assignmentNames.has(name));
+    if (orphanedFragments.length > 0) {
+      throw new Error(`Product "${product.sku}" has unresolved ProductOnPages fragment(s): ${orphanedFragments.join(', ')}.`);
+    }
 
     const currentNames: string[] = [];
     const seenIds = new Set<string>();

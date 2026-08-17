@@ -228,6 +228,17 @@ describe('preflightPagesSync', () => {
     expect(String(reconciled.shopsite.preserved.unknownElements.ProductOnPages)).toContain('Dog Food &amp; Treats');
     expect(reconciled.shopsite.preserved.advancedBlocks.ProductOnPages).toBeUndefined();
 
+    const staleFragment = {
+      sku: 'SKU-RENAME',
+      shopsite: {
+        preserved: {
+          unknownElements: { ProductOnPages: '<Name>Dog Food</Name><Name>Removed Page</Name>' },
+          advancedBlocks: {},
+        },
+      },
+    } as unknown as Product;
+    expect(() => reconcileProductsToActivePages(workspaceId, renamed.sourceHash, [staleFragment])).toThrow('unresolved ProductOnPages fragment');
+
     const nameOnly = {
       sku: 'SKU-NAME-ONLY',
       shopsite: {
