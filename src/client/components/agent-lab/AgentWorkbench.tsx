@@ -27,6 +27,7 @@ export function AgentWorkbench({
   onVersionUpdated,
 }: AgentWorkbenchProps) {
   const [sku, setSku] = useState('BLUE-076280014028');
+  const [discoveredGtin, setDiscoveredGtin] = useState('');
   const [name, setName] = useState('BLUE BUFF CAN DOG 12.5OZ');
   const [brandHint, setBrandHint] = useState('Blue Buffalo');
   const [departmentHint, setDepartmentHint] = useState('Dog Food');
@@ -53,8 +54,8 @@ export function AgentWorkbench({
 
   async function handleLaunchRun(e: React.FormEvent) {
     e.preventDefault();
-    if (!sku.trim() || !name.trim() || !price.trim()) {
-      setError('Please provide SKU, product name, and price');
+    if (!sku.trim() || !discoveredGtin.trim() || !name.trim() || !price.trim()) {
+      setError('Please provide SKU, discovered GTIN/UPC, product name, and price');
       return;
     }
 
@@ -65,6 +66,7 @@ export function AgentWorkbench({
     try {
       const res = await createPiRun({
         sku: sku.trim(),
+        discoveredGtin: discoveredGtin.trim(),
         name: name.trim(),
         brandHint: brandHint.trim() || undefined,
         departmentHint: departmentHint.trim() || undefined,
@@ -172,6 +174,15 @@ export function AgentWorkbench({
                 value={sku}
                 onChange={(e) => setSku(e.target.value)}
                 placeholder="e.g. BLUE-076280014028"
+              />
+            </div>
+            <div>
+              <label style={styles.label}>Discovered GTIN/UPC *</label>
+              <input
+                style={styles.input}
+                value={discoveredGtin}
+                onChange={(e) => setDiscoveredGtin(e.target.value)}
+                placeholder="e.g. 076280014028"
               />
             </div>
             <div>
@@ -294,7 +305,7 @@ export function AgentWorkbench({
             Ready to test product research
           </div>
           <div style={{ fontSize: 13, maxWidth: 440, margin: '0 auto' }}>
-            Enter a supplier SKU, product name, and price above and click <strong>Run Workbench Research</strong> to execute a live research session. GTIN/UPC is discovered evidence.
+            Enter a supplier SKU, explicitly discovered GTIN/UPC, product name, and price above and click <strong>Run Workbench Research</strong> to execute a live research session.
           </div>
         </div>
       )}

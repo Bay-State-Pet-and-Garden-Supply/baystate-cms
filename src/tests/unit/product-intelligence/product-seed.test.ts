@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   BatchContextSchema,
+  DiscoveredGtinSchema,
   ProductResearchV2InputSchema,
+  ProductSeedLaunchSchema,
   ProductSeedSchema,
   identifierRoleForSeedSku,
   priceEvidenceStrength,
@@ -18,6 +20,13 @@ describe('ProductSeed v2 input contract (#50)', () => {
     expect(productSeedToLegacyInput(seed)).toBeNull();
     expect(productSeedToLegacyInput(seed, '123')).toBeNull();
     expect(identifierRoleForSeedSku('123456789012')).toBe('sku');
+    for (const gtin of ['123456789', '1234567890', '12345678901']) {
+      expect(DiscoveredGtinSchema.safeParse(gtin).success).toBe(false);
+      expect(productSeedToLegacyInput(seed, gtin)).toBeNull();
+    }
+    for (const gtin of ['12345678', '123456789012', '1234567890123', '12345678901234']) {
+      expect(DiscoveredGtinSchema.safeParse(gtin).success).toBe(true);
+    }
   });
 
   it('converts only an explicitly discovered valid GTIN to historical input', () => {
@@ -41,6 +50,10 @@ describe('ProductSeed v2 input contract (#50)', () => {
   it('rejects weak/empty names but does not require a GTIN', () => {
     expect(ProductSeedSchema.safeParse({ ...seed, name: '' }).success).toBe(false);
     expect(ProductResearchV2InputSchema.safeParse({ productSeed: seed }).success).toBe(true);
+    expect(ProductResearchV2InputSchema.safeParse({ productSeed: seed, discoveredGtin: '036000291452' }).success).toBe(true);
+    expect(ProductSeedLaunchSchema.safeParse({ ...seed, discoveredGtin: '036000291452' }).success).toBe(true);
+    expect(ProductResearchV2InputSchema.safeParse({ productSeed: seed, discoveredGtin: '123456789' }).success).toBe(false);
+    expect(ProductSeedLaunchSchema.safeParse({ ...seed, discoveredGtin: '123456789' }).success).toBe(false);
   });
 
   it('keeps price-only differences in the immutable seed and treats price as weak without semantics', () => {

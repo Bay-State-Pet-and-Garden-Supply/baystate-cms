@@ -33,7 +33,7 @@ import {
   type ExistingIdentityAttachment,
   type ProductSeed,
 } from './contracts';
-import { BatchContextSchema, ExistingIdentityAttachmentSchema, ProductSeedSchema, productSeedToLegacyInput } from './product-seed';
+import { BatchContextSchema, DiscoveredGtinSchema, ExistingIdentityAttachmentSchema, ProductSeedSchema, productSeedToLegacyInput } from './product-seed';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from './executor';
 import type { ProductAssetEvidence } from './assets/schema';
 import type { PiAssetRow } from '../db/repositories/product-intelligence-repo';
@@ -413,6 +413,8 @@ export interface StartPiRunInput {
   input: ProductResearchInput;
   /** Immutable v2 seed, persisted separately from historical inputJson. */
   productSeed?: ProductSeed | null;
+  /** Explicitly discovered GTIN evidence used only for legacy compatibility. */
+  discoveredGtin?: string | null;
   /** Versioned non-authoritative batch hints. */
   batchContext?: BatchContext | null;
   /** Optional #43 raw/normalized identity attachment. */
@@ -477,9 +479,23 @@ export async function startProductIntelligenceRun(
 ): Promise<StartPiRunResult> {
   const productSeed = input.productSeed == null ? null : ProductSeedSchema.parse(input.productSeed);
   const batchContext = input.batchContext == null ? null : BatchContextSchema.parse(input.batchContext);
-  // The executor only receives a schema-valid historical shape. ProductSeed
-  // callers must resolve a discovered GTIN before reaching this boundary.
+  const discoveredGtin = input.discoveredGtin == null
+    ? null
+    : DiscoveredGtinSchema.parse(input.discoveredGtin);
+  // The executor only receives a schema-valid historical shape. When a seed
+  // is attached, its legacy compatibility input must be built from explicit
+  // discovered evidence and reconciled with the supplied historical input;
+  // neither path may promote the seed SKU to GTIN.
   const parsedInput = ProductResearchInputSchema.parse(input.input);
+  if (productSeed) {
+    const compatibilityInput = productSeedToLegacyInput(productSeed, discoveredGtin);
+    if (!compatibilityInput) {
+      throw new Error('ProductSeed requires a valid explicitly discovered GTIN for historical executor compatibility');
+    }
+    if (parsedInput.gtin !== compatibilityInput.gtin) {
+      throw new Error('ProductSeed and historical input GTIN do not match; refusing to pair independent identities');
+    }
+  }
   const existingIdentity = input.existingIdentity == null ? null : ExistingIdentityAttachmentSchema.parse(input.existingIdentity);
   const policy = ProductIntelligencePolicySchema.parse(input.policy ?? buildDefaultPiPolicy());
   const mode = input.mode ?? 'shadow';
@@ -554,7 +570,16 @@ export async function startProductIntelligenceRun(
     executor: executor.name,
     // Keep the original v2 seed separately inspectable. Historical runs keep
     // their original GTIN-first inputJson unchanged and replayable.
-    inputJson: JSON.stringify(productSeed ? { productSeed, batchContext, existingIdentity } : parsedInput),
+    inputJson: JSON.stringify(
+      productSeed
+        ? {
+            productSeed,
+            ...(discoveredGtin ? { discoveredGtin } : {}),
+            batchContext,
+            existingIdentity,
+          }
+        : parsedInput,
+    ),
     productSeedJson: productSeed ? JSON.stringify(productSeed) : null,
     batchContextJson: batchContext ? JSON.stringify(batchContext) : null,
     inputSchemaVersion: productSeed ? 2 : 1,
@@ -1511,9 +1536,14 @@ export async function replayPiRun(
   }
   const historicalV2Seed = origin.productSeedJson ? ProductSeedSchema.parse(JSON.parse(origin.productSeedJson)) : null;
   const historicalBatchContext = origin.batchContextJson ? BatchContextSchema.parse(JSON.parse(origin.batchContextJson)) : null;
+  const historicalInputJson = JSON.parse(origin.inputJson) as unknown;
+  const historicalDiscoveredGtin =
+    historicalV2Seed && historicalInputJson !== null && typeof historicalInputJson === 'object' && 'discoveredGtin' in historicalInputJson
+      ? DiscoveredGtinSchema.safeParse((historicalInputJson as { discoveredGtin?: unknown }).discoveredGtin).data ?? null
+      : null;
   const historicalInput = historicalV2Seed
-    ? productSeedToLegacyInput(historicalV2Seed)
-    : ProductResearchInputSchema.parse(JSON.parse(origin.inputJson));
+    ? productSeedToLegacyInput(historicalV2Seed, historicalDiscoveredGtin)
+    : ProductResearchInputSchema.parse(historicalInputJson);
   if (!historicalInput) {
     throw new Error('Cannot rerun a ProductSeed run without a valid discovered GTIN for historical executor compatibility');
   }
@@ -1522,6 +1552,7 @@ export async function replayPiRun(
     {
       input: historicalInput,
       productSeed: historicalV2Seed,
+      discoveredGtin: historicalDiscoveredGtin,
       batchContext: historicalBatchContext,
       mode: origin.mode,
       policy: rerunPolicy,

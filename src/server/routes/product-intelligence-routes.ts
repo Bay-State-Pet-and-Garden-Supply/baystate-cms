@@ -162,22 +162,26 @@ router.post('/product-intelligence/runs', async (c) => {
   const legacy = ProductResearchInputSchema.safeParse(parsed);
   let inputResult: { data: ReturnType<typeof ProductResearchInputSchema.parse> };
   let productSeed: import('../../product-intelligence/product-seed').ProductSeed | null = null;
+  let discoveredGtin: string | null = null;
   let batchContext: import('../../product-intelligence/product-seed').BatchContext | null = null;
   let existingIdentity: import('../../product-intelligence/product-seed').ExistingIdentityAttachment | null = null;
   if (v2Wrapped.success) {
     productSeed = v2Wrapped.data.productSeed;
+    discoveredGtin = v2Wrapped.data.discoveredGtin ?? null;
     batchContext = v2Wrapped.data.batchContext ?? null;
     existingIdentity = v2Wrapped.data.existingIdentity ?? null;
-    const legacyInput = productSeedToLegacyInput(productSeed);
+    const legacyInput = productSeedToLegacyInput(productSeed, discoveredGtin);
     if (!legacyInput) {
       return c.json({ error: 'ProductSeed has no valid discovered GTIN for the historical executor compatibility path' }, 400);
     }
     inputResult = { data: legacyInput };
   } else if (v2Direct.success) {
-    productSeed = ProductSeedSchema.parse(v2Direct.data);
-    batchContext = v2Direct.data.batchContext ?? null;
-    existingIdentity = v2Direct.data.existingIdentity ?? null;
-    const legacyInput = productSeedToLegacyInput(productSeed);
+    const { batchContext: directBatchContext, existingIdentity: directExistingIdentity, discoveredGtin: directDiscoveredGtin, ...directSeed } = v2Direct.data;
+    productSeed = ProductSeedSchema.parse(directSeed);
+    discoveredGtin = directDiscoveredGtin ?? null;
+    batchContext = directBatchContext ?? null;
+    existingIdentity = directExistingIdentity ?? null;
+    const legacyInput = productSeedToLegacyInput(productSeed, discoveredGtin);
     if (!legacyInput) {
       return c.json({ error: 'ProductSeed has no valid discovered GTIN for the historical executor compatibility path' }, 400);
     }
@@ -250,6 +254,7 @@ router.post('/product-intelligence/runs', async (c) => {
       {
         input: inputResult.data,
         productSeed,
+        discoveredGtin,
         batchContext,
         existingIdentity,
         mode: mode as 'shadow' | 'interactive' | 'onboarding',

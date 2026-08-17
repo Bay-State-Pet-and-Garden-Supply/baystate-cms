@@ -57,12 +57,45 @@ describe('ProductSeed run persistence (#50)', () => {
     const started = await startProductIntelligenceRun(executor, {
       input: { gtin: '036000291452', registerName: 'Treats', price: '2.5' },
       productSeed: { sku: 'SUP-2', name: 'Treats', price: 2.5 },
+      discoveredGtin: '036000291452',
       batchContext: { schemaVersion: 1, authoritative: false, batchId: 'b2', siblingSkus: [], hints: {} },
       policy: buildDefaultPiPolicy(),
     }, { workspaceId, workspacePath: '/tmp/product-seed-persistence' });
     await started.completed;
     expect(getPiRun(started.run.id)?.inputSchemaVersion).toBe(2);
     expect(JSON.parse(getPiRun(started.run.id)?.productSeedJson ?? '{}').sku).toBe('SUP-2');
+    expect(JSON.parse(getPiRun(started.run.id)?.inputJson ?? '{}').discoveredGtin).toBe('036000291452');
+  });
+
+  it('rejects a seed paired with a mismatched historical GTIN, including a numeric SKU', async () => {
+    const executor: ProductIntelligenceExecutor = {
+      name: 'legacy',
+      version: '1.0.0',
+      async startResearch(): Promise<ProductResearchResult> {
+        throw new Error('executor must not be called');
+      },
+    };
+    await expect(startProductIntelligenceRun(executor, {
+      input: { gtin: '123456789012', registerName: 'Treats' },
+      productSeed: { sku: '123456789012', name: 'Treats', price: 2.5 },
+      discoveredGtin: '036000291452',
+      policy: buildDefaultPiPolicy(),
+    }, { workspaceId, workspacePath: '/tmp/product-seed-persistence' })).rejects.toThrow(/do not match/);
+  });
+
+  it('fails closed when a seed has only a historical-looking SKU and no discovered GTIN', async () => {
+    const executor: ProductIntelligenceExecutor = {
+      name: 'legacy',
+      version: '1.0.0',
+      async startResearch(): Promise<ProductResearchResult> {
+        throw new Error('executor must not be called');
+      },
+    };
+    await expect(startProductIntelligenceRun(executor, {
+      input: { gtin: '123456789012', registerName: 'Treats' },
+      productSeed: { sku: '123456789012', name: 'Treats', price: 2.5 },
+      policy: buildDefaultPiPolicy(),
+    }, { workspaceId, workspacePath: '/tmp/product-seed-persistence' })).rejects.toThrow(/requires a valid explicitly discovered GTIN/);
   });
 
   it('keeps v2 seed and batch context separately inspectable while old input remains replayable', () => {

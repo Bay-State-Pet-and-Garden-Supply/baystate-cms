@@ -13,6 +13,11 @@ const SeedPriceSchema = z.union([
   z.string().trim().min(1).max(64),
 ]);
 
+/** A discovered barcode identity accepted by the historical GTIN contract. */
+export const DiscoveredGtinSchema = z.string().refine((value) => /^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(value), {
+  message: 'discoveredGtin must be 8, 12, 13, or 14 digits (UPC/GTIN)',
+});
+
 export const ProductSeedSchema = z.object({
   /** Store-facing SKU; numeric-looking values remain SKUs, not GTINs. */
   sku: z.string().trim().min(1).max(256),
@@ -47,10 +52,11 @@ export const ExistingIdentityAttachmentSchema = z.object({
 }).strict();
 export type ExistingIdentityAttachment = z.infer<typeof ExistingIdentityAttachmentSchema>;
 
-/** The v2 wire input. GTIN/UPC is intentionally absent. */
+/** The v2 wire input. A discovered GTIN is optional evidence, never seed data. */
 export const ProductResearchV2InputSchema = z.object({
   schemaVersion: z.literal(2).default(2),
   productSeed: ProductSeedSchema,
+  discoveredGtin: DiscoveredGtinSchema.nullish(),
   batchContext: BatchContextSchema.nullish(),
   existingIdentity: ExistingIdentityAttachmentSchema.nullish(),
 }).strict();
@@ -58,6 +64,8 @@ export type ProductResearchV2Input = z.infer<typeof ProductResearchV2InputSchema
 
 /** Direct seed form accepted by the API for a minimal launch payload. */
 export const ProductSeedLaunchSchema = ProductSeedSchema.extend({
+  /** Explicitly discovered evidence for the legacy executor adapter. */
+  discoveredGtin: DiscoveredGtinSchema.nullish(),
   batchContext: BatchContextSchema.nullish(),
   existingIdentity: ExistingIdentityAttachmentSchema.nullish(),
 }).strict();
@@ -80,10 +88,11 @@ export function productSeedToLegacyInput(
   seed: ProductSeed,
   discoveredGtin?: string | null,
 ): ProductResearchInput | null {
-  if (discoveredGtin == null || !/^\d{8,14}$/.test(discoveredGtin)) return null;
+  const parsedGtin = DiscoveredGtinSchema.safeParse(discoveredGtin);
+  if (!parsedGtin.success) return null;
 
   return {
-    gtin: discoveredGtin,
+    gtin: parsedGtin.data,
     registerName: seed.name,
     price: seedPriceToString(seed.price),
   };

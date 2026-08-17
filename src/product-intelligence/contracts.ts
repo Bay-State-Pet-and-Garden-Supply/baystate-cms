@@ -20,6 +20,7 @@ import { TerminalSubmissionSchema, type TerminalSubmission } from './workflow/bu
 // parser remains available for old runs and replay adapters.
 export {
   BatchContextSchema,
+  DiscoveredGtinSchema,
   ExistingIdentityAttachmentSchema,
   ProductResearchV2InputSchema,
   ProductSeedLaunchSchema,
@@ -39,6 +40,7 @@ export {
 } from './product-seed';
 import {
   BatchContextSchema,
+  DiscoveredGtinSchema,
   ExistingIdentityAttachmentSchema,
   ProductResearchV2InputSchema,
   ProductSeedLaunchSchema,
@@ -51,13 +53,7 @@ import {
 
 export const ProductResearchInputSchema = z.object({
   /** Exact GTIN/UPC as printed on the package (digits only, normalized). */
-  gtin: z
-    .string()
-    .min(1)
-    .max(64)
-    .refine((value) => /^\d{8,14}$/.test(value), {
-      message: 'gtin must be 8-14 digits (UPC/GTIN)',
-    }),
+  gtin: DiscoveredGtinSchema,
   /** The store register name as typed by the operator (e.g. "STELLA CHKN BROTH 16OZ"). */
   registerName: z.string().min(1).max(512),
   /** Optional brand hint from the operator. */

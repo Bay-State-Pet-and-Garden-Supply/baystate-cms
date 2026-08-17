@@ -216,6 +216,8 @@ export interface CreateRunInput {
   sku?: string;
   name?: string;
   price?: string | number;
+  /** Explicitly discovered GTIN evidence; never inferred from SKU. */
+  discoveredGtin?: string;
   batchContext?: {
     schemaVersion?: 1;
     authoritative?: false;
@@ -350,6 +352,7 @@ export function createPiRun(input: CreateRunInput): Promise<CreateRunResponse> {
           sku: input.sku,
           name: input.name,
           price: input.price,
+          ...(input.discoveredGtin !== undefined ? { discoveredGtin: input.discoveredGtin } : {}),
           ...(input.batchContext !== undefined ? { batchContext: input.batchContext } : {}),
           ...(input.existingIdentity !== undefined ? { existingIdentity: input.existingIdentity } : {}),
         }
