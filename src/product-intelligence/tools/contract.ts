@@ -182,6 +182,13 @@ export interface ExtractedFieldEvidence {
   sourcePath?: string;
   /** Artifact containing this field observation, when retained. */
   sourceArtifactId?: string | null;
+  /** SHA-256 of the exact source artifact containing this observation. */
+  sourceContentHash?: string | null;
+  /** Executed profile provenance, only for profile-path observations. */
+  sourceProfileId?: string | null;
+  sourceProfileVersion?: string | number | null;
+  /** Variant identity attached to this observation when source-specific. */
+  variantRef?: string | null;
   /** Field-specific durable evidence ids for this observation. */
   evidenceIds?: string[];
 }
@@ -200,6 +207,10 @@ export interface ExtractedIdentifierEvidence {
   sourcePath?: string;
   /** Artifact containing this identifier observation. */
   sourceArtifactId?: string | null;
+  /** SHA-256 of the exact source artifact containing this observation. */
+  sourceContentHash?: string | null;
+  /** Variant identity attached to this observation when source-specific. */
+  variantRef?: string | null;
   /** Durable evidence ids for this identifier observation. */
   evidenceIds?: string[];
 }
@@ -208,6 +219,10 @@ export interface ExtractedImageCandidate {
   url: string;
   /** Variant mapping when the page declares one (e.g. Shopify variant id). */
   variantRef?: string;
+  /** Artifact containing this image observation. */
+  sourceArtifactId?: string | null;
+  /** SHA-256 of the exact source artifact containing this image observation. */
+  sourceContentHash?: string | null;
   sourcePath?: string;
 }
 

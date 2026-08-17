@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runDeterministicExtraction, replayDeterministicExtraction } from '../../product-intelligence/extraction/evidence-runner';
+import { createDeterministicExtractionContract, runDeterministicExtraction, replayDeterministicExtraction } from '../../product-intelligence/extraction/evidence-runner';
 import type { FetchedPage } from '../../product-intelligence/extraction/platforms';
 import type { LadderOptions } from '../../product-intelligence/extraction/ladder';
 
@@ -47,6 +47,41 @@ describe('deterministic extraction evidence runner', () => {
     expect(replay.bundle.observations.some((o) => o.artifactId === 'artifact-48')).toBe(true);
   });
 
+  it('replay disables every transport and does not invoke the policy gate', async () => {
+    const transports = {
+      fetchPage: vi.fn(async () => page(JSON_LD)),
+      fetchShopify: vi.fn(async () => ({ title: 'network', variants: [] })) as never,
+      browser: { snapshot: vi.fn() },
+      interaction: { type: 'select_option', selector: '#size', optionLabel: '16 oz' } as never,
+      managedFallback: { fetch: vi.fn() } as never,
+      profiles: [{ name: 'network-profile', matches: () => true, extract: vi.fn() }],
+      llm: { adapter: { extract: vi.fn() } as never },
+    };
+    const networkGate = vi.fn(async () => ({ allowed: true }));
+    const replay = await replayDeterministicExtraction(
+      { artifactId: 'artifact-replay', content: JSON_LD, finalUrl: 'https://brand.example/p/product' },
+      { url: 'https://brand.example/p/product', expected },
+      { ladder: transports, networkGate },
+    );
+    expect(replay.bundle.observations.length).toBeGreaterThan(0);
+    expect(Object.values(transports).flatMap((transport) => {
+      if (typeof transport === 'function') return [transport];
+      if (transport && typeof transport === 'object') return Object.values(transport as Record<string, unknown>).filter((v): v is ReturnType<typeof vi.fn> => typeof v === 'function');
+      return [];
+    }).every((spy) => !spy.mock.calls.length)).toBe(true);
+    expect(networkGate).not.toHaveBeenCalled();
+  });
+
+  it('returns structured failure for a missing retained artifact without network', async () => {
+    const fetchPage = vi.fn();
+    const result = await runDeterministicExtraction(
+      { url: 'https://brand.example/p/product', artifactId: 'missing-artifact' },
+      { artifactReader: { load: async () => null }, ladder: { fetchPage } },
+    );
+    expect(result.bundle.failures[0]).toMatchObject({ code: 'artifact_unavailable', stage: 'replay' });
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
   it('retains embedded state observations as deterministic evidence', async () => {
     const run = await runDeterministicExtraction(
       { url: 'https://brand.example/p/embedded', expected: { gtin: '098765432109', name: 'Embedded Food 8 oz' } },
@@ -61,20 +96,41 @@ describe('deterministic extraction evidence runner', () => {
     const ladder = {
       fetchPage: async () => page('<html><body>profile fixture</body></html>'),
       profiles: [{
-        name: 'approved-profile',
+        name: 'approved-profile', id: 'profile-1', version: 1, runtime: 'static' as const,
         matches: () => true,
         extract: async () => ({ fields: [
-          { field: 'product_name', value: 'Profile Food', method: 'selectors', sourcePath: 'h1.product-title' },
-          { field: 'brand', value: 'Profile Brand', method: 'selectors', sourcePath: '.brand' },
-        ], images: [] }),
+          { field: 'product_name', value: 'Profile Food', method: 'selectors', sourcePath: 'h1.product-title', sourceContentHash: '0'.repeat(64) },
+          { field: 'brand', value: 'Profile Brand', method: 'selectors', sourcePath: '.brand', sourceContentHash: '0'.repeat(64) },
+        ], images: [], profile: { id: 'profile-1', version: 1, runtime: 'static' as const } }),
       }],
     };
     const first = await runDeterministicExtraction({ url: 'https://brand.example/p/profile', profile: { id: 'profile-1', version: 1, runtime: 'static' } }, { ladder });
     const second = await runDeterministicExtraction({ url: 'https://brand.example/p/profile', profile: { id: 'profile-1', version: 2, runtime: 'static' } }, { ladder });
     expect(first.bundle.profile?.version).toBe(1);
-    expect(second.bundle.profile?.version).toBe(2);
+    expect(second.bundle.profile?.version).toBe(1);
     expect(first.bundle.observations.find((o) => o.field === 'product_name')).toMatchObject({ profileId: 'profile-1', profileVersion: 1, sourcePath: 'h1.product-title' });
     expect(first.bundle.extractionPath.some((step) => step.sourcePath === 'h1.product-title')).toBe(true);
+    expect(second.bundle.observations.find((o) => o.field === 'product_name')?.profileVersion).toBe(1);
+  });
+
+  it('uses source metadata from platform payloads and preserves variant references', async () => {
+    const sourceHash = '1'.repeat(64);
+    const run = await runDeterministicExtraction(
+      { url: 'https://shop.example/products/family', expected: { name: 'Example Food', gtin: '111111111111' } },
+      {
+        ladder: {
+          fetchPage: async () => page('<script src="/cdn/shop/theme.js"></script>', 'https://shop.example/products/family'),
+          fetchShopify: async () => ({
+            id: 1, title: 'Example Food', vendor: 'Example', handle: 'family',
+            variants: [{ id: 42, title: '16 oz', sku: 'EX-16', barcode: '111111111111', available: true, price: null, option1: '16 oz', option2: null, option3: null }],
+            images: [], options: [], product_type: null, sourceContentHash: sourceHash, sourcePath: 'shopify-response',
+          }),
+        },
+      },
+    );
+    expect(run.bundle.observations.find((o) => o.field === 'sku')).toMatchObject({ contentHash: sourceHash, variantRef: '42' });
+    expect(run.bundle.observations.find((o) => o.field === 'gtin')).toMatchObject({ contentHash: sourceHash, variantRef: '42' });
+    expect(run.bundle.observations.find((o) => o.field === 'product_name')?.contentHash).toBe(sourceHash);
   });
 
   it('routes wrong variants, blocked pages, and missing fields with stable failure codes', async () => {
@@ -105,5 +161,13 @@ describe('deterministic extraction evidence runner', () => {
       { ladder: { fetchPage: async () => page('<html><body>empty</body></html>', 'https://empty.example/product') } },
     );
     expect(missing.bundle.failures.some((f) => f.code === 'missing_fields')).toBe(true);
+  });
+
+  it('wires the production contract through the deterministic runner', async () => {
+    const contract = createDeterministicExtractionContract({ ladder: { fetchPage: async () => page(JSON_LD) } });
+    const result = await contract.extract({ url: 'https://brand.example/p/product', expected, signal: new AbortController().signal, timeoutMs: 5000 });
+    expect(contract.name).toBe('deterministic_extraction_evidence');
+    expect(result.deterministicOnly).toBe(true);
+    expect(result.fields.some((field) => field.method === 'json_ld')).toBe(true);
   });
 });

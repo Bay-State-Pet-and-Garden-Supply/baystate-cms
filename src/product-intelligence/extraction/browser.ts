@@ -20,11 +20,18 @@ export interface CapturedNetworkResponse {
   status: number | null;
   responseContentType: string | null;
   jsonBody: unknown;
+  /** Provenance for this exact captured response, never inferred from page HTML. */
+  artifactId?: string | null;
+  contentHash?: string | null;
+  sourcePath?: string;
 }
 
 export interface BrowserSnapshot {
   url: string;
   finalUrl: string;
+  /** Artifact/hash for the exact browser snapshot bytes. */
+  artifactId?: string | null;
+  contentHash?: string | null;
   jsonLd: Array<Record<string, unknown>>;
   embeddedProductData: Array<Record<string, unknown>>;
   imageCandidates: string[];
@@ -58,7 +65,7 @@ export interface BrowserSnapshotFn {
 export interface BrowserExtractionEvidence {
   fields: ExtractedFieldEvidence[];
   images: ExtractedImageCandidate[];
-  gtins: Array<{ value: string; method: string }>;
+  gtins: Array<{ value: string; method: string; sourcePath?: string; sourceArtifactId?: string | null; sourceContentHash?: string | null; variantRef?: string | null }>;
   sku: string | null;
   brand: string | null;
   productName: string | null;
@@ -86,12 +93,12 @@ export interface VariantSetContribution {
   variantCount: number;
 }
 
-function addFieldOnce(fields: ExtractedFieldEvidence[], field: string, value: string | null | undefined, method: string, sourcePath?: string): void {
+function addFieldOnce(fields: ExtractedFieldEvidence[], field: string, value: string | null | undefined, method: string, sourcePath?: string, source?: { artifactId?: string | null; contentHash?: string | null; variantRef?: string | null }): void {
   if (value === null || value === undefined) return;
   const trimmed = String(value).trim();
   if (trimmed.length === 0) return;
   if (fields.some((f) => f.field === field && f.value === trimmed && f.method === method)) return;
-  fields.push({ field, value: trimmed.slice(0, 2000), method, sourcePath });
+  fields.push({ field, value: trimmed.slice(0, 2000), method, sourcePath, sourceArtifactId: source?.artifactId, sourceContentHash: source?.contentHash, variantRef: source?.variantRef });
 }
 
 /** Extract ladder evidence from an arbitrary product-like payload. */
@@ -102,7 +109,7 @@ export function evidenceFromProductPayload(
   out: {
     fields: ExtractedFieldEvidence[];
     images: ExtractedImageCandidate[];
-    gtins: Array<{ value: string; method: string }>;
+    gtins: Array<{ value: string; method: string; sourcePath?: string; sourceArtifactId?: string | null; sourceContentHash?: string | null; variantRef?: string | null }>;
     sku: string | null;
     brand: string | null;
     productName: string | null;
@@ -129,7 +136,7 @@ export function evidenceFromProductPayload(
   /** Round-5 P0-3: the expected entity identity (when known) scopes both proof
    *  and contradiction signals to linked payloads. When absent, callers
    *  without entity context keep the legacy unscoped behavior. */
-  opts?: { expectedGtin?: string | null },
+  opts?: { expectedGtin?: string | null; artifactId?: string | null; contentHash?: string | null; variantRef?: string | null },
 ): void {
   if (out.stats) out.stats.productLikeCount += 1;
   const title = typeof product.title === 'string' ? product.title : typeof product.name === 'string' ? product.name : null;
@@ -138,13 +145,14 @@ export function evidenceFromProductPayload(
   const size = typeof product.size === 'string' ? product.size : null;
   const gtin = gtinFromAny(product);
 
-  if (title) addFieldOnce(out.fields, 'product_name', title, method, sourcePath);
-  if (sku) addFieldOnce(out.fields, 'sku', sku, method, sourcePath);
-  if (brand) addFieldOnce(out.fields, 'brand', brand, method, sourcePath);
-  if (size) addFieldOnce(out.fields, 'size', size, method, sourcePath);
+  const source = { artifactId: opts?.artifactId, contentHash: opts?.contentHash, variantRef: opts?.variantRef };
+  if (title) addFieldOnce(out.fields, 'product_name', title, method, sourcePath, source);
+  if (sku) addFieldOnce(out.fields, 'sku', sku, method, sourcePath, source);
+  if (brand) addFieldOnce(out.fields, 'brand', brand, method, sourcePath, source);
+  if (size) addFieldOnce(out.fields, 'size', size, method, sourcePath, source);
   if (gtin) {
     const digits = gtin.replace(/\D/g, '');
-    if (!out.gtins.some((g) => g.value.replace(/\D/g, '') === digits)) out.gtins.push({ value: digits, method });
+    if (!out.gtins.some((g) => g.value.replace(/\D/g, '') === digits && g.variantRef === (opts?.variantRef ?? null))) out.gtins.push({ value: digits, method, sourcePath, sourceArtifactId: opts?.artifactId, sourceContentHash: opts?.contentHash, variantRef: opts?.variantRef ?? null });
   }
   out.sku ??= sku;
   out.brand ??= brand;
@@ -157,7 +165,7 @@ export function evidenceFromProductPayload(
         .filter((src): src is string => typeof src === 'string')
     : [];
   for (const image of images) {
-    if (!out.images.some((i) => i.url === image)) out.images.push({ url: image, sourcePath });
+    if (!out.images.some((i) => i.url === image)) out.images.push({ url: image, sourcePath, sourceArtifactId: opts?.artifactId, sourceContentHash: opts?.contentHash, variantRef: opts?.variantRef ?? undefined });
   }
 
   // Round-5 P0-3: an explicit `variants` array is affirmative variant-set
@@ -195,11 +203,19 @@ export function evidenceFromProductPayload(
   const variants = Array.isArray(product.variants) ? (product.variants as Array<Record<string, unknown>>).filter((v) => v && typeof v === 'object') : [];
   const firstVariant = variants[0];
   if (firstVariant) {
+    const variantRef = typeof firstVariant.id === 'string' || typeof firstVariant.id === 'number' ? String(firstVariant.id) : undefined;
     out.variant = {
-      id: typeof firstVariant.id === 'string' || typeof firstVariant.id === 'number' ? String(firstVariant.id) : undefined,
+      id: variantRef,
       name: typeof firstVariant.title === 'string' ? firstVariant.title : typeof firstVariant.name === 'string' ? firstVariant.name : undefined,
       sku: typeof firstVariant.sku === 'string' ? firstVariant.sku : undefined,
     };
+    if (typeof firstVariant.title === 'string') addFieldOnce(out.fields, 'variant_name', firstVariant.title, method, `${sourcePath}.variants[0].title`, { ...source, variantRef });
+    if (typeof firstVariant.sku === 'string') addFieldOnce(out.fields, 'sku', firstVariant.sku, method, `${sourcePath}.variants[0].sku`, { ...source, variantRef });
+    const variantGtin = gtinFromAny(firstVariant);
+    if (variantGtin) {
+      const digits = variantGtin.replace(/\D/g, '');
+      if (!out.gtins.some((g) => g.value.replace(/\D/g, '') === digits && g.variantRef === variantRef)) out.gtins.push({ value: digits, method, sourcePath: `${sourcePath}.variants[0].gtin`, sourceArtifactId: opts?.artifactId, sourceContentHash: opts?.contentHash, variantRef: variantRef ?? null });
+    }
   }
 }
 
@@ -392,7 +408,7 @@ export function evidenceFromBrowserSnapshot(
   out: {
     fields: ExtractedFieldEvidence[];
     images: ExtractedImageCandidate[];
-    gtins: Array<{ value: string; method: string }>;
+    gtins: Array<{ value: string; method: string; sourcePath?: string; sourceArtifactId?: string | null; sourceContentHash?: string | null; variantRef?: string | null }>;
     sku: string | null;
     brand: string | null;
     productName: string | null;
@@ -426,11 +442,11 @@ export function evidenceFromBrowserSnapshot(
   out.stats ??= { productLikeCount: 0 };
   out.pagePrimaryIds ??= pagePrimaryEntityIds(snapshot, normalizeCanonicalUrl(snapshot.finalUrl || snapshot.url), expected?.gtin ?? null);
   for (const jsonLd of snapshot.jsonLd) {
-    evidenceFromProductPayload(jsonLd, 'json_ld', 'browser JSON-LD', out, { expectedGtin: expected?.gtin ?? null });
+    evidenceFromProductPayload(jsonLd, 'json_ld', 'browser JSON-LD', out, { expectedGtin: expected?.gtin ?? null, artifactId: snapshot.artifactId, contentHash: snapshot.contentHash });
     methodsUsed.push('json_ld');
   }
   for (const embedded of snapshot.embeddedProductData) {
-    evidenceFromProductPayload(embedded, 'browser', 'browser embedded data', out, { expectedGtin: expected?.gtin ?? null });
+    evidenceFromProductPayload(embedded, 'browser', 'browser embedded data', out, { expectedGtin: expected?.gtin ?? null, artifactId: snapshot.artifactId, contentHash: snapshot.contentHash });
     methodsUsed.push('embedded_data');
   }
   for (const network of snapshot.networkResponses) {
@@ -440,13 +456,13 @@ export function evidenceFromBrowserSnapshot(
     // it has real product identity (gtin/variants/handle) — review PI-11-M2.
     const product = findProductLikeStrict(network.jsonBody);
     if (product) {
-      const sourcePath = `network:${network.url.split('?')[0].slice(0, 200)}`;
-      evidenceFromProductPayload(product, 'network_response', sourcePath, out, { expectedGtin: expected?.gtin ?? null });
+      const sourcePath = network.sourcePath ?? `network:${network.url.split('?')[0].slice(0, 200)}`;
+      evidenceFromProductPayload(product, 'network_response', sourcePath, out, { expectedGtin: expected?.gtin ?? null, artifactId: network.artifactId, contentHash: network.contentHash });
       methodsUsed.push('network_response');
     }
   }
   for (const image of snapshot.imageCandidates) {
-    if (!out.images.some((i) => i.url === image)) out.images.push({ url: image, sourcePath: 'browser image candidates' });
+    if (!out.images.some((i) => i.url === image)) out.images.push({ url: image, sourcePath: 'browser image candidates', sourceArtifactId: snapshot.artifactId, sourceContentHash: snapshot.contentHash });
   }
 
   // ---- Round-5 P0-3: compute the ENTITY-SCOPED variant-set signal. ----

@@ -82,6 +82,7 @@ export const ExtractionImageEvidenceSchema = z.object({
   sourcePath: z.string().min(1).max(512),
   method: z.string().min(1).max(128),
   artifactId: z.string().max(512).nullable(),
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
 }).strict();
 export type ExtractionImageEvidence = z.infer<typeof ExtractionImageEvidenceSchema>;
 
@@ -134,9 +135,18 @@ function toObservation(
   field: ExtractedFieldEvidence | ExtractedIdentifierEvidence,
   context: ProvenanceAdapterContext,
   variantRef: string | null = null,
-): ExtractionObservation {
+): ExtractionObservation | null {
   const value = String(field.value ?? '').slice(0, 4096);
   const source = sourcePathFor(field, field.method);
+  const contentHash = validContentHash(field.sourceContentHash ?? null);
+  const pageHash = validContentHash(result.contentHash);
+  // The run context may identify the retained page, but it must not be
+  // attached to a different source payload (Shopify/browser/profile).
+  const artifactId = field.sourceArtifactId ?? (contentHash && contentHash === pageHash ? context.artifactId ?? null : null);
+  // A page hash is valid only when the ladder explicitly attached it to this
+  // observation. Never borrow result.contentHash for platform/browser/profile
+  // observations; missing source metadata is unavailable, not page evidence.
+  if (!contentHash && !artifactId) return null;
   return {
     id: observationId(result.finalUrl, 'field' in field ? field.field : 'gtin', field.method, source.path, value),
     field: 'field' in field ? field.field : 'gtin',
@@ -145,11 +155,11 @@ function toObservation(
     sourcePath: source.path,
     sourceUrl: result.requestedUrl,
     finalUrl: result.finalUrl,
-    contentHash: validContentHash(result.contentHash),
-    artifactId: field.sourceArtifactId ?? context.artifactId ?? null,
-    profileId: context.profile?.id ?? null,
-    profileVersion: context.profile?.version ?? null,
-    variantRef,
+    contentHash,
+    artifactId,
+    profileId: 'field' in field ? field.sourceProfileId ?? null : null,
+    profileVersion: 'field' in field ? field.sourceProfileVersion ?? null : null,
+    variantRef: field.variantRef ?? variantRef,
     provenanceQuality: source.quality,
   };
 }
@@ -184,16 +194,23 @@ function failureForResult(result: PageExtractionResult): ExtractionFailure[] {
 export function createExtractionProvenanceAdapter(context: ProvenanceAdapterContext = {}) {
   return {
     adapt(result: PageExtractionResult): ExtractionEvidenceBundle {
-      const observations = result.fields.map((field) => toObservation(result, field, context));
-      const identifierObservations = result.gtins.map((gtin) => toObservation(result, gtin, context));
+      const observations = result.fields.flatMap((field) => {
+        const observation = toObservation(result, field, context);
+        return observation ? [observation] : [];
+      });
+      const identifierObservations = result.gtins.flatMap((gtin) => {
+        const observation = toObservation(result, gtin, context);
+        return observation ? [observation] : [];
+      });
       const allObservations = [...observations, ...identifierObservations];
       const images = result.images.slice(0, 16).map((image) => ({
         url: image.url,
         variantRef: image.variantRef ?? null,
         sourcePath: image.sourcePath?.trim() || 'image_candidates',
         method: image.sourcePath?.startsWith('profile:') ? 'profile_selector' : 'image_candidate',
-        artifactId: context.artifactId ?? null,
-      }));
+        artifactId: image.sourceArtifactId ?? (image.sourceContentHash && validContentHash(image.sourceContentHash) === validContentHash(result.contentHash) ? context.artifactId ?? null : null),
+        contentHash: validContentHash(image.sourceContentHash ?? null),
+      })).filter((image) => !!image.contentHash || !!image.artifactId);
       const imageObservations = images.map((image) => ({
         id: observationId(result.finalUrl, 'image', image.method, image.sourcePath, image.url),
         field: 'image',
@@ -202,17 +219,17 @@ export function createExtractionProvenanceAdapter(context: ProvenanceAdapterCont
         sourcePath: image.sourcePath,
         sourceUrl: result.requestedUrl,
         finalUrl: result.finalUrl,
-        contentHash: validContentHash(result.contentHash),
+        contentHash: image.contentHash,
         artifactId: image.artifactId,
-        profileId: context.profile?.id ?? null,
-        profileVersion: context.profile?.version ?? null,
+        profileId: null,
+        profileVersion: null,
         variantRef: image.variantRef,
         provenanceQuality: image.sourcePath === 'image_candidates' ? 'method_only' as const : 'exact_path' as const,
       }));
       const path = [...new Map(
         [...result.fields, ...result.gtins].map((entry) => {
           const source = sourcePathFor(entry, entry.method);
-          return [source.path, { layer: entry.method, method: entry.method, sourcePath: source.quality === 'exact_path' ? source.path : null, artifactId: context.artifactId ?? null }];
+          return [source.path, { layer: entry.method, method: entry.method, sourcePath: source.quality === 'exact_path' ? source.path : null, artifactId: entry.sourceArtifactId ?? context.artifactId ?? null }];
         }),
       ).values()];
       const variantReference = result.variant?.id ?? result.variant?.sku ?? null;

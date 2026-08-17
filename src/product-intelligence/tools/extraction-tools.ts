@@ -34,8 +34,8 @@ import {
   type PageExtractionContract,
   type PageExtractionResult,
 } from './contract';
-import { createLadderExtractionContract } from '../extraction/ladder';
 import { defaultLadderOptions } from '../extraction/wiring';
+import { createDeterministicExtractionContract } from '../extraction/evidence-runner';
 import { HTTP_EXTRACTION_HEADERS, type FetchedPage, type ShopifyProductJson } from '../extraction/platforms';
 import type { LadderOptions } from '../extraction/ladder';
 import type { PolicyGateway } from '../policy/policy-gateway';
@@ -190,7 +190,7 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
   }
 }
 
-const defaultPageExtractionContract: PageExtractionContract = createLadderExtractionContract(defaultLadderOptions());
+const defaultPageExtractionContract: PageExtractionContract = createDeterministicExtractionContract({ ladder: defaultLadderOptions() });
 
 /**
  * P0-1: ladder options whose HTTP layer rides the policy gateway. The ladder
@@ -239,15 +239,16 @@ function loadArtifactRepo(): NonNullable<typeof _artifactRepo> | null {
  *  fail-closed). Round-10 (P1-6): the type is explicit at the seam — fetched
  *  page HTML is retained as 'page_html'. No other artifact type is produced
  *  here yet (see the browser-capture note in gatewayBoundLadderOptions). */
-function persistPageArtifact(runId: string, url: string, html: string, contentHash: string, artifactType = 'page_html'): void {
+function persistPageArtifact(runId: string, url: string, html: string, contentHash: string, artifactType = 'page_html'): string | null {
   try {
     const repo = loadArtifactRepo();
-    if (!repo?.insertPiPageArtifact) return;
+    if (!repo?.insertPiPageArtifact) return null;
     // The repo enforces the 2MB cap (throws); a too-large page simply means
     // no artifact id — artifact-driven discovery is unavailable for it, by design.
-    repo.insertPiPageArtifact({ runId, url, contentHash, content: html, artifactType });
+    return repo.insertPiPageArtifact({ runId, url, contentHash, content: html, artifactType }).id;
   } catch {
     // fail closed: no artifact, no artifactId, discovery can't run for it
+    return null;
   }
 }
 
@@ -274,6 +275,11 @@ function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
       ? ctx.policy.allowedSourceDomains
       : undefined;
   const options = defaultLadderOptions(sourcesAllowlist);
+  options.networkGate = async (url, signal) => {
+    if (signal.aborted) return { allowed: false, code: 'cancelled' };
+    const decision = await gateway.checkNetworkRequest(netCtx, url);
+    return { allowed: decision.allowed, code: decision.reasonCode, detail: decision.detail };
+  };
   options.fetchPage = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<FetchedPage> => {
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -303,8 +309,9 @@ function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
     // network-capture path is added, it should persist here with
     // artifactType 'browser_network_capture' (same bounded, fail-closed
     // persistPageArtifact). NOT IMPLEMENTED — by design, fail-closed.
-    persistPageArtifact(ctx.runId, response.url || url, html, sha256Hex(html), 'page_html');
-    return { html, finalUrl: response.url || url, status: response.status, contentHash: sha256Hex(html) };
+    const pageHash = sha256Hex(html);
+    const artifactId = persistPageArtifact(ctx.runId, response.url || url, html, pageHash, 'page_html');
+    return { html, finalUrl: response.url || url, status: response.status, contentHash: pageHash, artifactId };
   };
   options.fetchShopify = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<ShopifyProductJson> => {
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -316,7 +323,14 @@ function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
       { dataClassification: 'fetched_content', maxResponseBytes: 2 * 1024 * 1024, allowedContentTypes: ['application/json'] },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-    return (await response.json()) as ShopifyProductJson;
+    const body = await response.text();
+    const sourceContentHash = sha256Hex(body);
+    return {
+      ...JSON.parse(body) as ShopifyProductJson,
+      sourceContentHash,
+      sourcePath: 'Shopify product JSON payload',
+      sourceUrl: response.url || url,
+    };
   };
   return options;
 }
@@ -350,7 +364,7 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
         // P0-1: when running the default ladder, bind its HTTP layer to the
         // policy gateway (per-run context) so the fetch itself is enforced,
         // not only pre-checked.
-        const runContract = contract === defaultPageExtractionContract ? createLadderExtractionContract(gatewayBoundLadderOptions(ctx)) : contract;
+        const runContract = contract === defaultPageExtractionContract ? createDeterministicExtractionContract({ ladder: gatewayBoundLadderOptions(ctx) }) : contract;
         const result = await runContract.extract({
           url,
           expected: {

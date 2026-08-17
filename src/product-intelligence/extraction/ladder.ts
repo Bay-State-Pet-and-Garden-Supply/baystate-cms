@@ -20,7 +20,7 @@
  */
 import { createRequire } from 'node:module';
 import * as cheerio from 'cheerio';
-import type { PageExtractionResult, ExtractedFieldEvidence, ExtractedImageCandidate } from '../tools/contract';
+import type { PageExtractionResult, ExtractedFieldEvidence, ExtractedIdentifierEvidence, ExtractedImageCandidate } from '../tools/contract';
 import {
   classifyPageIdentity,
   jsonLdLeafProductProof,
@@ -34,6 +34,8 @@ import { isLlmAvailable, type LlmExtractionAdapter } from './llm';
 import type { InteractionAction } from '../../shared/schemas/extraction-worker';
 
 export interface LadderOptions {
+  /** Policy authorization checked before every arbitrary HTTP(S) destination. */
+  networkGate?: (url: string, signal: AbortSignal) => Promise<{ allowed: boolean; code?: string; detail?: string }>;
   fetchPage?: typeof fetchPageHtml;
   fetchShopify?: typeof fetchShopifyProductJson;
   /**
@@ -55,8 +57,8 @@ export interface LadderOptions {
       expected?: { gtin?: string; name?: string; brandHint?: string | null },
     ): Promise<{
       fields: ExtractedFieldEvidence[];
-      images: Array<{ url: string; sourcePath?: string }>;
-      profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered' };
+      images: Array<{ url: string; sourcePath?: string; sourceArtifactId?: string | null; sourceContentHash?: string | null; variantRef?: string }>;
+      profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered'; artifactId?: string | null; contentHash?: string | null };
     } | null>;
   }>;
   /** Layer 5: rendered browser with network capture (injected worker client). */
@@ -73,7 +75,7 @@ export interface LadderRun {
   result: PageExtractionResult;
   layersUsed: string[];
   /** Approved profile selected by the ladder, when one matched. */
-  profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered' } | null;
+  profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered'; artifactId?: string | null; contentHash?: string | null } | null;
 }
 
 /** Digits-only comparison of expected vs extracted GTINs. */
@@ -94,7 +96,15 @@ export async function runExtractionLadder(
   const layersUsed: string[] = [];
   const fields: ExtractedFieldEvidence[] = [];
   const images: ExtractedImageCandidate[] = [];
-  const gtins: Array<{ value: string; method: string; sourcePath?: string }> = [];
+  const gtins: ExtractedIdentifierEvidence[] = [];
+  type SourceMetadata = {
+    artifactId?: string | null;
+    contentHash?: string | null;
+    variantRef?: string | null;
+    profileId?: string | null;
+    profileVersion?: string | number | null;
+  };
+  let pageArtifactId: string | null = null;
   const conflicts: Array<{ field: string; summary: string }> = [];
   const fetchModes: string[] = [];
   const variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }> = [];
@@ -126,6 +136,11 @@ export async function runExtractionLadder(
     }
   };
   const selectedVariantLinkage = (): boolean => variantSignals.some((s) => s.kind === 'variant_match');
+  const authorizeNetwork = async (destination: string): Promise<void> => {
+    if (!options.networkGate) return;
+    const decision = await options.networkGate(destination, signal);
+    if (!decision.allowed) throw new Error(`network denied${decision.code ? `: ${decision.code}` : ''}${decision.detail ? ` (${decision.detail})` : ''}`);
+  };
   // P0-5 round 2: an affirmative contradiction — platform/browser revealing
   // multiple variants (parent_page) or a variant mismatch — invalidates any
   // proof claim. Structured corroboration never survives a layer that
@@ -137,29 +152,36 @@ export async function runExtractionLadder(
   const effectiveSingleVariantProof = (): boolean =>
     (variantProofSource === 'platform' || variantProofSource === 'browser') && !contradictoryVariant();
 
-  const addField = (field: string, value: string | null | undefined, method: string, sourcePath?: string): void => {
+  const pageSource = (): SourceMetadata => ({ artifactId: pageArtifactId, contentHash });
+  const addField = (field: string, value: string | null | undefined, method: string, sourcePath?: string, source: SourceMetadata = pageSource()): void => {
     if (value === null || value === undefined) return;
     const trimmed = String(value).trim();
     if (trimmed.length === 0) return;
-    if (fields.some((f) => f.field === field && f.value === trimmed && f.method === method)) return;
-    fields.push({ field, value: trimmed.slice(0, 2000), method, sourcePath });
+    if (fields.some((f) => f.field === field && f.value === trimmed && f.method === method && f.variantRef === (source.variantRef ?? undefined))) return;
+    fields.push({ field, value: trimmed.slice(0, 2000), method, sourcePath, sourceArtifactId: source.artifactId, sourceContentHash: source.contentHash, sourceProfileId: source.profileId, sourceProfileVersion: source.profileVersion, variantRef: source.variantRef });
   };
 
-  const addGtin = (value: string, method: string, sourcePath?: string): void => {
+  const addGtin = (value: string, method: string, sourcePath?: string, source: SourceMetadata = pageSource()): void => {
     const digits = value.replace(/\D/g, '');
     if (digits.length < 6) return;
-    if (gtins.some((g) => g.value.replace(/\D/g, '') === digits && g.method === method)) return;
+    if (gtins.some((g) => g.value.replace(/\D/g, '') === digits && g.method === method && g.variantRef === (source.variantRef ?? undefined))) return;
     const existing = gtins.find((g) => g.value.replace(/\D/g, '') !== digits);
     if (existing) {
       conflicts.push({ field: 'gtin', summary: `conflicting GTIN evidence: ${existing.value} vs ${digits}` });
     }
-    gtins.push({ value: digits, method, sourcePath });
+    gtins.push({ value: digits, method, sourcePath, sourceArtifactId: source.artifactId, sourceContentHash: source.contentHash, variantRef: source.variantRef });
   };
 
   // Layer 1 + 2: one HTTP fetch, then parse every embedded structured signal.
   let page: FetchedPage;
   try {
+    // A raw default transport is never permitted without an explicit policy
+    // gate. Injected transports are the provider-neutral seam and are expected
+    // to be gateway-bound by their caller.
+    if (!options.fetchPage && !options.networkGate) throw new Error('network policy gate required for default transport');
+    await authorizeNetwork(url);
     page = await (options.fetchPage ?? fetchPageHtml)(url, signal, timeoutMs);
+    if (options.networkGate && page.finalUrl !== url) await authorizeNetwork(page.finalUrl);
   } catch (error) {
     return {
       result: {
@@ -192,6 +214,7 @@ export async function runExtractionLadder(
   fetchModes.push('http', 'structured_data');
   finalUrl = page.finalUrl;
   contentHash = page.contentHash;
+  pageArtifactId = page.artifactId ?? null;
 
   const signals = parseStructuredSignals(page.html);
   // JSON-LD single-offer = corroboration only (never sufficient on its own).
@@ -203,7 +226,7 @@ export async function runExtractionLadder(
     if (product.gtin) addGtin(product.gtin, 'json_ld', 'JSON-LD Product.gtin');
     if (product.size) addField('size', product.size, 'json_ld', 'JSON-LD Product.size');
     for (const image of product.images) {
-      if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: 'JSON-LD Product.image' });
+      if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: 'JSON-LD Product.image', sourceArtifactId: pageArtifactId, sourceContentHash: contentHash });
     }
     productName ??= product.name;
     sku ??= product.sku;
@@ -214,7 +237,7 @@ export async function runExtractionLadder(
   if (signals.metaDescription) addField('description', signals.metaDescription, 'meta', 'meta[name=description]');
   if (signals.ogImage) {
     if (!images.some((i) => i.url === signals.ogImage)) {
-      images.push({ url: signals.ogImage, sourcePath: 'og:image' });
+      images.push({ url: signals.ogImage, sourcePath: 'og:image', sourceArtifactId: pageArtifactId, sourceContentHash: contentHash });
     }
   }
   productName ??= signals.ogTitle ?? signals.metaTitle;
@@ -228,12 +251,17 @@ export async function runExtractionLadder(
       const jsonUrl = shopifyProductUrl(page.finalUrl);
       if (jsonUrl) {
         try {
+          await authorizeNetwork(jsonUrl);
           const productJson = await (options.fetchShopify ?? fetchShopifyProductJson)(jsonUrl, signal, timeoutMs);
           layersUsed.push('shopify');
-          addField('product_name', productJson.title, 'platform_api', 'Shopify product JSON');
-          addField('brand', productJson.vendor ?? undefined, 'platform_api', 'Shopify product JSON vendor');
+          const platformSource: SourceMetadata = {
+            artifactId: productJson.sourceArtifactId,
+            contentHash: productJson.sourceContentHash,
+          };
+          addField('product_name', productJson.title, 'platform_api', productJson.sourcePath ?? 'Shopify product JSON', platformSource);
+          addField('brand', productJson.vendor ?? undefined, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.vendor`, platformSource);
           const gtin = gtinFromAny(productJson as unknown as Record<string, unknown>);
-          if (gtin) addGtin(gtin, 'platform_api', 'Shopify product JSON gtin');
+          if (gtin) addGtin(gtin, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.gtin`, platformSource);
           productName ??= productJson.title;
           brand ??= productJson.vendor ?? null;
           if (productJson.variants.length > 1) {
@@ -249,14 +277,21 @@ export async function runExtractionLadder(
               name: typeof first.title === 'string' ? first.title : undefined,
               sku: typeof first.sku === 'string' ? first.sku : undefined,
             };
-            if (first.sku) addField('sku', first.sku, 'platform_api', 'Shopify product JSON variants[0].sku');
+            if (first.title) addField('variant_name', first.title, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.variants[0].title`, { ...platformSource, variantRef: String(first.id) });
+            if (first.option1) addField('size', first.option1, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.variants[0].option1`, { ...platformSource, variantRef: String(first.id) });
+            if (first.sku) addField('sku', first.sku, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.variants[0].sku`, { ...platformSource, variantRef: String(first.id) });
+            const firstGtin = gtinFromAny(first as unknown as Record<string, unknown>);
+            if (firstGtin) addGtin(firstGtin, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.variants[0].barcode`, { ...platformSource, variantRef: String(first.id) });
           }
           for (const v of productJson.variants) {
-            if (v.sku && v.sku !== first?.sku) addField('variant_sku', v.sku, 'platform_api', 'Shopify product JSON variants');
+            const variantRef = String(v.id);
+            if (v.sku && v.sku !== first?.sku) addField('variant_sku', v.sku, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.variants[].sku`, { ...platformSource, variantRef });
+            const variantGtin = gtinFromAny(v as unknown as Record<string, unknown>);
+            if (variantGtin) addGtin(variantGtin, 'platform_api', `${productJson.sourcePath ?? 'Shopify product JSON'}.variants[].barcode`, { ...platformSource, variantRef });
           }
           for (const image of productJson.images) {
             if (!images.some((i) => i.url === image.src)) {
-              images.push({ url: image.src, sourcePath: 'Shopify product JSON images', variantRef: image.variant_ids[0] !== undefined ? String(image.variant_ids[0]) : undefined });
+              images.push({ url: image.src, sourcePath: `${productJson.sourcePath ?? 'Shopify product JSON'}.images`, sourceArtifactId: platformSource.artifactId, sourceContentHash: platformSource.contentHash, variantRef: image.variant_ids[0] !== undefined ? String(image.variant_ids[0]) : undefined });
             }
           }
         } catch {
@@ -317,7 +352,7 @@ export async function runExtractionLadder(
         productName ??= wc.product.name;
         sku ??= wc.product.sku;
         for (const image of wc.product.images) {
-          if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: 'WooCommerce Store API images' });
+          if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: 'WooCommerce Store API images', sourceArtifactId: pageArtifactId, sourceContentHash: contentHash });
         }
         for (const attr of wc.product.attributes) {
           addField(`attribute_${attr.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`, attr.value, 'platform_api', 'WooCommerce Store API attributes');
@@ -346,7 +381,7 @@ export async function runExtractionLadder(
               .filter((src): src is string => typeof src === 'string')
           : [];
         for (const image of productImages) {
-          if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: '__NEXT_DATA__ product.images' });
+          if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: '__NEXT_DATA__ product.images', sourceArtifactId: pageArtifactId, sourceContentHash: contentHash });
         }
         if (Array.isArray(product.variants)) {
           const firstVariant = product.variants.find((v) => !!v && typeof v === 'object') as Record<string, unknown> | undefined;
@@ -388,7 +423,7 @@ export async function runExtractionLadder(
               .filter((src): src is string => typeof src === 'string')
           : [];
         for (const image of productImages) {
-          if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: '__NUXT__ product.images' });
+          if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: '__NUXT__ product.images', sourceArtifactId: pageArtifactId, sourceContentHash: contentHash });
         }
         if (Array.isArray(product.variants)) {
           const firstVariant = product.variants.find((v) => !!v && typeof v === 'object') as Record<string, unknown> | undefined;
@@ -422,17 +457,27 @@ export async function runExtractionLadder(
   for (const profile of options.profiles ?? []) {
     if (!profile.matches(finalUrl)) continue;
     profileMatched = true;
-    if (profile.id && profile.version !== undefined) selectedProfile = { id: profile.id, version: profile.version, runtime: profile.runtime };
     layersUsed.push('profile_selector');
     fetchModes.push('profile_selector');
     try {
       const out = await profile.extract(finalUrl, signal, timeoutMs, expected);
       if (out) {
-        if (out.profile) selectedProfile = out.profile;
-        for (const f of out.fields) addField(f.field, f.value, 'profile_selector', f.sourcePath);
+        selectedProfile = out.profile ?? (profile.id && profile.version !== undefined ? { id: profile.id, version: profile.version, runtime: profile.runtime } : null);
+        const profileSource: SourceMetadata = {
+          artifactId: out.profile?.artifactId ?? null,
+          contentHash: out.profile?.contentHash ?? null,
+          profileId: selectedProfile?.id ?? null,
+          profileVersion: selectedProfile?.version ?? null,
+        };
+        for (const f of out.fields) addField(f.field, f.value, 'profile_selector', f.sourcePath, {
+          ...profileSource,
+          artifactId: f.sourceArtifactId ?? profileSource.artifactId,
+          contentHash: f.sourceContentHash ?? profileSource.contentHash,
+          variantRef: f.variantRef,
+        });
         for (const image of out.images) {
           if (!images.some((i) => i.url === image.url)) {
-            images.push({ url: image.url, sourcePath: image.sourcePath });
+            images.push({ url: image.url, sourcePath: image.sourcePath, sourceArtifactId: image.sourceArtifactId ?? profileSource.artifactId, sourceContentHash: image.sourceContentHash ?? profileSource.contentHash, variantRef: image.variantRef });
           }
         }
       }

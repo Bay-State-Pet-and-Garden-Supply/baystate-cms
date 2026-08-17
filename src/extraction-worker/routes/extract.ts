@@ -31,6 +31,7 @@ import {
 } from '../../shared/schemas/extraction-worker';
 import { ExtractionDataSchema } from '../../shared/schemas/onboarding';
 import type { ExtractionData } from '../../shared/schemas/onboarding';
+import { sha256Hex } from '../../shared/stable-id';
 
 // ─── HTTP constants (sourced from page-extractor.ts) ──────────────────────────
 
@@ -340,6 +341,7 @@ interface ExtractedFields {
 async function doStaticExtract(request: ExtractRequest): Promise<{
   data: ExtractionData;
   warnings: string[];
+  sourceContentHash?: string | null;
 }> {
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
@@ -587,7 +589,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
     data.customFields = customFields;
   }
 
-  return { data, warnings };
+  return { data, warnings, sourceContentHash: sha256Hex(html) };
 }
 
 // ─── Rendered extraction ──────────────────────────────────────────────────────
@@ -598,6 +600,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
 async function doRenderedExtract(request: ExtractRequest): Promise<{
   data: ExtractionData;
   warnings: string[];
+  sourceContentHash?: string | null;
 }> {
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
@@ -1187,7 +1190,7 @@ export function handleExtract(req: IncomingMessage, res: ServerResponse): void {
 
       // ── Run extraction ────────────────────────────────────────────────
       const isRendered = request.profile.runtime === 'rendered';
-      const { data, warnings } = isRendered
+      const { data, warnings, sourceContentHash } = isRendered
         ? await doRenderedExtract(request)
         : await doStaticExtract(request);
 
@@ -1202,6 +1205,8 @@ export function handleExtract(req: IncomingMessage, res: ServerResponse): void {
         profileRuntime: request.profile.runtime,
         profileId: request.profileId,
         profileVersion: request.profileVersion,
+        sourceContentHash: sourceContentHash ?? null,
+        sourceArtifactId: null,
         warnings,
       };
 

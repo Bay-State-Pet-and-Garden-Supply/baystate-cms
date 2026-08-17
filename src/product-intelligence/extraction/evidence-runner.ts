@@ -9,9 +9,8 @@
  */
 import { sha256Hex } from '../../shared/stable-id';
 import type { FetchedPage } from './platforms';
-import { fetchPageHtml } from './platforms';
 import { runExtractionLadder, type LadderOptions } from './ladder';
-import type { PageExtractionResult } from '../tools/contract';
+import type { PageExtractionContract, PageExtractionResult } from '../tools/contract';
 import {
   ExtractionEvidenceBundleSchema,
   EXTRACTION_EVIDENCE_RUNNER_VERSION,
@@ -111,6 +110,7 @@ function replayPage(artifact: RetainedExtractionArtifact, requestedUrl: string):
     finalUrl: artifact.finalUrl ?? artifact.url ?? requestedUrl,
     status: 200,
     contentHash,
+    artifactId: artifact.artifactId,
   };
 }
 
@@ -135,7 +135,16 @@ export async function runDeterministicExtraction(
     const bundle = safeFailure('cancelled', 'request', 'extraction cancelled', false);
     return { bundle: { ...bundle, requestedUrl, finalUrl: requestedUrl, retrievedAt: now() }, result: emptyResult(requestedUrl, 'cancelled') };
   }
-  if (options.networkGate) {
+  let artifact = request.artifact ?? null;
+  if (!artifact && request.artifactId && options.artifactReader) {
+    try { artifact = await options.artifactReader.load(request.artifactId, signal); } catch { artifact = null; }
+  }
+  if (request.artifactId && !artifact) {
+    const bundle = safeFailure('artifact_unavailable', 'replay', `retained artifact unavailable: ${request.artifactId}`, false);
+    return { bundle: { ...bundle, requestedUrl, finalUrl: requestedUrl, retrievedAt: now(), artifactRefs: [request.artifactId] }, result: emptyResult(requestedUrl, 'artifact unavailable') };
+  }
+
+  if (!artifact && options.networkGate) {
     try {
       const decision = await options.networkGate(requestedUrl, signal);
       if (!decision.allowed) {
@@ -149,34 +158,25 @@ export async function runDeterministicExtraction(
     }
   }
 
-  let artifact = request.artifact ?? null;
-  if (!artifact && request.artifactId && options.artifactReader) {
-    try { artifact = await options.artifactReader.load(request.artifactId, signal); } catch { artifact = null; }
-  }
-  if (request.artifactId && !artifact) {
-    const bundle = safeFailure('artifact_unavailable', 'replay', `retained artifact unavailable: ${request.artifactId}`, false);
-    return { bundle: { ...bundle, requestedUrl, finalUrl: requestedUrl, retrievedAt: now(), artifactRefs: [request.artifactId] }, result: emptyResult(requestedUrl, 'artifact unavailable') };
-  }
-
   try {
     // Never pass model or managed fallback capabilities through this runner.
-    // Browser snapshots and profile callbacks remain deterministic seams; the
-    // caller owns their policy-gateway binding.
-    const ladder: LadderOptions = {
+    // Replay is a strict retained-bytes interpreter: no policy check, profile,
+    // browser, interaction, platform, managed, or model transport survives.
+    const replay = !!artifact;
+    const ladder: LadderOptions = replay ? {
+      fetchPage: async () => replayPage(artifact!, requestedUrl),
+      fetchShopify: async () => { throw new Error('platform artifact not retained'); },
+      profiles: [],
+      browser: null,
+      interaction: null,
+      managedFallback: null,
+      llm: null,
+    } : {
       ...(options.ladder ?? {}),
       llm: null,
       managedFallback: null,
+      networkGate: options.networkGate ?? options.ladder?.networkGate,
     };
-    if (artifact) {
-      const retained = artifact;
-      ladder.fetchPage = async () => replayPage(retained, requestedUrl);
-      // A replayed page must not silently issue a platform API request. The
-      // embedded state/JSON-LD/profile layers remain available from the bytes.
-      ladder.fetchShopify = async () => { throw new Error('platform artifact not retained'); };
-    } else if (options.ladder?.fetchPage === undefined) {
-      // Preserve the existing ladder transport and its bounded response guard.
-      ladder.fetchPage = fetchPageHtml;
-    }
     const { result, layersUsed, profile: selectedProfile } = await runExtractionLadder(
       requestedUrl,
       request.expected ?? {},
@@ -185,7 +185,9 @@ export async function runDeterministicExtraction(
       ladder,
     );
     let bundle = toExtractionEvidenceBundle(result, {
-      profile: request.profile ?? selectedProfile ?? null,
+      // Only the profile path selected and executed by the ladder may attach
+      // profile provenance. Request metadata is never authoritative.
+      profile: selectedProfile ?? null,
       artifactId: artifact?.artifactId ?? request.artifactId ?? result.artifactRef,
       retrievedAt: artifact?.retrievedAt ?? now(),
     });
@@ -216,7 +218,7 @@ export async function runDeterministicExtraction(
           : 'extraction_failed';
     const stage: ExtractionFailure['stage'] = code === 'blocked' || code === 'response_too_large' ? 'retrieval' : artifact ? 'replay' : 'retrieval';
     const bundle = safeFailure(code, stage, message, code === 'blocked');
-    return { bundle: { ...bundle, requestedUrl, finalUrl: requestedUrl, retrievedAt: now(), profile: request.profile ?? null, artifactRefs: artifact ? [artifact.artifactId] : [] }, result: emptyResult(requestedUrl, message) };
+    return { bundle: { ...bundle, requestedUrl, finalUrl: requestedUrl, retrievedAt: now(), profile: null, artifactRefs: artifact ? [artifact.artifactId] : [] }, result: emptyResult(requestedUrl, message) };
   }
 }
 
@@ -226,7 +228,14 @@ export async function replayDeterministicExtraction(
   request: Omit<DeterministicExtractionRequest, 'artifact' | 'artifactId'>,
   options: Omit<DeterministicExtractionRunnerOptions, 'artifactReader'> = {},
 ): Promise<DeterministicExtractionRun> {
-  return runDeterministicExtraction({ ...request, artifact }, options);
+  if (!artifact || typeof artifact.content !== 'string' || !artifact.artifactId) {
+    const url = request.url;
+    const bundle = safeFailure('artifact_unavailable', 'replay', 'retained artifact bytes unavailable', false);
+    return { bundle: { ...bundle, requestedUrl: url, finalUrl: url, retrievedAt: (options.now ?? (() => new Date().toISOString()))() }, result: emptyResult(url, 'artifact unavailable') };
+  }
+  // Deliberately discard all caller transports/capabilities. The artifact is
+  // the only input replay may interpret.
+  return runDeterministicExtraction({ ...request, artifact }, { now: options.now });
 }
 
 function emptyResult(url: string, reason: string): PageExtractionResult {
@@ -257,6 +266,23 @@ export class DeterministicExtractionRunner {
   run(request: DeterministicExtractionRequest): Promise<DeterministicExtractionRun> {
     return runDeterministicExtraction(request, this.options);
   }
+}
+
+/** Provider-neutral production contract backed by the evidence runner. */
+export function createDeterministicExtractionContract(options: DeterministicExtractionRunnerOptions = {}): PageExtractionContract {
+  return {
+    name: 'deterministic_extraction_evidence',
+    version: EXTRACTION_EVIDENCE_RUNNER_VERSION,
+    async extract(request) {
+      const run = await runExtractionEvidence({
+        url: request.url,
+        expected: request.expected,
+        signal: request.signal,
+        timeoutMs: request.timeoutMs,
+      }, options);
+      return run.result;
+    },
+  };
 }
 
 /** Naming alias used by provider-neutral extraction callers. */

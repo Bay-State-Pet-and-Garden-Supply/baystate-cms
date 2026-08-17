@@ -470,6 +470,27 @@ describe('ladder contract adapter + helpers', () => {
     expect(fetchPage).not.toHaveBeenCalled();
   });
 
+  it('fails closed before the default transport when the network policy denies a destination', async () => {
+    const fetchMock = vi.fn(async () => new Response('<html>must not fetch</html>', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const gate = vi.fn(async () => ({ allowed: false, code: 'private_ip', detail: 'link-local destination' }));
+      const { result, layersUsed } = await runExtractionLadder(
+        'http://169.254.169.254/latest/meta-data',
+        {},
+        new AbortController().signal,
+        5000,
+        { networkGate: gate },
+      );
+      expect(result.conflicts[0]).toMatchObject({ field: '_retrieval' });
+      expect(layersUsed).toEqual(['http']);
+      expect(gate).toHaveBeenCalledWith('http://169.254.169.254/latest/meta-data', expect.any(AbortSignal));
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('fetchPageHtml records the final URL, status, and content hash', async () => {
     const fetchMock = vi.fn(async () => new Response('<html>fixture</html>', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);

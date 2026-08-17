@@ -62,6 +62,10 @@ function lazySnapshotFn(sourcesAllowlist: string[] | undefined): BrowserSnapshot
       if (!result.ok) throw new Error(result.error);
       const data = result.data as {
         finalUrl: string;
+        htmlRef?: string | null;
+        networkRef?: string | null;
+        artifactId?: string | null;
+        contentHash?: string | null;
         jsonLd?: Array<Record<string, unknown>>;
         embeddedProductData?: Array<Record<string, unknown>>;
         imageCandidates?: string[];
@@ -70,6 +74,9 @@ function lazySnapshotFn(sourcesAllowlist: string[] | undefined): BrowserSnapshot
           status?: number | null;
           responseContentType?: string | null;
           jsonBody?: unknown;
+          artifactId?: string | null;
+          contentHash?: string | null;
+          sourcePath?: string;
         }>;
         interaction?: {
           performed?: boolean;
@@ -82,6 +89,8 @@ function lazySnapshotFn(sourcesAllowlist: string[] | undefined): BrowserSnapshot
       return {
         url: request.url,
         finalUrl: data.finalUrl ?? request.url,
+        artifactId: data.artifactId ?? data.htmlRef ?? null,
+        contentHash: data.contentHash ?? null,
         jsonLd: data.jsonLd ?? [],
         embeddedProductData: data.embeddedProductData ?? [],
         imageCandidates: data.imageCandidates ?? [],
@@ -90,6 +99,9 @@ function lazySnapshotFn(sourcesAllowlist: string[] | undefined): BrowserSnapshot
           status: response.status ?? null,
           responseContentType: response.responseContentType ?? null,
           jsonBody: response.jsonBody ?? null,
+          artifactId: response.artifactId ?? null,
+          contentHash: response.contentHash ?? null,
+          sourcePath: response.sourcePath,
         })),
         interaction: data.interaction
           ? {
@@ -142,8 +154,8 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
         expected?: { gtin?: string; name?: string; brandHint?: string | null },
       ): Promise<{
         fields: ExtractedFieldEvidence[];
-        images: Array<{ url: string; sourcePath?: string }>;
-        profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered' };
+        images: Array<{ url: string; sourcePath?: string; sourceArtifactId?: string | null; sourceContentHash?: string | null; variantRef?: string }>;
+        profile?: { id: string; version: string | number; runtime?: 'static' | 'rendered'; artifactId?: string | null; contentHash?: string | null };
       } | null> {
         if (signal.aborted) return null;
         try {
@@ -162,7 +174,7 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
               sourceUrl: string;
               profile: typeof profile;
               expected: { name: string; brandHint?: string | null; price?: string | null };
-            }) => Promise<{ ok: boolean; data?: import('../../shared/schemas/onboarding').ExtractionData; error?: string }>;
+            }) => Promise<{ ok: boolean; data?: import('../../shared/schemas/onboarding').ExtractionData; error?: string; sourceContentHash?: string | null; sourceArtifactId?: string | null }>;
           };
           if (!runner.runProfileExtraction) return null;
 
@@ -263,6 +275,8 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
               id: profile.id,
               version: profile.updatedAt ? Math.floor(new Date(profile.updatedAt).getTime() / 1000) : 0,
               runtime: profile.runtime,
+              artifactId: res.sourceArtifactId ?? null,
+              contentHash: res.sourceContentHash ?? null,
             },
           };
         } catch {

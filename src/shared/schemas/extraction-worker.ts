@@ -269,6 +269,9 @@ export const ExtractResponseSchema = z.object({
   profileRuntime: z.enum(['static', 'rendered']),
   profileId: z.string(),
   profileVersion: z.number().int(),
+  /** Hash of the exact bytes executed by the profile runner, when retained. */
+  sourceContentHash: z.string().regex(/^[0-9a-f]{64}$/).nullable().default(null),
+  sourceArtifactId: z.string().min(1).nullable().default(null),
   warnings: z.array(z.string()).default(() => []),
 });
 

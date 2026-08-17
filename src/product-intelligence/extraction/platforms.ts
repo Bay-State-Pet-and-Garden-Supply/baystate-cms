@@ -30,7 +30,10 @@ export interface FetchedPage {
   html: string;
   finalUrl: string;
   status: number;
+  /** SHA-256 of these exact retained page bytes. */
   contentHash: string;
+  /** Durable artifact containing these exact page bytes, when retained. */
+  artifactId?: string | null;
 }
 
 /**
@@ -223,6 +226,11 @@ export function parseStructuredSignals(html: string): StructuredSignals {
 }
 
 export interface ShopifyProductJson {
+  /** Provenance belongs to this payload, not the HTML page that discovered it. */
+  sourceArtifactId?: string | null;
+  sourceContentHash?: string | null;
+  sourcePath?: string;
+  sourceUrl?: string;
   id: string | number;
   title: string;
   vendor: string | null;
@@ -232,6 +240,8 @@ export interface ShopifyProductJson {
     id: string | number;
     title: string;
     sku: string | null;
+    /** Variant GTIN/barcode when the platform exposes one. */
+    barcode?: string | null;
     available: boolean | null;
     price: string | null;
     option1: string | null;
@@ -254,23 +264,30 @@ export function shopifyProductUrl(productUrl: string): string | null {
   }
 }
 
-async function fetchJson(url: string, signal: AbortSignal, timeoutMs: number, fetchFn: NetworkFetch = fetch): Promise<unknown> {
+async function fetchJson(url: string, signal: AbortSignal, timeoutMs: number, fetchFn: NetworkFetch = fetch): Promise<{ value: unknown; contentHash: string; finalUrl: string }> {
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const response = await fetchFn(url, { headers: HTTP_EXTRACTION_HEADERS, redirect: 'follow', signal: combined });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} for ${url}`);
   }
-  return response.json();
+  const body = await response.text();
+  return { value: JSON.parse(body), contentHash: sha256Hex(body), finalUrl: response.url || url };
 }
 
 /** Fetch Shopify's public product JSON (deterministic platform API). */
 export async function fetchShopifyProductJson(url: string, signal: AbortSignal, timeoutMs: number, fetchFn: NetworkFetch = fetch): Promise<ShopifyProductJson> {
-  const parsed = (await fetchJson(url, signal, timeoutMs, fetchFn)) as Partial<ShopifyProductJson>;
+  const fetched = await fetchJson(url, signal, timeoutMs, fetchFn);
+  const parsed = fetched.value as Partial<ShopifyProductJson>;
   if (typeof parsed.title !== 'string' || !Array.isArray(parsed.variants)) {
     throw new Error('Shopify product JSON missing expected fields');
   }
-  return parsed as ShopifyProductJson;
+  return {
+    ...parsed as ShopifyProductJson,
+    sourceContentHash: fetched.contentHash,
+    sourcePath: 'Shopify product JSON payload',
+    sourceUrl: fetched.finalUrl,
+  };
 }
 
 export function parseWooCommerceStoreApi(
@@ -427,7 +444,7 @@ export function parseNuxtData(html: string): NuxtData {
 
 /** Normalize a GTIN-ish value from any product payload. */
 export function gtinFromAny(obj: Record<string, unknown>): string | null {
-  const raw = obj.gtin ?? obj.GTIN ?? obj.gtin13 ?? obj.gtin12 ?? obj.gtin8 ?? obj.gtin14 ?? obj.ean ?? obj.upc;
+  const raw = obj.gtin ?? obj.GTIN ?? obj.gtin13 ?? obj.gtin12 ?? obj.gtin8 ?? obj.gtin14 ?? obj.ean ?? obj.upc ?? obj.barcode;
   if (raw === null || raw === undefined) return null;
   const digits = String(raw).replace(/\D/g, '');
   return digits.length >= 8 && digits.length <= 14 ? digits : null;
