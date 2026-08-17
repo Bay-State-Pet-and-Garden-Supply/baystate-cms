@@ -1,1 +1,0 @@
-All clean. Here's the acceptance report:

@@ -1,1 +1,0 @@
-All edits complete and validated. Here is the structured acceptance report.

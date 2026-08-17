@@ -1,1 +1,0 @@
-No type errors in pick-element.ts. The overlay rewrite is correct. Here's the acceptance report:

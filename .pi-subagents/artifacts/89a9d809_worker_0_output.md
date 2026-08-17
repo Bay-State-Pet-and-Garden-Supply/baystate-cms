@@ -1,1 +1,0 @@
-Everything is in place. Here's the final acceptance report for all fixes:

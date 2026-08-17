@@ -1,1 +1,0 @@
-Typecheck: zero errors. Here is the structured acceptance report.

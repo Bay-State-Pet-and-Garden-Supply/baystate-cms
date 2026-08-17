@@ -1,1 +1,0 @@
-All changes complete and validated. Here's the structured acceptance report.

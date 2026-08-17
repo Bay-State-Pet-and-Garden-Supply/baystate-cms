@@ -1,1 +1,0 @@
-All changes are verified. No staged files, no unexpected modifications — only the two target files were changed.

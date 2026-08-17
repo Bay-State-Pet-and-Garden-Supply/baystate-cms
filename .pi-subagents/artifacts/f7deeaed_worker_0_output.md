@@ -1,3 +1,0 @@
-The guard is now at the top of `upsertApiKey` and applies to BOTH the INSERT and UPDATE paths, even though the existing UPDATE branch has its own equivalent guard below. The top-level guard makes the rule explicit and prevents the redacted key from ever reaching either branch.
-
-All three fixes are in place. Let me return the structured acceptance report. All three fixes are in place and typecheck passes. Here's the structured acceptance report:

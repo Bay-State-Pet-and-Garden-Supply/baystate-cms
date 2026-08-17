@@ -28,16 +28,21 @@ storage/
 .recent-workspaces.json
 
 # ── Agent tooling artifacts & working docs ────────────────────────────────────
+.agents/
+skills-lock.json
 .pi-subagents/
 .pi/
 .fallow/
-.agents/skills/impeccable/
 .codex/
 .impeccable/
 HANDOFF.md
+worker-handoff.md
 .handoff/
 pi-session-*.html
+scratch/
+test-*-workspace/
 
 # ── Parallel-session working docs (excess — never committed) ───────────────
 subagents-reports/
-.analysis/adr0017-review-bundle.md
+.analysis/
+
