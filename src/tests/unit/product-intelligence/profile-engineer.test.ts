@@ -57,10 +57,29 @@ describe('Profile Engineer specialist (#51)', () => {
     const result = await specialist({
       checkProfile: () => ({ healthy: true }),
       workflow: { claim },
-    }).engineer({ domain: 'www.acme.example', activeProfile: { version: 3, selectors: { titleSelector: 'h1' }, runtime: 'rendered' }, samples: [sample('https://acme.example/p')] }, context);
+    }).engineer({ domain: 'www.acme.example', activeProfile: { version: 3, selectors: { titleSelector: 'h1' }, runtime: 'rendered' }, samples: [sample('https://acme.example/p1'), sample('https://acme.example/p2')] }, context);
     expect('outcome' in result && result.outcome).toBe('abstained');
     expect('abstention' in result && result.abstention?.reason).toBe('healthy_profile_reused');
     expect(claim).not.toHaveBeenCalled();
+  });
+
+  it('does not treat fallback extraction as an active-profile success', async () => {
+    const extraction: PageExtractionContract = {
+      name: 'fallback-only',
+      version: '1.0.0',
+      extract: async ({ url }) => ({
+        requestedUrl: url, finalUrl: url, fetchModes: ['json_ld'], contentHash: 'a'.repeat(64), artifactRef: null,
+        fields: [{ field: 'product_name', value: 'ACME Chicken Broth 16 oz', method: 'json_ld', sourcePath: 'jsonld:name' }],
+        gtins: [], sku: null, brand: null, productName: 'ACME Chicken Broth 16 oz', variant: null, size: null, packCount: null,
+        images: [], conflicts: [], identityStatus: 'exact_match', identityReasons: [], deterministicOnly: true,
+      }),
+    };
+    const health = await evaluateExistingProfile(
+      { version: 1, selectors: { titleSelector: '.missing-title' }, runtime: 'static' },
+      [sample('https://acme.example/p1'), sample('https://acme.example/p2')], extraction,
+      new AbortController().signal, 1000,
+    );
+    expect(health).toMatchObject({ healthy: false, reason: 'profile_incompatible:https://acme.example/p1' });
   });
 
   it('uses JSON-LD/platform evidence before proposing selectors and preserves exact artifacts', async () => {
@@ -108,11 +127,29 @@ describe('Profile Engineer specialist (#51)', () => {
   it('fails closed on wrong-variant samples while retaining their URL and artifact evidence', async () => {
     const result = await specialist().engineer({
       domain: 'variant.example',
-      samples: [sample('https://variant.example/wrong', { signals: { selectorOnly: true, wrongVariant: true }, expectedVariant: 'wrong' })],
+      samples: [
+        sample('https://variant.example/wrong', { signals: { selectorOnly: true, wrongVariant: true }, expectedVariant: 'wrong' }),
+        sample('https://variant.example/wrong-2', { signals: { selectorOnly: true, wrongVariant: true }, expectedVariant: 'wrong' }),
+      ],
     }, context);
     if (!('artifact' in result)) throw new Error('expected proposal output');
     expect(result.output.validation[0]).toMatchObject({ url: 'https://variant.example/wrong', artifactRefs: ['artifact:https://variant.example/wrong'], identityStatus: 'wrong_variant', overall: 'fail' });
     expect(result.output.validation[0].fields.titleSelector.failureReason).toMatch(/wrong-variant/i);
+  });
+
+  it('fails closed when fewer than two representative pages are supplied', async () => {
+    const result = await specialist().engineer({ domain: 'small.example', samples: [sample('https://small.example/only')] }, context);
+    expect(result).toMatchObject({ outcome: 'failed', failure: { code: 'invalid_input' } });
+  });
+
+  it('does not report success when the completion lease guard is lost', async () => {
+    const result = await specialist({
+      workflow: {
+        claim: () => ({ acquired: true, workflowId: 'workflow-1' }),
+        complete: () => ({ applied: false, reason: 'workflow_lease_lost' }),
+      },
+    }).engineer({ domain: 'lease.example', samples: [sample('https://lease.example/p1'), sample('https://lease.example/p2')] }, context);
+    expect(result).toMatchObject({ outcome: 'abstained', abstention: { reason: 'workflow_lease_lost' } });
   });
 
   it('registers versioned input/output payload schemas', async () => {

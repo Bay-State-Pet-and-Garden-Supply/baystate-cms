@@ -4259,24 +4259,52 @@ export function runMigrations(): void {
   const profileEngineerVersion = db
     .query('SELECT value FROM app_meta WHERE key = ?')
     .get('profile_engineer_workflow_schema_version') as { value: string } | undefined;
+  const workflowColumns = db.query('PRAGMA table_info(profile_engineer_domain_workflows)').all() as Array<{ name: string }>;
+  const hasWorkflowTable = workflowColumns.length > 0;
+  const hasWorkspaceColumn = workflowColumns.some((column) => column.name === 'workspace_id');
+  if (!hasWorkflowTable || !hasWorkspaceColumn) {
+    const legacyWorkspace = (db.query('SELECT id FROM workspace ORDER BY rowid ASC LIMIT 1').get() as { id: string } | undefined)?.id ?? 'legacy';
+    db.transaction(() => {
+      if (hasWorkflowTable) db.exec('ALTER TABLE profile_engineer_domain_workflows RENAME TO profile_engineer_domain_workflows_legacy');
+      db.exec(`
+        CREATE TABLE profile_engineer_domain_workflows (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          domain TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+          run_id TEXT NOT NULL,
+          lease_expires_at TEXT,
+          generation_id TEXT,
+          revision_id TEXT,
+          artifact_json TEXT,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(workspace_id, domain)
+        );
+      `);
+      if (hasWorkflowTable) {
+        db.query(`INSERT INTO profile_engineer_domain_workflows
+          (id, workspace_id, domain, status, run_id, lease_expires_at, generation_id, artifact_json, error_message, created_at, updated_at)
+          SELECT id, ?, domain, status, run_id, lease_expires_at, generation_id, artifact_json, error_message, created_at, updated_at
+          FROM profile_engineer_domain_workflows_legacy`).run(legacyWorkspace);
+        db.exec('DROP TABLE profile_engineer_domain_workflows_legacy');
+      }
+    })();
+  } else {
+    const hasRevisionColumn = workflowColumns.some((column) => column.name === 'revision_id');
+    if (!hasRevisionColumn) db.exec('ALTER TABLE profile_engineer_domain_workflows ADD COLUMN revision_id TEXT');
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_profile_engineer_workflows_status
+      ON profile_engineer_domain_workflows(workspace_id, status, lease_expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_engineer_workflows_workspace_domain
+      ON profile_engineer_domain_workflows(workspace_id, domain);
+  `);
   if (!profileEngineerVersion) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS profile_engineer_domain_workflows (
-        id TEXT PRIMARY KEY,
-        domain TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
-        run_id TEXT NOT NULL,
-        lease_expires_at TEXT,
-        generation_id TEXT,
-        artifact_json TEXT,
-        error_message TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_profile_engineer_workflows_status
-        ON profile_engineer_domain_workflows(status, lease_expires_at);
-    `);
-    db.exec("INSERT INTO app_meta (key, value) VALUES ('profile_engineer_workflow_schema_version', '1');");
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('profile_engineer_workflow_schema_version', '2');");
+  } else if (Number(profileEngineerVersion.value) < 2) {
+    db.query("UPDATE app_meta SET value = '2' WHERE key = 'profile_engineer_workflow_schema_version'").run();
   }
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as

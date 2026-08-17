@@ -19,6 +19,7 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/29
  */
 import { createRequire } from 'node:module';
+import * as cheerio from 'cheerio';
 import type { PageExtractionResult, ExtractedFieldEvidence, ExtractedImageCandidate } from '../tools/contract';
 import {
   classifyPageIdentity,
@@ -700,9 +701,71 @@ export function createLadderExtractionContract(options: LadderOptions = {}): Pag
       expected?: { gtin?: string; name?: string; brandHint?: string | null };
       signal: AbortSignal;
       timeoutMs: number;
+      profile?: { selectors: Record<string, string | null>; runtime: 'static' | 'rendered' };
     }): Promise<PageExtractionResult> {
       const { result } = await runExtractionLadder(request.url, request.expected ?? {}, request.signal, request.timeoutMs, options);
       return result;
+    },
+    async extractWithProfile(request: {
+      url: string;
+      expected?: { gtin?: string; name?: string; brandHint?: string | null };
+      signal: AbortSignal;
+      timeoutMs: number;
+      profile: { selectors: Record<string, string | null>; runtime: 'static' | 'rendered' };
+    }): Promise<PageExtractionResult> {
+      // This is the deterministic profile-runner seam: unlike `extract`, it
+      // never invokes the ladder's fallback layers and only reports values
+      // selected by the supplied profile.
+      const page = await (options.fetchPage ?? fetchPageHtml)(request.url, request.signal, request.timeoutMs);
+      const $ = cheerio.load(page.html);
+      const selector = (key: string): string | null => request.profile.selectors[key] ?? null;
+      const text = (key: string): string | null => {
+        const sel = selector(key);
+        if (!sel) return null;
+        try { return $(sel).first().text().trim() || null; } catch { return null; }
+      };
+      const productName = text('titleSelector');
+      const fields: ExtractedFieldEvidence[] = productName
+        ? [{ field: 'product_name', value: productName, method: 'profile_selector', sourcePath: selector('titleSelector') ?? undefined }]
+        : [];
+      const description = text('descriptionSelector');
+      if (description) fields.push({ field: 'description', value: description, method: 'profile_selector', sourcePath: selector('descriptionSelector') ?? undefined });
+      const brand = text('brandSelector');
+      if (brand) fields.push({ field: 'brand', value: brand, method: 'profile_selector', sourcePath: selector('brandSelector') ?? undefined });
+      const images: ExtractedImageCandidate[] = [];
+      const imageSelector = selector('imagesSelector');
+      if (imageSelector) {
+        try {
+          $(imageSelector).find('img').each((_index, element) => {
+            const src = $(element).attr('src') ?? $(element).attr('data-src');
+            if (src) images.push({ url: new URL(src, page.finalUrl).toString(), sourcePath: imageSelector });
+          });
+        } catch { /* invalid selectors are an incompatible profile */ }
+      }
+      const expectedName = request.expected?.name?.trim().toLowerCase();
+      const identityStatus = productName && expectedName && productName.toLowerCase().includes(expectedName)
+        ? 'exact_match' as const
+        : productName ? 'probable_match' as const : 'insufficient_evidence' as const;
+      return {
+        requestedUrl: request.url,
+        finalUrl: page.finalUrl,
+        fetchModes: ['profile_selector'],
+        contentHash: null,
+        artifactRef: null,
+        fields,
+        gtins: [],
+        sku: null,
+        brand,
+        productName,
+        variant: null,
+        size: null,
+        packCount: null,
+        images,
+        conflicts: [],
+        identityStatus,
+        identityReasons: productName ? [] : ['active profile title selector produced no value'],
+        deterministicOnly: true,
+      };
     },
   };
 }

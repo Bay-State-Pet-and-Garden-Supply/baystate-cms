@@ -88,7 +88,9 @@ export const ProfileEngineerInputSchema = z.object({
     selectors: boundedRecord(z.string().nullable()).default({}),
     runtime: z.enum(['static', 'rendered']).default('rendered'),
   }).nullable().default(null),
-  samples: z.array(ProfileEngineerSampleSchema).min(1).max(MAX_SAMPLES),
+  // Two independent pages are the minimum evidence needed to distinguish a
+  // working profile from a selector that only happens to match one fixture.
+  samples: z.array(ProfileEngineerSampleSchema).min(2).max(MAX_SAMPLES),
   requiredFields: z.array(z.string().trim().min(1).max(128)).max(MAX_FIELDS).default(['titleSelector']),
 }).strict();
 export type ProfileEngineerInput = z.infer<typeof ProfileEngineerInputSchema>;
@@ -156,10 +158,17 @@ export interface ProfileEngineerHealth {
   reason?: string;
 }
 
+export interface ProfileEngineerWorkflowMutation {
+  applied: boolean;
+  reason?: string;
+  generationId?: string | null;
+  revisionId?: string | null;
+}
+
 export interface ProfileEngineerWorkflowLock {
-  claim(domain: string, runId: string): Promise<{ acquired: boolean; workflowId: string; reason?: string }> | { acquired: boolean; workflowId: string; reason?: string };
-  complete?(workflowId: string, runId: string, artifactJson?: string): Promise<void> | void;
-  fail?(workflowId: string, runId: string, reason: string): Promise<void> | void;
+  claim(domain: string, runId: string, workspaceId: string): Promise<{ acquired: boolean; workflowId: string; reason?: string }> | { acquired: boolean; workflowId: string; reason?: string };
+  complete?(workflowId: string, runId: string, artifactJson?: string): Promise<ProfileEngineerWorkflowMutation> | ProfileEngineerWorkflowMutation;
+  fail?(workflowId: string, runId: string, reason: string): Promise<ProfileEngineerWorkflowMutation> | ProfileEngineerWorkflowMutation;
 }
 
 export interface ProfileEngineerDependencies {
@@ -276,17 +285,31 @@ export async function evaluateExistingProfile(
 ): Promise<ProfileEngineerHealth> {
   if (!profile) return { healthy: false, reason: 'profile_missing' };
   if (samples.length === 0) return { healthy: false, reason: 'no_representative_samples' };
+  const profileRequest = {
+    selectors: profile.selectors,
+    runtime: profile.runtime,
+  };
   for (const sample of samples) {
     if (signal.aborted) return { healthy: false, reason: 'cancelled' };
     try {
-      const result = await extraction.extract({
+      const request = {
         url: sample.url,
         expected: { name: sample.expectedName ?? undefined, gtin: sample.expectedGtin ?? undefined },
         signal,
         timeoutMs,
-      });
-      const title = result.productName ?? result.fields.find((field) => field.field === 'product_name')?.value;
-      if (!title || result.identityStatus === 'wrong_variant' || result.identityStatus === 'conflicting_identity') {
+        profile: profileRequest,
+      };
+      // Never use the generic ladder for this check when an explicit profile
+      // runner is available. The fallback path is accepted only when the
+      // returned evidence proves that the supplied profile actually ran.
+      const result = extraction.extractWithProfile
+        ? await extraction.extractWithProfile(request)
+        : await extraction.extract(request);
+      const profileFields = result.fields.filter((field) => field.method === 'profile_selector');
+      const title = profileFields.find((field) => field.field === 'product_name')?.value
+        ?? profileFields.find((field) => field.field === 'title')?.value;
+      const usedProfile = result.fetchModes.includes('profile_selector') && profileFields.length > 0;
+      if (!usedProfile || !title?.trim() || result.identityStatus === 'wrong_variant' || result.identityStatus === 'conflicting_identity') {
         return { healthy: false, reason: `profile_incompatible:${sample.url}` };
       }
     } catch {
@@ -360,7 +383,7 @@ export class ProfileEngineerSpecialist {
     this.dependencies = dependencies;
     this.options = {
       codeCommit: options.codeCommit ?? null,
-      minimumRepresentativeSamples: Math.max(1, Math.min(MAX_SAMPLES, options.minimumRepresentativeSamples ?? 2)),
+      minimumRepresentativeSamples: Math.max(2, Math.min(MAX_SAMPLES, options.minimumRepresentativeSamples ?? 2)),
     };
   }
 
@@ -373,6 +396,15 @@ export class ProfileEngineerSpecialist {
     const parsed = ProfileEngineerInputSchema.safeParse(rawInput);
     if (!parsed.success) return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'failed', failure: { code: 'invalid_input', message: parsed.error.message }, durationMs: 0 };
     const startedAt = Date.now();
+    const minimumSamples = this.options.minimumRepresentativeSamples;
+    if (parsed.data.samples.length < minimumSamples) {
+      return {
+        specialist: PROFILE_ENGINEER_SPECIALIST_NAME,
+        outcome: 'failed',
+        failure: { code: 'invalid_input', message: `at least ${minimumSamples} representative pages are required` },
+        durationMs: 0,
+      };
+    }
     const input = { ...parsed.data, domain: normalizeDomain(parsed.data.domain) };
 
     if (input.activeProfile) {
@@ -392,7 +424,7 @@ export class ProfileEngineerSpecialist {
 
     let lock: { acquired: boolean; workflowId: string; reason?: string } | null = null;
     if (this.dependencies.workflow) {
-      lock = await this.dependencies.workflow.claim(input.domain, context.runId);
+      lock = await this.dependencies.workflow.claim(input.domain, context.runId, context.workspaceId);
       if (!lock.acquired) return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'abstained', abstention: { reason: lock.reason ?? 'domain_workflow_already_running', actionableNextStep: 'Reuse the existing domain workflow result or wait for its validation.', targets: [input.domain] }, durationMs: Date.now() - startedAt };
     }
 
@@ -413,13 +445,40 @@ export class ProfileEngineerSpecialist {
         },
       });
       if (lock && this.dependencies.workflow?.complete) {
-        await this.dependencies.workflow.complete(lock.workflowId, context.runId, serializeSpecialistArtifact(artifact));
+        const completion = await this.dependencies.workflow.complete(lock.workflowId, context.runId, serializeSpecialistArtifact(artifact));
+        if (!completion.applied) {
+          return {
+            specialist: PROFILE_ENGINEER_SPECIALIST_NAME,
+            outcome: 'abstained',
+            abstention: {
+              reason: completion.reason ?? 'workflow_lease_lost',
+              actionableNextStep: 'Retry the profile proposal under a newly acquired workflow lease.',
+              targets: [input.domain],
+            },
+            durationMs: Date.now() - startedAt,
+          };
+        }
       }
       const result = SpecialistResultSchema.parse({ specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'succeeded', output: artifact, durationMs });
       return { output: proposal, artifact, result };
     } catch (error) {
-      if (lock && this.dependencies.workflow?.fail) await this.dependencies.workflow.fail(lock.workflowId, context.runId, error instanceof Error ? error.message : String(error));
-      return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'failed', failure: { code: 'capability_error', message: error instanceof Error ? error.message.slice(0, 4096) : String(error).slice(0, 4096) }, durationMs: Date.now() - startedAt };
+      const message = error instanceof Error ? error.message : String(error);
+      if (lock && this.dependencies.workflow?.fail) {
+        const failure = await this.dependencies.workflow.fail(lock.workflowId, context.runId, message);
+        if (!failure.applied) {
+          return {
+            specialist: PROFILE_ENGINEER_SPECIALIST_NAME,
+            outcome: 'abstained',
+            abstention: {
+              reason: failure.reason ?? 'workflow_lease_lost',
+              actionableNextStep: 'Retry the profile proposal under a newly acquired workflow lease.',
+              targets: [input.domain],
+            },
+            durationMs: Date.now() - startedAt,
+          };
+        }
+      }
+      return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'failed', failure: { code: 'capability_error', message: message.slice(0, 4096) }, durationMs: Date.now() - startedAt };
     }
   }
 }

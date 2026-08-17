@@ -247,6 +247,25 @@ export interface PageExtractionContract {
     expected?: { gtin?: string; name?: string; brandHint?: string | null };
     signal: AbortSignal;
     timeoutMs: number;
+    /** Optional approved profile to apply. Implementations that omit profile
+     * support must not be used to validate an active profile. */
+    profile?: {
+      selectors: Record<string, string | null>;
+      runtime: 'static' | 'rendered';
+    };
+  }): Promise<PageExtractionResult>;
+  /** Explicit profile-runner seam. This is intentionally separate from the
+   * fallback ladder so a compatibility probe cannot silently pass on JSON-LD,
+   * heuristics, browser, or LLM extraction. */
+  extractWithProfile?(request: {
+    url: string;
+    expected?: { gtin?: string; name?: string; brandHint?: string | null };
+    signal: AbortSignal;
+    timeoutMs: number;
+    profile: {
+      selectors: Record<string, string | null>;
+      runtime: 'static' | 'rendered';
+    };
   }): Promise<PageExtractionResult>;
 }
 
