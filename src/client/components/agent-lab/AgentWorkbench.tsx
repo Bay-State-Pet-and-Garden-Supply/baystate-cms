@@ -26,8 +26,8 @@ export function AgentWorkbench({
   flags: _flags,
   onVersionUpdated,
 }: AgentWorkbenchProps) {
-  const [gtin, setGtin] = useState('076280014028');
-  const [registerName, setRegisterName] = useState('BLUE BUFF CAN DOG 12.5OZ');
+  const [sku, setSku] = useState('BLUE-076280014028');
+  const [name, setName] = useState('BLUE BUFF CAN DOG 12.5OZ');
   const [brandHint, setBrandHint] = useState('Blue Buffalo');
   const [departmentHint, setDepartmentHint] = useState('Dog Food');
   const [price, setPrice] = useState('3.49');
@@ -53,8 +53,8 @@ export function AgentWorkbench({
 
   async function handleLaunchRun(e: React.FormEvent) {
     e.preventDefault();
-    if (!gtin.trim()) {
-      setError('Please provide a GTIN or UPC barcode');
+    if (!sku.trim() || !name.trim() || !price.trim()) {
+      setError('Please provide SKU, product name, and price');
       return;
     }
 
@@ -64,8 +64,8 @@ export function AgentWorkbench({
 
     try {
       const res = await createPiRun({
-        gtin: gtin.trim(),
-        registerName: registerName.trim(),
+        sku: sku.trim(),
+        name: name.trim(),
         brandHint: brandHint.trim() || undefined,
         departmentHint: departmentHint.trim() || undefined,
         price: price.trim() || undefined,
@@ -166,20 +166,20 @@ export function AgentWorkbench({
         <form onSubmit={handleLaunchRun}>
           <div style={styles.formGrid}>
             <div>
-              <label style={styles.label}>UPC / GTIN *</label>
+              <label style={styles.label}>Supplier SKU *</label>
               <input
                 style={styles.input}
-                value={gtin}
-                onChange={(e) => setGtin(e.target.value)}
-                placeholder="e.g. 076280014028"
+                value={sku}
+                onChange={(e) => setSku(e.target.value)}
+                placeholder="e.g. BLUE-076280014028"
               />
             </div>
             <div>
-              <label style={styles.label}>Register Name *</label>
+              <label style={styles.label}>Product Name *</label>
               <input
                 style={styles.input}
-                value={registerName}
-                onChange={(e) => setRegisterName(e.target.value)}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. BLUE BUFF CAN DOG 12.5OZ"
               />
             </div>
@@ -294,7 +294,7 @@ export function AgentWorkbench({
             Ready to test product research
           </div>
           <div style={{ fontSize: 13, maxWidth: 440, margin: '0 auto' }}>
-            Enter a UPC or product title above and click <strong>Run Workbench Research</strong> to execute a live research session and inspect extracted attributes.
+            Enter a supplier SKU, product name, and price above and click <strong>Run Workbench Research</strong> to execute a live research session. GTIN/UPC is discovered evidence.
           </div>
         </div>
       )}
@@ -310,8 +310,8 @@ export function AgentWorkbench({
           runId={activeRunId}
           versionId={selectedVersionId}
           originalResultHash="mock-hash"
-          initialGtin={gtin}
-          initialRegisterName={registerName}
+          initialGtin={sku}
+          initialRegisterName={name}
           initialBrand={brandHint}
         />
       )}

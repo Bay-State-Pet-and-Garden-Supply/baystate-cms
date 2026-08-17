@@ -25,12 +25,9 @@ import type {
 // Run launch validation
 // ---------------------------------------------------------------------------
 
-export interface RunLaunchFields {
-  gtin: string;
-  registerName: string;
-  price?: string;
-  quantity?: number;
-}
+export type RunLaunchFields =
+  | { sku: string; name: string; price?: string }
+  | { gtin: string; registerName: string; price?: string; quantity?: number };
 
 export interface ValidationResult {
   valid: boolean;
@@ -40,17 +37,18 @@ export interface ValidationResult {
 export function validateRunLaunch(fields: RunLaunchFields): ValidationResult {
   const issues: string[] = [];
 
-  const digits = fields.gtin.replace(/[\s-]/g, '');
-  if (!digits) {
-    issues.push('GTIN is required');
-  } else if (!/^\d+$/.test(digits)) {
-    issues.push('GTIN must contain only digits');
-  } else if (digits.length < 8 || digits.length > 14) {
-    issues.push('GTIN must be 8-14 digits');
-  }
-
-  if (!fields.registerName.trim()) {
-    issues.push('Register name is required');
+  if ('sku' in fields) {
+    if (!fields.sku.trim()) issues.push('SKU is required');
+    if (!fields.name.trim()) issues.push('Product name is required');
+  } else {
+    const digits = fields.gtin.replace(/[\s-]/g, '');
+    if (!digits) issues.push('GTIN is required');
+    else if (!/^\d+$/.test(digits)) issues.push('GTIN must contain only digits');
+    else if (digits.length < 8 || digits.length > 14) issues.push('GTIN must be 8-14 digits');
+    if (!fields.registerName.trim()) issues.push('Register name is required');
+    if (fields.quantity !== undefined && (!Number.isInteger(fields.quantity) || fields.quantity < 1)) {
+      issues.push('Quantity must be a positive integer');
+    }
   }
 
   if (fields.price !== undefined && fields.price !== '') {
@@ -60,53 +58,25 @@ export function validateRunLaunch(fields: RunLaunchFields): ValidationResult {
     }
   }
 
-  if (fields.quantity !== undefined) {
-    if (!Number.isInteger(fields.quantity) || fields.quantity < 1) {
-      issues.push('Quantity must be a positive integer');
-    }
-  }
-
   return { valid: issues.length === 0, issues };
 }
 
-export function buildRunLaunchPayload(fields: {
-  gtin: string;
-  registerName: string;
-  brandHint?: string;
-  departmentHint?: string;
-  price?: string;
-  quantity?: number;
-}): {
-  gtin: string;
-  registerName: string;
-  brandHint?: string;
-  departmentHint?: string;
-  price?: string;
-  quantity?: number;
-} {
-  const payload: {
-    gtin: string;
-    registerName: string;
-    brandHint?: string;
-    departmentHint?: string;
-    price?: string;
-    quantity?: number;
-  } = {
-    gtin: fields.gtin.replace(/[\s-]/g, ''),
-    registerName: fields.registerName.trim(),
+export function buildRunLaunchPayload(fields: { sku: string; name: string; price?: string }): { sku: string; name: string; price?: string };
+export function buildRunLaunchPayload(fields: { gtin: string; registerName: string; brandHint?: string; departmentHint?: string; price?: string; quantity?: number }): Record<string, unknown>;
+export function buildRunLaunchPayload(fields: { sku?: string; name?: string; gtin?: string; registerName?: string; brandHint?: string; departmentHint?: string; price?: string; quantity?: number }): Record<string, unknown> {
+  if (fields.sku !== undefined || fields.name !== undefined) {
+    const payload: { sku: string; name: string; price?: string } = { sku: fields.sku?.trim() ?? '', name: fields.name?.trim() ?? '' };
+    if (fields.price !== undefined && fields.price !== '') payload.price = fields.price;
+    return payload;
+  }
+  const payload: Record<string, unknown> = {
+    gtin: fields.gtin?.replace(/[\s-]/g, '') ?? '',
+    registerName: fields.registerName?.trim() ?? '',
   };
-  if (fields.brandHint !== undefined && fields.brandHint.trim()) {
-    payload.brandHint = fields.brandHint.trim();
-  }
-  if (fields.departmentHint !== undefined && fields.departmentHint.trim()) {
-    payload.departmentHint = fields.departmentHint.trim();
-  }
-  if (fields.price !== undefined && fields.price !== '') {
-    payload.price = fields.price;
-  }
-  if (fields.quantity !== undefined) {
-    payload.quantity = fields.quantity;
-  }
+  if (fields.brandHint?.trim()) payload.brandHint = fields.brandHint.trim();
+  if (fields.departmentHint?.trim()) payload.departmentHint = fields.departmentHint.trim();
+  if (fields.price !== undefined && fields.price !== '') payload.price = fields.price;
+  if (fields.quantity !== undefined) payload.quantity = fields.quantity;
   return payload;
 }
 

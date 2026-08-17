@@ -33,15 +33,19 @@ export function buildResearchPrompt(
 ): BuiltResearchPrompt {
   const { policy, executionMode, existingEvidenceRefs } = context;
 
-  const inputJson = JSON.stringify({
-    gtin: input.gtin,
-    registerName: input.registerName,
-    brandHint: input.brandHint ?? null,
-    departmentHint: input.departmentHint ?? null,
-    price: input.price ?? null,
-    quantity: input.quantity ?? null,
-    existingOnboardingItemId: input.existingOnboardingItemId ?? null,
-  });
+  const inputJson = JSON.stringify(
+    context.productSeed
+      ? { productSeed: context.productSeed, batchContext: context.batchContext ?? null, existingIdentity: context.existingIdentity ?? null }
+      : {
+          gtin: input.gtin,
+          registerName: input.registerName,
+          brandHint: input.brandHint ?? null,
+          departmentHint: input.departmentHint ?? null,
+          price: input.price ?? null,
+          quantity: input.quantity ?? null,
+          existingOnboardingItemId: input.existingOnboardingItemId ?? null,
+        },
+  );
 
   const constraints = [
     `- Allowed built-in tools: ${policy.allowedTools.length > 0 ? policy.allowedTools.join(', ') : '(none)'}`,
@@ -60,7 +64,9 @@ export function buildResearchPrompt(
     inputJson,
     '```',
     '',
-    'The register name and hints may be imperfect or wrong. Your job is to determine the exact product and document evidence. If the GTIN does not resolve to a single exact product, state the identity conflict or abstain.',
+    context.productSeed
+      ? 'The ProductSeed is immutable source input. SKU, name, and price are clues with distinct evidentiary strength; discover GTIN/UPC/MPN from cited sources and never infer one from the SKU. Batch context is non-authoritative.'
+      : 'The register name and hints may be imperfect or wrong. Your job is to determine the exact product and document evidence. If the GTIN does not resolve to a single exact product, state the identity conflict or abstain.',
     '',
     '## Execution constraints',
     constraints,

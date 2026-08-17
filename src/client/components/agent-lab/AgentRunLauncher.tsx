@@ -12,24 +12,19 @@ interface Props {
 }
 
 export function AgentRunLauncher({ onCreated, onCancel }: Props) {
-  const [gtin, setGtin] = useState('');
-  const [registerName, setRegisterName] = useState('');
-  const [brandHint, setBrandHint] = useState('');
-  const [departmentHint, setDepartmentHint] = useState('');
+  const [sku, setSku] = useState('');
+  const [name, setName] = useState('');
   const [price, setPrice] = useState('');
-  const [quantity, setQuantity] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [issues, setIssues] = useState<string[]>([]);
 
   const handleSubmit = async () => {
     setServerError(null);
-    const qtyNum = quantity.trim() === '' ? undefined : Number(quantity);
     const result = validateRunLaunch({
-      gtin,
-      registerName,
+      sku,
+      name,
       price: price.trim() === '' ? undefined : price,
-      quantity: qtyNum,
     });
     if (!result.valid) {
       setIssues(result.issues);
@@ -39,12 +34,9 @@ export function AgentRunLauncher({ onCreated, onCancel }: Props) {
     setSubmitting(true);
     try {
       const payload = buildRunLaunchPayload({
-        gtin,
-        registerName,
-        brandHint: brandHint.trim() || undefined,
-        departmentHint: departmentHint.trim() || undefined,
+        sku,
+        name,
         price: price.trim() || undefined,
-        quantity: qtyNum,
       });
       const res = await createPiRun(payload);
       onCreated(res.runId);
@@ -86,31 +78,17 @@ export function AgentRunLauncher({ onCreated, onCancel }: Props) {
       {serverError && <p style={styles.error}>Server error: {serverError}</p>}
 
       <div style={styles.field}>
-        <label style={styles.label}>UPC / GTIN *</label>
-        <input style={styles.input} value={gtin} onChange={(e) => setGtin(e.target.value)} placeholder="e.g. 039978004012" />
-        <div style={styles.hint}>8-14 digit UPC/GTIN as printed on the package.</div>
+        <label style={styles.label}>Supplier SKU *</label>
+        <input style={styles.input} value={sku} onChange={(e) => setSku(e.target.value)} placeholder="e.g. ABC-123" />
+        <div style={styles.hint}>The SKU remains an SKU; GTIN/UPC is discovered evidence.</div>
       </div>
       <div style={styles.field}>
-        <label style={styles.label}>Register name *</label>
-        <input style={styles.input} value={registerName} onChange={(e) => setRegisterName(e.target.value)} placeholder="e.g. STELLA CHKN BROTH 16OZ" />
+        <label style={styles.label}>Product name *</label>
+        <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. STELLA CHKN BROTH 16OZ" />
       </div>
       <div style={styles.field}>
-        <label style={styles.label}>Brand hint</label>
-        <input style={styles.input} value={brandHint} onChange={(e) => setBrandHint(e.target.value)} placeholder="Optional" />
-      </div>
-      <div style={styles.field}>
-        <label style={styles.label}>Department hint</label>
-        <input style={styles.input} value={departmentHint} onChange={(e) => setDepartmentHint(e.target.value)} placeholder="Optional" />
-      </div>
-      <div style={{ display: 'flex', gap: 16 }}>
-        <div style={{ ...styles.field, flex: 1 }}>
-          <label style={styles.label}>Price</label>
-          <input style={styles.input} value={price} onChange={(e) => setPrice(e.target.value)} placeholder="e.g. 3.99" />
-        </div>
-        <div style={{ ...styles.field, flex: 1 }}>
-          <label style={styles.label}>Quantity</label>
-          <input style={styles.input} value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="e.g. 12" />
-        </div>
+        <label style={styles.label}>Price *</label>
+        <input style={styles.input} value={price} onChange={(e) => setPrice(e.target.value)} placeholder="e.g. 3.99" />
       </div>
 
       <div style={styles.btnRow}>

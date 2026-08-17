@@ -16,6 +16,35 @@
 import { z } from 'zod';
 import { TerminalSubmissionSchema, type TerminalSubmission } from './workflow/bundle';
 
+// PI-#50 v2 seed contracts live separately so the historical GTIN-first
+// parser remains available for old runs and replay adapters.
+export {
+  BatchContextSchema,
+  ExistingIdentityAttachmentSchema,
+  ProductResearchV2InputSchema,
+  ProductSeedLaunchSchema,
+  ProductSeedSchema,
+  PRODUCT_SEED_ARTIFACT_TYPE,
+  PRODUCT_SEED_ARTIFACT_SCHEMA_VERSION,
+  identifierRoleForSeedSku,
+  priceEvidenceStrength,
+  productSeedToLegacyInput,
+  seedPriceToString,
+  type BatchContext,
+  type ExistingIdentityAttachment,
+  type ProductResearchV2Input,
+  type ProductSeed,
+  type ProductSeedLaunch,
+  type SeedEvidenceStrength,
+} from './product-seed';
+import {
+  BatchContextSchema,
+  ExistingIdentityAttachmentSchema,
+  ProductResearchV2InputSchema,
+  ProductSeedLaunchSchema,
+  ProductSeedSchema,
+} from './product-seed';
+
 // ---------------------------------------------------------------------------
 // Product input
 // ---------------------------------------------------------------------------
@@ -44,6 +73,18 @@ export const ProductResearchInputSchema = z.object({
 });
 
 export type ProductResearchInput = z.infer<typeof ProductResearchInputSchema>;
+
+/** API launch input: v2 seed forms first, with the historical GTIN-first
+ * contract retained as a readable/replayable compatibility branch. */
+export const ProductResearchLaunchInputSchema = z.union([
+  ProductResearchV2InputSchema,
+  ProductSeedLaunchSchema,
+  ProductResearchInputSchema,
+]);
+export type ProductResearchLaunchInput = z.infer<typeof ProductResearchLaunchInputSchema>;
+/** Alias used by callers that refer to a run rather than a research launch. */
+export const ProductIntelligenceRunInputSchema = ProductResearchLaunchInputSchema;
+export type ProductIntelligenceRunInput = ProductResearchLaunchInput;
 
 // ---------------------------------------------------------------------------
 // Execution context
@@ -130,6 +171,12 @@ export const ProductResearchContextSchema = z.object({
   existingEvidenceRefs: z.array(z.string()).default([]),
   /** Server-compiled agent version prompt text (PI-7). */
   compiledPrompt: z.string().nullish(),
+  /** Immutable v2 seed, when this run was launched from ProductSeed. */
+  productSeed: ProductSeedSchema.nullish(),
+  /** Versioned non-authoritative batch hints, never a product identity source. */
+  batchContext: BatchContextSchema.nullish(),
+  /** Optional raw/normalized identity attachment from #43. */
+  existingIdentity: ExistingIdentityAttachmentSchema.nullish(),
 });
 
 /**

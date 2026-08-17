@@ -12,8 +12,11 @@ import { Hono } from 'hono';
 import {
   ProductIntelligencePolicySchema,
   ProductResearchInputSchema,
+  ProductResearchV2InputSchema,
+  ProductSeedLaunchSchema,
   type ProductIntelligencePolicy,
 } from '../../product-intelligence/contracts';
+import { productSeedToLegacyInput, ProductSeedSchema } from '../../product-intelligence/product-seed';
 import {
   buildDefaultPiPolicy,
   cancelPiRun,
@@ -154,10 +157,29 @@ router.post('/product-intelligence/runs', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
   const parsed = (body as { input?: unknown }).input;
-  const inputResult = ProductResearchInputSchema.safeParse(parsed);
-  if (!inputResult.success) {
+  const v2Wrapped = ProductResearchV2InputSchema.safeParse(parsed);
+  const v2Direct = ProductSeedLaunchSchema.safeParse(parsed);
+  const legacy = ProductResearchInputSchema.safeParse(parsed);
+  let inputResult: { data: ReturnType<typeof ProductResearchInputSchema.parse> };
+  let productSeed: import('../../product-intelligence/product-seed').ProductSeed | null = null;
+  let batchContext: import('../../product-intelligence/product-seed').BatchContext | null = null;
+  let existingIdentity: import('../../product-intelligence/product-seed').ExistingIdentityAttachment | null = null;
+  if (v2Wrapped.success) {
+    productSeed = v2Wrapped.data.productSeed;
+    batchContext = v2Wrapped.data.batchContext ?? null;
+    existingIdentity = v2Wrapped.data.existingIdentity ?? null;
+    inputResult = { data: productSeedToLegacyInput(productSeed) };
+  } else if (v2Direct.success) {
+    productSeed = ProductSeedSchema.parse(v2Direct.data);
+    batchContext = v2Direct.data.batchContext ?? null;
+    existingIdentity = v2Direct.data.existingIdentity ?? null;
+    inputResult = { data: productSeedToLegacyInput(productSeed) };
+  } else if (legacy.success) {
+    inputResult = { data: legacy.data };
+  } else {
+    const issues = v2Wrapped.error.issues.concat(v2Direct.error.issues, legacy.error.issues);
     return c.json(
-      { error: `Invalid product research input: ${inputResult.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}` },
+      { error: `Invalid product research input: ${issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}` },
       400,
     );
   }
@@ -219,6 +241,9 @@ router.post('/product-intelligence/runs', async (c) => {
       selection.executor,
       {
         input: inputResult.data,
+        productSeed,
+        batchContext,
+        existingIdentity,
         mode: mode as 'shadow' | 'interactive' | 'onboarding',
         policy: resolvedPolicy,
         onboardingItemId:

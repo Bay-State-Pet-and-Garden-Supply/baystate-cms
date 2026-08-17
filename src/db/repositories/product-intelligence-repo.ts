@@ -37,6 +37,11 @@ export interface PiRunRow {
   status: PiRunStatus;
   executor: string;
   inputJson: string;
+  /** v2 immutable ProductSeed JSON; null for historical GTIN-first runs. */
+  productSeedJson: string | null;
+  /** v2 versioned, non-authoritative BatchContext JSON. */
+  batchContextJson: string | null;
+  inputSchemaVersion: number;
   policyJson: string;
   configSnapshotId: string;
   configSnapshotHash: string;
@@ -78,6 +83,9 @@ export interface CreatePiRunInput {
   mode: PiRunMode;
   executor: string;
   inputJson: string;
+  productSeedJson?: string | null;
+  batchContextJson?: string | null;
+  inputSchemaVersion?: number;
   policyJson: string;
   configSnapshotId: string;
   configSnapshotHash: string;
@@ -116,12 +124,13 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
   db.run(
     `INSERT INTO product_intelligence_runs
      (id, workspace_id, onboarding_item_id, mode, status, executor, input_json,
-      policy_json, config_snapshot_id, config_snapshot_hash, code_commit,
+      product_seed_json, batch_context_json, input_schema_version, policy_json,
+      config_snapshot_id, config_snapshot_hash, code_commit,
       prompt_hash, pi_version, extension_versions_json, started_at, completed_at,
       origin_run_id, replay_depth, base_policy_id, base_policy_version, policy_overrides_json,
       tools_json, agent_version_snapshot_id, agent_version_content_hash,
       version_role_at_execution, import_eligible_at_execution)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.workspaceId,
@@ -130,6 +139,9 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
       input.status ?? 'running',
       input.executor,
       input.inputJson,
+      input.productSeedJson ?? null,
+      input.batchContextJson ?? null,
+      input.inputSchemaVersion ?? 1,
       input.policyJson,
       input.configSnapshotId,
       input.configSnapshotHash,
@@ -156,7 +168,9 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
 
 const RUN_SELECT = `
   SELECT id, workspace_id AS workspaceId, onboarding_item_id AS onboardingItemId,
-         mode, status, executor, input_json AS inputJson, policy_json AS policyJson,
+         mode, status, executor, input_json AS inputJson,
+         product_seed_json AS productSeedJson, batch_context_json AS batchContextJson,
+         input_schema_version AS inputSchemaVersion, policy_json AS policyJson,
          config_snapshot_id AS configSnapshotId, config_snapshot_hash AS configSnapshotHash,
          code_commit AS codeCommit, prompt_hash AS promptHash, pi_version AS piVersion,
          extension_versions_json AS extensionVersionsJson,

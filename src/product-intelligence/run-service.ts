@@ -29,7 +29,11 @@ import {
   type ProductResearchContext,
   type ProductResearchInput,
   type ProductResearchResult,
+  type BatchContext,
+  type ExistingIdentityAttachment,
+  type ProductSeed,
 } from './contracts';
+import { BatchContextSchema, ExistingIdentityAttachmentSchema, ProductSeedSchema, productSeedToLegacyInput } from './product-seed';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from './executor';
 import type { ProductAssetEvidence } from './assets/schema';
 import type { PiAssetRow } from '../db/repositories/product-intelligence-repo';
@@ -405,7 +409,14 @@ function mapDomainEventType(type: string): string {
 // ---------------------------------------------------------------------------
 
 export interface StartPiRunInput {
+  /** Normalized executor input; v2 callers also provide productSeed below. */
   input: ProductResearchInput;
+  /** Immutable v2 seed, persisted separately from historical inputJson. */
+  productSeed?: ProductSeed | null;
+  /** Versioned non-authoritative batch hints. */
+  batchContext?: BatchContext | null;
+  /** Optional #43 raw/normalized identity attachment. */
+  existingIdentity?: ExistingIdentityAttachment | null;
   /** Execution mode; 'onboarding' is rejected unless the flag allows it. */
   mode?: 'shadow' | 'interactive' | 'onboarding';
   policy?: ProductIntelligencePolicy;
@@ -464,7 +475,14 @@ export async function startProductIntelligenceRun(
   input: StartPiRunInput,
   options: { workspaceId?: string; workspacePath?: string; bus?: RunEventBus } = {},
 ): Promise<StartPiRunResult> {
-  const parsedInput = ProductResearchInputSchema.parse(input.input);
+  const productSeed = input.productSeed == null ? null : ProductSeedSchema.parse(input.productSeed);
+  const batchContext = input.batchContext == null ? null : BatchContextSchema.parse(input.batchContext);
+  // The executor still receives the historical shape, but v2 deliberately
+  // carries an empty GTIN sentinel rather than promoting SKU to an identifier.
+  const parsedInput = productSeed
+    ? ({ ...ProductResearchInputSchema.omit({ gtin: true }).parse(input.input), gtin: '' } as ProductResearchInput)
+    : ProductResearchInputSchema.parse(input.input);
+  const existingIdentity = input.existingIdentity == null ? null : ExistingIdentityAttachmentSchema.parse(input.existingIdentity);
   const policy = ProductIntelligencePolicySchema.parse(input.policy ?? buildDefaultPiPolicy());
   const mode = input.mode ?? 'shadow';
 
@@ -525,6 +543,9 @@ export async function startProductIntelligenceRun(
     policy,
     executionMode: mode,
     existingEvidenceRefs: [],
+    productSeed,
+    batchContext,
+    existingIdentity,
   });
   const promptHash = compiledPrompt.promptHash;
 
@@ -533,7 +554,12 @@ export async function startProductIntelligenceRun(
     onboardingItemId: input.onboardingItemId ?? null,
     mode,
     executor: executor.name,
-    inputJson: JSON.stringify(parsedInput),
+    // Keep the original v2 seed separately inspectable. Historical runs keep
+    // their original GTIN-first inputJson unchanged and replayable.
+    inputJson: JSON.stringify(productSeed ? { productSeed, batchContext, existingIdentity } : parsedInput),
+    productSeedJson: productSeed ? JSON.stringify(productSeed) : null,
+    batchContextJson: batchContext ? JSON.stringify(batchContext) : null,
+    inputSchemaVersion: productSeed ? 2 : 1,
     policyJson: JSON.stringify(policy),
     configSnapshotId: policy.configId,
     configSnapshotHash: policy.configId,
@@ -563,6 +589,9 @@ export async function startProductIntelligenceRun(
     executionMode: mode,
     existingEvidenceRefs: [],
     compiledPrompt: compiledPrompt.fullText,
+    productSeed,
+    batchContext,
+    existingIdentity,
     signal: controller.signal,
   };
 
@@ -612,7 +641,7 @@ export async function startProductIntelligenceRun(
           result.submission === null
             ? { valid: true, issues: [] as string[] }
             : isWorkflowSubmission(result.submission)
-              ? validateTerminalSubmission(result.submission, parsedInput.gtin, workspace.id, run.id)
+              ? validateTerminalSubmission(result.submission, parsedInput.gtin || null, workspace.id, run.id)
               : { valid: false, issues: ['unsupported submission shape'] as string[] };
         if (!validation.valid) {
           const message = `Terminal submission failed validation: ${validation.issues.join('; ')}`;
@@ -1482,10 +1511,17 @@ export async function replayPiRun(
     }
     rerunPolicy = originPolicy;
   }
+  const historicalV2Seed = origin.productSeedJson ? ProductSeedSchema.parse(JSON.parse(origin.productSeedJson)) : null;
+  const historicalBatchContext = origin.batchContextJson ? BatchContextSchema.parse(JSON.parse(origin.batchContextJson)) : null;
+  const historicalInput = historicalV2Seed
+    ? productSeedToLegacyInput(historicalV2Seed)
+    : ProductResearchInputSchema.parse(JSON.parse(origin.inputJson));
   const started = await startProductIntelligenceRun(
     options.executor,
     {
-      input: ProductResearchInputSchema.parse(JSON.parse(origin.inputJson)),
+      input: historicalInput,
+      productSeed: historicalV2Seed,
+      batchContext: historicalBatchContext,
       mode: origin.mode,
       policy: rerunPolicy,
       onboardingItemId: origin.onboardingItemId,

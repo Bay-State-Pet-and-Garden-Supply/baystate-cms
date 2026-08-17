@@ -4193,6 +4193,29 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── ProductSeed v2 run input (issue #50) ─────────────────────────────────
+  // Additive columns preserve historical GTIN-first input_json verbatim while
+  // giving v2 runs separately inspectable immutable seed and non-authoritative
+  // batch context snapshots.
+  const piSeedVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('product_intelligence_seed_schema_version') as { value: string } | undefined;
+  if (!piSeedVersion) {
+    db.transaction(() => {
+      const cols = db.query('PRAGMA table_info(product_intelligence_runs)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'product_seed_json')) {
+        db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN product_seed_json TEXT;');
+      }
+      if (!cols.some((c) => c.name === 'batch_context_json')) {
+        db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN batch_context_json TEXT;');
+      }
+      if (!cols.some((c) => c.name === 'input_schema_version')) {
+        db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN input_schema_version INTEGER NOT NULL DEFAULT 1;');
+      }
+    })();
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_seed_schema_version', '1');");
+  }
+
   // ── Cohort-curation shadow observations (epic #46 review round, Package B) ─
   // PR4 C5 shadow mode currently logs the deterministic cohort Execution
   // Product Type resolution and writes NOTHING — no durable artifact to

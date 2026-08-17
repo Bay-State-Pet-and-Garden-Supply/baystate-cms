@@ -213,9 +213,12 @@ export interface BundleValidationResult {
 }
 
 /** Rules that apply to every terminal submission shape. */
-function validateCommon(submission: TerminalSubmission, expectedGtin: string, issues: string[]): void {
+function validateCommon(submission: TerminalSubmission, expectedGtin: string | null, issues: string[]): void {
   const gtin = 'gtin' in submission ? submission.gtin : null;
-  if (!gtin || gtin.replace(/\D/g, '') !== expectedGtin.replace(/\D/g, '')) {
+  // v2 runs have no identifier seed. A discovered GTIN is evidence and is
+  // validated for shape by the terminal schema, but cannot be compared to a
+  // missing seed value. Historical runs retain the exact equality gate.
+  if (expectedGtin && (!gtin || gtin.replace(/\D/g, '') !== expectedGtin.replace(/\D/g, ''))) {
     issues.push(`gtin "${gtin}" does not match the run input GTIN ${expectedGtin}`);
   }
   if ('evidenceIds' in submission && submission.evidenceIds.length === 0) {
@@ -473,7 +476,7 @@ function validateInsufficientSubmission(submission: InsufficientEvidenceSubmissi
  */
 export function validateTerminalSubmission(
   submission: TerminalSubmission,
-  expectedGtin: string,
+  expectedGtin: string | null,
   workspaceId: string,
   runId?: string | null,
 ): BundleValidationResult {

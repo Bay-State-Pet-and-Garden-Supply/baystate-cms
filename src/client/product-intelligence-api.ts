@@ -212,11 +212,25 @@ export interface PiLiveEvent {
 }
 
 export interface CreateRunInput {
-  gtin: string;
-  registerName: string;
+  /** v2 minimal launch fields. */
+  sku?: string;
+  name?: string;
+  price?: string | number;
+  batchContext?: {
+    schemaVersion?: 1;
+    authoritative?: false;
+    batchId?: string | null;
+    batchName?: string | null;
+    itemIndex?: number | null;
+    siblingSkus?: string[];
+    hints?: Record<string, string>;
+  };
+  existingIdentity?: { raw?: unknown; normalized?: unknown; sourceRef?: string | null };
+  /** Historical GTIN-first fields retained for readable/replayable callers. */
+  gtin?: string;
+  registerName?: string;
   brandHint?: string;
   departmentHint?: string;
-  price?: string;
   quantity?: number;
   mode?: PiRunMode;
   agentVersionSnapshotId?: string;
@@ -329,15 +343,24 @@ export function getPiRun(id: string): Promise<PiRunProjection> {
 }
 
 export function createPiRun(input: CreateRunInput): Promise<CreateRunResponse> {
+  const isV2 = input.sku !== undefined || input.name !== undefined;
   const body: Record<string, unknown> = {
-    input: {
-      gtin: input.gtin,
-      registerName: input.registerName,
-      ...(input.brandHint !== undefined ? { brandHint: input.brandHint } : {}),
-      ...(input.departmentHint !== undefined ? { departmentHint: input.departmentHint } : {}),
-      ...(input.price !== undefined ? { price: input.price } : {}),
-      ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
-    },
+    input: isV2
+      ? {
+          sku: input.sku,
+          name: input.name,
+          price: input.price,
+          ...(input.batchContext !== undefined ? { batchContext: input.batchContext } : {}),
+          ...(input.existingIdentity !== undefined ? { existingIdentity: input.existingIdentity } : {}),
+        }
+      : {
+          gtin: input.gtin,
+          registerName: input.registerName,
+          ...(input.brandHint !== undefined ? { brandHint: input.brandHint } : {}),
+          ...(input.departmentHint !== undefined ? { departmentHint: input.departmentHint } : {}),
+          ...(input.price !== undefined ? { price: input.price } : {}),
+          ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
+        },
     ...(input.mode ? { mode: input.mode } : {}),
     ...(input.agentVersionSnapshotId ? { agentVersionSnapshotId: input.agentVersionSnapshotId } : {}),
   };
