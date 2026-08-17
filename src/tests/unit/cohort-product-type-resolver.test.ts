@@ -907,6 +907,7 @@ describe('Milestone E — distributor_record evidence (source labeling + identit
         unitOfMeasure: null,
         ingredients: null,
         merchandisingProvenance: {},
+        distributorReferenceValues: {},
       },
     } as ExecutionEvidenceProjectionMemberV2;
   }

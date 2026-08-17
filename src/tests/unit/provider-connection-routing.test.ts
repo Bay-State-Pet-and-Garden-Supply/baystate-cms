@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { initDb, closeDb } from '../../db/connection';
+import { initDb, closeDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import {
   isLoopbackHost,
@@ -12,8 +12,6 @@ import {
   type AiRoutingConfig,
 } from '../../ai/provider-connections';
 import {
-  AiAvailabilityError,
-  AiMisconfigurationError,
   AiPolicyDeniedError,
   executeOpenAiChat,
 } from '../../ai/network-transport';
@@ -340,9 +338,7 @@ describe('Inference Dispatcher & Availability Failover', () => {
   });
 
   it('falls over and warns when model is missing (HTTP 404 misconfiguration)', async () => {
-    let callCount = 0;
     (globalThis as any).fetch = vi.fn().mockImplementation(async (url: string) => {
-      callCount++;
       if (url.includes('192.168.1.50')) {
         return {
           ok: false,
@@ -552,6 +548,47 @@ describe('Database Repository Integration & Redaction', () => {
     expect(repaired.workloads.storeManager.primary).toBe('inherit');
     expect(repaired.defaults.catalogTarget.connectionId).not.toBe('desktop-lmstudio');
     expect(repaired.defaults.catalogTarget.modelId).toBeTruthy();
+  });
+
+  it('reconciles missing built-in connections (openai-cloud) on existing installs without clobbering operator edits', () => {
+    // Operator relabel + credential on an existing built-in row: must survive
+    // the reconciliation untouched.
+    upsertProviderConnection({
+      id: 'deepseek-cloud',
+      label: 'DeepSeek (Cloud) — operator relabeled',
+      transport: 'openai-compatible',
+      baseUrl: 'https://custom.deepseek.example/v1',
+      credential: 'sk-operator-key',
+      trustZone: 'cloud',
+      approvedHost: 'custom.deepseek.example',
+      approvedPort: 443,
+      enabled: true,
+    });
+
+    // Simulate an install whose provider_connections table was seeded before
+    // `openai-cloud` joined the built-in set: the row is absent from the DB.
+    // Written directly because the repo API self-heals on every access — the
+    // old empty-table guard left such installs permanently missing the
+    // built-in.
+    getDb().query("DELETE FROM provider_connections WHERE id = 'openai-cloud'").run();
+    expect(
+      getDb().query("SELECT id FROM provider_connections WHERE id = 'openai-cloud'").get(),
+    ).toBeNull();
+
+    // Self-healing reconcile: the missing built-in is re-added on next access...
+    const connections = listProviderConnections();
+    const openai = connections.find(c => c.id === 'openai-cloud');
+    expect(openai).toBeDefined();
+    expect(openai?.baseUrl).toBe('https://api.openai.com/v1');
+    expect(openai?.approvedHost).toBe('api.openai.com');
+    expect(openai?.approvedPort).toBe(443);
+    expect(openai?.enabled).toBe(true);
+
+    // ...and operator edits on existing rows are preserved.
+    const deepseek = connections.find(c => c.id === 'deepseek-cloud');
+    expect(deepseek?.label).toBe('DeepSeek (Cloud) — operator relabeled');
+    expect(deepseek?.credential).toBe('sk-operator-key');
+    expect(deepseek?.baseUrl).toBe('https://custom.deepseek.example/v1');
   });
 });
 

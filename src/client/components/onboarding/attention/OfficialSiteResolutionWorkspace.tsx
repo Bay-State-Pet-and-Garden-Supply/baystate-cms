@@ -160,9 +160,12 @@ export function OfficialSiteResolutionWorkspace({
     try {
       const res = await getItemConflicts(itemId);
       setConflicts(res.conflicts);
-      const open = res.conflicts.filter((c) => c.status === 'open');
+      // Only HARD open conflicts gate advancement: the server completes
+      // sourcing when the last open HARD conflict is resolved (soft
+      // discrepancies are informational and never block).
+      const open = res.conflicts.filter((c) => c.status === 'open' && c.severity === 'hard');
       if (open.length === 0) {
-        // Every conflict resolved — sourcing completes automatically.
+        // Every open hard conflict resolved — sourcing completes automatically.
         const ws = await getItemWorkState(itemId).catch(() => null);
         if (ws && ws.workState.category !== 'needs_attention') {
           onResolved?.();
@@ -413,7 +416,11 @@ export function OfficialSiteResolutionWorkspace({
     );
   }
 
-  const openConflicts = (conflicts ?? []).filter((c) => c.status === 'open');
+  // Resolution decisions are required only for HARD identity conflicts.
+  // Soft discrepancies (distributorSku/name/copy variants) never gate
+  // advancement; legacy soft rows render as informational only.
+  const hardOpenConflicts = (conflicts ?? []).filter((c) => c.status === 'open' && c.severity === 'hard');
+  const softOpenConflicts = (conflicts ?? []).filter((c) => c.status === 'open' && c.severity === 'soft');
 
   return (
     <div
@@ -581,12 +588,26 @@ export function OfficialSiteResolutionWorkspace({
                 <span className="attn-mutating">
                   <span className="attn-spinner" aria-hidden="true" /> Loading conflicts…
                 </span>
-              ) : openConflicts.length === 0 ? (
-                <p style={{ margin: 0, fontFamily: 'var(--font-body)', fontSize: '0.8125rem' }}>
-                  No open conflicts. Choose how to proceed:
-                </p>
+              ) : hardOpenConflicts.length === 0 ? (
+                <>
+                  <p style={{ margin: 0, fontFamily: 'var(--font-body)', fontSize: '0.8125rem' }}>
+                    No open identity conflicts. Choose how to proceed:
+                  </p>
+                  {softOpenConflicts.length > 0 ? (
+                    <p
+                      style={{
+                        margin: '8px 0 0',
+                        fontFamily: 'var(--font-body)',
+                        fontSize: '0.8125rem',
+                        color: 'var(--color-mulch-brown)',
+                      }}
+                    >
+                      Remaining discrepancies are informational and don&apos;t block progress.
+                    </p>
+                  ) : null}
+                </>
               ) : (
-                openConflicts.map((conflict) => (
+                hardOpenConflicts.map((conflict) => (
                   <div className="attn-conflict" key={conflict.id}>
                     <div className="attn-conflict-field">{conflict.field}</div>
                     {conflict.candidates.map((candidate) => (

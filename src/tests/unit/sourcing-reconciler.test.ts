@@ -165,19 +165,30 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(distinctResult.acceptedAttemptIds).toEqual([]);
   });
 
-  test('soft copy disagreement persists a soft conflict but never blocks acceptance', async () => {
-    const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', description: 'Chicken recipe' });
-    const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', description: 'Chicken & rice recipe' });
+  test('soft disagreements (copy + distributor reference fields) are consolidated, never persisted as conflict rows, and never block acceptance', async () => {
+    const a1 = makeAttempt('a1', 'phillips', {
+      upc: '012345678905',
+      brand: 'Nutro',
+      description: 'Chicken recipe',
+      distributorSku: 'SKU-PHIL',
+    });
+    const a2 = makeAttempt('a2', 'bci', {
+      upc: '012345678905',
+      brand: 'Nutro',
+      description: 'Chicken & rice recipe',
+      distributorSku: 'SKU-BCI',
+    });
 
     const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
 
     expect(result.hasHardIdentityConflict).toBe(false);
-    expect(result.softConflictCount).toBe(1);
+    expect(result.softConflictCount).toBe(2);
     expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
 
-    const conflicts = listConflictsForItem(itemId);
-    expect(conflicts.length).toBe(1);
-    expect(conflicts[0].severity).toBe('soft');
+    // Soft disagreements are consolidated by the projection authority with
+    // provenance (HARD-only persistence) — they never become durable
+    // conflict rows and never require an operator decision.
+    expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
   test('confidence NEVER overrides a hard conflict; agreement is accepted even at low confidence', async () => {

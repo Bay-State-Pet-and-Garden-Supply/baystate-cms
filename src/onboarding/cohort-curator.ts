@@ -430,6 +430,8 @@ function buildExecutionEvidenceProjectionMember(
       fieldProvenance: ext.fieldProvenance ?? {},
       packagingTitle: ext.packagingTitle ?? null,
       distributorSku: ext.distributorSku ?? null,
+      /** All accepted attempts' per-distributor reference values (sorted-unique). */
+      distributorReferenceValues: ext.distributorReferenceValues ?? {},
       manufacturerPartNumber: ext.manufacturerPartNumber ?? null,
       variantAttributes: ext.variantAttributes ?? {},
       // Amendment B merchandising fields (M5b-1): frozen explicitly so
@@ -1880,6 +1882,7 @@ function frozenExtractionData(
     fieldProvenance: { ...frozen.fieldProvenance },
     packagingTitle: frozen.packagingTitle ?? null,
     distributorSku: frozen.distributorSku ?? null,
+    distributorReferenceValues: { ...(frozen.distributorReferenceValues ?? {}) },
     manufacturerPartNumber: frozen.manufacturerPartNumber ?? null,
     variantAttributes: { ...frozen.variantAttributes },
     // Amendment B merchandising fields (M5b-1): reconstructed from the frozen

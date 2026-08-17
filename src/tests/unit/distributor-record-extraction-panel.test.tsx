@@ -185,6 +185,19 @@ describe('ExtractionStagePanel — distributor-record source (MD)', () => {
     expect(html).not.toContain('primaryImage');
   });
 
+  it('shows additional distributor SKUs from other accepted providers as reference values', () => {
+    const data = ExtractionDataSchema.parse({
+      ...distributorExtractionData(),
+      distributorReferenceValues: {
+        distributorSku: ['DIST-SKU-1', 'SKU-BCI', 'SKU-UNFI'],
+        name: ['Dog Food Chicken 10 lb', 'DOG FOOD CHICKEN 10LB'],
+      },
+    });
+    const html = renderPanel({ extractionData: data, sourceType: 'distributor_record' });
+    expect(html).toContain('DIST-SKU-1');
+    expect(html).toContain('SKU-BCI · SKU-UNFI');
+  });
+
   it('never renders distributor copy even when a tampered payload carries description/customFields', () => {
     // A malformed or tampered distributor payload must not display copy:
     // the panel renders identity fields only for distributor sources.

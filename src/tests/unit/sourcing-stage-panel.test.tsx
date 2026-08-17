@@ -186,6 +186,65 @@ describe('SourcingStagePanel (engine enabled)', () => {
     expect(html).toContain('Resolve all hard conflicts or retry before continuing.');
   });
 
+  it('renders soft conflicts as informational — no resolution actions, never blocks Continue', () => {
+    const html = renderToStaticMarkup(
+      <SourcingStagePanel
+        reviewItem={reviewItem()}
+        sourcingEngineEnabled={true}
+        sourcingMode="automatic"
+        sourcingEntryPolicyVersion={1}
+        conflicts={[
+          hardOpenConflict({
+            id: 'cnf-soft-sku',
+            field: 'distributorSku',
+            severity: 'soft',
+            candidates: [
+              { id: 'cand-s1', conflictId: 'cnf-soft-sku', evidenceAttemptId: 'attempt-1', valueJson: '"055428"', createdAt: new Date().toISOString() },
+              { id: 'cand-s2', conflictId: 'cnf-soft-sku', evidenceAttemptId: 'attempt-2', valueJson: '"38155012"', createdAt: new Date().toISOString() },
+            ],
+          }),
+        ]}
+        onContinueToDiscovery={async () => {}}
+        onResolveConflict={async () => {}}
+      />,
+    );
+    // Informational presentation only — no candidate/custom/dismiss actions.
+    expect(html).toContain('Distributor Discrepancies (informational)');
+    expect(html).toContain('Informational discrepancy');
+    expect(html).not.toContain('Use candidate');
+    expect(html).not.toContain('Custom value');
+    expect(html).not.toContain('Dismiss');
+    // A soft-only conflict never blocks Continue.
+    expect(html).not.toContain('disabled=""');
+  });
+
+  it('renders hard conflicts with resolution actions while soft conflicts stay informational', () => {
+    const html = renderToStaticMarkup(
+      <SourcingStagePanel
+        reviewItem={reviewItem()}
+        sourcingEngineEnabled={true}
+        sourcingMode="automatic"
+        sourcingEntryPolicyVersion={1}
+        conflicts={[
+          hardOpenConflict(),
+          hardOpenConflict({
+            id: 'cnf-soft-sku',
+            field: 'distributorSku',
+            severity: 'soft',
+          }),
+        ]}
+        onContinueToDiscovery={async () => {}}
+        onResolveConflict={async () => {}}
+      />,
+    );
+    expect(html).toContain('Identity Conflicts — Resolve to Continue');
+    expect(html).toContain('Use candidate');
+    expect(html).toContain('Custom value');
+    expect(html).toContain('Dismiss');
+    expect(html).toContain('Informational discrepancy');
+    expect(html).toContain('disabled=""');
+  });
+
   it('marks distributor image URLs as display-only — never catalog-approved', () => {
     const html = renderToStaticMarkup(
       <SourcingStagePanel

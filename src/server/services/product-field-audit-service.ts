@@ -26,7 +26,9 @@ export interface ProductFieldAuditResult {
   uniqueValueCount: number;
   topValues: AuditValue[];
   duplicateGroups: DuplicateGroup[];
+  totalDuplicateGroupCount: number;
   suspiciousGroups: SuspiciousGroup[];
+  totalSuspiciousGroupCount: number;
 }
 
 export interface NormalizationProposal {
@@ -58,6 +60,9 @@ export function validateFieldName(field: string): void {
   }
 }
 
+/** Maximum serialized result size (bytes) before progressive stripping kicks in. */
+const AUDIT_RESULT_BYTE_BUDGET = 28 * 1024;
+
 /**
  * Scan all active products and audit the specified ProductField.
  */
@@ -79,7 +84,7 @@ export function getProductFieldAudit(field: string, limit: number = 100): Produc
       const valStr = String(val);
       const existing = valueMap.get(valStr) || { count: 0, skus: [] };
       existing.count++;
-      if (existing.skus.length < 50) {
+      if (existing.skus.length < 5) {
         existing.skus.push(p.sku);
       }
       valueMap.set(valStr, existing);
@@ -176,7 +181,7 @@ export function getProductFieldAudit(field: string, limit: number = 100): Produc
   }
 
   // Detect suspicious values
-  const suspiciousGroups: SuspiciousGroup[] = [];
+  const allSuspiciousGroups: SuspiciousGroup[] = [];
   for (const v of uniqueValues) {
     const reasons: string[] = [];
     const val = v.value;
@@ -211,7 +216,7 @@ export function getProductFieldAudit(field: string, limit: number = 100): Produc
     }
 
     if (reasons.length > 0) {
-      suspiciousGroups.push({
+      allSuspiciousGroups.push({
         value: val,
         count: v.count,
         reasons,
@@ -220,15 +225,75 @@ export function getProductFieldAudit(field: string, limit: number = 100): Produc
     }
   }
 
-  return {
+  // Cap duplicate groups: sort by total affected products descending, then truncate
+  const totalDuplicateGroupCount = duplicateGroups.length;
+  duplicateGroups.sort((a, b) => {
+    const aTotal = a.values.reduce((sum, v) => sum + v.count, 0);
+    const bTotal = b.values.reduce((sum, v) => sum + v.count, 0);
+    return bTotal - aTotal;
+  });
+  const cappedDuplicateGroups = duplicateGroups.slice(0, limit);
+
+  // Cap suspicious groups: sort by count descending, then truncate
+  const totalSuspiciousGroupCount = allSuspiciousGroups.length;
+  allSuspiciousGroups.sort((a, b) => b.count - a.count);
+  const cappedSuspiciousGroups = allSuspiciousGroups.slice(0, limit);
+
+  const result: ProductFieldAuditResult = {
     field,
     totalProductsScanned,
     missingCount,
     uniqueValueCount: uniqueValues.length,
     topValues,
-    duplicateGroups,
-    suspiciousGroups,
+    duplicateGroups: cappedDuplicateGroups,
+    totalDuplicateGroupCount,
+    suspiciousGroups: cappedSuspiciousGroups,
+    totalSuspiciousGroupCount,
   };
+
+  // Byte-budget safety valve: progressively strip data if still too large
+  return applyByteBudget(result);
+}
+
+/**
+ * Progressively strip payload until result fits within the byte budget.
+ * Stripping order: suspicious SKUs → duplicate SKUs → suspicious groups → top values.
+ */
+function applyByteBudget(result: ProductFieldAuditResult): ProductFieldAuditResult {
+  const measure = () => JSON.stringify(result).length;
+
+  // Pass 1: strip SKUs from suspicious groups
+  if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    for (const g of result.suspiciousGroups) {
+      g.skus = g.skus.slice(0, 1);
+    }
+  }
+
+  // Pass 2: strip SKUs from duplicate group values
+  if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    for (const g of result.duplicateGroups) {
+      for (const v of g.values) {
+        v.skus = v.skus.slice(0, 1);
+      }
+    }
+  }
+
+  // Pass 3: halve suspicious groups
+  if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    result.suspiciousGroups = result.suspiciousGroups.slice(0, Math.max(10, result.suspiciousGroups.length >> 1));
+  }
+
+  // Pass 4: halve top values
+  if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    result.topValues = result.topValues.slice(0, Math.max(10, result.topValues.length >> 1));
+  }
+
+  // Pass 5: clear suspicious groups entirely
+  if (measure() > AUDIT_RESULT_BYTE_BUDGET) {
+    result.suspiciousGroups = [];
+  }
+
+  return result;
 }
 
 /**

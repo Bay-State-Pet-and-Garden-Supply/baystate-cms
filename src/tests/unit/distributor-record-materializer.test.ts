@@ -314,6 +314,50 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     expect(provenance?.acceptedEvidenceAttemptIds).toEqual([a1.id, a2.id].sort());
   });
 
+  test('disagreeing distributor SKUs/names across accepted providers consolidate; ALL values reach the extraction payload', () => {
+    const a1 = makeFoundAttempt('phillips', {
+      brand: 'Brand A',
+      weight: '10 lbs',
+      distributorSku: 'SKU-PHIL',
+      name: 'Pet Kibble 5lb',
+      manufacturerPartNumber: 'MPN-1',
+    });
+    const a2 = makeFoundAttempt('unfi', {
+      brand: 'Brand A',
+      weight: '10 lbs',
+      distributorSku: 'SKU-UNFI',
+      name: 'PET KIBBLE 5LB',
+      manufacturerPartNumber: 'MPN-1',
+    });
+    const decision = routeQualified([a1, a2]);
+    claimForExtraction();
+
+    const result = materializeDistributorRecordExtraction(itemId, WORKSPACE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const item = findItemById(itemId);
+    const data = item?.extractionData as Record<string, unknown>;
+    // The projection consolidates the single pick (sorted-first)…
+    expect(data?.distributorSku).toBe('SKU-PHIL');
+    expect(data?.title).toBe('PET KIBBLE 5LB');
+    // …but EVERY accepted attempt's reference value is preserved for
+    // Curation (sorted-unique; per-distributor reference fields only).
+    expect(data?.distributorReferenceValues).toEqual({
+      distributorSku: ['SKU-PHIL', 'SKU-UNFI'],
+      name: ['PET KIBBLE 5LB', 'Pet Kibble 5lb'],
+    });
+    // The evidence-hash contract is unchanged: the hash covers the
+    // projection only; the reference map is a deterministic payload
+    // addition derived from the same immutable accepted attempts.
+    const rows = getDb()
+      .query('SELECT evidence_hash FROM onboarding_extractions WHERE item_id = ?')
+      .all(itemId) as Array<{ evidence_hash: string }>;
+    expect(rows[0].evidence_hash).toBe(decision.evidenceHash);
+    const prov = data?.distributorRecordProvenance as Record<string, unknown>;
+    expect(prov?.evidenceHash).toBe(decision.evidenceHash);
+  });
+
   test('found + provider error: qualified record materializes, error attempt is not accepted', () => {
     const att = makeFoundAttempt('phillips', { brand: 'Brand A', weight: '10 lbs' });
     makeFoundAttempt('unfi', {}, { outcome: 'source_error', errorCode: 'timeout' });

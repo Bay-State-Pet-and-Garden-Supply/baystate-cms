@@ -973,7 +973,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 {output.duplicateGroups && output.duplicateGroups.length > 0 && (
                   <div style={{ marginTop: 8 }}>
                     <div style={{ fontWeight: 700, color: colors.signetBurgundy, fontSize: 12 }}>
-                      Duplicate Groups Detected ({output.duplicateGroups.length})
+                      Duplicate Groups Detected ({output.duplicateGroups.length}{output.totalDuplicateGroupCount > output.duplicateGroups.length ? ` of ${output.totalDuplicateGroupCount}` : ''})
                     </div>
                     <div style={{ maxHeight: 120, overflowY: 'auto', marginTop: 4 }}>
                       {output.duplicateGroups.map((g: any, i: number) => (

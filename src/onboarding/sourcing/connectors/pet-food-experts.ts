@@ -261,11 +261,15 @@ export function parsePetFoodExpertsPdp(html: string): PetFoodExpertsPdpData {
   const blockText = productBlockText($);
   const brand =
     labeledSpec($, 'Brand') ||
-    // Live specs concatenate labels without spaces ("AttributesBrand: Daves
-    // Pet Food Flavor: Chicken…"): capture up to the first colon, then strip
-    // a trailing sibling label token if it leaked into the capture.
-    (blockText.match(/Brand:\s*([A-Za-z][^\n:]{1,80})/) ?? [])[1]
-      ?.replace(/\s+(Flavor|Animal|Diet|Food Form|Ingredients)\s*$/, '')
+    // Live specs concatenate labels without separators ("AttributesBrand: Daves
+    // Pet Food Flavor: Chicken…") — and sometimes with the value GLUED to the
+    // next label ("Old Mother HubbardFlavor: Peanut Butter…", observed
+    // 2026-08-16): the capture stops at the first colon (the one terminating
+    // the leaked label), so the per-character lookahead below cuts the capture
+    // at the FIRST label-colon boundary — glued or whitespace-separated.
+    // "Brand: NutriDietAnimal: Dog…" → "NutriDiet"; a brand merely ending in
+    // one of the tokens (no following colon) is never truncated.
+    (blockText.match(/Brand:\s*([A-Za-z](?:(?!\s*(?:Flavor|Animal|Diet|Food Form|Ingredients)\s*:)[^\n:]){1,80})/) ?? [])[1]
       ?.replace(/\s+/g, ' ')
       ?.trim() ||
     null;

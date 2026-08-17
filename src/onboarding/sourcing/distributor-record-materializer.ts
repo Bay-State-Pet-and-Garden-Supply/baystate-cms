@@ -59,7 +59,12 @@ export function payloadsEquivalentAfterWeightNormalization(
 }
 import { normalizeGtin } from './contracts';
 import { SourcingDecisionV2Schema } from '../../shared/schemas/onboarding';
-import { EvidenceAttemptSchema } from '../../shared/schemas/distributor-evidence';
+import {
+  EvidenceAttemptSchema,
+  ProductIdentityEvidenceSchema,
+  type EvidenceAttempt,
+  type ProductIdentityEvidence,
+} from '../../shared/schemas/distributor-evidence';
 
 /**
  * Deterministic distributor-record extraction materializer (Amendment A,
@@ -197,6 +202,47 @@ export function buildDistributorExtractionDataV1(
 }
 
 /**
+ * Per-distributor reference values from the ACCEPTED evidence attempts
+ * (Amendment B follow-up). Sorted-unique trimmed values per reference field
+ * (`distributorSku`, `distributorUpc`, `name`). These fields are NOT
+ * identity-critical — their disagreements never block qualification (the
+ * projection consolidates the single pick) — but every accepted attempt's
+ * value must reach Curation so no distributor data is lost. PURE and
+ * DETERMINISTIC: only schema-valid `found` attempts in the accepted set
+ * contribute; output keys and arrays are sorted.
+ */
+export function collectDistributorReferenceValues(
+  acceptedAttemptIds: string[],
+  attempts: EvidenceAttempt[],
+): Record<string, string[]> {
+  const accepted = new Set(acceptedAttemptIds);
+  const byField = new Map<string, Set<string>>();
+  for (const attempt of attempts) {
+    if (attempt.outcome !== 'found' || !accepted.has(attempt.id) || !attempt.identityJson) continue;
+    let identity: ProductIdentityEvidence;
+    try {
+      const parsed = ProductIdentityEvidenceSchema.safeParse(JSON.parse(attempt.identityJson) as unknown);
+      if (!parsed.success) continue;
+      identity = parsed.data;
+    } catch {
+      continue;
+    }
+    for (const field of ['distributorSku', 'distributorUpc', 'name'] as const) {
+      const value = identity[field];
+      if (typeof value === 'string' && value.trim()) {
+        if (!byField.has(field)) byField.set(field, new Set());
+        byField.get(field)!.add(value.trim());
+      }
+    }
+  }
+  const result: Record<string, string[]> = {};
+  for (const field of Array.from(byField.keys()).sort()) {
+    result[field] = Array.from(byField.get(field) ?? []).sort();
+  }
+  return result;
+}
+
+/**
  * Build the merchandising-depth ExtractionData v2 (Amendment B, M5). Adds
  * description, features (bulletPoints), explicit noncanonical category,
  * dimensions, case pack, unit of measure, ingredients, and APPROVED image
@@ -217,6 +263,7 @@ export function buildDistributorExtractionDataV1(
 function buildDistributorExtractionDataV2(
   p: DistributorRecordProjectionV2,
   evidenceHash: string,
+  attempts: EvidenceAttempt[],
 ): Record<string, unknown> {  const imageEntries = p.merchandisingProvenance['imageUrls'] ?? [];
   const distributorImageCandidates = p.imageUrls.map((url) => {
     const contributing = imageEntries.filter((e) => e.values.includes(url));
@@ -247,6 +294,13 @@ function buildDistributorExtractionDataV2(
     distributorSku: p.distributorSku,
     manufacturerPartNumber: p.manufacturerPartNumber,
     distributorCategory: p.category,
+    /**
+     * All accepted attempts' values for per-distributor reference fields
+     * (distributorSku, distributorUpc, name). The consolidated single pick
+     * stays in `distributorSku`; this map preserves every value so
+     * Curation/display never lose distributor data. Sorted-unique arrays.
+     */
+    distributorReferenceValues: collectDistributorReferenceValues(p.provenance.acceptedAttemptIds, attempts),
     casePack: p.casePack,
     unitOfMeasure: p.unitOfMeasure,
     ingredients: p.ingredients,
@@ -306,9 +360,10 @@ function buildDistributorExtractionDataV2(
 export function reconstructDistributorExtractionPayload(
   projection: DistributorRecordProjection | DistributorRecordProjectionV2,
   evidenceHash: string,
+  attempts: EvidenceAttempt[],
 ): Record<string, unknown> | null {
   if (projection.version === PROJECTION_VERSION_V2) {
-    return buildDistributorExtractionDataV2(projection as DistributorRecordProjectionV2, evidenceHash);
+    return buildDistributorExtractionDataV2(projection as DistributorRecordProjectionV2, evidenceHash, attempts);
   }
   if (projection.version === PROJECTION_VERSION) {
     return buildDistributorExtractionDataV1(projection as DistributorRecordProjection, evidenceHash);
@@ -509,7 +564,7 @@ export function materializeDistributorRecordExtraction(
         if (!v2HashMatches) {
           return { ok: false as const, code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.hash_mismatch, reasonCodes: [] };
         }
-        expectedData = buildDistributorExtractionDataV2(projectionV2.projection, decision.evidenceHash);
+        expectedData = buildDistributorExtractionDataV2(projectionV2.projection, decision.evidenceHash, attempts);
       } else if (existing.extraction_method === 'distributor_record_v1') {
         if (!projectionV1.qualified || !v1HashMatches) {
           return { ok: false as const, code: DISTRIBUTOR_MATERIALIZATION_ERROR_CODES.hash_mismatch, reasonCodes: [] };
@@ -579,7 +634,7 @@ export function materializeDistributorRecordExtraction(
     // Materialize the merchandising-depth ExtractionData v2 from the
     // canonical projection (same deterministic builder used by the
     // idempotent path).
-    const extractionData = buildDistributorExtractionDataV2(projectionV2.projection, decision.evidenceHash);
+    const extractionData = buildDistributorExtractionDataV2(projectionV2.projection, decision.evidenceHash, attempts);
     const extractionDataJson = JSON.stringify(extractionData);
     const now = new Date().toISOString();
 

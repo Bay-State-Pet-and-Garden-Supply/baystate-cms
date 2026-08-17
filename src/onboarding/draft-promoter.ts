@@ -397,12 +397,12 @@ function checkDistributorPromotionProvenance(
   let expectedPayload: Record<string, unknown> | null = null;
   if (projectionV2.qualified && projectionV2.evidenceHash === parsedDecision.evidenceHash) {
     expectedMethod = 'distributor_record_v2';
-    expectedPayload = reconstructDistributorExtractionPayload(projectionV2.projection, parsedDecision.evidenceHash);
+    expectedPayload = reconstructDistributorExtractionPayload(projectionV2.projection, parsedDecision.evidenceHash, attempts);
   } else {
     const projectionV1 = buildDistributorRecordProjectionV1(projectionInput);
     if (projectionV1.qualified && projectionV1.evidenceHash === parsedDecision.evidenceHash) {
       expectedMethod = 'distributor_record_v1';
-      expectedPayload = reconstructDistributorExtractionPayload(projectionV1.projection, parsedDecision.evidenceHash);
+      expectedPayload = reconstructDistributorExtractionPayload(projectionV1.projection, parsedDecision.evidenceHash, attempts);
     }
   }
   if (expectedMethod === null || expectedPayload === null) {

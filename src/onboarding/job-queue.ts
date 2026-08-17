@@ -893,12 +893,17 @@ export class OnboardingWorker {
      * (written by reconciliation); the decision JSON now carries the same
      * field/severity/provider-value mapping instead of a contradictory
      * empty array. Unresolvable provider ids fall back to the evidence
-     * attempt id (never a blank key).
+     * attempt id (never a blank key). HARD-only: soft disagreements on
+     * reference/copy fields are consolidated by the projection authority
+     * and never enter decision payloads (the needs_input_conflict route
+     * requires ≥1 hard conflict anyway).
      */
     const durableConflictsForDecision = (itemId: string): SourcingConflict[] => {
       const attempts = getCurrentGenerationAttempts(itemId);
       const providerByAttempt = new Map(attempts.map(a => [a.id, a.providerId]));
-      return listCurrentGenerationConflictsForItem(itemId).map(c => ({
+      return listCurrentGenerationConflictsForItem(itemId)
+        .filter(c => c.severity === 'hard')
+        .map(c => ({
         field: c.field,
         severity: c.severity,
         providerValues: Object.fromEntries(

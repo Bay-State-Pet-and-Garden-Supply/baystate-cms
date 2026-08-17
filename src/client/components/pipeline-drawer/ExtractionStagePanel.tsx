@@ -253,7 +253,18 @@ export function ExtractionStagePanel({
               {isDistributor && extractionData.distributorSku && (
                 <tr>
                   <td style={{ padding: '8px 8px 8px 0', fontWeight: 600, color: '#475569', width: 140, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Distributor SKU</td>
-                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{extractionData.distributorSku}</td>
+                  <td style={{ padding: '8px 0', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>
+                    {extractionData.distributorSku}
+                    {extractionData.distributorReferenceValues?.distributorSku &&
+                      extractionData.distributorReferenceValues.distributorSku.length > 1 && (
+                        <span style={{ color: '#64748b', fontSize: 11 }}>
+                          {' '}· Also:{' '}
+                          {extractionData.distributorReferenceValues.distributorSku
+                            .filter((v) => v !== extractionData.distributorSku)
+                            .join(' · ')}
+                        </span>
+                      )}
+                  </td>
                 </tr>
               )}
               {isDistributor && extractionData.manufacturerPartNumber && (

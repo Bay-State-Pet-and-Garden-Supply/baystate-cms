@@ -51,7 +51,20 @@ export type DiscoveryRunOutcome =
   | 'needs_input_setup'
   | 'failed';
 
-/** Create a discovery run row for an item (status 'running'). Returns the run id. */
+/**
+ * Create a discovery run row for an item (status 'running'). Returns the run id.
+ *
+ * One active run per item: legacy live databases enforce this with unique
+ * partial indexes (`idx_discovery_runs_one_running` / `_one_queued`), and the
+ * discovery-run migration v2 recreates them on fresh installs. A retry or
+ * re-execution must therefore never collide with a stale 'running'/'queued'
+ * run left behind by an interrupted attempt (e.g. the process died mid-run) —
+ * without this, the INSERT raises
+ * `UNIQUE constraint failed: onboarding_discovery_runs.item_id` and the whole
+ * item processing fails. Any stale active run is superseded first (marked
+ * 'failed' with the reason preserved on the old row), then the new run is
+ * inserted, atomically.
+ */
 export function createDiscoveryRun(itemId: string, request: {
   trigger: 'automatic' | 'refinement' | 'direct_url';
   upc: string;
@@ -61,11 +74,25 @@ export function createDiscoveryRun(itemId: string, request: {
   const db = getDb();
   const id = `dr_${randomUUID().slice(0, 12)}`;
   const now = new Date().toISOString();
-  db.query(
-    `INSERT INTO onboarding_discovery_runs
-      (id, item_id, trigger, status, request_json, current_step, created_at, started_at)
-     VALUES (?, ?, ?, 'running', ?, 'preflight', ?, ?)`,
-  ).run(id, itemId, request.trigger, JSON.stringify(request), now, now);
+  const create = db.transaction(() => {
+    // Supersede any stale active run so the new execution owns the trace.
+    // The `status = 'running'` guards on the step/complete/fail updates make
+    // the superseded row inert: a late completion from the old attempt is a
+    // no-op and can never overwrite the new run's outcome.
+    db.query(
+      `UPDATE onboarding_discovery_runs
+       SET status = 'failed', outcome = 'failed',
+           outcome_message = 'Superseded by a newer discovery run',
+           completed_at = ?
+       WHERE item_id = ? AND status IN ('queued', 'running')`,
+    ).run(now, itemId);
+    db.query(
+      `INSERT INTO onboarding_discovery_runs
+        (id, item_id, trigger, status, request_json, current_step, created_at, started_at)
+       VALUES (?, ?, ?, 'running', ?, 'preflight', ?, ?)`,
+    ).run(id, itemId, request.trigger, JSON.stringify(request), now, now);
+  });
+  create();
   return id;
 }
 

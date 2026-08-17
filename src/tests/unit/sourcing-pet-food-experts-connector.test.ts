@@ -306,6 +306,30 @@ describe('PetFoodExpertsConnector — live-shape parser units (2026-08-15 captur
     expect(p.brand).not.toContain('Flavor');
   });
 
+  // Observed live 2026-08-16 (Old Mother Hubbard / Fromm / Wellness SKUs): the
+  // spec run is one glued block with NO separator between the brand value and
+  // the next label — "…Brand: Old Mother HubbardFlavor: Peanut Butter…".
+  const GLUED_LABEL_PDP = `
+    <html><body>
+      <h1>OLD MOTHER HUBBARD MILK BAR P'NUTTY BDAY PARTY 10OZ</h1>
+      <div data-test-selector="page_ProductDetailsPage">
+        <div data-test-selector="productDetails_productId_4b17acce">
+          Item #43110438
+          UPC#:  CAS: 685038118097, EA: 076344104384
+        </div>
+        <div data-test-selector="productDetails_specifications">
+          AttributesBrand: Old Mother HubbardFlavor: Peanut ButterAnimal: DogTreat
+        </div>
+        <div data-test-selector="productDetails_htmlContent"></div>
+      </div>
+    </body></html>`;
+
+  test('brand regex cuts a GLUED sibling label (no whitespace separator)', () => {
+    const p = parsePetFoodExpertsPdp(GLUED_LABEL_PDP);
+    expect(p.brand).toBe('Old Mother Hubbard');
+    expect(p.brand).not.toContain('Flavor');
+  });
+
   test('ingredients section text is captured (bounded, no fabricated copy)', () => {
     const p = parsePetFoodExpertsPdp(LIVE_SHAPE_PDP);
     expect(p.ingredients).toContain('Chicken, Water Sufficient For Processing');

@@ -293,8 +293,11 @@ export function evaluateDistributorEvidence(
  *
  * - Identity-critical contradictions (upc, gtin, manufacturerPartNumber,
  *   weight, size, count, packCount, brand, flavor, formula + declared axes)
- *   yield HARD conflicts persisted durably; copy disagreements yield SOFT
- *   conflicts with provenance.
+ *   yield HARD conflicts persisted durably. Disagreements on non-identity
+ *   fields (distributorSku/distributorUpc/name and merchandising copy) are
+ *   NEVER persisted as conflict rows — the projection authority consolidates
+ *   them (sorted picks + v2 merchandising provenance) so every accepted
+ *   attempt's values still reach Curation without operator decisions.
  * - Confidence score alone NEVER overrides identity conflicts.
  * - Only CURRENT-generation attempts reach this function (the worker passes
  *   the current generation's attempts); conflicts are persisted generation-
@@ -316,7 +319,13 @@ export function reconcileDistributorEvidence(
     const { insertConflictWithCandidates } = lazyRequire(
       '../db/repositories/onboarding-conflict-repo',
     ) as typeof import('../db/repositories/onboarding-conflict-repo');
+    // HARD-only persistence (Amendment B follow-up): disagreements on
+    // non-identity reference fields (distributorSku/distributorUpc/name) and
+    // merchandising copy are consolidated by the projection authority with
+    // provenance — they are never operator decisions, so they never become
+    // durable conflict rows. Only identity-critical contradictions persist.
     for (const conflict of evaluation.conflicts) {
+      if (conflict.severity !== 'hard') continue;
       insertConflictWithCandidates(
         itemId,
         conflict.field,

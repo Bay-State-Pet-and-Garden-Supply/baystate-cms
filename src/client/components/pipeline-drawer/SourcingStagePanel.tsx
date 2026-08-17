@@ -336,11 +336,14 @@ export function SourcingStagePanel({
           }}
         >
           <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#111827' }}>
-            Identity Conflicts — Resolve to Continue
+            {openHardConflicts
+              ? 'Identity Conflicts — Resolve to Continue'
+              : 'Distributor Discrepancies (informational)'}
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {conflicts.map((c) => {
               const isOpen = c.status === 'open';
+              const isHard = c.severity === 'hard';
               const resolving = resolvingConflictId === c.id;
               return (
                 <div
@@ -372,7 +375,7 @@ export function SourcingStagePanel({
                     </span>
                   </div>
 
-                  {isOpen ? (
+                  {isOpen && isHard ? (
                     <>
                       {c.candidates.map((cand) => (
                         <div
@@ -453,6 +456,11 @@ export function SourcingStagePanel({
                         </button>
                       </div>
                     </>
+                  ) : isOpen ? (
+                    <div style={{ color: '#92400e', fontSize: 11, lineHeight: 1.5 }}>
+                      Informational discrepancy — doesn&apos;t block progress; the record value is
+                      consolidated automatically.
+                    </div>
                   ) : (
                     <div style={{ color: '#4b5563', fontSize: 11 }}>
                       Resolved via {c.resolutionType ?? 'resolution'}:

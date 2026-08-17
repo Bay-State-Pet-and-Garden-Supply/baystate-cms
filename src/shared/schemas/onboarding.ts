@@ -219,6 +219,13 @@ export const ExtractionDataSchema = z.object({
   distributorImageApprovals: z.array(DistributorImageApprovalSchema).optional().default(() => []),
   /** Distributor SKU from the qualified distributor record (distributor_record sources only). */
   distributorSku: z.string().nullable().default(null),
+  /**
+   * All accepted evidence attempts' values for per-distributor reference
+   * fields (distributorSku, distributorUpc, name). The consolidated single
+   * pick stays in `distributorSku`; this map preserves every value so
+   * Curation/display never lose distributor data. Sorted-unique arrays.
+   */
+  distributorReferenceValues: z.record(z.string(), z.array(z.string())).optional().default(() => ({})),
   /** Manufacturer part number from the qualified distributor record (distributor_record sources only). */
   manufacturerPartNumber: z.string().nullable().default(null),
   /**

@@ -107,34 +107,41 @@ function ensureSeededDefaults(): void {
     );
   `);
 
-  const count = db.query('SELECT COUNT(*) as count FROM provider_connections').get() as { count: number };
-  if (count.count === 0) {
-    const now = new Date().toISOString();
-    const insertConn = db.query(`
-      INSERT OR IGNORE INTO provider_connections (
-        id, label, transport, base_url, credential, trust_zone,
-        approved_host, approved_port, enabled, connect_timeout_ms,
-        inference_timeout_ms, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+  // Self-healing reconciliation of BUILT-IN connections. `INSERT OR IGNORE`
+  // is idempotent: existing rows — including operator edits (credentials,
+  // enabled state, custom base URLs, security pins) — are never touched,
+  // while built-ins introduced by newer product versions (e.g.
+  // `openai-cloud`) are added to installs whose `provider_connections`
+  // table was seeded before they existed. A built-in is a product default:
+  // re-adding it after a manual deletion is intentional, and operators opt
+  // out by disabling the connection (enabled = false) rather than deleting
+  // it. (The previous empty-table guard left newer built-ins permanently
+  // absent from already-seeded installs.)
+  const now = new Date().toISOString();
+  const insertConn = db.query(`
+    INSERT OR IGNORE INTO provider_connections (
+      id, label, transport, base_url, credential, trust_zone,
+      approved_host, approved_port, enabled, connect_timeout_ms,
+      inference_timeout_ms, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
 
-    for (const conn of Object.values(DEFAULT_BUILTIN_CONNECTIONS)) {
-      insertConn.run(
-        conn.id,
-        conn.label,
-        conn.transport,
-        conn.baseUrl,
-        conn.credential ?? null,
-        conn.trustZone,
-        conn.approvedHost || 'localhost',
-        conn.approvedPort ?? null,
-        conn.enabled ? 1 : 0,
-        conn.connectTimeoutMs ?? 2000,
-        conn.inferenceTimeoutMs ?? 60000,
-        now,
-        now,
-      );
-    }
+  for (const conn of Object.values(DEFAULT_BUILTIN_CONNECTIONS)) {
+    insertConn.run(
+      conn.id,
+      conn.label,
+      conn.transport,
+      conn.baseUrl,
+      conn.credential ?? null,
+      conn.trustZone,
+      conn.approvedHost || 'localhost',
+      conn.approvedPort ?? null,
+      conn.enabled ? 1 : 0,
+      conn.connectTimeoutMs ?? 2000,
+      conn.inferenceTimeoutMs ?? 60000,
+      now,
+      now,
+    );
   }
 
   const defaultsRow = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current');

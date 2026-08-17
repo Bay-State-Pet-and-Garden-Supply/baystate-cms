@@ -278,6 +278,13 @@ export const ExecutionEvidenceProjectionMemberV2Schema =
       distributorSku: z.string().nullable().default(null),
       manufacturerPartNumber: z.string().nullable().default(null),
       variantAttributes: z.record(z.string(), z.string()).default(() => ({})),
+      /**
+       * All accepted attempts' values for per-distributor reference fields
+       * (distributorSku, distributorUpc, name). The consolidated single pick
+       * stays in `distributorSku`; the map preserves every value so
+       * Curation never loses distributor data. Sorted-unique arrays.
+       */
+      distributorReferenceValues: z.record(z.string(), z.array(z.string())).default(() => ({})),
       // Amendment B merchandising fields (M5b-1): explicit bounded fields with
       // safe defaults so pre-merchandising v2 snapshots parse unchanged.
       // Features travel in the existing `bulletPoints` (the v2 materializer
@@ -365,6 +372,7 @@ export function normalizeExecutionEvidenceProjectionMemberV1(
       unitOfMeasure: null,
       ingredients: null,
       merchandisingProvenance: {},
+      distributorReferenceValues: {},
     },
   };
 }

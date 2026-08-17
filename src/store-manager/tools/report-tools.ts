@@ -70,7 +70,7 @@ export const getStoreManagerReportAdapter: StoreManagerToolAdapter = {
         defaultFieldAudit: {
           field: fieldAudit.field,
           uniqueValueCount: fieldAudit.uniqueValueCount,
-          duplicateGroupCount: fieldAudit.duplicateGroups.length,
+          duplicateGroupCount: fieldAudit.totalDuplicateGroupCount,
         },
       };
     }

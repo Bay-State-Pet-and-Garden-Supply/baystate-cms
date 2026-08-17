@@ -89,6 +89,33 @@ export function runMigrations(): void {
     console.log('[Migrations] Onboarding discovery-runs traceability migration complete.');
   }
 
+  // v2: restore the one-active-run-per-item invariant. Legacy live databases
+  // carried unique partial indexes `idx_discovery_runs_one_running` /
+  // `idx_discovery_runs_one_queued` (at most one 'running' and one 'queued'
+  // run per item), but the v1 schema above omitted them — fresh installs had
+  // no guard and the current code assumes a single active run per item. The
+  // repository's `createDiscoveryRun` supersedes stale active runs before
+  // inserting, so the indexes are a safe backstop against concurrent
+  // executions, never a retry blocker. `IF NOT EXISTS` leaves the legacy
+  // originals untouched on databases that still carry them.
+  const discoveryRunsV2 = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('onboarding_discovery_runs_schema_version') as { value: string } | undefined;
+  if (discoveryRunsV2?.value !== '2') {
+    console.log('[Migrations] Restoring discovery-runs one-active-run-per-item indexes...');
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_runs_one_running
+        ON onboarding_discovery_runs(item_id) WHERE status = 'running';
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_runs_one_queued
+        ON onboarding_discovery_runs(item_id) WHERE status = 'queued';
+    `);
+    db.exec(`
+      INSERT INTO app_meta (key, value) VALUES ('onboarding_discovery_runs_schema_version', '2')
+      ON CONFLICT(key) DO UPDATE SET value = '2';
+    `);
+    console.log('[Migrations] Discovery-runs indexes complete.');
+  }
+
   // ── Epic #46 operator work-state: durable review/approval/export state ──
   // New table `onboarding_review_state` (version-gated marker
   // `operator_state_schema_version`). Runs AFTER the onboarding migration

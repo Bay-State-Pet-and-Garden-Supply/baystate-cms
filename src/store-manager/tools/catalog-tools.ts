@@ -83,12 +83,12 @@ export function collectNextActionEvidence(workspaceId: string): NextActionEviden
     });
   }
   const brandAudit = getProductFieldAudit('ProductField16', 100);
-  if (brandAudit.uniqueValueCount > 0 && brandAudit.duplicateGroups.length > 0) {
+  if (brandAudit.uniqueValueCount > 0 && brandAudit.totalDuplicateGroupCount > 0) {
     evidence.push({
       focus: 'product_fields',
       priority: 3,
-      evidenceKey: `product_field.ProductField16.duplicate_groups.${brandAudit.duplicateGroups.length}`,
-      action: `Normalize ${brandAudit.duplicateGroups.length} casing/whitespace duplicate group(s) in Brand (ProductField16).`,
+      evidenceKey: `product_field.ProductField16.duplicate_groups.${brandAudit.totalDuplicateGroupCount}`,
+      action: `Normalize ${brandAudit.totalDuplicateGroupCount} casing/whitespace duplicate group(s) in Brand (ProductField16).`,
     });
   }
 

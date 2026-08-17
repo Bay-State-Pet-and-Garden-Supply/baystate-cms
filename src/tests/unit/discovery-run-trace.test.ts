@@ -23,15 +23,17 @@ import os from 'node:os';
 import { initDb, closeDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
+import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems, findItemById } from '../../db/repositories/onboarding-item-repo';
 import {
   getLatestDiscoveryRunForItem,
   listDiscoveryRunsForBatch,
+  createDiscoveryRun,
 } from '../../db/repositories/onboarding-source-repo';
 import { OnboardingWorker } from '../../onboarding/job-queue';
 import type { Workspace } from '../../shared/types';
-import type { InsertSourceData } from '../../db/repositories/onboarding-source-repo';
+import type { InsertSourceData, DiscoveryRunRow } from '../../db/repositories/onboarding-source-repo';
 import type { VerificationResult } from '../../onboarding/page-verifier';
 
 // Discovery + verification are injected through the worker's deps seam (no
@@ -144,7 +146,11 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
   }
 
   test('auto-selected discovery writes a completed run and stamps sources', async () => {
-    const [item] = insertItems(batchId, [{ upc: 'UPC-1', name: 'Brand Product', rowNumber: 1, stage: 'discovery' }], 'discovery', 1);
+    const [item] = insertItems(batchId, [{ upc: 'UPC-1', name: 'Brand Product', rowNumber: 1, stage: 'discovery', brandHint: 'BrandX' }], 'discovery', 1);
+    // Map BrandX → brand.example.com so the ADR 0017 authority gate permits
+    // auto-accept for the candidate (gate behavior is covered by
+    // brand-authority-gate.test.ts).
+    upsertBrandSite('BrandX', 'brand.example.com');
     discoverImpl = async () => ({
       candidates: [CANDIDATE],
       consolidatedName: 'Brand Product',
@@ -240,9 +246,61 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
     expect(after.retryCount).toBeGreaterThan(0);
   });
 
+  test('retry supersedes a stale running run instead of hitting the unique index', async () => {
+    // Live-DB failure reproduction: a previous discovery attempt was
+    // interrupted (process died mid-run), leaving a 'running' run row for the
+    // item. The unique partial index `idx_discovery_runs_one_running` (v2
+    // migration) forbids a second running run, so the retry's INSERT used to
+    // raise `UNIQUE constraint failed: onboarding_discovery_runs.item_id` and
+    // mark the item failed. `createDiscoveryRun` must supersede the stale run
+    // first, preserving the old row as a failed audit trace.
+    const [item] = insertItems(batchId, [{ upc: 'UPC-7', name: 'Retry Item', rowNumber: 1, stage: 'discovery', brandHint: 'BrandX' }], 'discovery', 1);
+    // Map BrandX → brand.example.com so the candidate passes the ADR 0017
+    // authority gate and the run completes deterministic-ally with
+    // auto_selected (the gate outcome itself is covered by
+    // brand-authority-gate.test.ts).
+    upsertBrandSite('BrandX', 'brand.example.com');
+    const staleId = createDiscoveryRun(item.id, {
+      trigger: 'automatic',
+      upc: 'UPC-7',
+      name: 'Retry Item',
+      brandHint: 'BrandX',
+    });
+    discoverImpl = async () => ({
+      candidates: [CANDIDATE],
+      consolidatedName: 'Retry Item',
+      inferredBrand: null,
+      noDomainMapped: false,
+    });
+    verifyImpl = async (candidates: InsertSourceData[]) => candidates.map(strongVerification);
+
+    await runWorkerOnce(); // pre-fix: throws UNIQUE constraint failed here
+
+    const runs = getDb()
+      .query('SELECT * FROM onboarding_discovery_runs WHERE item_id = ? ORDER BY rowid')
+      .all(item.id) as DiscoveryRunRow[];
+    expect(runs.length).toBe(2);
+
+    // Stale run superseded with the audit reason preserved.
+    expect(runs[0].id).toBe(staleId);
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].outcome).toBe('failed');
+    expect(runs[0].outcome_message).toContain('Superseded');
+
+    // New run owns the trace and completes normally.
+    expect(runs[1].status).toBe('completed');
+    expect(runs[1].outcome).toBe('auto_selected');
+    const after = findItemById(item.id)!;
+    expect(after.stageStatus).toBe('completed');
+    expect(after.sourceUrl).toBe(CANDIDATE.url);
+  });
+
   test('runs are listable per batch (audit view)', async () => {
-    insertItems(batchId, [{ upc: 'UPC-5', name: 'A', rowNumber: 1, stage: 'discovery' }], 'discovery', 1);
-    insertItems(batchId, [{ upc: 'UPC-6', name: 'B', rowNumber: 2, stage: 'discovery' }], 'discovery', 1);
+    // Both items carry a mapped brand so the authority gate auto-accepts
+    // (see brand-authority-gate.test.ts for the gate itself).
+    upsertBrandSite('BrandX', 'brand.example.com');
+    insertItems(batchId, [{ upc: 'UPC-5', name: 'A', rowNumber: 1, stage: 'discovery', brandHint: 'BrandX' }], 'discovery', 1);
+    insertItems(batchId, [{ upc: 'UPC-6', name: 'B', rowNumber: 2, stage: 'discovery', brandHint: 'BrandX' }], 'discovery', 1);
     discoverImpl = async () => ({
       candidates: [CANDIDATE],
       consolidatedName: null,

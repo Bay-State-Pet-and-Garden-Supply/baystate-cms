@@ -7,6 +7,7 @@ import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import {
   getProductFieldAudit,
   proposeProductFieldNormalization,
+  validateFieldName,
 } from '../../server/services/product-field-audit-service';
 
 describe('ProductField Audit Service', () => {
@@ -111,6 +112,13 @@ describe('ProductField Audit Service', () => {
     const wsSuspicious = audit.suspiciousGroups.find(s => s.value === ' Dog Food');
     expect(wsSuspicious).toBeDefined();
     expect(wsSuspicious?.reasons).toContain('Leading or trailing whitespace');
+
+    // Verify new total count fields
+    expect(audit.totalDuplicateGroupCount).toBeGreaterThanOrEqual(audit.duplicateGroups.length);
+    expect(audit.totalSuspiciousGroupCount).toBeGreaterThanOrEqual(audit.suspiciousGroups.length);
+    // With this small dataset, counts should match (no truncation)
+    expect(audit.totalDuplicateGroupCount).toBe(audit.duplicateGroups.length);
+    expect(audit.totalSuspiciousGroupCount).toBe(audit.suspiciousGroups.length);
   });
 
   it('should generate proposals correctly based on strategies', () => {
@@ -141,5 +149,51 @@ describe('ProductField Audit Service', () => {
     const safeProposals = proposeProductFieldNormalization('ProductField24', 'safe_duplicates');
     expect(safeProposals.proposals.every(p => p.safeAutoApply)).toBe(true);
     expect(safeProposals.proposals.map(p => p.oldValue)).toContain(' Dog Food');
+  });
+
+  it('should cap groups and keep result under the byte budget for large datasets', () => {
+    const now = new Date().toISOString();
+    // Insert 500 unique singleton values into a different field to avoid
+    // polluting ProductField24 used by other tests.
+    for (let i = 0; i < 500; i++) {
+      insertProductIndex({
+        id: randomUUID(),
+        sku: `BYTE-BUDGET-${i}`,
+        filePath: `products/BYTE-BUDGET-${i}.json`,
+        title: `Byte Budget Product ${i}`,
+        status: 'active',
+        price: '1.00',
+        inventoryQuantity: 1,
+        primaryImage: null,
+        productHash: 'hash',
+        lastApprovedCommit: null,
+        lastPulledRemoteHash: null,
+        lastSyncedRemoteHash: null,
+        lastSyncedAt: null,
+        syncStatus: 'not_synced',
+        hasAdvancedBlocks: 0,
+        hasWarnings: 0,
+        createdAt: now,
+        updatedAt: now,
+        customFields: { ProductField99: `UniqueTestBrand_${i}_${'x'.repeat(30)}` },
+      });
+    }
+
+    const audit = getProductFieldAudit('ProductField99', 100);
+
+    // Serialized result must stay under the 28 KB byte budget
+    const serializedSize = JSON.stringify(audit).length;
+    expect(serializedSize).toBeLessThanOrEqual(28 * 1024);
+
+    // Total counts reflect the uncapped totals
+    expect(audit.totalSuspiciousGroupCount).toBeGreaterThanOrEqual(500);
+    // Suspicious groups array should be capped (at most 100 = limit)
+    expect(audit.suspiciousGroups.length).toBeLessThanOrEqual(100);
+    // Top values should be capped
+    expect(audit.topValues.length).toBeLessThanOrEqual(100);
+    // SKU arrays should have at most 5 entries
+    for (const v of audit.topValues) {
+      expect(v.skus.length).toBeLessThanOrEqual(5);
+    }
   });
 });
