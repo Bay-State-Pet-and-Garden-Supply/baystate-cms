@@ -178,7 +178,7 @@ type ParsedRow = {
   familyTokens: string[];
   /** Identity-oriented tokens exclude generic merchandising language. */
   identityTokens: string[];
-  /** The first meaningful token is only a bounded brand cue, never a fact. */
+  /** The first identity-oriented token is only a bounded brand cue, never a fact. */
   brandToken: string | null;
   skuPrefix: string | null;
   skuNumber: number | null;
@@ -272,7 +272,9 @@ function parseRow(row: BatchSeedRow): ParsedRow {
   // measured variants. They are clues for grouping, never product facts.
   const familyTokens = meaningfulTokens.filter((token) => !VARIANT_WORDS.has(token));
   const identityTokens = familyTokens.filter((token) => !GENERIC_FAMILY_WORDS.has(token));
-  const brandToken = meaningfulTokens[0] ?? null;
+  // Generic merchandising words cannot establish a brand cue. Only an
+  // identity-oriented leading token may participate in brand isolation.
+  const brandToken = identityTokens[0] ?? null;
   const sku = skuParts(row.productSeed.sku);
   return {
     row,
@@ -292,9 +294,9 @@ function parseRow(row: BatchSeedRow): ParsedRow {
 function commonFirstTokens(rows: ParsedRow[]): Map<string, string[]> {
   const occurrences = new Map<string, string[]>();
   for (const row of rows) {
-    // A repeated leading token is the safest deterministic brand-token cue;
-    // never call it a confirmed brand.
-    const leading = row.meaningfulTokens.slice(0, 2);
+    // A repeated identity-oriented leading token is the safest deterministic
+    // brand-token cue; never call it a confirmed brand.
+    const leading = row.identityTokens.slice(0, 2);
     for (const token of leading) {
       const ids = occurrences.get(token) ?? [];
       if (!ids.includes(row.row.rowId)) ids.push(row.row.rowId);
@@ -371,6 +373,9 @@ function relationFor(left: ParsedRow, right: ParsedRow, repeatedBrandTokens: Set
   if (left.price !== null && left.price === right.price && differentSize) reasons.push('same_price_pattern');
 
   let kind: BatchRelationshipKind | null = null;
+  // Once both rows provide distinct identity-oriented brand cues, no
+  // relationship type may bridge them, including the broad overlap fallback.
+  if (distinctBrandCue) return null;
   if (sameName) kind = 'duplicate';
   else if (meaningfulFamilyIdentity && differentSize) kind = 'likely_variant';
   else if (overlap >= 0.67 || (meaningfulFamilyIdentity && (skuSequence || abbreviatedFamily))) kind = 'near_duplicate';

@@ -105,6 +105,46 @@ describe('deterministic batch intelligence (#57)', () => {
     }
   });
 
+  it('filters generic leading words before deriving brand cues', () => {
+    const result = deriveBatchIntelligence({
+      batchId: 'generic-brand-cues',
+      batchVersion: '1',
+      rows: [
+        row('acme-small', 'AC-100', 'Premium Acme Wild Salmon 5 oz', 9.99),
+        row('acme-large', 'AC-101', 'Premium Acme Wild Salmon 10 oz', 14.99),
+        row('betterbone', 'BB-200', 'Premium BetterBone Wild Salmon 15 oz', 19.99),
+      ],
+    });
+
+    expect(result.payload.signals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'repeated_brand_token', value: 'acme' }),
+    ]));
+    expect(result.payload.signals.some((signal) => signal.kind === 'repeated_brand_token' && signal.value === 'premium')).toBe(false);
+    expect(result.payload.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rowId: 'acme-small', relatedRowId: 'acme-large', kind: 'likely_variant' }),
+    ]));
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'acme-small' && relation.relatedRowId === 'betterbone')).toBe(false);
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'betterbone' && relation.relatedRowId === 'acme-small')).toBe(false);
+  });
+
+  it('isolates high-overlap near duplicates when identity brand cues differ', () => {
+    const result = deriveBatchIntelligence({
+      batchId: 'cross-brand-near-duplicates',
+      batchVersion: '1',
+      rows: [
+        row('acme', 'AC-100', 'Acme Wild Salmon Chicken Adult Nutrition 5 oz', 9.99),
+        row('betterbone', 'BB-200', 'BetterBone Wild Salmon Chicken Adult Nutrition 10 oz', 14.99),
+        row('acme-variant', 'AC-101', 'Acme Wild Salmon Chicken Adult Nutrition 20 oz', 19.99),
+      ],
+    });
+
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'acme' && relation.relatedRowId === 'betterbone')).toBe(false);
+    expect(result.payload.relationships.some((relation) => relation.rowId === 'betterbone' && relation.relatedRowId === 'acme')).toBe(false);
+    expect(result.payload.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rowId: 'acme', relatedRowId: 'acme-variant', kind: 'likely_variant' }),
+    ]));
+  });
+
   it('keeps unrelated mixed batches out of row context and bounds the projection', () => {
     const rows = Array.from({ length: 20 }, (_, index) => row(`row-${index}`, `SKU-${index}`, `Brand${index} Unique Product ${index} oz`, index + 1));
     const result = deriveBatchIntelligence({ batchId: 'mixed', batchVersion: '1', rows });
