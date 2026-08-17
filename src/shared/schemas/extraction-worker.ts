@@ -257,6 +257,13 @@ export const ExtractRequestSchema = z.object({
     customSelectors: z.record(z.string(), z.string()).default(() => ({})),
     imageRules: z.record(z.string(), z.unknown()).default(() => ({})),
     variantSelectionStrategy: VariantSelectionStrategySchema.nullable().default(null),
+    /** Worker-side source-domain allowlist for this profile execution. When
+     * non-empty, every destination (initial fetch, every redirect hop, and
+     * every rendered sub-resource) must be an exact or subdomain-suffix match
+     * of one of these domains IN ADDITION to the SSRF floor. Derived from the
+     * profile's approved domain (and, for Pi runs, the run policy's
+     * allowedSourceDomains). */
+    allowedSourceDomains: z.array(z.string().min(1).max(256)).max(64).default([]),
   }),
 });
 

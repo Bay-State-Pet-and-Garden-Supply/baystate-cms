@@ -226,6 +226,39 @@ describe('extraction ladder', () => {
     expect(result.fields.find((field) => field.field === 'sku' && field.variantRef === '1')).toMatchObject({ value: 'CT-1', variantRef: '1' });
   });
 
+  it('emits provenance/variantRef for EVERY Nuxt variant entry (multi-variant regression)', async () => {
+    const html = `<html><head><title>Catnip Toy</title></head>
+<body><script>window.__NUXT__={"data":[{"product":{"title":"Catnip Toy Mouse","brand":"Paws Inc","images":["https://img.example.com/mouse.jpg"],"variants":[
+      {"id":1,"title":"Mouse","sku":"CT-1","gtin":"098765432109","option1":"Mouse"},
+      {"id":2,"title":"Mouse 2-pack","sku":"CT-2","gtin":"098765432116"},
+      {"id":3,"title":"Mouse 3-pack","sku":"CT-3","gtin":"098765432123"}
+    ]}}]}</script></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://nuxt.example.com/p/catnip-mouse',
+      {},
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(html, 'https://nuxt.example.com/p/catnip-mouse') },
+    );
+    // Every variant entry carries its own provenance + variantRef, not just variants[0].
+    const variantNames = result.fields.filter((f) => f.field === 'variant_name');
+    expect(variantNames.map((f) => f.variantRef)).toEqual(['1', '2', '3']);
+    expect(variantNames.every((f) => f.method === 'platform_api' && f.sourcePath?.startsWith('__NUXT__ product.variants['))).toBe(true);
+    expect(result.fields.find((f) => f.field === 'sku' && f.variantRef === '1')).toMatchObject({ value: 'CT-1', sourcePath: '__NUXT__ product.variants[0].sku' });
+    expect(result.fields.find((f) => f.field === 'variant_sku' && f.variantRef === '2')).toMatchObject({ value: 'CT-2', sourcePath: '__NUXT__ product.variants[1].sku' });
+    expect(result.fields.find((f) => f.field === 'variant_sku' && f.variantRef === '3')).toMatchObject({ value: 'CT-3', sourcePath: '__NUXT__ product.variants[2].sku' });
+    // Every variant's GTIN is recorded with its variantRef.
+    expect(result.gtins.filter((g) => g.variantRef).map((g) => ({ value: g.value, variantRef: g.variantRef }))).toEqual([
+      { value: '098765432109', variantRef: '1' },
+      { value: '098765432116', variantRef: '2' },
+      { value: '098765432123', variantRef: '3' },
+    ]);
+    // Product-level fields still resolve and the multi-variant state is reported.
+    expect(result.productName).toBe('Catnip Toy Mouse');
+    expect(result.brand).toBe('Paws Inc');
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+
   it('runs the registered profile layer and merges its evidence', async () => {
     const profile = {
       name: 'test-profile',
@@ -249,7 +282,9 @@ describe('extraction ladder', () => {
       },
     );
     expect(layersUsed).toContain('profile_selector');
-    expect(result.fields.some((f) => f.method === 'profile_selector' && f.field === 'product_name')).toBe(true);
+    // The resolver's declared method is preserved verbatim (never overwritten
+    // with profile_selector — blocker fix 1).
+    expect(result.fields.some((f) => f.method === 'selectors' && f.field === 'product_name')).toBe(true);
     expect(result.images[0].url).toBe('https://img.example.com/profiled.jpg');
     expect(result.identityStatus).toBe('probable_match');
   });

@@ -19,6 +19,10 @@ export interface ProfileRunnerOptions {
   sourceUrl: string;
   /** The extractor profile (CSS selectors) for this domain. */
   profile: ExtractorProfile;
+  /** Optional extra source domains for the worker-side allowlist (e.g. the
+   * Pi run policy's allowedSourceDomains). The profile's own approved domain
+   * is always included. */
+  allowedSourceDomains?: string[];
   /** Expected product info from the spreadsheet. */
   expected: {
     name: string;
@@ -48,6 +52,15 @@ export async function runProfileExtraction(
 ): Promise<ProfileRunnerResult> {
   const { sourceUrl, profile, expected } = options;
 
+  // The profile's approved domain is always an allowed source; Pi runs may
+  // add the run policy's allowedSourceDomains on top. Deduplicated and
+  // transmitted to the worker so every fetch/redirect/sub-resource is checked
+  // against the SSRF floor AND this explicit allowlist.
+  const allowedSourceDomains = Array.from(new Set([
+    profile.domain,
+    ...(options.allowedSourceDomains ?? []),
+  ])).filter((domain): domain is string => typeof domain === 'string' && domain.trim().length > 0);
+
   const request = {
     profileId: profile.id,
     profileVersion: profile.updatedAt
@@ -73,6 +86,7 @@ export async function runProfileExtraction(
       customSelectors: profile.customSelectors ?? {},
       imageRules: {},
       variantSelectionStrategy: profile.variantSelectionStrategy as VariantSelectionStrategy | null ?? null,
+      allowedSourceDomains,
     },
   };
 

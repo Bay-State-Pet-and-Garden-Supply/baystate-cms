@@ -173,6 +173,7 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
             runProfileExtraction?: (opts: {
               sourceUrl: string;
               profile: typeof profile;
+              allowedSourceDomains?: string[];
               expected: { name: string; brandHint?: string | null; price?: string | null };
             }) => Promise<{ ok: boolean; data?: import('../../shared/schemas/onboarding').ExtractionData; fieldProvenance?: Record<string, string>; fieldProvenanceDetails?: Record<string, { method: string; sourcePath: string }>; error?: string; sourceContentHash?: string | null; sourceArtifactId?: string | null }>;
           };
@@ -181,6 +182,10 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
           const res = await runner.runProfileExtraction({
             sourceUrl: url,
             profile,
+            // The run's allowed-source-domains ride along to the worker so its
+            // static/rendered fetches and redirects are checked against the
+            // same explicit allowlist (in addition to the SSRF floor).
+            allowedSourceDomains: sourcesAllowlist,
             expected: {
               name: expected?.name ?? '',
               brandHint: expected?.brandHint ?? null,

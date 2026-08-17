@@ -172,6 +172,59 @@ export async function runExtractionLadder(
     gtins.push({ value: digits, method, sourcePath, sourceArtifactId: source.artifactId, sourceContentHash: source.contentHash, variantRef: source.variantRef });
   };
 
+  // Nuxt hydration state (window.__NUXT__ / __NUXT_DATA__) can carry a full
+  // variant list. Emit provenance + variantRef for EVERY variant entry — not
+  // only variants[0] — including per-variant SKU/GTIN and field observations,
+  // so downstream identity work never flattens the variant set.
+  const emitNuxtProduct = (product: Record<string, unknown>): void => {
+    addField('product_name', product.title as string | undefined, 'platform_api', '__NUXT__ product');
+    if (typeof product.sku === 'string') addField('sku', product.sku, 'platform_api', '__NUXT__ product.sku');
+    const productGtin = gtinFromAny(product);
+    if (productGtin) addGtin(productGtin, 'platform_api', '__NUXT__ product.gtin');
+    productName ??= typeof product.title === 'string' ? product.title : null;
+    sku ??= typeof product.sku === 'string' ? product.sku : null;
+    brand ??= typeof product.brand === 'string' ? product.brand : null;
+    if (typeof product.brand === 'string') addField('brand', product.brand, 'platform_api', '__NUXT__ product.brand');
+    const productImages = Array.isArray(product.images)
+      ? product.images
+          .map((img) => (typeof img === 'string' ? img : (img as { src?: unknown; url?: unknown })?.src ?? (img as { url?: unknown })?.url))
+          .filter((src): src is string => typeof src === 'string')
+      : [];
+    for (const image of productImages) {
+      if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: '__NUXT__ product.images', sourceArtifactId: pageArtifactId, sourceContentHash: contentHash });
+    }
+    if (Array.isArray(product.variants)) {
+      const variantList = product.variants.filter((v): v is Record<string, unknown> => !!v && typeof v === 'object');
+      const first = variantList[0];
+      if (first) {
+        variant = {
+          id: typeof first.id === 'string' || typeof first.id === 'number' ? String(first.id) : undefined,
+          name: typeof first.title === 'string' ? first.title : typeof first.name === 'string' ? first.name : undefined,
+          sku: typeof first.sku === 'string' ? first.sku : undefined,
+        };
+        if (variantList.length > 1) {
+          variantSignals.push({ kind: 'parent_page' });
+        } else if (variantList.length === 1) {
+          // Platform API affirmatively reports exactly one variant.
+          noteProof('platform');
+        }
+      }
+      variantList.forEach((v, index) => {
+        const variantRef = typeof v.id === 'string' || typeof v.id === 'number' ? String(v.id) : `nuxt-variant-${index}`;
+        const variantSource: SourceMetadata = { ...pageSource(), variantRef };
+        const variantPath = `__NUXT__ product.variants[${index}]`;
+        const variantTitle = typeof v.title === 'string' ? v.title : typeof v.name === 'string' ? v.name : undefined;
+        if (variantTitle) addField('variant_name', variantTitle, 'platform_api', `${variantPath}.title`, variantSource);
+        if (typeof v.sku === 'string') {
+          addField(index === 0 ? 'sku' : 'variant_sku', v.sku, 'platform_api', `${variantPath}.sku`, variantSource);
+        }
+        if (index === 0 && typeof v.option1 === 'string') addField('size', v.option1, 'platform_api', `${variantPath}.option1`, variantSource);
+        const variantGtin = gtinFromAny(v);
+        if (variantGtin) addGtin(variantGtin, 'platform_api', `${variantPath}.barcode`, variantSource);
+      });
+    }
+  };
+
   // Layer 1 + 2: one HTTP fetch, then parse every embedded structured signal.
   let page: FetchedPage;
   try {
@@ -330,13 +383,7 @@ export async function runExtractionLadder(
             const nuxtFallback = parseNuxtData(page.html);
             if (nuxtFallback.product) {
               layersUsed.push('nuxt');
-              const product = nuxtFallback.product;
-              addField('product_name', product.title as string | undefined, 'platform_api', '__NUXT__ product');
-              if (typeof product.sku === 'string') addField('sku', product.sku, 'platform_api', '__NUXT__ product.sku');
-              const fallbackGtin = gtinFromAny(product);
-              if (fallbackGtin) addGtin(fallbackGtin, 'platform_api', '__NUXT__ product.gtin');
-              productName ??= typeof product.title === 'string' ? product.title : null;
-              sku ??= typeof product.sku === 'string' ? product.sku : null;
+              emitNuxtProduct(nuxtFallback.product);
             }
           }
         }
@@ -409,45 +456,7 @@ export async function runExtractionLadder(
       const nuxtData = parseNuxtData(page.html);
       if (nuxtData.product) {
         layersUsed.push('nuxt');
-        const product = nuxtData.product;
-        addField('product_name', product.title as string | undefined, 'platform_api', '__NUXT__ product');
-        if (typeof product.sku === 'string') addField('sku', product.sku, 'platform_api', '__NUXT__ product.sku');
-        const gtin = gtinFromAny(product);
-        if (gtin) addGtin(gtin, 'platform_api', '__NUXT__ product.gtin');
-        productName ??= typeof product.title === 'string' ? product.title : null;
-        sku ??= typeof product.sku === 'string' ? product.sku : null;
-        brand ??= typeof product.brand === 'string' ? product.brand : null;
-        if (typeof product.brand === 'string') addField('brand', product.brand, 'platform_api', '__NUXT__ product.brand');
-        const productImages = Array.isArray(product.images)
-          ? product.images
-              .map((img) => (typeof img === 'string' ? img : (img as { src?: unknown; url?: unknown })?.src ?? (img as { url?: unknown })?.url))
-              .filter((src): src is string => typeof src === 'string')
-          : [];
-        for (const image of productImages) {
-          if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: '__NUXT__ product.images', sourceArtifactId: pageArtifactId, sourceContentHash: contentHash });
-        }
-        if (Array.isArray(product.variants)) {
-          const firstVariant = product.variants.find((v) => !!v && typeof v === 'object') as Record<string, unknown> | undefined;
-          if (firstVariant) {
-            variant = {
-              id: typeof firstVariant.id === 'string' || typeof firstVariant.id === 'number' ? String(firstVariant.id) : undefined,
-              name: typeof firstVariant.title === 'string' ? firstVariant.title : typeof firstVariant.name === 'string' ? firstVariant.name : undefined,
-              sku: typeof firstVariant.sku === 'string' ? firstVariant.sku : undefined,
-            };
-            const variantRef = typeof firstVariant.id === 'string' || typeof firstVariant.id === 'number' ? String(firstVariant.id) : undefined;
-            const variantSource: SourceMetadata = { ...pageSource(), variantRef };
-            if (typeof firstVariant.title === 'string') addField('variant_name', firstVariant.title, 'platform_api', '__NUXT__ product.variants[0].title', variantSource);
-            if (typeof firstVariant.sku === 'string') addField('sku', firstVariant.sku, 'platform_api', '__NUXT__ product.variants[0].sku', variantSource);
-            const variantGtin = gtinFromAny(firstVariant);
-            if (variantGtin) addGtin(variantGtin, 'platform_api', '__NUXT__ product.variants[0].barcode', variantSource);
-            if (product.variants.length > 1) {
-              variantSignals.push({ kind: 'parent_page' });
-            } else if (product.variants.length === 1) {
-              // Platform API affirmatively reports exactly one variant.
-              noteProof('platform');
-            }
-          }
-        }
+        emitNuxtProduct(nuxtData.product);
       } else {
         layersUsed.push('nuxt_no_product');
       }
@@ -475,12 +484,23 @@ export async function runExtractionLadder(
           profileId: selectedProfile?.id ?? null,
           profileVersion: selectedProfile?.version ?? null,
         };
-        for (const f of out.fields) addField(f.field, f.value, 'profile_selector', f.sourcePath, {
-          ...profileSource,
-          artifactId: f.sourceArtifactId ?? profileSource.artifactId,
-          contentHash: f.sourceContentHash ?? profileSource.contentHash,
-          variantRef: f.variantRef,
-        });
+        for (const f of out.fields) {
+          // Preserve the resolver-provided method/sourcePath/artifact/hash/
+          // variantRef verbatim — never overwrite f.method with
+          // profile_selector. Only tag profile_selector when the resolver
+          // explicitly reports selector provenance (an explicit method or a
+          // `profile:`-prefixed source path); structured/meta fallbacks keep
+          // their true method and unknown origins stay 'profile_fallback'.
+          const method = f.method && f.method.trim().length > 0
+            ? f.method
+            : (typeof f.sourcePath === 'string' && f.sourcePath.startsWith('profile:') ? 'profile_selector' : 'profile_fallback');
+          addField(f.field, f.value, method, f.sourcePath, {
+            ...profileSource,
+            artifactId: f.sourceArtifactId ?? profileSource.artifactId,
+            contentHash: f.sourceContentHash ?? profileSource.contentHash,
+            variantRef: f.variantRef,
+          });
+        }
         for (const image of out.images) {
           if (!images.some((i) => i.url === image.url)) {
             images.push({ url: image.url, sourcePath: image.sourcePath, sourceArtifactId: image.sourceArtifactId ?? profileSource.artifactId, sourceContentHash: image.sourceContentHash ?? profileSource.contentHash, variantRef: image.variantRef });

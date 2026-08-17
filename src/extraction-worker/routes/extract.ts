@@ -330,7 +330,40 @@ function makePlaywrightEmbeddedExtractor(): string {
 
 const MAX_PROFILE_REDIRECTS = 5;
 
-type FieldProvenanceDetail = { method: string; sourcePath: string };
+export type FieldProvenanceDetail = { method: string; sourcePath: string };
+
+/** Injected transport seams for the worker profile fetch (testability). */
+export interface ProfileTransportDeps {
+  /** Injected DNS resolver (defaults to node:dns/promises lookup). */
+  lookupFn?: (hostname: string, options: { all: true }) => Promise<Array<{ address: string }>>;
+  /** Injected HTTP transport (defaults to global fetch). */
+  fetchFn?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+}
+
+/**
+ * Map an extracted field's declared provenance + exact origin path into the
+ * response's fieldProvenanceDetails entry. Fields without a known origin are
+ * omitted (fail closed) — a fabricated JSON-LD path is never emitted for a
+ * meta/microdata/fallback value, and an unknown method is never upgraded to
+ * profile_selector.
+ */
+export function buildFieldProvenanceDetails(
+  provenance: Record<string, string>,
+  origins: Record<string, string | null>,
+): Record<string, FieldProvenanceDetail> {
+  const details: Record<string, FieldProvenanceDetail> = {};
+  for (const [field, declared] of Object.entries(provenance)) {
+    const origin = origins[field];
+    if (!origin) continue;
+    details[field] = {
+      method: declared === 'profile-selector' ? 'profile_selector' : declared === 'json-ld' ? 'json_ld' : declared,
+      sourcePath: origin,
+    };
+  }
+  return details;
+}
+
+const TRACKER_URL = /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i;
 
 function retainProfileSource(sourceUrl: string, html: string): { sourceContentHash: string; sourceArtifactId: string | null } {
   const sourceContentHash = sha256Hex(html);
@@ -348,9 +381,15 @@ function retainProfileSource(sourceUrl: string, html: string): { sourceContentHa
  * Worker-side profile transport. The worker is a separate process and cannot
  * receive the Pi policy gateway, so static profile fetches use the same SSRF
  * floor locally: DNS is resolved before every request, redirects are manual
- * and revalidated hop-by-hop, and only web ports are accepted.
+ * and revalidated hop-by-hop, and only web ports are accepted. When the
+ * profile declares allowed source domains, every destination must also be an
+ * exact or subdomain-suffix match of that allowlist.
  */
-async function assertSafeProfileDestination(currentUrl: string): Promise<void> {
+export async function assertSafeProfileDestination(
+  currentUrl: string,
+  allowedSourceDomains: string[] = [],
+  deps: ProfileTransportDeps = {},
+): Promise<void> {
   const parsed = new URL(currentUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('profile fetch requires http(s)');
   if (parsed.username || parsed.password) throw new Error('profile fetch rejects credentialed URLs');
@@ -360,7 +399,20 @@ async function assertSafeProfileDestination(currentUrl: string): Promise<void> {
   if (hostname === 'localhost' || classifyIp(hostname) === 'private' || classifyIp(hostname) === 'link_local') {
     throw new Error('profile fetch denied private or link-local destination');
   }
-  const addresses = await lookup(hostname, { all: true });
+  // Explicit domain allowlist (suffix match, `www.`-normalized). An empty
+  // allowlist means the caller did not restrict sources; the SSRF floor still
+  // applies. Applied to every hop and every rendered sub-resource.
+  if (allowedSourceDomains.length > 0) {
+    const normalizedHost = hostname.replace(/^www\./, '');
+    const allowlisted = allowedSourceDomains.some((domain) => {
+      const normalized = domain.toLowerCase().replace(/^www\./, '').trim();
+      if (normalized.length === 0) return false;
+      return normalizedHost === normalized || normalizedHost.endsWith(`.${normalized}`);
+    });
+    if (!allowlisted) throw new Error(`profile fetch denied destination outside allowed source domains: ${hostname}`);
+  }
+  const lookupFn = deps.lookupFn ?? lookup;
+  const addresses = await lookupFn(hostname, { all: true });
   if (addresses.length === 0 || addresses.some(({ address }) => {
     const kind = classifyIp(address);
     return kind === 'private' || kind === 'link_local' || kind === 'unknown';
@@ -369,11 +421,16 @@ async function assertSafeProfileDestination(currentUrl: string): Promise<void> {
   }
 }
 
-async function safeProfileFetch(sourceUrl: string, signal: AbortSignal): Promise<Response> {
+export async function safeProfileFetch(
+  sourceUrl: string,
+  signal: AbortSignal,
+  allowedSourceDomains: string[] = [],
+  deps: ProfileTransportDeps = {},
+): Promise<Response> {
   let currentUrl = sourceUrl;
   for (let redirectCount = 0; ; redirectCount += 1) {
-    await assertSafeProfileDestination(currentUrl);
-    const response = await fetch(currentUrl, {
+    await assertSafeProfileDestination(currentUrl, allowedSourceDomains, deps);
+    const response = await (deps.fetchFn ?? fetch)(currentUrl, {
       headers: HTTP_EXTRACTION_HEADERS,
       signal,
       redirect: 'manual',
@@ -385,6 +442,27 @@ async function safeProfileFetch(sourceUrl: string, signal: AbortSignal): Promise
       continue;
     }
     return response;
+  }
+}
+
+/**
+ * Rendered-profile network guard: EVERY request (navigation, redirect hops,
+ * sub-resources) is revalidated against the SSRF floor and the profile's
+ * source-domain allowlist, and tracker destinations are aborted. This is the
+ * single authoritative route guard for rendered extraction — no later route
+ * handler may continue an unchecked request.
+ */
+export async function profileNetworkGuard(
+  url: string,
+  allowedSourceDomains: string[],
+  deps: ProfileTransportDeps = {},
+): Promise<boolean> {
+  if (TRACKER_URL.test(url)) return false;
+  try {
+    await assertSafeProfileDestination(url, allowedSourceDomains, deps);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -401,7 +479,10 @@ interface ExtractedFields {
 /**
  * Run deterministic extraction via HTTP fetch + Cheerio DOM parsing.
  */
-async function doStaticExtract(request: ExtractRequest): Promise<{
+export async function doStaticExtract(
+  request: ExtractRequest,
+  deps: ProfileTransportDeps = {},
+): Promise<{
   data: ExtractionData;
   warnings: string[];
   sourceContentHash?: string | null;
@@ -411,12 +492,13 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
   const selectors = profile.selectors || {};
+  const allowedSourceDomains = profile.allowedSourceDomains ?? [];
 
   // ── Fetch page ─────────────────────────────────────────────────────────
   let response: Response;
   let html: string;
   try {
-    response = await safeProfileFetch(sourceUrl, AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS));
+    response = await safeProfileFetch(sourceUrl, AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS), allowedSourceDomains, deps);
     if (!response.ok) {
       warnings.push(`HTTP fetch returned ${response.status} ${response.statusText}`);
     }
@@ -445,10 +527,12 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   // Title: selector required — if empty, extraction fails
   let title: string | null = null;
   let titleProvenance = '';
+  let titleOrigin: string | null = null;
   if (titleSelector) {
     title = $(titleSelector).first().text().trim() || null;
     if (title) {
       titleProvenance = 'profile-selector';
+      titleOrigin = titleSelector;
       // Concatenate optional title selectors (e.g. subheadings, taglines)
       const toSel = request.profile.titleOptionalSelectors;
       if (toSel && toSel.length > 0) {
@@ -472,7 +556,10 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       metaTags['page:title'] ||
       null;
     if (title) {
-      titleProvenance = 'json-ld';
+      titleProvenance = title === jsonLd?.name ? 'json-ld' : 'meta';
+      titleOrigin = title === jsonLd?.name
+        ? 'json-ld:Product.name'
+        : title === metaTags['og:title'] ? 'meta:og:title' : 'meta:page:title';
     }
   }
 
@@ -485,10 +572,12 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   // Brand
   let brand: string | null = null;
   let brandProvenance = '';
+  let brandOrigin: string | null = null;
   if (brandSelector) {
     brand = $(brandSelector).first().text().trim() || null;
     if (brand) {
       brandProvenance = 'profile-selector';
+      brandOrigin = brandSelector;
     }
   }
   if (!brand) {
@@ -507,16 +596,21 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       null;
     if (brand) {
       brandProvenance = brandFromJsonLd ? 'json-ld' : microdata.brand ? 'microdata' : 'meta';
+      brandOrigin = brandFromJsonLd
+        ? 'json-ld:Product.brand'
+        : microdata.brand ? 'microdata:Product.brand' : 'meta:product:brand';
     }
   }
 
   // Description
   let description: string | null = null;
   let descriptionProvenance = '';
+  let descriptionOrigin: string | null = null;
   if (descriptionSelector) {
     description = $(descriptionSelector).first().text().trim() || null;
     if (description) {
       descriptionProvenance = 'profile-selector';
+      descriptionOrigin = descriptionSelector;
     } else {
       warnings.push(`descriptionSelector "${descriptionSelector}" returned empty — failing extraction`);
       return buildFailedResult(request, warnings);
@@ -528,20 +622,26 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       metaTags['description'] ||
       null;
     if (description) {
-      descriptionProvenance = 'json-ld';
+      descriptionProvenance = description === jsonLd?.description ? 'json-ld' : 'meta';
+      descriptionOrigin = description === jsonLd?.description
+        ? 'json-ld:Product.description'
+        : description === metaTags['og:description'] ? 'meta:og:description' : 'meta:description';
     }
   }
 
   // Price from selector or expected price (expected.price overrides)
   let price: string | null = null;
   let priceProvenance = '';
+  let priceOrigin: string | null = null;
   if (expected?.price) {
     price = expected.price;
     priceProvenance = 'spreadsheet-import';
+    priceOrigin = 'expected:price';
   } else if (priceSelector) {
     price = $(priceSelector).first().text().trim() || null;
     if (price) {
       priceProvenance = 'profile-selector';
+      priceOrigin = priceSelector;
       // Clean to numeric representation
       const match = price.match(/\$?(\d+\.?\d*)/);
       if (match) {
@@ -558,6 +658,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
     price = priceFromJsonLd || metaTags['product:price:amount'] || null;
     if (price) {
       priceProvenance = priceFromJsonLd ? 'json-ld' : 'meta';
+      priceOrigin = priceFromJsonLd ? 'json-ld:Product.offers.price' : 'meta:product:price:amount';
     }
   }
 
@@ -565,6 +666,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   let primaryImage: string | null = null;
   const additionalImages: string[] = [];
   let imageProvenance = '';
+  let imageOrigin: string | null = null;
 
   if (imagesSelector) {
     const rawImages = collectImagesFromSelector($, imagesSelector, finalUrl);
@@ -572,6 +674,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       primaryImage = rawImages[0];
       additionalImages.push(...rawImages.slice(1));
       imageProvenance = 'profile-selector';
+      imageOrigin = imagesSelector;
     } else {
       warnings.push(`imagesSelector "${imagesSelector}" returned empty — failing extraction`);
       return buildFailedResult(request, warnings);
@@ -585,6 +688,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       if (resolved) {
         primaryImage = resolved;
         imageProvenance = 'json-ld';
+        imageOrigin = 'json-ld:Product.image';
       }
     }
 
@@ -593,6 +697,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       if (resolved) {
         primaryImage = resolved;
         imageProvenance = 'meta';
+        imageOrigin = 'meta:og:image';
       }
     }
 
@@ -601,18 +706,23 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       if (resolved) {
         primaryImage = resolved;
         imageProvenance = 'microdata';
+        imageOrigin = 'microdata:Product.image';
       }
     }
   }
 
   // ── Build provenance record ──────────────────────────────────────────
   const provenance: Record<string, string> = {};
-  if (title) provenance.title = titleProvenance;
-  if (brand) provenance.brand = brandProvenance;
-  if (description) provenance.description = descriptionProvenance;
-  if (price) provenance.price = priceProvenance;
-  if (primaryImage) provenance.primaryImage = imageProvenance;
-  if (additionalImages.length > 0) provenance.additionalImages = imageProvenance;
+  // Exact origin path per accepted field (selector / JSON-LD type / meta key
+  // / microdata itemprop / expected value). Unknown origins are omitted from
+  // fieldProvenanceDetails — a path is never fabricated for a fallback value.
+  const origins: Record<string, string | null> = {};
+  if (title) { provenance.title = titleProvenance; origins.title = titleOrigin; }
+  if (brand) { provenance.brand = brandProvenance; origins.brand = brandOrigin; }
+  if (description) { provenance.description = descriptionProvenance; origins.description = descriptionOrigin; }
+  if (price) { provenance.price = priceProvenance; origins.price = priceOrigin; }
+  if (primaryImage) { provenance.primaryImage = imageProvenance; origins.primaryImage = imageOrigin; }
+  if (additionalImages.length > 0) { provenance.additionalImages = imageProvenance; origins.additionalImages = imageOrigin; }
   if (sourceUrl) provenance.sourceUrl = 'request';
   provenance.profileRuntime = 'static';
 
@@ -626,6 +736,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
         if (val) {
           customFields[fieldName] = val;
           provenance[`custom.${fieldName}`] = 'profile-selector';
+          origins[`custom.${fieldName}`] = selector;
         }
       } catch { /* skip bad selectors */ }
     }
@@ -651,21 +762,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   }
 
   const retained = retainProfileSource(finalUrl, html);
-  const fieldProvenanceDetails: Record<string, FieldProvenanceDetail> = {};
-  const detail = (field: string, declared: string, selector: string | null, fallbackPath: string): void => {
-    if (!provenance[field]) return;
-    fieldProvenanceDetails[field] = {
-      method: declared === 'profile-selector' ? 'profile_selector' : declared === 'json-ld' ? 'json_ld' : declared,
-      sourcePath: declared === 'profile-selector' && selector ? selector : fallbackPath,
-    };
-  };
-  detail('title', titleProvenance, titleSelector, 'json-ld:Product.name');
-  detail('brand', brandProvenance, brandSelector, 'json-ld:Product.brand');
-  detail('description', descriptionProvenance, descriptionSelector, 'json-ld:Product.description');
-  detail('price', priceProvenance, priceSelector, 'json-ld:Product.offers.price');
-  detail('primaryImage', imageProvenance, imagesSelector, 'json-ld:Product.image');
-  if (additionalImages.length > 0) detail('additionalImages', imageProvenance, imagesSelector, 'json-ld:Product.image');
-  for (const key of Object.keys(customFields)) detail(`custom.${key}`, 'profile-selector', profile.customSelectors?.[key] ?? null, `custom:${key}`);
+  const fieldProvenanceDetails = buildFieldProvenanceDetails(provenance, origins);
   return { data, warnings, sourceContentHash: retained.sourceContentHash, sourceArtifactId: retained.sourceArtifactId, fieldProvenanceDetails };
 }
 
@@ -684,8 +781,9 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
   const selectors = profile.selectors || {};
+  const allowedSourceDomains = profile.allowedSourceDomains ?? [];
   try {
-    await assertSafeProfileDestination(sourceUrl);
+    await assertSafeProfileDestination(sourceUrl, allowedSourceDomains);
   } catch (error) {
     warnings.push(`Rendered network denied: ${error instanceof Error ? error.message : String(error)}`);
     return buildFailedResult(request, warnings);
@@ -698,14 +796,12 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   const result = await runRenderedPage(
     {
       url: sourceUrl,
-      networkGuard: async (url) => {
-        try {
-          await assertSafeProfileDestination(url);
-          return true;
-        } catch {
-          return false;
-        }
-      },
+      // One authoritative network guard for the whole page lifecycle: every
+      // request (navigation, redirect hops, and sub-resources) is revalidated
+      // against the SSRF floor + the profile's source-domain allowlist, and
+      // trackers are aborted. No later route handler may continue an
+      // unchecked request.
+      networkGuard: async (url) => profileNetworkGuard(url, allowedSourceDomains),
       navigationTimeoutMs: RENDERED_NAVIGATE_TIMEOUT_MS,
       dwellMs: RENDERED_DWELL_MS,
     },
@@ -811,20 +907,6 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
 
       const finalUrl = page.url();
 
-      // ── Block only trackers (not images/fonts/styles — those help
-      //     Cloudflare fingerprinting and are needed for profile selectors)
-      await page.route('**/*', async (route) => {
-        const req = route.request();
-        const reqUrl = req.url();
-        if (
-          /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i.test(reqUrl)
-        ) {
-          await route.abort();
-        } else {
-          await route.continue();
-        }
-      });
-
       // ── Extract JSON-LD ──────────────────────────────────────────────
       let jsonLd: Record<string, unknown> | null = null;
       try {
@@ -878,11 +960,13 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       // ── Title ────────────────────────────────────────────────────────
       let title: string | null = null;
       const titleProvenance: string[] = [];
+      let titleOrigin: string | null = null;
 
       if (titleSelector) {
         title = await evalText(titleSelector);
         if (title) {
           titleProvenance.push('profile-selector');
+          titleOrigin = titleSelector;
           // Concatenate optional title selectors (e.g. subheadings, taglines)
           const toSel = request.profile.titleOptionalSelectors;
           if (toSel && toSel.length > 0) {
@@ -906,29 +990,35 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         if (title) {
           const src = title === jsonLd?.name ? 'json-ld' : 'meta';
           titleProvenance.push(src);
+          titleOrigin = title === jsonLd?.name
+            ? 'json-ld:Product.name'
+            : title === metaTags['og:title'] ? 'meta:og:title' : 'meta:page:title';
         }
       }
 
       // ── Brand ─────────────────────────────────────────────────────────
       let brand: string | null = null;
       let brandProvenance = '';
+      let brandOrigin: string | null = null;
       if (brandSelector) {
         brand = await evalText(brandSelector);
-        if (brand) brandProvenance = 'profile-selector';
+        if (brand) { brandProvenance = 'profile-selector'; brandOrigin = brandSelector; }
       }
       if (!brand) {
         const jb = jsonLd?.brand as Record<string, unknown> | string | undefined;
         const bfj = typeof jb === 'string' ? jb : (jb as Record<string, unknown>)?.name as string | undefined;
-        if (bfj) { brand = bfj; brandProvenance = 'json-ld'; }
+        if (bfj) { brand = bfj; brandProvenance = 'json-ld'; brandOrigin = 'json-ld:Product.brand'; }
       }
 
       // ── Description ──────────────────────────────────────────────────
       let description: string | null = null;
       let descriptionProvenance = '';
+      let descriptionOrigin: string | null = null;
       if (descriptionSelector) {
         description = await evalText(descriptionSelector);
         if (description) {
           descriptionProvenance = 'profile-selector';
+          descriptionOrigin = descriptionSelector;
         } else {
           warnings.push(`descriptionSelector "${descriptionSelector}" returned empty — failing extraction`);
           return buildFailedResult(request, warnings);
@@ -939,19 +1029,27 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
           metaTags['og:description'] ||
           metaTags['description'] ||
           null;
-        if (description) descriptionProvenance = 'json-ld';
+        if (description) {
+          descriptionProvenance = description === jsonLd?.description ? 'json-ld' : 'meta';
+          descriptionOrigin = description === jsonLd?.description
+            ? 'json-ld:Product.description'
+            : description === metaTags['og:description'] ? 'meta:og:description' : 'meta:description';
+        }
       }
 
       // ── Price ─────────────────────────────────────────────────────────
       let price: string | null = null;
       let priceProvenance = '';
+      let priceOrigin: string | null = null;
       if (expected?.price) {
         price = expected.price;
         priceProvenance = 'spreadsheet-import';
+        priceOrigin = 'expected:price';
       } else if (priceSelector) {
         price = await evalText(priceSelector);
         if (price) {
           priceProvenance = 'profile-selector';
+          priceOrigin = priceSelector;
           const m = price.match(/\$?(\d+\.?\d*)/);
           if (m) price = m[0];
         } else {
@@ -961,13 +1059,17 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       } else {
         const offers = jsonLd?.offers as Record<string, unknown> | undefined;
         price = (offers?.price as string) || metaTags['product:price:amount'] || null;
-        if (price) priceProvenance = offers?.price ? 'json-ld' : 'meta';
+        if (price) {
+          priceProvenance = offers?.price ? 'json-ld' : 'meta';
+          priceOrigin = offers?.price ? 'json-ld:Product.offers.price' : 'meta:product:price:amount';
+        }
       }
 
       // ── Images from selector ────────────────────────────────────────
       let primaryImage: string | null = null;
       const additionalImages: string[] = [];
       let imageProvenance = '';
+      let imageOrigin: string | null = null;
 
       if (imagesSelector) {
         try {
@@ -1026,6 +1128,7 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
             primaryImage = rawImages[0];
             additionalImages.push(...rawImages.slice(1).slice(0, 29));
             imageProvenance = 'profile-selector';
+            imageOrigin = imagesSelector;
           } else {
             warnings.push(`imagesSelector "${imagesSelector}" returned empty — failing extraction`);
             return buildFailedResult(request, warnings);
@@ -1040,32 +1143,41 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
           const img = jsonLd.image as string | string[];
           const url = Array.isArray(img) ? img[0] : img;
           const resolved = resolveUrl(url, finalUrl);
-          if (resolved) { primaryImage = resolved; imageProvenance = 'json-ld'; }
+          if (resolved) { primaryImage = resolved; imageProvenance = 'json-ld'; imageOrigin = 'json-ld:Product.image'; }
         }
         if (!primaryImage && metaTags['og:image']) {
           const resolved = resolveUrl(metaTags['og:image'], finalUrl);
-          if (resolved) { primaryImage = resolved; imageProvenance = 'meta'; }
+          if (resolved) { primaryImage = resolved; imageProvenance = 'meta'; imageOrigin = 'meta:og:image'; }
         }
       }
 
       // ── Custom selectors ────────────────────────────────────────────
       const customFields: Record<string, string> = {};
+      // Provenance + exact origin path per accepted field. Origins are never
+      // fabricated: fields without a known path are omitted from
+      // fieldProvenanceDetails (fail closed), and a meta/microdata fallback
+      // is never relabeled as a selector path.
+      const provenance: Record<string, string> = {};
+      const origins: Record<string, string | null> = {};
       if (profile.customSelectors) {
         for (const [fieldName, selector] of Object.entries(profile.customSelectors)) {
           if (!selector) continue;
           const val = await evalText(selector);
-          if (val) customFields[fieldName] = val;
+          if (val) {
+            customFields[fieldName] = val;
+            provenance[`custom.${fieldName}`] = 'profile-selector';
+            origins[`custom.${fieldName}`] = selector;
+          }
         }
       }
 
       // ── Build provenance ────────────────────────────────────────────
-      const provenance: Record<string, string> = {};
-      if (title) provenance.title = titleProvenance[0] || 'json-ld';
-      if (brand) provenance.brand = brandProvenance;
-      if (description) provenance.description = descriptionProvenance;
-      if (price) provenance.price = priceProvenance;
-      if (primaryImage) provenance.primaryImage = imageProvenance;
-      if (additionalImages.length > 0) provenance.additionalImages = imageProvenance;
+      if (title) { provenance.title = titleProvenance[0] || 'json-ld'; origins.title = titleOrigin; }
+      if (brand) { provenance.brand = brandProvenance; origins.brand = brandOrigin; }
+      if (description) { provenance.description = descriptionProvenance; origins.description = descriptionOrigin; }
+      if (price) { provenance.price = priceProvenance; origins.price = priceOrigin; }
+      if (primaryImage) { provenance.primaryImage = imageProvenance; origins.primaryImage = imageOrigin; }
+      if (additionalImages.length > 0) { provenance.additionalImages = imageProvenance; origins.additionalImages = imageOrigin; }
       if (sourceUrl) provenance.sourceUrl = 'request';
       provenance.profileRuntime = 'rendered';
       if (Object.keys(customFields).length > 0) provenance.customFields = 'profile-selector';
@@ -1074,21 +1186,7 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       // run. Selector values are not authoritative without this source hash
       // (and artifact reference) attached to the response.
       const retained = retainProfileSource(finalUrl, await page.content());
-      const fieldProvenanceDetails: Record<string, FieldProvenanceDetail> = {};
-      const detail = (field: string, declared: string, selector: string | null, fallbackPath: string): void => {
-        if (!provenance[field]) return;
-        fieldProvenanceDetails[field] = {
-          method: declared === 'profile-selector' ? 'profile_selector' : declared === 'json-ld' ? 'json_ld' : declared,
-          sourcePath: declared === 'profile-selector' && selector ? selector : fallbackPath,
-        };
-      };
-      detail('title', titleProvenance[0] ?? '', titleSelector, 'json-ld:Product.name');
-      detail('brand', brandProvenance, brandSelector, 'json-ld:Product.brand');
-      detail('description', descriptionProvenance, descriptionSelector, 'json-ld:Product.description');
-      detail('price', priceProvenance, priceSelector, 'json-ld:Product.offers.price');
-      detail('primaryImage', imageProvenance, imagesSelector, 'json-ld:Product.image');
-      if (additionalImages.length > 0) detail('additionalImages', imageProvenance, imagesSelector, 'json-ld:Product.image');
-      for (const key of Object.keys(customFields)) detail(`custom.${key}`, 'profile-selector', profile.customSelectors?.[key] ?? null, `custom:${key}`);
+      const fieldProvenanceDetails = buildFieldProvenanceDetails(provenance, origins);
       return {
         blocked: false as const,
         title: title ?? null,

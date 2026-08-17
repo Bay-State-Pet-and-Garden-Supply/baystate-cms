@@ -3280,6 +3280,8 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
         customSelectors: customSelectors || {},
         imageRules: {},
         variantSelectionStrategy: variantSelectionStrategy || null,
+        // Draft test extraction is scoped to the tested page's domain only.
+        allowedSourceDomains: [],
       },
     });
 
