@@ -87,7 +87,8 @@ export const V4HierarchyNodeSchema = z.object({
   facetProfileId: ClassificationSlugSchema.nullable(),
   departmentId: ClassificationSlugSchema,
   legacyTypeIds: z.array(ClassificationSlugSchema),
-  derivation: z.enum(['department', 'group', 'family', 'type_1to1']),
+  derivation: z.enum(['department', 'group', 'family', 'type_1to1', 'type_native']),
+  scope: z.object({ animalDomain: ClassificationSlugSchema }).strict().nullable().optional(),
 }).strict();
 export type V4HierarchyNode = z.infer<typeof V4HierarchyNodeSchema>;
 
@@ -852,6 +853,50 @@ function parseV4Envelope<T extends { entries: unknown[]; bundleOrigin: unknown }
   return parsed.data;
 }
 
+/** True when `childId` is a descendant of (or equal to) `ancestorId`. */
+function isDescendantOf(
+  childId: string,
+  ancestorId: string,
+  nodeById: Map<string, { id: string; parentId: string | null }>,
+): boolean {
+  let cursor: { id: string; parentId: string | null } | undefined = nodeById.get(childId);
+  const visited = new Set<string>();
+  while (cursor) {
+    if (visited.has(cursor.id)) return false; // cycle rule reports it
+    visited.add(cursor.id);
+    if (cursor.id === ancestorId) return true;
+    cursor = cursor.parentId ? nodeById.get(cursor.parentId) : undefined;
+  }
+  return false;
+}
+
+/** Deterministic species hint from a page name's leading tokens. */
+function pageSpeciesHint(pageName: string): string | null {
+  const norm = pageName.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (/^caged bird|^wild bird|\bbird\b/.test(norm)) return 'wild_bird';
+  if (/^dog\b/.test(norm)) return 'dog';
+  if (/^cat\b/.test(norm)) return 'cat';
+  if (/^fish\b/.test(norm)) return 'fish';
+  if (/^horse\b/.test(norm)) return 'horse';
+  return null;
+}
+
+/** Nearest declared scope (walking ancestors). */
+function effectiveScopeOf(
+  nodeId: string,
+  nodeById: Map<string, { id: string; parentId: string | null; scope?: { animalDomain?: string } | null }>,
+): string | null {
+  let cursor = nodeById.get(nodeId);
+  const visited = new Set<string>();
+  while (cursor) {
+    if (visited.has(cursor.id)) return null; // cycle rule reports it
+    visited.add(cursor.id);
+    if (cursor.scope?.animalDomain) return cursor.scope.animalDomain;
+    cursor = cursor.parentId ? nodeById.get(cursor.parentId) : undefined;
+  }
+  return null;
+}
+
 /**
  * Validate a v4 canonical-hierarchy release directory. Same philosophy as the
  * v3 gate: a broken hierarchy must be impossible to load. Reuses the v3
@@ -1115,9 +1160,19 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   // ── Rule 6: leaf bijection with v3 product-types.json ────────────────────
   {
     const leafNodes = hierarchy.filter(n => n.classifiable);
-    for (const leaf of leafNodes) {
+    // v4-native leaves (derivation type_native, e.g. fish-food) carry NO
+    // legacy v3 type — they are legitimate additions beyond the v3 universe
+    // (ChatGPT fix-phase review). Only migrated leaves must satisfy the
+    // v3 bijection.
+    const migratedLeaves = leafNodes.filter(n => n.derivation !== 'type_native');
+    for (const leaf of migratedLeaves) {
       if (!leaf.legacyTypeIds || leaf.legacyTypeIds.length === 0) {
         fail('leaf_node_no_legacy_type', `Classifiable node "${leaf.id}" has no legacyTypeIds.`);
+      }
+    }
+    for (const leaf of leafNodes.filter(n => n.derivation === 'type_native')) {
+      if (leaf.legacyTypeIds && leaf.legacyTypeIds.length > 0) {
+        fail('native_leaf_has_legacy_type', `v4-native node "${leaf.id}" must not carry legacyTypeIds.`);
       }
     }
 
@@ -1218,6 +1273,21 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
             fail('canonical_leaf_unknown_node', `Canonical leaf page "${page.pageName}" references unknown node "${page.nodeId}".`);
           } else if (!node.classifiable) {
             fail('canonical_leaf_node_not_classifiable', `Canonical leaf page "${page.pageName}" references non-classifiable node "${page.nodeId}".`);
+          } else {
+            // Page→node scope compatibility (ChatGPT fix-phase review #4): a
+            // page whose name is confidently scoped to one animal domain must
+            // not ratify to a node in a different domain. Deterministic
+            // species check: page starts with a species token.
+            const pageSpecies = pageSpeciesHint(page.pageName);
+            const nodeScope = effectiveScopeOf(node.id, nodeById);
+            if (pageSpecies && nodeScope && pageSpecies !== nodeScope && nodeScope !== 'wild_bird') {
+              fail('page_scope_mismatch', `Page "${page.pageName}" is ${pageSpecies}-scoped but maps to node "${page.nodeId}" (scope ${nodeScope}).`);
+            }
+            // wild-bird pages may only map to nodes under the wild-bird family
+            // (never deer-wildlife-feed or the department root).
+            if (pageSpecies === 'wild_bird' && !isDescendantOf(node.id, 'wild-bird', nodeById)) {
+              fail('page_scope_mismatch', `Wild-bird page "${page.pageName}" maps to "${page.nodeId}" outside the wild-bird family.`);
+            }
           }
           if (nodeIdToLeafPage.has(page.nodeId)) {
             fail('duplicate_canonical_node_page', `Canonical node "${page.nodeId}" is projected by both "${nodeIdToLeafPage.get(page.nodeId)}" and "${page.pageName}".`);
@@ -1339,6 +1409,54 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
       if (overlap.length > 0) {
         fail('species_safety_overlap', `Dog and cat groups share legacy types: ${overlap.join(', ')}.`);
       }
+    }
+  }
+
+  // ── Rule 10b: scope inheritance safety (ChatGPT fix-phase review #4) ────
+  // Every node's effective scope must equal its nearest declared ancestor
+  // scope; a descendant may never contradict its parent's scope. Also verify
+  // scoped branches are internally consistent (fish under pet-supplies,
+  // wild-bird under wild-bird-wildlife with deer OUTSIDE the wild-bird
+  // family).
+  {
+    const nodeByIdMap = new Map(hierarchy.map(n => [n.id, n]));
+    const declaredScope = (n: V4HierarchyNode): string | null => n.scope?.animalDomain ?? null;
+    const effectiveScope = (n: V4HierarchyNode): string | null => {
+      let cursor: V4HierarchyNode | undefined = n;
+      const visited = new Set<string>();
+      while (cursor) {
+        if (visited.has(cursor.id)) return null; // cycle rule reports it
+        visited.add(cursor.id);
+        const s = declaredScope(cursor);
+        if (s) return s;
+        cursor = cursor.parentId ? nodeByIdMap.get(cursor.parentId) : undefined;
+      }
+      return null;
+    };
+    for (const node of hierarchy) {
+      const own = declaredScope(node);
+      const inherited = effectiveScope(node);
+      if (own && inherited && own !== inherited) {
+        fail('scope_conflict', `Node "${node.id}" declares scope ${own} but inherits ${inherited} from its ancestor.`);
+      }
+      // Classifiable leaves must not escape their branch's species.
+      if (node.classifiable && inherited === 'dog' && !isDescendantOf(node.id, 'dog', nodeByIdMap)) {
+        fail('scope_escape', `Classifiable node "${node.id}" inherits dog scope but is not a descendant of dog.`);
+      }
+      if (node.classifiable && inherited === 'cat' && !isDescendantOf(node.id, 'cat', nodeByIdMap)) {
+        fail('scope_escape', `Classifiable node "${node.id}" inherits cat scope but is not a descendant of cat.`);
+      }
+    }
+    // deer-wildlife-feed must be OUTSIDE wild-bird (it is a wildlife leaf
+    // directly under the department root, never under the wild-bird family).
+    const deer = hierarchy.find(n => n.id === 'deer-wildlife-feed');
+    if (deer && isDescendantOf('deer-wildlife-feed', 'wild-bird', nodeByIdMap)) {
+      fail('scope_escape', 'deer-wildlife-feed must not be a descendant of the wild-bird family (wildlife is a separate partition).');
+    }
+    // fish-food must be under fish.
+    const fishFood = hierarchy.find(n => n.id === 'fish-food');
+    if (fishFood && !isDescendantOf('fish-food', 'fish', nodeByIdMap)) {
+      fail('scope_escape', 'fish-food must be a descendant of the fish browse node.');
     }
   }
 

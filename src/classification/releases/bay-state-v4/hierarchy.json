@@ -55,7 +55,10 @@
       "legacyTypeIds": [
         "bird-food"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "wild_bird"
+      }
     },
     {
       "id": "bird-houses-baths",
@@ -67,7 +70,10 @@
       "legacyTypeIds": [
         "bird-houses-baths"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "wild_bird"
+      }
     },
     {
       "id": "cat",
@@ -81,7 +87,10 @@
         "cat-toys",
         "cat-treats"
       ],
-      "derivation": "group"
+      "derivation": "group",
+      "scope": {
+        "animalDomain": "cat"
+      }
     },
     {
       "id": "cat-food",
@@ -94,7 +103,10 @@
         "cat-food-dry",
         "cat-food-wet"
       ],
-      "derivation": "family"
+      "derivation": "family",
+      "scope": {
+        "animalDomain": "cat"
+      }
     },
     {
       "id": "cat-food-dry",
@@ -106,7 +118,10 @@
       "legacyTypeIds": [
         "cat-food-dry"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "cat"
+      }
     },
     {
       "id": "cat-food-wet",
@@ -118,7 +133,10 @@
       "legacyTypeIds": [
         "cat-food-wet"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "cat"
+      }
     },
     {
       "id": "cat-litter",
@@ -130,7 +148,10 @@
       "legacyTypeIds": [
         "cat-litter"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "cat"
+      }
     },
     {
       "id": "cat-toys",
@@ -142,7 +163,10 @@
       "legacyTypeIds": [
         "cat-toys"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "cat"
+      }
     },
     {
       "id": "cat-treats",
@@ -154,7 +178,10 @@
       "legacyTypeIds": [
         "cat-treats"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "cat"
+      }
     },
     {
       "id": "cattle-feed",
@@ -241,7 +268,10 @@
         "dog-treats",
         "dog-waste-bags"
       ],
-      "derivation": "group"
+      "derivation": "group",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "dog-crates-kennels",
@@ -253,7 +283,10 @@
       "legacyTypeIds": [
         "dog-crates-kennels"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "dog-food",
@@ -266,7 +299,10 @@
         "dog-food-dry",
         "dog-food-wet"
       ],
-      "derivation": "family"
+      "derivation": "family",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "dog-food-dry",
@@ -278,7 +314,10 @@
       "legacyTypeIds": [
         "dog-food-dry"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "dog-food-wet",
@@ -290,7 +329,10 @@
       "legacyTypeIds": [
         "dog-food-wet"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "dog-toys",
@@ -302,7 +344,10 @@
       "legacyTypeIds": [
         "dog-toys"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "dog-treats",
@@ -314,7 +359,10 @@
       "legacyTypeIds": [
         "dog-treats"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "dog-waste-bags",
@@ -326,7 +374,10 @@
       "legacyTypeIds": [
         "dog-waste-bags"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "dog"
+      }
     },
     {
       "id": "electric-fence-chargers",
@@ -432,6 +483,32 @@
         "firewood-kindling"
       ],
       "derivation": "type_1to1"
+    },
+    {
+      "id": "fish",
+      "label": "Fish",
+      "parentId": "pet-supplies",
+      "classifiable": false,
+      "facetProfileId": null,
+      "departmentId": "pet-supplies",
+      "legacyTypeIds": [],
+      "derivation": "group",
+      "scope": {
+        "animalDomain": "fish"
+      }
+    },
+    {
+      "id": "fish-food",
+      "label": "Fish Food",
+      "parentId": "fish",
+      "classifiable": true,
+      "facetProfileId": "profile-pet-food",
+      "departmentId": "pet-supplies",
+      "legacyTypeIds": [],
+      "derivation": "type_native",
+      "scope": {
+        "animalDomain": "fish"
+      }
     },
     {
       "id": "flea-tick-treatment",
@@ -968,7 +1045,10 @@
       "legacyTypeIds": [
         "suet-cakes"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "wild_bird"
+      }
     },
     {
       "id": "supplements",
@@ -1082,7 +1162,10 @@
         "suet-cakes",
         "wild-bird-feeders"
       ],
-      "derivation": "family"
+      "derivation": "family",
+      "scope": {
+        "animalDomain": "wild_bird"
+      }
     },
     {
       "id": "wild-bird-feeders",
@@ -1094,7 +1177,10 @@
       "legacyTypeIds": [
         "wild-bird-feeders"
       ],
-      "derivation": "type_1to1"
+      "derivation": "type_1to1",
+      "scope": {
+        "animalDomain": "wild_bird"
+      }
     },
     {
       "id": "wild-bird-wildlife",

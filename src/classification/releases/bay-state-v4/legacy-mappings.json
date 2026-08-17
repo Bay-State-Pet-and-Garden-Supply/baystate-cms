@@ -595,8 +595,8 @@
       "kind": "profile_map",
       "v3ProfileId": "air-compressors-hoses-profile",
       "v4ProfileId": "profile-power-equipment",
-      "v3Fingerprint": "b3422050ef1b906c1d7a58b5",
-      "v4Fingerprint": "b3422050ef1b906c1d7a58b5",
+      "v3Fingerprint": "de7047634717db39570531c1",
+      "v4Fingerprint": "de7047634717db39570531c1",
       "equivalent": true
     },
     {
@@ -604,8 +604,8 @@
       "kind": "profile_map",
       "v3ProfileId": "bee-supplies-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -613,8 +613,8 @@
       "kind": "profile_map",
       "v3ProfileId": "bird-food-profile",
       "v4ProfileId": "profile-wild-bird",
-      "v3Fingerprint": "5b7f894d311a6064a9dac343",
-      "v4Fingerprint": "5b7f894d311a6064a9dac343",
+      "v3Fingerprint": "95fa1b02fa3657de968e38a2",
+      "v4Fingerprint": "95fa1b02fa3657de968e38a2",
       "equivalent": true
     },
     {
@@ -622,8 +622,8 @@
       "kind": "profile_map",
       "v3ProfileId": "bird-houses-baths-profile",
       "v4ProfileId": "profile-wild-bird",
-      "v3Fingerprint": "5b7f894d311a6064a9dac343",
-      "v4Fingerprint": "5b7f894d311a6064a9dac343",
+      "v3Fingerprint": "95fa1b02fa3657de968e38a2",
+      "v4Fingerprint": "95fa1b02fa3657de968e38a2",
       "equivalent": true
     },
     {
@@ -631,8 +631,8 @@
       "kind": "profile_map",
       "v3ProfileId": "cat-food-dry-profile",
       "v4ProfileId": "profile-pet-food",
-      "v3Fingerprint": "37e1d9a35bdbf630ca12cd48",
-      "v4Fingerprint": "37e1d9a35bdbf630ca12cd48",
+      "v3Fingerprint": "186e9f6ad0b1a908d38ea766",
+      "v4Fingerprint": "186e9f6ad0b1a908d38ea766",
       "equivalent": true
     },
     {
@@ -640,8 +640,8 @@
       "kind": "profile_map",
       "v3ProfileId": "cat-food-wet-profile",
       "v4ProfileId": "profile-pet-food",
-      "v3Fingerprint": "37e1d9a35bdbf630ca12cd48",
-      "v4Fingerprint": "37e1d9a35bdbf630ca12cd48",
+      "v3Fingerprint": "186e9f6ad0b1a908d38ea766",
+      "v4Fingerprint": "186e9f6ad0b1a908d38ea766",
       "equivalent": true
     },
     {
@@ -649,8 +649,8 @@
       "kind": "profile_map",
       "v3ProfileId": "cat-litter-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -658,8 +658,8 @@
       "kind": "profile_map",
       "v3ProfileId": "cat-toys-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -667,8 +667,8 @@
       "kind": "profile_map",
       "v3ProfileId": "cat-treats-profile",
       "v4ProfileId": "profile-pet-food",
-      "v3Fingerprint": "37e1d9a35bdbf630ca12cd48",
-      "v4Fingerprint": "37e1d9a35bdbf630ca12cd48",
+      "v3Fingerprint": "186e9f6ad0b1a908d38ea766",
+      "v4Fingerprint": "186e9f6ad0b1a908d38ea766",
       "equivalent": true
     },
     {
@@ -676,8 +676,8 @@
       "kind": "profile_map",
       "v3ProfileId": "cattle-feed-profile",
       "v4ProfileId": "profile-livestock-feed",
-      "v3Fingerprint": "1a714dcfc078f6320cacf983",
-      "v4Fingerprint": "1a714dcfc078f6320cacf983",
+      "v3Fingerprint": "a2f813419160384ea218e320",
+      "v4Fingerprint": "a2f813419160384ea218e320",
       "equivalent": true
     },
     {
@@ -685,8 +685,8 @@
       "kind": "profile_map",
       "v3ProfileId": "chainsaws-log-splitters-profile",
       "v4ProfileId": "profile-power-equipment",
-      "v3Fingerprint": "b3422050ef1b906c1d7a58b5",
-      "v4Fingerprint": "b3422050ef1b906c1d7a58b5",
+      "v3Fingerprint": "de7047634717db39570531c1",
+      "v4Fingerprint": "de7047634717db39570531c1",
       "equivalent": true
     },
     {
@@ -694,8 +694,8 @@
       "kind": "profile_map",
       "v3ProfileId": "collars-leashes-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -703,8 +703,8 @@
       "kind": "profile_map",
       "v3ProfileId": "coop-barn-heat-lamps-profile",
       "v4ProfileId": "profile-heating",
-      "v3Fingerprint": "77a7da5749ad69ecc3e450da",
-      "v4Fingerprint": "77a7da5749ad69ecc3e450da",
+      "v3Fingerprint": "aafba1797b40739564c6b76d",
+      "v4Fingerprint": "aafba1797b40739564c6b76d",
       "equivalent": true
     },
     {
@@ -712,8 +712,8 @@
       "kind": "profile_map",
       "v3ProfileId": "corral-panels-gates-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -721,8 +721,8 @@
       "kind": "profile_map",
       "v3ProfileId": "deer-wildlife-feed-profile",
       "v4ProfileId": "profile-wild-bird",
-      "v3Fingerprint": "5b7f894d311a6064a9dac343",
-      "v4Fingerprint": "5b7f894d311a6064a9dac343",
+      "v3Fingerprint": "95fa1b02fa3657de968e38a2",
+      "v4Fingerprint": "95fa1b02fa3657de968e38a2",
       "equivalent": true
     },
     {
@@ -730,8 +730,8 @@
       "kind": "profile_map",
       "v3ProfileId": "dog-crates-kennels-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -739,8 +739,8 @@
       "kind": "profile_map",
       "v3ProfileId": "dog-food-dry-profile",
       "v4ProfileId": "profile-pet-food",
-      "v3Fingerprint": "37e1d9a35bdbf630ca12cd48",
-      "v4Fingerprint": "37e1d9a35bdbf630ca12cd48",
+      "v3Fingerprint": "186e9f6ad0b1a908d38ea766",
+      "v4Fingerprint": "186e9f6ad0b1a908d38ea766",
       "equivalent": true
     },
     {
@@ -748,8 +748,8 @@
       "kind": "profile_map",
       "v3ProfileId": "dog-food-wet-profile",
       "v4ProfileId": "profile-pet-food",
-      "v3Fingerprint": "37e1d9a35bdbf630ca12cd48",
-      "v4Fingerprint": "37e1d9a35bdbf630ca12cd48",
+      "v3Fingerprint": "186e9f6ad0b1a908d38ea766",
+      "v4Fingerprint": "186e9f6ad0b1a908d38ea766",
       "equivalent": true
     },
     {
@@ -757,8 +757,8 @@
       "kind": "profile_map",
       "v3ProfileId": "dog-toys-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -766,8 +766,8 @@
       "kind": "profile_map",
       "v3ProfileId": "dog-treats-profile",
       "v4ProfileId": "profile-pet-food",
-      "v3Fingerprint": "37e1d9a35bdbf630ca12cd48",
-      "v4Fingerprint": "37e1d9a35bdbf630ca12cd48",
+      "v3Fingerprint": "186e9f6ad0b1a908d38ea766",
+      "v4Fingerprint": "186e9f6ad0b1a908d38ea766",
       "equivalent": true
     },
     {
@@ -775,8 +775,8 @@
       "kind": "profile_map",
       "v3ProfileId": "dog-waste-bags-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -784,8 +784,8 @@
       "kind": "profile_map",
       "v3ProfileId": "electric-fence-chargers-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -793,8 +793,8 @@
       "kind": "profile_map",
       "v3ProfileId": "electric-fence-insulators-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -802,8 +802,8 @@
       "kind": "profile_map",
       "v3ProfileId": "equine-grooming-hoof-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -811,8 +811,8 @@
       "kind": "profile_map",
       "v3ProfileId": "fence-wire-mesh-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -820,8 +820,8 @@
       "kind": "profile_map",
       "v3ProfileId": "fencing-tools-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -829,8 +829,8 @@
       "kind": "profile_map",
       "v3ProfileId": "firewood-kindling-profile",
       "v4ProfileId": "profile-heating",
-      "v3Fingerprint": "77a7da5749ad69ecc3e450da",
-      "v4Fingerprint": "77a7da5749ad69ecc3e450da",
+      "v3Fingerprint": "aafba1797b40739564c6b76d",
+      "v4Fingerprint": "aafba1797b40739564c6b76d",
       "equivalent": true
     },
     {
@@ -838,8 +838,8 @@
       "kind": "profile_map",
       "v3ProfileId": "flea-tick-treatment-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -847,8 +847,8 @@
       "kind": "profile_map",
       "v3ProfileId": "fly-control-equine-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -856,8 +856,8 @@
       "kind": "profile_map",
       "v3ProfileId": "fly-insect-control-livestock-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -865,8 +865,8 @@
       "kind": "profile_map",
       "v3ProfileId": "garage-barn-heaters-profile",
       "v4ProfileId": "profile-heating",
-      "v3Fingerprint": "77a7da5749ad69ecc3e450da",
-      "v4Fingerprint": "77a7da5749ad69ecc3e450da",
+      "v3Fingerprint": "aafba1797b40739564c6b76d",
+      "v4Fingerprint": "aafba1797b40739564c6b76d",
       "equivalent": true
     },
     {
@@ -874,8 +874,8 @@
       "kind": "profile_map",
       "v3ProfileId": "garden-hoses-reels-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -883,8 +883,8 @@
       "kind": "profile_map",
       "v3ProfileId": "goat-sheep-feed-profile",
       "v4ProfileId": "profile-livestock-feed",
-      "v3Fingerprint": "1a714dcfc078f6320cacf983",
-      "v4Fingerprint": "1a714dcfc078f6320cacf983",
+      "v3Fingerprint": "a2f813419160384ea218e320",
+      "v4Fingerprint": "a2f813419160384ea218e320",
       "equivalent": true
     },
     {
@@ -892,8 +892,8 @@
       "kind": "profile_map",
       "v3ProfileId": "grass-seed-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -901,8 +901,8 @@
       "kind": "profile_map",
       "v3ProfileId": "grooming-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -910,8 +910,8 @@
       "kind": "profile_map",
       "v3ProfileId": "hand-tools-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -919,8 +919,8 @@
       "kind": "profile_map",
       "v3ProfileId": "heating-pellets-wood-profile",
       "v4ProfileId": "profile-heating",
-      "v3Fingerprint": "77a7da5749ad69ecc3e450da",
-      "v4Fingerprint": "77a7da5749ad69ecc3e450da",
+      "v3Fingerprint": "aafba1797b40739564c6b76d",
+      "v4Fingerprint": "aafba1797b40739564c6b76d",
       "equivalent": true
     },
     {
@@ -928,8 +928,8 @@
       "kind": "profile_map",
       "v3ProfileId": "horse-blankets-tack-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -937,8 +937,8 @@
       "kind": "profile_map",
       "v3ProfileId": "horse-feed-profile",
       "v4ProfileId": "profile-livestock-feed",
-      "v3Fingerprint": "1a714dcfc078f6320cacf983",
-      "v4Fingerprint": "1a714dcfc078f6320cacf983",
+      "v3Fingerprint": "a2f813419160384ea218e320",
+      "v4Fingerprint": "a2f813419160384ea218e320",
       "equivalent": true
     },
     {
@@ -946,8 +946,8 @@
       "kind": "profile_map",
       "v3ProfileId": "horse-treats-supplements-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -955,8 +955,8 @@
       "kind": "profile_map",
       "v3ProfileId": "insect-control-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -964,8 +964,8 @@
       "kind": "profile_map",
       "v3ProfileId": "lawn-fertilizer-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -973,8 +973,8 @@
       "kind": "profile_map",
       "v3ProfileId": "lawn-mowers-profile",
       "v4ProfileId": "profile-power-equipment",
-      "v3Fingerprint": "b3422050ef1b906c1d7a58b5",
-      "v4Fingerprint": "b3422050ef1b906c1d7a58b5",
+      "v3Fingerprint": "de7047634717db39570531c1",
+      "v4Fingerprint": "de7047634717db39570531c1",
       "equivalent": true
     },
     {
@@ -982,8 +982,8 @@
       "kind": "profile_map",
       "v3ProfileId": "livestock-feeders-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -991,8 +991,8 @@
       "kind": "profile_map",
       "v3ProfileId": "livestock-health-dewormers-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -1000,8 +1000,8 @@
       "kind": "profile_map",
       "v3ProfileId": "overalls-coveralls-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -1009,8 +1009,8 @@
       "kind": "profile_map",
       "v3ProfileId": "pet-beds-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -1018,8 +1018,8 @@
       "kind": "profile_map",
       "v3ProfileId": "pig-swine-feed-profile",
       "v4ProfileId": "profile-livestock-feed",
-      "v3Fingerprint": "1a714dcfc078f6320cacf983",
-      "v4Fingerprint": "1a714dcfc078f6320cacf983",
+      "v3Fingerprint": "a2f813419160384ea218e320",
+      "v4Fingerprint": "a2f813419160384ea218e320",
       "equivalent": true
     },
     {
@@ -1027,8 +1027,8 @@
       "kind": "profile_map",
       "v3ProfileId": "plant-food-fertilizer-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -1036,8 +1036,8 @@
       "kind": "profile_map",
       "v3ProfileId": "potting-soil-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -1045,8 +1045,8 @@
       "kind": "profile_map",
       "v3ProfileId": "poultry-coops-equipment-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -1054,8 +1054,8 @@
       "kind": "profile_map",
       "v3ProfileId": "poultry-feed-profile",
       "v4ProfileId": "profile-livestock-feed",
-      "v3Fingerprint": "1a714dcfc078f6320cacf983",
-      "v4Fingerprint": "1a714dcfc078f6320cacf983",
+      "v3Fingerprint": "a2f813419160384ea218e320",
+      "v4Fingerprint": "a2f813419160384ea218e320",
       "equivalent": true
     },
     {
@@ -1063,8 +1063,8 @@
       "kind": "profile_map",
       "v3ProfileId": "power-tool-accessories-profile",
       "v4ProfileId": "profile-power-equipment",
-      "v3Fingerprint": "b3422050ef1b906c1d7a58b5",
-      "v4Fingerprint": "b3422050ef1b906c1d7a58b5",
+      "v3Fingerprint": "de7047634717db39570531c1",
+      "v4Fingerprint": "de7047634717db39570531c1",
       "equivalent": true
     },
     {
@@ -1072,8 +1072,8 @@
       "kind": "profile_map",
       "v3ProfileId": "pressure-washers-profile",
       "v4ProfileId": "profile-power-equipment",
-      "v3Fingerprint": "b3422050ef1b906c1d7a58b5",
-      "v4Fingerprint": "b3422050ef1b906c1d7a58b5",
+      "v3Fingerprint": "de7047634717db39570531c1",
+      "v4Fingerprint": "de7047634717db39570531c1",
       "equivalent": true
     },
     {
@@ -1081,8 +1081,8 @@
       "kind": "profile_map",
       "v3ProfileId": "propane-heaters-profile",
       "v4ProfileId": "profile-heating",
-      "v3Fingerprint": "77a7da5749ad69ecc3e450da",
-      "v4Fingerprint": "77a7da5749ad69ecc3e450da",
+      "v3Fingerprint": "aafba1797b40739564c6b76d",
+      "v4Fingerprint": "aafba1797b40739564c6b76d",
       "equivalent": true
     },
     {
@@ -1090,8 +1090,8 @@
       "kind": "profile_map",
       "v3ProfileId": "small-animal-feed-bedding-profile",
       "v4ProfileId": "profile-livestock-feed",
-      "v3Fingerprint": "1a714dcfc078f6320cacf983",
-      "v4Fingerprint": "1a714dcfc078f6320cacf983",
+      "v3Fingerprint": "a2f813419160384ea218e320",
+      "v4Fingerprint": "a2f813419160384ea218e320",
       "equivalent": true
     },
     {
@@ -1099,8 +1099,8 @@
       "kind": "profile_map",
       "v3ProfileId": "sprinklers-nozzles-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -1108,8 +1108,8 @@
       "kind": "profile_map",
       "v3ProfileId": "stall-mats-bedding-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -1117,8 +1117,8 @@
       "kind": "profile_map",
       "v3ProfileId": "stock-tanks-waterers-profile",
       "v4ProfileId": "profile-livestock-equipment",
-      "v3Fingerprint": "644bff366883bcb4c11aca7f",
-      "v4Fingerprint": "644bff366883bcb4c11aca7f",
+      "v3Fingerprint": "f2fe961f98967fc34797c5e2",
+      "v4Fingerprint": "f2fe961f98967fc34797c5e2",
       "equivalent": true
     },
     {
@@ -1126,8 +1126,8 @@
       "kind": "profile_map",
       "v3ProfileId": "stove-pipe-chimney-care-profile",
       "v4ProfileId": "profile-heating",
-      "v3Fingerprint": "77a7da5749ad69ecc3e450da",
-      "v4Fingerprint": "77a7da5749ad69ecc3e450da",
+      "v3Fingerprint": "aafba1797b40739564c6b76d",
+      "v4Fingerprint": "aafba1797b40739564c6b76d",
       "equivalent": true
     },
     {
@@ -1135,8 +1135,8 @@
       "kind": "profile_map",
       "v3ProfileId": "string-trimmers-edgers-profile",
       "v4ProfileId": "profile-power-equipment",
-      "v3Fingerprint": "b3422050ef1b906c1d7a58b5",
-      "v4Fingerprint": "b3422050ef1b906c1d7a58b5",
+      "v3Fingerprint": "de7047634717db39570531c1",
+      "v4Fingerprint": "de7047634717db39570531c1",
       "equivalent": true
     },
     {
@@ -1144,8 +1144,8 @@
       "kind": "profile_map",
       "v3ProfileId": "suet-cakes-profile",
       "v4ProfileId": "profile-wild-bird",
-      "v3Fingerprint": "5b7f894d311a6064a9dac343",
-      "v4Fingerprint": "5b7f894d311a6064a9dac343",
+      "v3Fingerprint": "95fa1b02fa3657de968e38a2",
+      "v4Fingerprint": "95fa1b02fa3657de968e38a2",
       "equivalent": true
     },
     {
@@ -1153,8 +1153,8 @@
       "kind": "profile_map",
       "v3ProfileId": "supplements-profile",
       "v4ProfileId": "profile-pet-food",
-      "v3Fingerprint": "37e1d9a35bdbf630ca12cd48",
-      "v4Fingerprint": "37e1d9a35bdbf630ca12cd48",
+      "v3Fingerprint": "186e9f6ad0b1a908d38ea766",
+      "v4Fingerprint": "186e9f6ad0b1a908d38ea766",
       "equivalent": true
     },
     {
@@ -1162,8 +1162,8 @@
       "kind": "profile_map",
       "v3ProfileId": "t-posts-wooden-posts-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -1171,8 +1171,8 @@
       "kind": "profile_map",
       "v3ProfileId": "tie-down-straps-chains-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -1180,8 +1180,8 @@
       "kind": "profile_map",
       "v3ProfileId": "towing-couplers-jacks-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -1189,8 +1189,8 @@
       "kind": "profile_map",
       "v3ProfileId": "trailer-hitches-balls-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -1198,8 +1198,8 @@
       "kind": "profile_map",
       "v3ProfileId": "trailer-lights-wiring-profile",
       "v4ProfileId": "profile-fencing-towing",
-      "v3Fingerprint": "9005261e3a80a8437a0db4ca",
-      "v4Fingerprint": "9005261e3a80a8437a0db4ca",
+      "v3Fingerprint": "d9dafc136517b8afea4b2e0f",
+      "v4Fingerprint": "d9dafc136517b8afea4b2e0f",
       "equivalent": true
     },
     {
@@ -1207,8 +1207,8 @@
       "kind": "profile_map",
       "v3ProfileId": "weed-control-profile",
       "v4ProfileId": "profile-garden",
-      "v3Fingerprint": "06b4fa6604933cef0642bd62",
-      "v4Fingerprint": "06b4fa6604933cef0642bd62",
+      "v3Fingerprint": "3828878b02495b1456d6839d",
+      "v4Fingerprint": "3828878b02495b1456d6839d",
       "equivalent": true
     },
     {
@@ -1216,8 +1216,8 @@
       "kind": "profile_map",
       "v3ProfileId": "wild-bird-feeders-profile",
       "v4ProfileId": "profile-wild-bird",
-      "v3Fingerprint": "5b7f894d311a6064a9dac343",
-      "v4Fingerprint": "5b7f894d311a6064a9dac343",
+      "v3Fingerprint": "95fa1b02fa3657de968e38a2",
+      "v4Fingerprint": "95fa1b02fa3657de968e38a2",
       "equivalent": true
     },
     {
@@ -1225,8 +1225,8 @@
       "kind": "profile_map",
       "v3ProfileId": "work-boots-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -1234,8 +1234,8 @@
       "kind": "profile_map",
       "v3ProfileId": "work-gloves-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     },
     {
@@ -1243,8 +1243,8 @@
       "kind": "profile_map",
       "v3ProfileId": "workwear-outerwear-profile",
       "v4ProfileId": "profile-accessories",
-      "v3Fingerprint": "bb4a2007ba2142c315ba4708",
-      "v4Fingerprint": "bb4a2007ba2142c315ba4708",
+      "v3Fingerprint": "4b418c5e4f8937014a6e67bc",
+      "v4Fingerprint": "4b418c5e4f8937014a6e67bc",
       "equivalent": true
     }
   ]

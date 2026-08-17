@@ -81,11 +81,11 @@ describe('committed bay-state-v4 release', () => {
   it('loads with expected counts matching the manifest', () => {
     const bundle = loadTaxonomyReleaseV4(RELEASE_ID);
     expect(bundle.manifest.releaseId).toBe('bay-state-v4');
-    expect(bundle.manifest.counts.nodes).toBe(89);
-    expect(bundle.hierarchy.length).toBe(89);
+    expect(bundle.manifest.counts.nodes).toBe(91);
+    expect(bundle.hierarchy.length).toBe(91);
     const leaves = bundle.hierarchy.filter(n => n.classifiable);
-    expect(leaves.length).toBe(73);
-    expect(bundle.manifest.counts.types).toBe(73);
+    expect(leaves.length).toBe(74);
+    expect(bundle.manifest.counts.types).toBe(74);
     expect(bundle.attributes.length).toBe(27);
     expect(bundle.manifest.counts.attributes).toBe(27);
     expect(bundle.pageProjections.length).toBe(153);
@@ -106,16 +106,16 @@ describe('committed bay-state-v4 release', () => {
     expect(() => assertReleaseValidV4(RELEASE_ID)).not.toThrow();
   });
 
-  it('hierarchy shape: 10 roots, 3 browse + 3 families, 73 leaves, all reachable', () => {
+  it('hierarchy shape: 10 roots, 4 browse + 3 families, 74 leaves, all reachable', () => {
     const bundle = loadTaxonomyReleaseV4(RELEASE_ID);
     const roots = bundle.hierarchy.filter(n => n.parentId === null);
     expect(roots.length).toBe(10);
     const groups = bundle.hierarchy.filter(n => n.derivation === 'group');
-    expect(groups.length).toBe(3);
+    expect(groups.length).toBe(4);
     const families = bundle.hierarchy.filter(n => n.derivation === 'family');
     expect(families.length).toBe(3);
     const leaves = bundle.hierarchy.filter(n => n.classifiable);
-    expect(leaves.length).toBe(73);
+    expect(leaves.length).toBe(74);
     const nodeIds = new Set(bundle.hierarchy.map(n => n.id));
     expect(nodeIds.size).toBe(bundle.hierarchy.length);
     // Every non-root parent resolves.
@@ -123,7 +123,7 @@ describe('committed bay-state-v4 release', () => {
       if (node.parentId !== null) expect(nodeIds.has(node.parentId)).toBe(true);
     }
     // Semantic browse nodes exist (ChatGPT ragged hierarchy).
-    for (const id of ['dog', 'cat', 'pet-health-wellness', 'dog-food', 'cat-food', 'wild-bird']) {
+    for (const id of ['dog', 'cat', 'fish', 'pet-health-wellness', 'dog-food', 'cat-food', 'wild-bird']) {
       expect(nodeIds.has(id)).toBe(true);
     }
   });

@@ -127,6 +127,36 @@ const FAMILY_DEFS: Record<string, { label: string; parentId: string; leafTypeIds
 };
 
 /**
+ * v4-native leaves (no v3 legacy type). First one: fish-food (ChatGPT fix
+ * phase review). fish-food is the canonical classifiable leaf for the fish
+ * domain; audience pages (Betta/Goldfish/Koi/Tropical/Aquarium) are
+ * MERCHANDISING over it, never canonical leaves.
+ */
+const NATIVE_LEAF_DEFS: Array<{ id: string; label: string; parentId: string; facetProfileId: string; departmentId: string }> = [
+  {
+    id: 'fish-food',
+    label: 'Fish Food',
+    parentId: 'fish',
+    facetProfileId: 'profile-pet-food',
+    departmentId: 'pet-supplies',
+  },
+];
+
+/**
+ * Species/domain scope inheritance (ChatGPT fix-phase review #4). Browse
+ * nodes declare a scope; descendants inherit it and may never contradict it.
+ * Validator enforces ancestry scope safety + page→node scope compatibility.
+ */
+const NODE_SCOPE: Record<string, { animalDomain: string }> = {
+  'dog': { animalDomain: 'dog' },
+  'dog-food': { animalDomain: 'dog' },
+  'cat': { animalDomain: 'cat' },
+  'cat-food': { animalDomain: 'cat' },
+  'fish': { animalDomain: 'fish' },
+  'wild-bird': { animalDomain: 'wild_bird' },
+};
+
+/**
  * Explicit leaf → parent overrides (ChatGPT v4 review dispositions):
  *   - pet-supplies-other deleted → cat-toys → cat; dog-waste-bags → dog;
  *     supplements → pet-health-wellness; the rest → pet-supplies root
@@ -234,12 +264,48 @@ interface FacetProfileDef {
   v3ProfileIds: string[];
 }
 
+/**
+ * Effective facet-behavior descriptor for an attribute (ChatGPT fix-phase
+ * review #2): resolves global attribute definition + deterministic compiler
+ * defaults into the exact shape the ShopSite facet compiler will emit.
+ * v3 attributes carry no facet metadata, so defaults are deterministic:
+ *   facetEnabled      = kind==='shopsite' (mapped attrs are filterable)
+ *   searchIndexable   = kind==='shopsite'
+ *   facetOrder        = derived from export-mapping order (stable)
+ *   valueSortMode     = 'alphabetical'
+ *   displayLabel      = attribute name
+ *   controlType       = valueMode→select / measured→range / else→text
+ *   facetSelection    = cardinality single→'single' / multiple→'multi'
+ *   multiValueOperator= 'or'
+ */
+function effectiveFacetDescriptor(
+  attr: { id: string; name: string; valueMode?: string | null; exportDisposition?: { kind: string } | null } | undefined,
+  cardinality: string | undefined,
+  facetOrder: number,
+): string {
+  const kind = attr?.exportDisposition?.kind;
+  const valueMode = attr?.valueMode ?? 'freeText';
+  const controlType = valueMode === 'measured' ? 'range' : valueMode === 'controlled' ? 'select' : 'text';
+  const facetSelection = cardinality === 'multiple' ? 'multi' : 'single';
+  return JSON.stringify({
+    attributeId: attr?.id ?? 'UNKNOWN',
+    facetEnabled: kind === 'shopsite',
+    searchIndexable: kind === 'shopsite',
+    facetOrder,
+    valueSortMode: 'alphabetical',
+    displayLabel: attr?.name ?? 'UNKNOWN',
+    controlType,
+    facetSelection,
+    multiValueOperator: 'or',
+  });
+}
+
 function profileSignature(profile: typeof v3.profiles[number]): string {
   // Behavioral fingerprint: attribute ids + required + cardinality PLUS each
   // attribute's behavioral fields (valueMode, canonicalUnit, allowedValues,
   // valueAliases, universal/claim/composition flags, group, export
-  // disposition). Two profiles are deduped ONLY when every compiler-relevant
-  // property is equivalent (ChatGPT v4 review fix #12).
+  // disposition) PLUS the effective facet descriptor. Two profiles are
+  // deduped ONLY when every compiler-relevant property is equivalent.
   const parts = profile.attributes
     .map(a => {
       const attr = v3.attributes.find(x => x.id === a.attributeId);
@@ -258,7 +324,9 @@ function profileSignature(profile: typeof v3.profiles[number]): string {
             exportField: attr.exportDisposition?.kind === 'shopsite' ? attr.exportDisposition.catalogField : null,
           })
         : 'MISSING';
-      return `${a.attributeId}|req:${a.required ? 1 : 0}|card:${a.cardinality ?? 'single'}|${behavior}`;
+      const facetOrder = profile.attributes.findIndex(x => x.attributeId === a.attributeId);
+      const facet = effectiveFacetDescriptor(attr, a.cardinality, facetOrder);
+      return `${a.attributeId}|req:${a.required ? 1 : 0}|card:${a.cardinality ?? 'single'}|${behavior}|facet:${facet}`;
     })
     .sort()
     .join(';');
@@ -306,7 +374,11 @@ for (const profile of v3.profiles) {
     def = {
       id,
       name,
-      attributes: [...profile.attributes].sort((a, b) => a.attributeId.localeCompare(b.attributeId)),
+      // Preserve the FIRST defining profile's attribute ORDER — facet order is
+      // part of the behavioral fingerprint (ChatGPT fix-phase review #2). Two
+      // v3 profiles with the same set but different orders are NOT equivalent
+      // and will key to different shared profiles.
+      attributes: [...profile.attributes],
       v3ProfileIds: [],
     };
     fingerprintToProfile.set(fp, def);
@@ -359,6 +431,18 @@ for (const [groupId, def] of Object.entries(BROWSE_DEFS)) {
   });
 }
 
+// fish browse node under pet-supplies (v4-native domain, ChatGPT fix review).
+hierarchyNodes.push({
+  id: 'fish',
+  label: 'Fish',
+  parentId: 'pet-supplies',
+  classifiable: false,
+  facetProfileId: null,
+  departmentId: 'pet-supplies',
+  legacyTypeIds: [],
+  derivation: 'group',
+});
+
 // Family browse nodes (real product families).
 for (const [familyId, def] of Object.entries(FAMILY_DEFS)) {
   hierarchyNodes.push({
@@ -371,6 +455,21 @@ for (const [familyId, def] of Object.entries(FAMILY_DEFS)) {
     legacyTypeIds: [...def.leafTypeIds],
     derivation: 'family',
   });
+}
+
+// v4-native leaves (no v3 legacy type).
+for (const leafDef of NATIVE_LEAF_DEFS) {
+  hierarchyNodes.push({
+    id: leafDef.id,
+    label: leafDef.label,
+    parentId: leafDef.parentId,
+    classifiable: true,
+    facetProfileId: leafDef.facetProfileId,
+    departmentId: leafDef.departmentId,
+    legacyTypeIds: [],
+    derivation: 'type_native',
+  });
+  typeIdToNodeId.set(leafDef.id, leafDef.id);
 }
 
 // Leaf nodes (one per v3 type).
@@ -487,17 +586,43 @@ const envelope = {
   schemaVersion: 2,
 };
 
-const hierarchyEntries = hierarchyNodes
-  .map(node => ({
-    id: node.id,
-    label: node.label,
-    parentId: node.parentId,
-    classifiable: node.classifiable,
-    facetProfileId: node.facetProfileId,
-    departmentId: node.departmentId,
-    legacyTypeIds: node.legacyTypeIds,
-    derivation: node.derivation,
-  }))
+interface HierarchyEntryShape {
+  id: string;
+  label: string;
+  parentId: string | null;
+  classifiable: boolean;
+  facetProfileId: string | null;
+  departmentId: string;
+  legacyTypeIds: string[];
+  derivation: string;
+  scope?: { animalDomain: string };
+}
+
+const hierarchyEntries: HierarchyEntryShape[] = hierarchyNodes
+  .map(node => {
+    const entry: HierarchyEntryShape = {
+      id: node.id,
+      label: node.label,
+      parentId: node.parentId,
+      classifiable: node.classifiable,
+      facetProfileId: node.facetProfileId,
+      departmentId: node.departmentId,
+      legacyTypeIds: node.legacyTypeIds,
+      derivation: node.derivation,
+    };
+    const scope = NODE_SCOPE[node.id];
+    if (scope) entry.scope = scope;
+    // Inherit scope from nearest ancestor when the node has no explicit scope.
+    if (!scope) {
+      let cursor = node.parentId;
+      while (cursor) {
+        const parentScope = NODE_SCOPE[cursor];
+        if (parentScope) { entry.scope = parentScope; break; }
+        cursor = hierarchyNodes.find(n => n.id === cursor)?.parentId ?? null;
+      }
+    }
+    return entry;
+  })
   .sort((a, b) => a.id.localeCompare(b.id));
 
 // Profile provenance: per shared profile, the consuming canonical node ids
@@ -527,7 +652,9 @@ function fingerprintForProfileAttributes(attributes: Array<{ attributeId: string
             exportField: attr.exportDisposition?.kind === 'shopsite' ? attr.exportDisposition.catalogField : null,
           })
         : 'MISSING';
-      return `${a.attributeId}|req:${a.required ? 1 : 0}|card:${a.cardinality ?? 'single'}|${behavior}`;
+      const facetOrder = attributes.findIndex(x => x.attributeId === a.attributeId);
+      const facet = effectiveFacetDescriptor(attr, a.cardinality, facetOrder);
+      return `${a.attributeId}|req:${a.required ? 1 : 0}|card:${a.cardinality ?? 'single'}|${behavior}|facet:${facet}`;
     })
     .sort()
     .join(';');
@@ -714,7 +841,8 @@ const manifest = {
   counts: {
     nodes: hierarchyEntries.length,
     departments: 10,
-    types: 73,
+    types: 73 + NATIVE_LEAF_DEFS.length,
+    nativeLeaves: NATIVE_LEAF_DEFS.length,
     attributes: attributeEntries.length,
     facetProfiles: facetProfileEntries.length,
     pages: livePages.length,
@@ -736,15 +864,17 @@ fs.writeFileSync(path.join(OUT_DIR, 'manifest.json'), canonicalJson(manifest), '
 
 // ─── Self-verification ──────────────────────────────────────────────────────────
 
+interface LeafNodeLike { id: string; classifiable: boolean; facetProfileId: string | null; legacyTypeIds: string[]; derivation: string; }
+
 const leafNodes = hierarchyEntries.filter(n => n.classifiable);
 const leafMissingProfile = leafNodes.filter(n => !n.facetProfileId);
 const profileIds = new Set(facetProfileEntries.map(p => p.id));
-const leafBadProfileRef = leafNodes.filter(n => n.facetProfileId && !profileIds.has(n.facetProfileId!));
+const leafBadProfileRef = leafNodes.filter(n => n.facetProfileId !== null && n.facetProfileId !== undefined && !profileIds.has(n.facetProfileId));
 const canonicalLeafPages = pageRoleEntries.filter(p => p.role === 'canonical_leaf');
 const pageBadNodeRef = canonicalLeafPages.filter(p => !p.nodeId || !hierarchyEntries.some(n => n.id === p.nodeId));
 
 const problems: string[] = [];
-if (leafNodes.length !== 73) problems.push(`expected 73 leaf nodes, got ${leafNodes.length}`);
+if (leafNodes.length !== 73 + NATIVE_LEAF_DEFS.length) problems.push(`expected ${73 + NATIVE_LEAF_DEFS.length} leaf nodes, got ${leafNodes.length}`);
 if (leafMissingProfile.length) problems.push(`${leafMissingProfile.length} leaves missing facetProfileId`);
 if (leafBadProfileRef.length) problems.push(`${leafBadProfileRef.length} leaves reference unknown profile`);
 if (pageBadNodeRef.length) problems.push(`${pageBadNodeRef.length} canonical_leaf pages reference unknown node`);
@@ -759,6 +889,13 @@ for (const node of hierarchyEntries.filter(n => n.derivation === 'group' || n.de
   const actual = [...(node.legacyTypeIds as string[])].sort();
   if (JSON.stringify(expected) !== JSON.stringify(actual)) {
     problems.push(`node ${node.id} legacyTypeIds mismatch (expected ${expected.join(',')}, got ${actual.join(',')})`);
+  }
+}
+
+// Native leaves carry no legacy types and must have a scope-safe ancestry.
+for (const node of hierarchyEntries.filter(n => n.derivation === 'type_native')) {
+  if ((node.legacyTypeIds as string[]).length > 0) {
+    problems.push(`native leaf ${node.id} must not carry legacyTypeIds`);
   }
 }
 

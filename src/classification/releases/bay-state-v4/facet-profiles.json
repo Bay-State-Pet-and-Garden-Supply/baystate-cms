@@ -12,15 +12,6 @@
       "attributes": [
         {
           "applicabilityConditions": [],
-          "attributeId": "color",
-          "cardinality": "single",
-          "confidenceThresholds": {},
-          "constraints": {},
-          "required": false,
-          "valueAliases": []
-        },
-        {
-          "applicabilityConditions": [],
           "attributeId": "material",
           "cardinality": "single",
           "confidenceThresholds": {},
@@ -30,7 +21,16 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-cross-sell",
+          "attributeId": "color",
+          "cardinality": "single",
+          "confidenceThresholds": {},
+          "constraints": {},
+          "required": false,
+          "valueAliases": []
+        },
+        {
+          "applicabilityConditions": [],
+          "attributeId": "size",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -48,7 +48,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "size",
+          "attributeId": "product-cross-sell",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -86,7 +86,7 @@
         "work-gloves",
         "workwear-outerwear"
       ],
-      "behaviorFingerprint": "bb4a2007ba2142c315ba4708"
+      "behaviorFingerprint": "4b418c5e4f8937014a6e67bc"
     },
     {
       "id": "profile-fencing-towing",
@@ -103,7 +103,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-cross-sell",
+          "attributeId": "size",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -121,7 +121,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "size",
+          "attributeId": "product-cross-sell",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -153,7 +153,7 @@
         "trailer-hitches-balls",
         "trailer-lights-wiring"
       ],
-      "behaviorFingerprint": "9005261e3a80a8437a0db4ca"
+      "behaviorFingerprint": "d9dafc136517b8afea4b2e0f"
     },
     {
       "id": "profile-garden",
@@ -162,15 +162,6 @@
         {
           "applicabilityConditions": [],
           "attributeId": "category",
-          "cardinality": "single",
-          "confidenceThresholds": {},
-          "constraints": {},
-          "required": false,
-          "valueAliases": []
-        },
-        {
-          "applicabilityConditions": [],
-          "attributeId": "material",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -188,7 +179,16 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-cross-sell",
+          "attributeId": "material",
+          "cardinality": "single",
+          "confidenceThresholds": {},
+          "constraints": {},
+          "required": false,
+          "valueAliases": []
+        },
+        {
+          "applicabilityConditions": [],
+          "attributeId": "size",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -206,7 +206,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "size",
+          "attributeId": "product-cross-sell",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -236,7 +236,7 @@
         "sprinklers-nozzles",
         "weed-control"
       ],
-      "behaviorFingerprint": "06b4fa6604933cef0642bd62"
+      "behaviorFingerprint": "3828878b02495b1456d6839d"
     },
     {
       "id": "profile-heating",
@@ -253,7 +253,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-cross-sell",
+          "attributeId": "product-feature",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -262,7 +262,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-feature",
+          "attributeId": "product-cross-sell",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -286,7 +286,7 @@
         "propane-heaters",
         "stove-pipe-chimney-care"
       ],
-      "behaviorFingerprint": "77a7da5749ad69ecc3e450da"
+      "behaviorFingerprint": "aafba1797b40739564c6b76d"
     },
     {
       "id": "profile-livestock-equipment",
@@ -295,6 +295,15 @@
         {
           "applicabilityConditions": [],
           "attributeId": "material",
+          "cardinality": "single",
+          "confidenceThresholds": {},
+          "constraints": {},
+          "required": false,
+          "valueAliases": []
+        },
+        {
+          "applicabilityConditions": [],
+          "attributeId": "size",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -312,15 +321,6 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-cross-sell",
-          "cardinality": "single",
-          "confidenceThresholds": {},
-          "constraints": {},
-          "required": false,
-          "valueAliases": []
-        },
-        {
-          "applicabilityConditions": [],
           "attributeId": "product-feature",
           "cardinality": "single",
           "confidenceThresholds": {},
@@ -330,7 +330,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "size",
+          "attributeId": "product-cross-sell",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -364,7 +364,7 @@
         "stall-mats-bedding",
         "stock-tanks-waterers"
       ],
-      "behaviorFingerprint": "644bff366883bcb4c11aca7f"
+      "behaviorFingerprint": "f2fe961f98967fc34797c5e2"
     },
     {
       "id": "profile-livestock-feed",
@@ -381,7 +381,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "nutrition",
+          "attributeId": "packaging-type",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -390,7 +390,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "packaging-type",
+          "attributeId": "nutrition",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -423,12 +423,48 @@
         "poultry-feed",
         "small-animal-feed-bedding"
       ],
-      "behaviorFingerprint": "1a714dcfc078f6320cacf983"
+      "behaviorFingerprint": "a2f813419160384ea218e320"
     },
     {
       "id": "profile-pet-food",
       "name": "Pet Food & Treats",
       "attributes": [
+        {
+          "applicabilityConditions": [],
+          "attributeId": "food-form",
+          "cardinality": "single",
+          "confidenceThresholds": {},
+          "constraints": {},
+          "required": false,
+          "valueAliases": []
+        },
+        {
+          "applicabilityConditions": [],
+          "attributeId": "flavor",
+          "cardinality": "single",
+          "confidenceThresholds": {},
+          "constraints": {},
+          "required": false,
+          "valueAliases": []
+        },
+        {
+          "applicabilityConditions": [],
+          "attributeId": "species",
+          "cardinality": "single",
+          "confidenceThresholds": {},
+          "constraints": {},
+          "required": false,
+          "valueAliases": []
+        },
+        {
+          "applicabilityConditions": [],
+          "attributeId": "life-stage",
+          "cardinality": "single",
+          "confidenceThresholds": {},
+          "constraints": {},
+          "required": false,
+          "valueAliases": []
+        },
         {
           "applicabilityConditions": [],
           "attributeId": "breed-size",
@@ -449,34 +485,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "flavor",
-          "cardinality": "single",
-          "confidenceThresholds": {},
-          "constraints": {},
-          "required": false,
-          "valueAliases": []
-        },
-        {
-          "applicabilityConditions": [],
-          "attributeId": "food-form",
-          "cardinality": "single",
-          "confidenceThresholds": {},
-          "constraints": {},
-          "required": false,
-          "valueAliases": []
-        },
-        {
-          "applicabilityConditions": [],
           "attributeId": "health-benefits",
-          "cardinality": "single",
-          "confidenceThresholds": {},
-          "constraints": {},
-          "required": false,
-          "valueAliases": []
-        },
-        {
-          "applicabilityConditions": [],
-          "attributeId": "life-stage",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -500,15 +509,6 @@
           "constraints": {},
           "required": false,
           "valueAliases": []
-        },
-        {
-          "applicabilityConditions": [],
-          "attributeId": "species",
-          "cardinality": "single",
-          "confidenceThresholds": {},
-          "constraints": {},
-          "required": false,
-          "valueAliases": []
         }
       ],
       "sourceV3ProfileIds": [
@@ -527,9 +527,10 @@
         "dog-food-dry",
         "dog-food-wet",
         "dog-treats",
+        "fish-food",
         "supplements"
       ],
-      "behaviorFingerprint": "37e1d9a35bdbf630ca12cd48"
+      "behaviorFingerprint": "186e9f6ad0b1a908d38ea766"
     },
     {
       "id": "profile-power-equipment",
@@ -546,7 +547,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-cross-sell",
+          "attributeId": "product-feature",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -555,7 +556,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-feature",
+          "attributeId": "product-cross-sell",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -579,7 +580,7 @@
         "pressure-washers",
         "string-trimmers-edgers"
       ],
-      "behaviorFingerprint": "b3422050ef1b906c1d7a58b5"
+      "behaviorFingerprint": "de7047634717db39570531c1"
     },
     {
       "id": "profile-wild-bird",
@@ -605,7 +606,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-cross-sell",
+          "attributeId": "product-feature",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -614,7 +615,7 @@
         },
         {
           "applicabilityConditions": [],
-          "attributeId": "product-feature",
+          "attributeId": "product-cross-sell",
           "cardinality": "single",
           "confidenceThresholds": {},
           "constraints": {},
@@ -636,7 +637,7 @@
         "suet-cakes",
         "wild-bird-feeders"
       ],
-      "behaviorFingerprint": "5b7f894d311a6064a9dac343"
+      "behaviorFingerprint": "95fa1b02fa3657de968e38a2"
     }
   ]
 }

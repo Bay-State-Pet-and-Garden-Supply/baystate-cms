@@ -7,9 +7,9 @@
   "lifecycle": "release",
   "sourceBaseline": "bay-state-v3",
   "fileVersions": {
-    "hierarchy.json": "4e2c66d64ad1e1240901600d3302088e5f9335b0b37d5f32e0cdb4ef97f3b0b0",
-    "facet-profiles.json": "d86e0b850bc9134b9ac90fe5abcf2a573225a39c402d939c8d99b21ac1f123bd",
-    "legacy-mappings.json": "af82c85d0a2a8602b36f261affa5280674f425e6af35fa028b4c22f258e20d3d",
+    "hierarchy.json": "93ff57f1d36087d4130c5823f84ce8e9bf6f07ab69e09f9b38858928cf886b2d",
+    "facet-profiles.json": "db325fdd4c9197dda2b6166fb573d87cfb015b0d510b7241c4e0a4c9c2aa027f",
+    "legacy-mappings.json": "b1d826eb032348037ccea2f019209035d956055dcfff6c6c59a2f80ce2e1e36a",
     "attributes.json": "14a88494e7d5d54929dc36790281cb7f672844b073b8374da9708c5eb2eb9d9c",
     "shopsite-projection.json": "2898e165753f5e4b31d82a6af4dbd85ecb2c2b836526a97bacd03dd97b02d182",
     "export-mappings.json": "cbd4dc1f917ae424e577f280605a1239ce92521af1a770a17ecc58e8f09df4cd",
@@ -17,9 +17,10 @@
     "page-assignment-policy.json": "64eafc38fcf9a9ba074f18a33c7026396642f3458a503419552686ba2285c7db"
   },
   "counts": {
-    "nodes": 89,
+    "nodes": 91,
     "departments": 10,
-    "types": 73,
+    "types": 74,
+    "nativeLeaves": 1,
     "attributes": 27,
     "facetProfiles": 9,
     "pages": 153,
