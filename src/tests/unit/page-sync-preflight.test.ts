@@ -6,8 +6,9 @@ import { initDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { getActivePageImport, listPageImports } from '../../db/repositories/page-import-repo';
-import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
-import { preflightPagesSync } from '../../shopsite/page-sync-preflight';
+import { assignProductToVerifiedPage, listVerifiedPageOptions } from '../../db/repositories/page-repo';
+import { preflightPagesSync, reconcileProductsToActivePages } from '../../shopsite/page-sync-preflight';
+import type { Product } from '../../shared/types';
 import { sha256Hex } from '../../shared/stable-id';
 
 let workspaceId = 'ws-preflight-test';
@@ -206,6 +207,49 @@ describe('preflightPagesSync', () => {
 
     expect(preflightPagesSync({ workspaceId, client: brokenFetcher })).rejects.toThrow('ShopSite Pages preflight failed');
     expect(getActivePageImport(workspaceId)).toBeNull();
+  });
+
+  it('reconciles renamed pages by stable identity and rejects name-only assignments', async () => {
+    await preflightPagesSync({ workspaceId, client: createFetcher(SAMPLE_PAGES_XML) });
+    const dogPage = listVerifiedPageOptions(workspaceId).find(page => page.name === 'Dog Food')!;
+    assignProductToVerifiedPage('SKU-RENAME', dogPage.id, dogPage.name);
+
+    const renamed = await preflightPagesSync({ workspaceId, client: createFetcher(UPDATED_PAGES_XML) });
+    const product = {
+      sku: 'SKU-RENAME',
+      shopsite: {
+        preserved: {
+          unknownElements: { ProductOnPages: '<Name>Dog Food</Name>' },
+          advancedBlocks: { ProductOnPages: '<Name>Dog Food</Name>' },
+        },
+      },
+    } as unknown as Product;
+    const reconciled = reconcileProductsToActivePages(workspaceId, renamed.sourceHash, [product])[0];
+    expect(String(reconciled.shopsite.preserved.unknownElements.ProductOnPages)).toContain('Dog Food &amp; Treats');
+    expect(reconciled.shopsite.preserved.advancedBlocks.ProductOnPages).toBeUndefined();
+
+    const nameOnly = {
+      sku: 'SKU-NAME-ONLY',
+      shopsite: {
+        preserved: { unknownElements: { ProductOnPages: '<Name>Cat Supplies</Name>' }, advancedBlocks: {} },
+      },
+    } as unknown as Product;
+    expect(() => reconcileProductsToActivePages(workspaceId, renamed.sourceHash, [nameOnly])).toThrow('without verified Page identity');
+  });
+
+  it('fails closed when an assigned page is removed from the active import', async () => {
+    await preflightPagesSync({ workspaceId, client: createFetcher(SAMPLE_PAGES_XML) });
+    const dogPage = listVerifiedPageOptions(workspaceId).find(page => page.name === 'Dog Food')!;
+    assignProductToVerifiedPage('SKU-REMOVED', dogPage.id, dogPage.name);
+    const removedXml = SAMPLE_PAGES_XML.replace(/\s*<Page>\s*<PageID>1001<\/PageID>[\s\S]*?<\/Page>/, '');
+    const changed = await preflightPagesSync({ workspaceId, client: createFetcher(removedXml) });
+    const product = {
+      sku: 'SKU-REMOVED',
+      shopsite: {
+        preserved: { unknownElements: { ProductOnPages: '<Name>Dog Food</Name>' }, advancedBlocks: {} },
+      },
+    } as unknown as Product;
+    expect(() => reconcileProductsToActivePages(workspaceId, changed.sourceHash, [product])).toThrow('outside the active ShopSite Pages import');
   });
 
   it('fails closed when remote ShopSite response code indicates error', async () => {

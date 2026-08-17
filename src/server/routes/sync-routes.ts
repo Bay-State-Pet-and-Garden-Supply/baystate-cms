@@ -19,7 +19,7 @@ import { skuToProductFilePath } from '../../git/product-file-path';
 import { getDb } from '../../db/connection';
 import { createImagesZip } from '../../shopsite/zip-generator';
 import { ShopSiteHttpClient } from '../../shopsite/shopsite-http-client';
-import { preflightPagesSync } from '../../shopsite/page-sync-preflight';
+import { preflightPagesSync, reconcileProductsToActivePages } from '../../shopsite/page-sync-preflight';
 import type { Product } from '../../shared/types';
 
 const route = new Hono();
@@ -254,7 +254,11 @@ async function runDirectSync(options: {
       message: preflight.message,
     });
 
-    const products = productsFromApprovedItems(items);
+    const products = reconcileProductsToActivePages(
+      options.workspaceId,
+      preflight.sourceHash,
+      productsFromApprovedItems(items),
+    );
     const xml = buildProductsXml(products);
     addSyncJobEvent({ syncJobId: job.id, level: 'info', message: `Generated XML for ${products.length} product(s)` });
 

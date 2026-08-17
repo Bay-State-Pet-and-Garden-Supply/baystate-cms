@@ -74,9 +74,7 @@ function createSampleProduct(sku: string): Product {
         uniqueName: 'SKU',
       },
       preserved: {
-        unknownElements: {
-          ProductOnPages: '\n    <Name>Pet Food</Name>\n  ',
-        },
+        unknownElements: {},
         advancedBlocks: {},
         rawAttributes: {},
       },

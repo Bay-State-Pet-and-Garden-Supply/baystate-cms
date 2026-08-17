@@ -1,6 +1,10 @@
 import { downloadPagesFromShopSite, type PagesXmlFetcher } from './page-download-service';
 import { getActivePageImport } from '../db/repositories/page-import-repo';
+import { getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
 import { activatePageImportFromRecords } from './page-import-service';
+import { extractPageNamesFromPreserved } from './page-candidate-importer';
+import { buildProductOnPagesFragment } from './product-page-assignments';
+import type { Product } from '../shared/types';
 
 export interface PagesPreflightResult {
   status: 'up_to_date' | 'reconciled';
@@ -73,4 +77,61 @@ export async function preflightPagesSync(options: {
     message,
     warnings: downloadResult.warnings,
   };
+}
+
+/**
+ * Reconcile preserved ProductOnPages fragments against the exact verified
+ * import that preflight observed. Display names are evidence only: a product
+ * with a page fragment must also have a stable product_pages.page_id that is
+ * present in the active import. Removed, renamed-without-identity, stale, and
+ * name-only assignments fail closed before dbupload.cgi.
+ */
+export function reconcileProductsToActivePages(
+  workspaceId: string,
+  expectedSourceHash: string,
+  products: Product[],
+): Product[] {
+  const activeImport = getActivePageImport(workspaceId);
+  if (!activeImport || activeImport.sourceHash !== expectedSourceHash) {
+    throw new Error('ShopSite Pages changed during sync; refusing to serialize ProductOnPages against a different import.');
+  }
+
+  const verifiedPages = listVerifiedPageOptions(workspaceId);
+  const pageById = new Map(verifiedPages.map(page => [page.id, page]));
+
+  for (const product of products) {
+    const preserved = product.shopsite?.preserved;
+    const fragmentNames = extractPageNamesFromPreserved(preserved);
+    if (fragmentNames.length === 0) continue;
+
+    const assignments = getProductPageAssignments(product.sku);
+    if (assignments.length === 0) {
+      throw new Error(`Product "${product.sku}" has ProductOnPages data without verified Page identity assignments.`);
+    }
+
+    const currentNames: string[] = [];
+    const seenIds = new Set<string>();
+    for (const assignment of assignments) {
+      if (!assignment.pageId) {
+        throw new Error(`Product "${product.sku}" has name-only Page assignment "${assignment.pageName}"; refusing to serialize it.`);
+      }
+      if (seenIds.has(assignment.pageId)) continue;
+      const page = pageById.get(assignment.pageId);
+      if (!page) {
+        throw new Error(`Product "${product.sku}" has Page assignment "${assignment.pageName}" outside the active ShopSite Pages import.`);
+      }
+      seenIds.add(assignment.pageId);
+      currentNames.push(page.name);
+    }
+
+    // Replace both preserved sources so a stale advanced block cannot re-add
+    // an old name after the verified current names are written.
+    delete preserved.unknownElements['ProductOnPages'];
+    delete preserved.advancedBlocks['ProductOnPages'];
+    delete preserved.advancedBlocks['productOnPages'];
+    if (currentNames.length > 0) {
+      preserved.unknownElements['ProductOnPages'] = buildProductOnPagesFragment(currentNames);
+    }
+  }
+  return products;
 }
