@@ -20,6 +20,7 @@ import {
   AttributesFileV2Schema,
   AttributeProfilesFileV2Schema,
   AttributeMappingsFileV2Schema,
+  AttributeProfileAttributeV2Schema,
   DepartmentsFileV2Schema,
   GuidanceFileV2Schema,
   ProductTypesFileV2Schema,
@@ -69,6 +70,142 @@ export const PageAssignmentPolicyV2Schema = z.object({
 }).strict();
 export type PageAssignmentPolicyV2 = z.infer<typeof PageAssignmentPolicyV2Schema>;
 
+// ─── v4 canonical-hierarchy release schemas ─────────────────────────────────────
+
+/**
+ * v4 hierarchy node (bay-state-v4). SEMANTICALLY RAGGED depth (ChatGPT v4
+ * review): L1 department roots (parentId null, classifiable false), browse
+ * nodes (species/dimension: dog, cat, pet-health-wellness) and family nodes
+ * (dog-food, cat-food, wild-bird) — all classifiable false — plus 73
+ * classifiable leaf nodes (one per v3 type).
+ */
+export const V4HierarchyNodeSchema = z.object({
+  id: ClassificationSlugSchema,
+  label: z.string().min(1),
+  parentId: ClassificationSlugSchema.nullable(),
+  classifiable: z.boolean(),
+  facetProfileId: ClassificationSlugSchema.nullable(),
+  departmentId: ClassificationSlugSchema,
+  legacyTypeIds: z.array(ClassificationSlugSchema),
+  derivation: z.enum(['department', 'group', 'family', 'type_1to1']),
+}).strict();
+export type V4HierarchyNode = z.infer<typeof V4HierarchyNodeSchema>;
+
+export const V4HierarchySchema = z.object({
+  schemaVersion: z.literal(2),
+  bundleOrigin: ClassificationBundleOriginV2Schema,
+  entries: z.array(V4HierarchyNodeSchema),
+}).strict();
+
+/** v4 shared facet profile (deduplicated from v3 attribute profiles by
+ *  behavioral fingerprint; carries provenance + blast radius). */
+export const V4FacetProfileSchema = z.object({
+  id: ClassificationSlugSchema,
+  name: z.string().min(1),
+  attributes: z.array(AttributeProfileAttributeV2Schema),
+  sourceV3ProfileIds: z.array(ClassificationSlugSchema),
+  canonicalNodeIds: z.array(ClassificationSlugSchema),
+  behaviorFingerprint: z.string().min(8),
+}).strict();
+export type V4FacetProfile = z.infer<typeof V4FacetProfileSchema>;
+
+export const V4FacetProfilesSchema = z.object({
+  schemaVersion: z.literal(2),
+  bundleOrigin: ClassificationBundleOriginV2Schema,
+  entries: z.array(V4FacetProfileSchema),
+}).strict();
+
+/** v4 legacy-mapping entry — discriminated on `kind`. */
+export const V4TypeMigrationEntrySchema = z.object({
+  id: ClassificationSlugSchema,
+  kind: z.literal('type_migration'),
+  v3TypeId: ClassificationSlugSchema,
+  targetNodeId: ClassificationSlugSchema,
+  disposition: z.enum([
+    'preserve_as_node',
+    'merge',
+    'split',
+    'alias',
+    'retire_to_attribute',
+    'manual_review',
+  ]),
+  rationale: z.string().min(1),
+}).strict();
+export type V4TypeMigrationEntry = z.infer<typeof V4TypeMigrationEntrySchema>;
+
+export const V4ProfileMapEntrySchema = z.object({
+  id: ClassificationSlugSchema,
+  kind: z.literal('profile_map'),
+  v3ProfileId: ClassificationSlugSchema,
+  v4ProfileId: ClassificationSlugSchema,
+  v3Fingerprint: z.string().min(8),
+  v4Fingerprint: z.string().min(8),
+  equivalent: z.boolean(),
+}).strict();
+export type V4ProfileMapEntry = z.infer<typeof V4ProfileMapEntrySchema>;
+
+export const V4LegacyMappingSchema = z.discriminatedUnion('kind', [
+  V4TypeMigrationEntrySchema,
+  V4ProfileMapEntrySchema,
+]);
+export type V4LegacyMapping = z.infer<typeof V4LegacyMappingSchema>;
+
+export const V4LegacyMappingsSchema = z.object({
+  schemaVersion: z.literal(2),
+  bundleOrigin: ClassificationBundleOriginV2Schema,
+  entries: z.array(V4LegacyMappingSchema),
+}).strict();
+
+/** v4 ShopSite page projection roles. */
+export const V4PageRoleEnum = z.enum([
+  'canonical_leaf',
+  'canonical_browse',
+  'shop_all_aggregate',
+  'merchandising',
+  'navigation',
+  'needs_review',
+]);
+export type V4PageRole = z.infer<typeof V4PageRoleEnum>;
+
+export const V4PageProjectionSchema = z.object({
+  pageName: z.string().min(1),
+  role: V4PageRoleEnum,
+  nodeId: ClassificationSlugSchema.nullable(),
+  childPages: z.array(z.string()),
+  facetProfileId: ClassificationSlugSchema.nullable(),
+  productCount: z.number().int().nonnegative(),
+}).strict();
+export type V4PageProjection = z.infer<typeof V4PageProjectionSchema>;
+
+export const V4ShopsiteProjectionSchema = z.object({
+  schemaVersion: z.literal(2),
+  bundleOrigin: ClassificationBundleOriginV2Schema,
+  entries: z.array(V4PageProjectionSchema),
+}).strict();
+
+/** v4 release manifest (schemaVersion 3 — the hybrid hierarchy release). */
+export const V4ManifestSchema = z.object({
+  releaseId: ClassificationSlugSchema,
+  revision: ClassificationSlugSchema,
+  createdAt: StrictIsoDateTimeStringSchema,
+  schemaVersion: z.literal(3),
+  compatibilityVersion: z.literal(3),
+  lifecycle: z.literal('release'),
+  sourceBaseline: z.string().min(1),
+  fileVersions: z.record(z.string(), Sha256HexSchema),
+  counts: z.object({
+    nodes: z.number().int(),
+    departments: z.number().int(),
+    types: z.number().int(),
+    attributes: z.number().int(),
+    facetProfiles: z.number().int(),
+    pages: z.number().int(),
+    mappings: z.number().int(),
+  }),
+  notes: z.array(z.string()).default([]),
+}).strict();
+export type V4Manifest = z.infer<typeof V4ManifestSchema>;
+
 // ─── Report / error types ──────────────────────────────────────────────────────
 
 export interface ReleaseValidationFinding {
@@ -87,6 +224,8 @@ export interface ReleaseValidationReport {
     departments: number;
     mappings: number;
   };
+  /** Shared-profile blast radius (v4): each profile with >1 consuming node. */
+  profileBlastRadii: Array<{ profileId: string; nodeCount: number; nodeIds: string[] }>;
 }
 
 export class ReleaseValidationError extends Error {
@@ -109,6 +248,20 @@ export interface TaxonomyReleaseBundle {
   attributes: ProductAttributeConfigV2[];
   attributeProfiles: AttributeProfileConfigV2[];
   exportMappings: AttributeMappingConfigV2[];
+  guidance: GuidanceConfigV2[];
+  pageAssignmentPolicy: PageAssignmentPolicyV2;
+}
+
+// ─── v4 structured release bundle ───────────────────────────────────────────────
+
+export interface TaxonomyReleaseBundleV4 {
+  manifest: V4Manifest;
+  hierarchy: V4HierarchyNode[];
+  facetProfiles: V4FacetProfile[];
+  legacyMappings: V4LegacyMapping[];
+  attributes: ProductAttributeConfigV2[];
+  exportMappings: AttributeMappingConfigV2[];
+  pageProjections: V4PageProjection[];
   guidance: GuidanceConfigV2[];
   pageAssignmentPolicy: PageAssignmentPolicyV2;
 }
@@ -600,6 +753,7 @@ export function validateTaxonomyRelease(releaseDir: string): ReleaseValidationRe
       departments: departments.length,
       mappings: mappings.length,
     },
+    profileBlastRadii: [],
   };
 }
 
@@ -654,6 +808,614 @@ export function assertReleaseValid(releaseDir: string): ReleaseValidationReport 
     const messages = report.findings.filter(f => f.severity === 'error').map(f => `  [${f.code}] ${f.message}`);
     throw new ReleaseValidationError(
       `Taxonomy release "${releaseDir}" is invalid:\n${messages.join('\n')}`,
+      report,
+    );
+  }
+  return report;
+}
+
+// ─── v4 validator ───────────────────────────────────────────────────────────────
+
+/** v4 release files (differs from v3: hierarchy replaces departments/product-types). */
+const V4_RELEASE_FILES = [
+  'manifest.json',
+  'hierarchy.json',
+  'facet-profiles.json',
+  'legacy-mappings.json',
+  'attributes.json',
+  'shopsite-projection.json',
+  'export-mappings.json',
+  'guidance.json',
+  'page-assignment-policy.json',
+] as const;
+
+/**
+ * Parse a v4 envelope file through a V4 schema; null when the file is missing
+ * or fails schema validation (the caller adds the finding once).
+ */
+function parseV4Envelope<T extends { entries: unknown[]; bundleOrigin: unknown }>(
+  raw: unknown,
+  schema: { safeParse(v: unknown): { success: true; data: T } | { success: false } },
+  fileName: string,
+  findings: ReleaseValidationFinding[],
+): T | null {
+  if (raw === undefined) return null;
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    findings.push({
+      code: 'invalid_v4_release_file',
+      message: `${fileName} failed v4 schema validation.`,
+      severity: 'error',
+    });
+    return null;
+  }
+  return parsed.data;
+}
+
+/**
+ * Validate a v4 canonical-hierarchy release directory. Same philosophy as the
+ * v3 gate: a broken hierarchy must be impossible to load. Reuses the v3
+ * attribute/export-mapping checks (Rule A below) and adds the hierarchy
+ * invariants. Returns a report; never throws (callers use
+ * `loadTaxonomyReleaseV4` / `assertReleaseValidV4` to fail closed).
+ */
+export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidationReport {
+  const findings: ReleaseValidationFinding[] = [];
+  const dir = resolveReleaseDir(releaseDir);
+  const report: ReleaseValidationReport = {
+    ok: false,
+    findings,
+    counts: { productTypes: 0, attributes: 0, attributeProfiles: 0, departments: 0, mappings: 0 },
+    profileBlastRadii: [],
+  };
+
+  const fail = (code: string, message: string) => {
+    findings.push({ code, message, severity: 'error' });
+  };
+
+  // ── Read + parse every v4 file (missing/malformed = error) ─────────────
+  const rawFiles: Record<string, unknown> = {};
+  for (const fileName of V4_RELEASE_FILES) {
+    const filePath = path.join(dir, fileName);
+    if (!fs.existsSync(filePath)) {
+      fail('missing_release_file', `${fileName} is missing from the v4 release.`);
+      continue;
+    }
+    try {
+      rawFiles[fileName] = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (err) {
+      fail('release_file_parse_error', `${fileName} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // ── Manifest ─────────────────────────────────────────────────────────────
+  const manifestParsed = rawFiles['manifest.json']
+    ? V4ManifestSchema.safeParse(rawFiles['manifest.json'])
+    : null;
+  if (rawFiles['manifest.json'] && !manifestParsed?.success) {
+    fail('invalid_v4_manifest', `manifest.json failed v4 schema validation: ${z.prettifyError(manifestParsed!.error)}`);
+  }
+  const manifest = manifestParsed?.success ? manifestParsed.data : null;
+
+  // ── Envelope parsing ──────────────────────────────────────────────────────
+  const hierarchy = parseV4Envelope(rawFiles['hierarchy.json'], V4HierarchySchema, 'hierarchy.json', findings)?.entries ?? [];
+  const facetProfiles = parseV4Envelope(rawFiles['facet-profiles.json'], V4FacetProfilesSchema, 'facet-profiles.json', findings)?.entries ?? [];
+  const legacyMappings = parseV4Envelope(rawFiles['legacy-mappings.json'], V4LegacyMappingsSchema, 'legacy-mappings.json', findings)?.entries ?? [];
+  const attributes = parseV4Envelope(rawFiles['attributes.json'], AttributesFileV2Schema, 'attributes.json', findings)?.entries ?? [];
+  const exportMappings = parseV4Envelope(rawFiles['export-mappings.json'], AttributeMappingsFileV2Schema, 'export-mappings.json', findings)?.entries ?? [];
+  const pageProjections = parseV4Envelope(rawFiles['shopsite-projection.json'], V4ShopsiteProjectionSchema, 'shopsite-projection.json', findings)?.entries ?? [];
+  const guidance = parseV4Envelope(rawFiles['guidance.json'], GuidanceFileV2Schema, 'guidance.json', findings)?.entries ?? [];
+  const pagePolicyParsed = rawFiles['page-assignment-policy.json']
+    ? PageAssignmentPolicyV2Schema.safeParse(rawFiles['page-assignment-policy.json'])
+    : null;
+  if (rawFiles['page-assignment-policy.json'] && !pagePolicyParsed?.success) {
+    fail('invalid_page_assignment_policy', 'page-assignment-policy.json failed schema validation.');
+  }
+  const pagePolicy = pagePolicyParsed?.success ? pagePolicyParsed.data : null;
+
+  // ── File hash verification against manifest.fileVersions ────────────────
+  if (manifest) {
+    for (const [fileName, expectedHash] of Object.entries(manifest.fileVersions)) {
+      const filePath = path.join(dir, fileName);
+      if (!fs.existsSync(filePath)) {
+        fail('manifest_hash_missing_file', `manifest.fileVersions references ${fileName} which is missing.`);
+        continue;
+      }
+      const actualHash = sha256OfFile(filePath);
+      if (actualHash !== expectedHash) {
+        fail('manifest_hash_mismatch', `${fileName} sha256 (${actualHash.slice(0, 12)}…) does not match manifest (${expectedHash.slice(0, 12)}…).`);
+      }
+    }
+  }
+
+  // ── Rule 1: node ids unique + kebab-case format ──────────────────────────
+  {
+    const seen = new Set<string>();
+    for (const node of hierarchy) {
+      if (!SLUG_RELEASE_ID_RE.test(node.id)) {
+        fail('invalid_node_id_format', `Hierarchy node id "${node.id}" must match /^[a-z0-9]+(-[a-z0-9]+)*$/.`);
+      }
+      if (seen.has(node.id)) {
+        fail('duplicate_node_id', `Duplicate hierarchy node id "${node.id}".`);
+      }
+      seen.add(node.id);
+    }
+  }
+
+  // ── Rule 2: parentId references; roots exist; exactly 10 roots ───────────
+  const nodeById = new Map<string, V4HierarchyNode>();
+  for (const node of hierarchy) nodeById.set(node.id, node);
+
+  {
+    const roots = hierarchy.filter(n => n.parentId === null);
+    if (roots.length !== 10) {
+      fail('invalid_root_count', `Expected exactly 10 department roots (parentId null), found ${roots.length}.`);
+    }
+    for (const node of hierarchy) {
+      if (node.parentId === null) continue;
+      if (node.parentId === node.id) {
+        fail('self_parent_node', `Hierarchy node "${node.id}" has parentId pointing at itself.`);
+        continue;
+      }
+      if (!nodeById.has(node.parentId)) {
+        fail('unknown_parent_node', `Hierarchy node "${node.id}" references unknown parent "${node.parentId}".`);
+      }
+    }
+  }
+
+  // ── Rule 3: no cycles (DFS from roots); every node reachable ─────────────
+  {
+    const visited = new Set<string>();
+    const stack: string[] = [];
+    for (const root of hierarchy.filter(n => n.parentId === null)) {
+      stack.push(root.id);
+    }
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      for (const child of hierarchy.filter(n => n.parentId === id)) {
+        stack.push(child.id);
+      }
+    }
+    if (visited.size !== hierarchy.length) {
+      const unreachable = hierarchy.filter(n => !visited.has(n.id)).map(n => n.id);
+      // A cycle would leave every node on the cycle unreachable from the roots.
+      fail('hierarchy_cycle_or_unreachable', `${hierarchy.length - visited.size} node(s) are not reachable from the roots (cycle or dangling): ${unreachable.join(', ')}`);
+    }
+  }
+
+  // ── Rule 4: classifiable → facetProfileId exists; non-classifiable → null ─
+  const facetProfileById = new Map<string, V4FacetProfile>();
+  for (const profile of facetProfiles) facetProfileById.set(profile.id, profile);
+
+  {
+    for (const node of hierarchy) {
+      if (node.classifiable) {
+        if (!node.facetProfileId || !facetProfileById.has(node.facetProfileId)) {
+          fail('classifiable_node_missing_profile', `Classifiable node "${node.id}" has missing/unknown facetProfileId "${node.facetProfileId ?? '(none)'}".`);
+        }
+      } else if (node.facetProfileId !== null) {
+        fail('non_classifiable_node_has_profile', `Non-classifiable node "${node.id}" must have facetProfileId null, got "${node.facetProfileId}".`);
+      }
+    }
+  }
+
+  // ── Rule 5: facet profiles — unique ids, attribute refs resolve, no dupes ─
+  {
+    const attributeIds = new Set(attributes.map(a => a.id));
+    const seenProfileIds = new Set<string>();
+    for (const profile of facetProfiles) {
+      if (seenProfileIds.has(profile.id)) {
+        fail('duplicate_facet_profile_id', `Duplicate facet profile id "${profile.id}".`);
+      }
+      seenProfileIds.add(profile.id);
+      const seenAttrIds = new Set<string>();
+      for (const attr of profile.attributes) {
+        if (!attributeIds.has(attr.attributeId)) {
+          fail('facet_profile_unknown_attribute', `Facet profile "${profile.id}" references unknown attribute "${attr.attributeId}".`);
+        }
+        if (seenAttrIds.has(attr.attributeId)) {
+          fail('facet_profile_duplicate_attribute', `Facet profile "${profile.id}" lists attribute "${attr.attributeId}" more than once.`);
+        }
+        seenAttrIds.add(attr.attributeId);
+      }
+    }
+  }
+
+  // ── Rule 5b: profile provenance + blast radius (ChatGPT v4 review fix #13) ──
+  {
+    const profileIds = new Set(facetProfiles.map(p => p.id));
+    const leafNodes = hierarchy.filter(n => n.classifiable);
+    const leafByProfile = new Map<string, string[]>();
+    for (const leaf of leafNodes) {
+      if (!leaf.facetProfileId) continue;
+      const arr = leafByProfile.get(leaf.facetProfileId) ?? [];
+      arr.push(leaf.id);
+      leafByProfile.set(leaf.facetProfileId, arr);
+    }
+    for (const profile of facetProfiles) {
+      if (!profile.sourceV3ProfileIds || profile.sourceV3ProfileIds.length === 0) {
+        fail('profile_missing_provenance', `Facet profile "${profile.id}" has no sourceV3ProfileIds.`);
+      }
+      if (!profile.behaviorFingerprint || profile.behaviorFingerprint.length < 8) {
+        fail('profile_missing_fingerprint', `Facet profile "${profile.id}" has no behaviorFingerprint.`);
+      }
+      for (const v3Id of profile.sourceV3ProfileIds) {
+        if (!/^[a-z0-9-]+$/.test(v3Id)) {
+          fail('profile_provenance_invalid', `Facet profile "${profile.id}" has invalid sourceV3ProfileId "${v3Id}".`);
+        }
+      }
+      // Provenance must match the hierarchy: the canonicalNodeIds recorded on
+      // the profile must equal the leaves actually referencing it.
+      const recorded = [...(profile.canonicalNodeIds ?? [])].sort();
+      const actual = [...(leafByProfile.get(profile.id) ?? [])].sort();
+      if (JSON.stringify(recorded) !== JSON.stringify(actual)) {
+        fail('profile_node_ids_mismatch', `Facet profile "${profile.id}" canonicalNodeIds do not match the leaves referencing it (recorded ${recorded.join(',')}, actual ${actual.join(',')}).`);
+      }
+    }
+    // Blast radius (report only, not an error): shared profiles with >1 node.
+    for (const profile of facetProfiles) {
+      const count = (leafByProfile.get(profile.id) ?? []).length;
+      if (count > 1) {
+        report.profileBlastRadii.push({
+          profileId: profile.id,
+          nodeCount: count,
+          nodeIds: (leafByProfile.get(profile.id) ?? []).sort(),
+        });
+      }
+    }
+  }
+
+  // ── Rule 5c: profile_map behavioral equivalence (ChatGPT v4 review fix #12) ──
+  {
+    const profileById = new Map(facetProfiles.map(p => [p.id, p]));
+    const seenProfileMaps = new Set<string>();
+    for (const mapping of legacyMappings.filter(m => m.kind === 'profile_map')) {
+      if (seenProfileMaps.has(mapping.v3ProfileId)) {
+        fail('duplicate_profile_map', `v3 profile "${mapping.v3ProfileId}" has more than one profile_map entry.`);
+      }
+      seenProfileMaps.add(mapping.v3ProfileId);
+      const v4Profile = profileById.get(mapping.v4ProfileId);
+      if (!v4Profile) {
+        fail('profile_map_unknown_target', `profile_map for "${mapping.v3ProfileId}" references unknown v4 profile "${mapping.v4ProfileId}".`);
+        continue;
+      }
+      if (mapping.v3Fingerprint !== mapping.v4Fingerprint) {
+        fail('profile_behavior_mismatch', `profile_map "${mapping.v3ProfileId}"→"${mapping.v4ProfileId}" fingerprints differ (${mapping.v3Fingerprint} vs ${mapping.v4Fingerprint}).`);
+      }
+      if (mapping.equivalent !== true) {
+        fail('profile_behavior_mismatch', `profile_map "${mapping.v3ProfileId}"→"${mapping.v4ProfileId}" declares equivalent:false.`);
+      }
+      if (v4Profile.behaviorFingerprint !== mapping.v4Fingerprint) {
+        fail('profile_fingerprint_inconsistent', `profile_map "${mapping.v3ProfileId}" v4Fingerprint does not match the target profile's behaviorFingerprint.`);
+      }
+      if (!v4Profile.sourceV3ProfileIds.includes(mapping.v3ProfileId)) {
+        fail('profile_map_provenance_missing', `profile_map "${mapping.v3ProfileId}"→"${mapping.v4ProfileId}" but the v4 profile does not list it in sourceV3ProfileIds.`);
+      }
+    }
+    // Every v3 profile must have a profile_map entry (bijection on the v3 side).
+    const v3DirForProfiles = path.resolve(path.dirname(dir), 'bay-state-v3');
+    const v3ProfilesFile = path.join(v3DirForProfiles, 'attribute-profiles.json');
+    if (fs.existsSync(v3ProfilesFile)) {
+      try {
+        const parsed = AttributeProfilesFileV2Schema.safeParse(JSON.parse(fs.readFileSync(v3ProfilesFile, 'utf8')));
+        if (parsed.success) {
+          const v3ProfileIds = parsed.data.entries.map(e => e.id);
+          for (const v3Id of v3ProfileIds) {
+            if (!seenProfileMaps.has(v3Id)) {
+              fail('profile_map_missing', `v3 profile "${v3Id}" has no profile_map entry.`);
+            }
+          }
+        }
+      } catch { /* already reported by Rule 6 */ }
+    }
+  }
+
+  // ── Rule 6: leaf bijection with v3 product-types.json ────────────────────
+  {
+    const leafNodes = hierarchy.filter(n => n.classifiable);
+    for (const leaf of leafNodes) {
+      if (!leaf.legacyTypeIds || leaf.legacyTypeIds.length === 0) {
+        fail('leaf_node_no_legacy_type', `Classifiable node "${leaf.id}" has no legacyTypeIds.`);
+      }
+    }
+
+    // Resolve the v3 release sibling directory (releaseDir/../bay-state-v3).
+    const v3Dir = path.resolve(path.dirname(dir), 'bay-state-v3');
+    const v3ProductTypesFile = path.join(v3Dir, 'product-types.json');
+    if (!fs.existsSync(v3ProductTypesFile)) {
+      fail('v3_baseline_missing', `Cannot verify leaf bijection: v3 product-types.json not found at ${v3ProductTypesFile}.`);
+    } else {
+      let v3TypeIds: string[] = [];
+      try {
+        const v3Parsed = ProductTypesFileV2Schema.safeParse(JSON.parse(fs.readFileSync(v3ProductTypesFile, 'utf8')));
+        if (!v3Parsed.success) {
+          fail('v3_baseline_invalid', `v3 product-types.json failed schema validation.`);
+        } else {
+          v3TypeIds = v3Parsed.data.entries.map(e => e.id);
+        }
+      } catch (err) {
+        fail('v3_baseline_read_error', `Cannot read v3 product-types.json: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      if (v3TypeIds.length > 0) {
+        // Every v3 type must appear in EXACTLY ONE leaf's legacyTypeIds, and
+        // every leaf legacyTypeId must be a known v3 type (bijection).
+        const leafTypeIdCounts = new Map<string, number>();
+        const unknownLeafTypes: string[] = [];
+        for (const leaf of leafNodes) {
+          for (const typeId of leaf.legacyTypeIds) {
+            if (!v3TypeIds.includes(typeId)) unknownLeafTypes.push(`${leaf.id}:${typeId}`);
+            leafTypeIdCounts.set(typeId, (leafTypeIdCounts.get(typeId) ?? 0) + 1);
+          }
+        }
+        if (unknownLeafTypes.length > 0) {
+          fail('leaf_legacy_type_unknown', `Leaf legacyTypeIds reference types not in v3: ${unknownLeafTypes.join(', ')}`);
+        }
+        const duplicatedTypes = [...leafTypeIdCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id);
+        if (duplicatedTypes.length > 0) {
+          fail('leaf_type_not_bijective', `v3 types appear in more than one leaf's legacyTypeIds: ${duplicatedTypes.join(', ')}`);
+        }
+        const missingTypes = v3TypeIds.filter(id => !leafTypeIdCounts.has(id));
+        if (missingTypes.length > 0) {
+          fail('leaf_type_missing', `${missingTypes.length} v3 type(s) are not represented by any classifiable leaf: ${missingTypes.join(', ')}`);
+        }
+      }
+    }
+  }
+
+  // ── Rule 7: legacy-mappings type_migration completeness ──────────────────
+  {
+    const migrations = legacyMappings.filter(m => m.kind === 'type_migration');
+    const v3Dir = path.resolve(path.dirname(dir), 'bay-state-v3');
+    const v3ProductTypesFile = path.join(v3Dir, 'product-types.json');
+    let v3TypeIds: string[] = [];
+    if (fs.existsSync(v3ProductTypesFile)) {
+      try {
+        const parsed = ProductTypesFileV2Schema.safeParse(JSON.parse(fs.readFileSync(v3ProductTypesFile, 'utf8')));
+        if (parsed.success) v3TypeIds = parsed.data.entries.map(e => e.id);
+      } catch { /* already reported by Rule 6 */ }
+    }
+    if (v3TypeIds.length > 0) {
+      const migrated = new Map<string, V4TypeMigrationEntry>();
+      for (const migration of migrations) {
+        if (migrated.has(migration.v3TypeId)) {
+          fail('duplicate_type_migration', `v3 type "${migration.v3TypeId}" has more than one type_migration entry.`);
+        }
+        migrated.set(migration.v3TypeId, migration);
+        if (!nodeById.has(migration.targetNodeId)) {
+          fail('type_migration_unknown_target', `type_migration for "${migration.v3TypeId}" targets unknown node "${migration.targetNodeId}".`);
+        }
+        const target = nodeById.get(migration.targetNodeId);
+        if (target && !target.classifiable) {
+          fail('type_migration_target_not_classifiable', `type_migration for "${migration.v3TypeId}" targets non-classifiable node "${migration.targetNodeId}".`);
+        }
+      }
+      const missing = v3TypeIds.filter(id => !migrated.has(id));
+      if (missing.length > 0) {
+        fail('type_migration_missing', `${missing.length} v3 type(s) have no type_migration entry: ${missing.join(', ')}`);
+      }
+    }
+  }
+
+  // ── Rule 8: shopsite-projection invariants ───────────────────────────────
+  {
+    const seenPageNames = new Set<string>();
+    const nodeIdToLeafPage = new Map<string, string>();
+    for (const page of pageProjections) {
+      if (seenPageNames.has(page.pageName)) {
+        fail('duplicate_page_projection', `Duplicate page projection "${page.pageName}".`);
+      }
+      seenPageNames.add(page.pageName);
+
+      if (page.role === 'canonical_leaf') {
+        if (!page.nodeId) {
+          fail('canonical_leaf_missing_node', `Canonical leaf page "${page.pageName}" has no nodeId.`);
+        } else {
+          const node = nodeById.get(page.nodeId);
+          if (!node) {
+            fail('canonical_leaf_unknown_node', `Canonical leaf page "${page.pageName}" references unknown node "${page.nodeId}".`);
+          } else if (!node.classifiable) {
+            fail('canonical_leaf_node_not_classifiable', `Canonical leaf page "${page.pageName}" references non-classifiable node "${page.nodeId}".`);
+          }
+          if (nodeIdToLeafPage.has(page.nodeId)) {
+            fail('duplicate_canonical_node_page', `Canonical node "${page.nodeId}" is projected by both "${nodeIdToLeafPage.get(page.nodeId)}" and "${page.pageName}".`);
+          }
+          nodeIdToLeafPage.set(page.nodeId, page.pageName);
+        }
+        if (page.facetProfileId && !facetProfileById.has(page.facetProfileId)) {
+          fail('page_unknown_facet_profile', `Canonical leaf page "${page.pageName}" references unknown facet profile "${page.facetProfileId}".`);
+        }
+      }
+    }
+  }
+
+  // ── Rule 9: manifest counts + identity ───────────────────────────────────
+  {
+    if (manifest) {
+      const actual = {
+        nodes: hierarchy.length,
+        departments: hierarchy.filter(n => n.parentId === null).length,
+        types: hierarchy.filter(n => n.classifiable).length,
+        attributes: attributes.length,
+        facetProfiles: facetProfiles.length,
+        pages: pageProjections.length,
+        mappings: exportMappings.length,
+      };
+      for (const [key, exp] of Object.entries(manifest.counts)) {
+        const act = actual[key as keyof typeof actual];
+        if (exp !== act) {
+          fail('manifest_count_mismatch', `manifest.counts.${key} is ${exp}, but the release contains ${act}.`);
+        }
+      }
+      if (!isValidReleaseId(manifest.releaseId)) {
+        fail('invalid_release_id_format', `manifest.releaseId "${manifest.releaseId}" must match /^[a-z0-9]+(-[a-z0-9]+)*$/.`);
+      }
+      if (!isValidReleaseId(manifest.revision)) {
+        fail('invalid_release_id_format', `manifest.revision "${manifest.revision}" must match /^[a-z0-9]+(-[a-z0-9]+)*$/.`);
+      }
+      const dirBasename = path.basename(dir);
+      if (manifest.releaseId !== dirBasename) {
+        fail('release_id_mismatch', `manifest.releaseId "${manifest.releaseId}" does not match the release directory basename "${dirBasename}".`);
+      }
+      if (manifest.revision !== manifest.releaseId) {
+        fail('revision_mismatch', `manifest.revision "${manifest.revision}" does not equal manifest.releaseId "${manifest.releaseId}".`);
+      }
+    }
+  }
+
+  // ── Rule A (reuse v3 checks): attributes ids + export duality ────────────
+  {
+    const seenAttrIds = new Set<string>();
+    for (const attr of attributes) {
+      if (!SLUG_RELEASE_ID_RE.test(attr.id)) {
+        fail('invalid_attribute_id_format', `Attribute id "${attr.id}" must match /^[a-z0-9]+(-[a-z0-9]+)*$/.`);
+      }
+      if (seenAttrIds.has(attr.id)) {
+        fail('duplicate_attribute_id', `Duplicate attribute id "${attr.id}".`);
+      }
+      seenAttrIds.add(attr.id);
+      if (attr.exportDisposition === undefined) {
+        fail('attribute_missing_export_disposition', `Attribute "${attr.id}" has no exportDisposition.`);
+      } else if (attr.exportDisposition.kind === 'shopsite' && attr.exportDisposition.catalogField.trim().length === 0) {
+        fail('attribute_empty_export_field', `Attribute "${attr.id}" has a shopsite disposition with an empty catalogField.`);
+      }
+    }
+
+    // Export duality set-equality (v3 Rule 8b): export-mappings must equal
+    // exactly the projection of shopsite-disposition attributes.
+    const expectedByAttribute = new Map<string, string>();
+    for (const attr of attributes) {
+      if (attr.exportDisposition?.kind === 'shopsite') {
+        expectedByAttribute.set(attr.id, attr.exportDisposition.catalogField);
+      }
+    }
+    const actualByAttribute = new Map<string, string[]>();
+    for (const mapping of exportMappings) {
+      const existing = actualByAttribute.get(mapping.attributeId) ?? [];
+      existing.push(mapping.catalogField);
+      actualByAttribute.set(mapping.attributeId, existing);
+    }
+    for (const [attributeId, expectedField] of expectedByAttribute) {
+      const actualFields = actualByAttribute.get(attributeId);
+      if (!actualFields || actualFields.length === 0) {
+        fail('export_mapping_missing', `Attribute "${attributeId}" has a shopsite exportDisposition but no export mapping.`);
+      } else if (actualFields.length > 1) {
+        fail('duplicate_export_mapping', `Attribute "${attributeId}" has ${actualFields.length} export mappings; exactly one is required.`);
+      } else if (actualFields[0] !== expectedField) {
+        fail('export_mapping_mismatch', `Attribute "${attributeId}" maps to "${actualFields[0]}" but exportDisposition declares "${expectedField}".`);
+      }
+    }
+    for (const [attributeId, actualFields] of actualByAttribute) {
+      const attr = attributes.find(a => a.id === attributeId);
+      if (!attr) continue;
+      if (attr.exportDisposition?.kind !== 'shopsite') {
+        fail('export_mapping_forbidden', `Attribute "${attributeId}" has ${actualFields.length} export mapping(s) but disposition is "${attr.exportDisposition?.kind ?? 'missing'}".`);
+        continue;
+      }
+      for (const field of actualFields) {
+        if (field !== attr.exportDisposition.catalogField) {
+          fail('export_mapping_mismatch', `Attribute "${attributeId}" maps to "${field}" but exportDisposition declares "${attr.exportDisposition.catalogField}".`);
+        }
+      }
+    }
+  }
+
+  // ── Rule 10: species-safety cross-check (best effort) ────────────────────
+  // The v4 release does not yet carry per-node species metadata, so a strict
+  // species-safety verification is not assertable from the release data alone.
+  // We verify the structural prerequisite instead: the leaf→group assignment
+  // is bijective (Rule 6), so no v3 type can be classified under two different
+  // species groups. When species metadata is added to hierarchy nodes in a
+  // future release, a per-node species-safety rule must be enforced here.
+  {
+    const dogGroup = hierarchy.find(n => n.id === 'dog');
+    const catGroup = hierarchy.find(n => n.id === 'cat');
+    if (dogGroup && catGroup) {
+      const dogTypes = new Set(dogGroup.legacyTypeIds);
+      const catTypes = new Set(catGroup.legacyTypeIds);
+      const overlap = [...dogTypes].filter(id => catTypes.has(id));
+      if (overlap.length > 0) {
+        fail('species_safety_overlap', `Dog and cat groups share legacy types: ${overlap.join(', ')}.`);
+      }
+    }
+  }
+
+  // ── Rule B: guidance ids unique; page-assignment-policy validity ─────────
+  {
+    const seenGuidanceIds = new Set<string>();
+    for (const g of guidance) {
+      if (seenGuidanceIds.has(g.id)) {
+        fail('duplicate_guidance_id', `Duplicate guidance id "${g.id}".`);
+      }
+      seenGuidanceIds.add(g.id);
+    }
+    if (pagePolicy) {
+      if (!Number.isInteger(pagePolicy.maxPagesPerProduct) || pagePolicy.maxPagesPerProduct <= 0) {
+        fail('invalid_max_pages', 'page-assignment-policy maxPagesPerProduct must be a positive integer.');
+      }
+      if (!Array.isArray(pagePolicy.allowedSpecies) || pagePolicy.allowedSpecies.length === 0) {
+        fail('invalid_allowed_species', 'page-assignment-policy allowedSpecies must be a non-empty array of strings.');
+      }
+    }
+  }
+
+  return {
+    ok: findings.every(f => f.severity !== 'error'),
+    findings,
+    counts: {
+      productTypes: hierarchy.filter(n => n.classifiable).length,
+      attributes: attributes.length,
+      attributeProfiles: facetProfiles.length,
+      departments: hierarchy.filter(n => n.parentId === null).length,
+      mappings: exportMappings.length,
+    },
+    profileBlastRadii: report.profileBlastRadii,
+  };
+}
+
+/**
+ * Parse a validated v4 release into a structured bundle. THROWS
+ * `ReleaseValidationError` (code `release_invalid`) when the release has any
+ * `error`-severity finding.
+ */
+export function loadTaxonomyReleaseV4(releaseDir: string): TaxonomyReleaseBundleV4 {
+  const report = validateTaxonomyReleaseV4(releaseDir);
+  if (!report.ok) {
+    const messages = report.findings.filter(f => f.severity === 'error').map(f => `  [${f.code}] ${f.message}`);
+    throw new ReleaseValidationError(
+      `Taxonomy release v4 "${releaseDir}" is invalid:\n${messages.join('\n')}`,
+      report,
+    );
+  }
+
+  const dir = resolveReleaseDir(releaseDir);
+  const read = (fileName: string) => JSON.parse(fs.readFileSync(path.join(dir, fileName), 'utf8'));
+
+  return {
+    manifest: V4ManifestSchema.parse(read('manifest.json')),
+    hierarchy: V4HierarchySchema.parse(read('hierarchy.json')).entries,
+    facetProfiles: V4FacetProfilesSchema.parse(read('facet-profiles.json')).entries,
+    legacyMappings: V4LegacyMappingsSchema.parse(read('legacy-mappings.json')).entries,
+    attributes: AttributesFileV2Schema.parse(read('attributes.json')).entries,
+    exportMappings: AttributeMappingsFileV2Schema.parse(read('export-mappings.json')).entries,
+    pageProjections: V4ShopsiteProjectionSchema.parse(read('shopsite-projection.json')).entries,
+    guidance: GuidanceFileV2Schema.parse(read('guidance.json')).entries,
+    pageAssignmentPolicy: PageAssignmentPolicyV2Schema.parse(read('page-assignment-policy.json')),
+  };
+}
+
+/**
+ * Assert a v4 release is valid. THROWS `ReleaseValidationError` on any
+ * `error`-severity finding; otherwise returns the validation report.
+ */
+export function assertReleaseValidV4(releaseDir: string): ReleaseValidationReport {
+  const report = validateTaxonomyReleaseV4(releaseDir);
+  if (!report.ok) {
+    const messages = report.findings.filter(f => f.severity === 'error').map(f => `  [${f.code}] ${f.message}`);
+    throw new ReleaseValidationError(
+      `Taxonomy release v4 "${releaseDir}" is invalid:\n${messages.join('\n')}`,
       report,
     );
   }

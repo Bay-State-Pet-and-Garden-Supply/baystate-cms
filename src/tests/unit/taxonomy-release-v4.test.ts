@@ -32,6 +32,13 @@ function expectFinding(report: ReleaseValidationReport, code: string): void {
   expect(findingCodes(report)).toContain(code);
 }
 
+function bundleProfileExists(profileId: string): boolean {
+  const profiles = JSON.parse(
+    fs.readFileSync(path.join(RELEASE_DIR, 'facet-profiles.json'), 'utf8'),
+  );
+  return profiles.entries.some((p: any) => p.id === profileId);
+}
+
 // ─── Temp-copy helpers (tests never mutate the real release) ───────────────────
 
 let tmpRoot: string;
@@ -74,8 +81,8 @@ describe('committed bay-state-v4 release', () => {
   it('loads with expected counts matching the manifest', () => {
     const bundle = loadTaxonomyReleaseV4(RELEASE_ID);
     expect(bundle.manifest.releaseId).toBe('bay-state-v4');
-    expect(bundle.manifest.counts.nodes).toBe(96);
-    expect(bundle.hierarchy.length).toBe(96);
+    expect(bundle.manifest.counts.nodes).toBe(89);
+    expect(bundle.hierarchy.length).toBe(89);
     const leaves = bundle.hierarchy.filter(n => n.classifiable);
     expect(leaves.length).toBe(73);
     expect(bundle.manifest.counts.types).toBe(73);
@@ -99,12 +106,14 @@ describe('committed bay-state-v4 release', () => {
     expect(() => assertReleaseValidV4(RELEASE_ID)).not.toThrow();
   });
 
-  it('hierarchy shape: 10 roots, 13 groups, 73 leaves, all reachable', () => {
+  it('hierarchy shape: 10 roots, 3 browse + 3 families, 73 leaves, all reachable', () => {
     const bundle = loadTaxonomyReleaseV4(RELEASE_ID);
     const roots = bundle.hierarchy.filter(n => n.parentId === null);
     expect(roots.length).toBe(10);
     const groups = bundle.hierarchy.filter(n => n.derivation === 'group');
-    expect(groups.length).toBe(13);
+    expect(groups.length).toBe(3);
+    const families = bundle.hierarchy.filter(n => n.derivation === 'family');
+    expect(families.length).toBe(3);
     const leaves = bundle.hierarchy.filter(n => n.classifiable);
     expect(leaves.length).toBe(73);
     const nodeIds = new Set(bundle.hierarchy.map(n => n.id));
@@ -112,6 +121,10 @@ describe('committed bay-state-v4 release', () => {
     // Every non-root parent resolves.
     for (const node of bundle.hierarchy) {
       if (node.parentId !== null) expect(nodeIds.has(node.parentId)).toBe(true);
+    }
+    // Semantic browse nodes exist (ChatGPT ragged hierarchy).
+    for (const id of ['dog', 'cat', 'pet-health-wellness', 'dog-food', 'cat-food', 'wild-bird']) {
+      expect(nodeIds.has(id)).toBe(true);
     }
   });
 });
@@ -284,5 +297,74 @@ describe('negative cases (temp copies)', () => {
       expect(err).toBeInstanceOf(ReleaseValidationError);
       expect((err as ReleaseValidationError).code).toBe('release_invalid');
     }
+  });
+
+  // ── Profile behavioral-equivalence + provenance (ChatGPT v4 review #12/#13) ──
+
+  it('all profile_map entries are behaviorally equivalent with matching fingerprints', () => {
+    const bundle = loadTaxonomyReleaseV4(RELEASE_ID);
+    const profileMaps = bundle.legacyMappings.filter(m => m.kind === 'profile_map');
+    expect(profileMaps.length).toBe(73);
+    for (const m of profileMaps) {
+      if (m.kind !== 'profile_map') continue;
+      expect(m.equivalent).toBe(true);
+      expect(m.v3Fingerprint).toBe(m.v4Fingerprint);
+      const target = bundle.facetProfiles.find(p => p.id === m.v4ProfileId);
+      expect(target).toBeDefined();
+      expect(target!.behaviorFingerprint).toBe(m.v4Fingerprint);
+      expect(target!.sourceV3ProfileIds).toContain(m.v3ProfileId);
+    }
+  });
+
+  it('every facet profile has provenance and its canonicalNodeIds match the hierarchy', () => {
+    const bundle = loadTaxonomyReleaseV4(RELEASE_ID);
+    for (const profile of bundle.facetProfiles) {
+      expect(profile.sourceV3ProfileIds.length).toBeGreaterThan(0);
+      expect(profile.behaviorFingerprint.length).toBeGreaterThanOrEqual(8);
+      const actualLeaves = bundle.hierarchy.filter(n => n.classifiable && n.facetProfileId === profile.id).map(n => n.id).sort();
+      expect([...profile.canonicalNodeIds].sort()).toEqual(actualLeaves);
+    }
+  });
+
+  it('reports shared-profile blast radii for profiles with >1 consuming node', () => {
+    const report = validateTaxonomyReleaseV4(RELEASE_ID);
+    expect(report.profileBlastRadii.length).toBeGreaterThan(0);
+    for (const radius of report.profileBlastRadii) {
+      expect(radius.nodeCount).toBe(radius.nodeIds.length);
+      expect(radius.nodeCount).toBeGreaterThan(1);
+      expect(bundleProfileExists(radius.profileId)).toBe(true);
+    }
+  });
+
+  it('rejects a profile_map whose fingerprints differ (behavioral mismatch)', () => {
+    const dir = freshCopy();
+    const legacy = readJson(dir, 'legacy-mappings.json');
+    const map = legacy.entries.find((e: any) => e.kind === 'profile_map');
+    map.v4Fingerprint = 'f'.repeat(24);
+    writeJson(dir, 'legacy-mappings.json', legacy);
+    const report = validateTaxonomyReleaseV4(dir);
+    expectFinding(report, 'profile_behavior_mismatch');
+    expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('rejects a profile whose recorded canonicalNodeIds drift from the hierarchy', () => {
+    const dir = freshCopy();
+    const profiles = readJson(dir, 'facet-profiles.json');
+    const profile = profiles.entries.find((e: any) => e.canonicalNodeIds.length > 0);
+    profile.canonicalNodeIds = ['nonexistent-leaf'];
+    writeJson(dir, 'facet-profiles.json', profiles);
+    const report = validateTaxonomyReleaseV4(dir);
+    expectFinding(report, 'profile_node_ids_mismatch');
+    expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
+  });
+
+  it('rejects a shared profile missing provenance', () => {
+    const dir = freshCopy();
+    const profiles = readJson(dir, 'facet-profiles.json');
+    profiles.entries[0].sourceV3ProfileIds = [];
+    writeJson(dir, 'facet-profiles.json', profiles);
+    const report = validateTaxonomyReleaseV4(dir);
+    expectFinding(report, 'profile_missing_provenance');
+    expect(() => loadTaxonomyReleaseV4(dir)).toThrow(ReleaseValidationError);
   });
 });

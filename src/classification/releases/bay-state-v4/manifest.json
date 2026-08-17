@@ -7,9 +7,9 @@
   "lifecycle": "release",
   "sourceBaseline": "bay-state-v3",
   "fileVersions": {
-    "hierarchy.json": "fde64761ac056c9ef2a9eab34408ea28b300074f0c8ace362dc600057bf04944",
-    "facet-profiles.json": "b96db877eb3389d5ac7a8c008d3387eefb11b8551a6d51e2ed8ca95c94ef03a3",
-    "legacy-mappings.json": "f37b89116ffb9f97cffc6b4743dae5e58b792b7f400942f9deaca195f839c693",
+    "hierarchy.json": "4e2c66d64ad1e1240901600d3302088e5f9335b0b37d5f32e0cdb4ef97f3b0b0",
+    "facet-profiles.json": "d86e0b850bc9134b9ac90fe5abcf2a573225a39c402d939c8d99b21ac1f123bd",
+    "legacy-mappings.json": "af82c85d0a2a8602b36f261affa5280674f425e6af35fa028b4c22f258e20d3d",
     "attributes.json": "14a88494e7d5d54929dc36790281cb7f672844b073b8374da9708c5eb2eb9d9c",
     "shopsite-projection.json": "2898e165753f5e4b31d82a6af4dbd85ecb2c2b836526a97bacd03dd97b02d182",
     "export-mappings.json": "cbd4dc1f917ae424e577f280605a1239ce92521af1a770a17ecc58e8f09df4cd",
@@ -17,7 +17,7 @@
     "page-assignment-policy.json": "64eafc38fcf9a9ba074f18a33c7026396642f3458a503419552686ba2285c7db"
   },
   "counts": {
-    "nodes": 96,
+    "nodes": 89,
     "departments": 10,
     "types": 73,
     "attributes": 27,
@@ -27,12 +27,12 @@
   },
   "notes": [
     "Hybrid architecture (ChatGPT-ratified): one immutable canonical hierarchy is the only classification truth; ShopSite Pages, breadcrumbs, PF13/PF14, PF24/PF25 are compiled projections.",
-    "Hierarchy: L1 = 10 department roots (classifiable=false); L2 = 13 group nodes (classifiable=false); L3 = 73 leaf nodes (classifiable=true, one per v3 type, derivation type_1to1).",
-    "Leaf parent group resolution: exact normalized-name match against the legacy v1 taxonomy, then a curated alias map (13 types), then the department default group for unmatched types (dog-waste-bags, cat-toys, grooming, supplements, collars-leashes, small-animal-feed-bedding, bee-supplies, bird-houses-baths).",
-    "Facet profiles: the 73 v3 attribute profiles deduplicated by identical attribute-set signature into 9 shared profiles (profile-*). v3 profile -> v4 profile map recorded in legacy-mappings.json.",
+    "Hierarchy is SEMANTICALLY RAGGED (ChatGPT v4 review): L1 = 10 department roots (classifiable=false); browse nodes = dog, cat, pet-health-wellness (species/dimension) + dog-food, cat-food, wild-bird (real product families); L3 = 73 leaf nodes (classifiable=true, one per v3 type, derivation type_1to1). Legacy wrapper groups are collapsed into their department roots.",
+    "Leaf parent resolution: explicit override map first (cat-toys→cat, dog-waste-bags→dog, supplements→pet-health-wellness, collars-leashes/grooming/pet-beds/small-animal-feed-bedding→pet-supplies, deer-wildlife-feed→wild-bird-wildlife), then family membership, then legacy parentCategory, then department root.",
+    "Facet profiles: the 73 v3 attribute profiles deduplicated by BEHAVIORAL FINGERPRINT (attribute ids + required + cardinality + attribute valueMode/units/allowedValues/aliases/universal/claim/composition/export disposition) into 9 shared profiles. Every profile carries sourceV3ProfileIds + canonicalNodeIds (blast radius) + behaviorFingerprint; every profile_map entry in legacy-mappings.json is verified equivalent:true (build fails otherwise).",
     "attributes.json carries 25 v3 attributes plus 2 compiled projection attributes: canonical-category-id (ProductField13) and canonical-breadcrumb (ProductField14).",
     "export-mappings.json carries the 17 v3 mappings plus canonical-category-id-mapping (PF13) and canonical-breadcrumb-mapping (PF14).",
-    "ShopSite page projection: 153 live pages assigned roles deterministically — canonical_leaf=4, shop_all_aggregate=18, merchandising=15, navigation=10, needs_review=106 (canonical_browse=0 in this first pass; page roles for the remaining pages require human curation in the next phase).",
+    "ShopSite page projection: 153 live pages assigned roles deterministically — canonical_leaf=4, shop_all_aggregate=18, merchandising=15, navigation=10, needs_review=106 (canonical_browse=0 in this pass; remaining pages require human curation — needs_review must reach 0 before the compiler phase).",
     "Shop All aggregation pages are page projections, NOT hierarchy nodes (documented in the hybrid plan).",
     "Legacy v1 taxonomy (src/classification/taxonomy/*.json) is still referenced by this builder but remains otherwise dead code pending the P6 removal phase."
   ]

@@ -9,7 +9,7 @@
     {
       "id": "air-compressors-hoses",
       "label": "Air Compressors & Hoses",
-      "parentId": "power-equipment",
+      "parentId": "power-equipment-tools",
       "classifiable": true,
       "facetProfileId": "profile-power-equipment",
       "departmentId": "power-equipment-tools",
@@ -17,21 +17,6 @@
         "air-compressors-hoses"
       ],
       "derivation": "type_1to1"
-    },
-    {
-      "id": "apparel-supplies",
-      "label": "Apparel & Workwear",
-      "parentId": "apparel-workwear",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "apparel-workwear",
-      "legacyTypeIds": [
-        "work-boots",
-        "work-gloves",
-        "workwear-outerwear",
-        "overalls-coveralls"
-      ],
-      "derivation": "group"
     },
     {
       "id": "apparel-workwear",
@@ -51,7 +36,7 @@
     {
       "id": "bee-supplies",
       "label": "Bee Supplies & Apiary",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "livestock-farm-animals",
@@ -63,7 +48,7 @@
     {
       "id": "bird-food",
       "label": "Wild Bird Food & Seed",
-      "parentId": "wild-bird-supplies",
+      "parentId": "wild-bird",
       "classifiable": true,
       "facetProfileId": "profile-wild-bird",
       "departmentId": "wild-bird-wildlife",
@@ -75,7 +60,7 @@
     {
       "id": "bird-houses-baths",
       "label": "Bird Houses & Baths",
-      "parentId": "wild-bird-supplies",
+      "parentId": "wild-bird",
       "classifiable": true,
       "facetProfileId": "profile-wild-bird",
       "departmentId": "wild-bird-wildlife",
@@ -85,9 +70,36 @@
       "derivation": "type_1to1"
     },
     {
+      "id": "cat",
+      "label": "Cat",
+      "parentId": "pet-supplies",
+      "classifiable": false,
+      "facetProfileId": null,
+      "departmentId": "pet-supplies",
+      "legacyTypeIds": [
+        "cat-litter",
+        "cat-toys",
+        "cat-treats"
+      ],
+      "derivation": "group"
+    },
+    {
+      "id": "cat-food",
+      "label": "Cat Food",
+      "parentId": "cat",
+      "classifiable": false,
+      "facetProfileId": null,
+      "departmentId": "pet-supplies",
+      "legacyTypeIds": [
+        "cat-food-dry",
+        "cat-food-wet"
+      ],
+      "derivation": "family"
+    },
+    {
       "id": "cat-food-dry",
       "label": "Dry Cat Food",
-      "parentId": "cat-supplies",
+      "parentId": "cat-food",
       "classifiable": true,
       "facetProfileId": "profile-pet-food",
       "departmentId": "pet-supplies",
@@ -99,7 +111,7 @@
     {
       "id": "cat-food-wet",
       "label": "Wet Cat Food",
-      "parentId": "cat-supplies",
+      "parentId": "cat-food",
       "classifiable": true,
       "facetProfileId": "profile-pet-food",
       "departmentId": "pet-supplies",
@@ -111,7 +123,7 @@
     {
       "id": "cat-litter",
       "label": "Cat Litter",
-      "parentId": "cat-supplies",
+      "parentId": "cat",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -121,24 +133,9 @@
       "derivation": "type_1to1"
     },
     {
-      "id": "cat-supplies",
-      "label": "Cat Supplies",
-      "parentId": "pet-supplies",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "pet-supplies",
-      "legacyTypeIds": [
-        "cat-food-dry",
-        "cat-food-wet",
-        "cat-treats",
-        "cat-litter"
-      ],
-      "derivation": "group"
-    },
-    {
       "id": "cat-toys",
       "label": "Cat Toys",
-      "parentId": "pet-supplies-other",
+      "parentId": "cat",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -150,7 +147,7 @@
     {
       "id": "cat-treats",
       "label": "Cat Treats",
-      "parentId": "cat-supplies",
+      "parentId": "cat",
       "classifiable": true,
       "facetProfileId": "profile-pet-food",
       "departmentId": "pet-supplies",
@@ -162,7 +159,7 @@
     {
       "id": "cattle-feed",
       "label": "Cattle Feed",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-feed",
       "departmentId": "livestock-farm-animals",
@@ -174,7 +171,7 @@
     {
       "id": "chainsaws-log-splitters",
       "label": "Chainsaws & Log Splitters",
-      "parentId": "power-equipment",
+      "parentId": "power-equipment-tools",
       "classifiable": true,
       "facetProfileId": "profile-power-equipment",
       "departmentId": "power-equipment-tools",
@@ -186,7 +183,7 @@
     {
       "id": "collars-leashes",
       "label": "Collars & Leashes",
-      "parentId": "pet-supplies-other",
+      "parentId": "pet-supplies",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -198,7 +195,7 @@
     {
       "id": "coop-barn-heat-lamps",
       "label": "Coop & Barn Heat Lamps",
-      "parentId": "heating-fuel",
+      "parentId": "heating-fuel-climate-control",
       "classifiable": true,
       "facetProfileId": "profile-heating",
       "departmentId": "heating-fuel-climate-control",
@@ -210,7 +207,7 @@
     {
       "id": "corral-panels-gates",
       "label": "Corral Panels & Farm Gates",
-      "parentId": "fencing-supplies",
+      "parentId": "fencing-agriculture-containment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "fencing-agriculture-containment",
@@ -222,7 +219,7 @@
     {
       "id": "deer-wildlife-feed",
       "label": "Deer & Wildlife Feed",
-      "parentId": "wild-bird-supplies",
+      "parentId": "wild-bird-wildlife",
       "classifiable": true,
       "facetProfileId": "profile-wild-bird",
       "departmentId": "wild-bird-wildlife",
@@ -232,9 +229,24 @@
       "derivation": "type_1to1"
     },
     {
+      "id": "dog",
+      "label": "Dog",
+      "parentId": "pet-supplies",
+      "classifiable": false,
+      "facetProfileId": null,
+      "departmentId": "pet-supplies",
+      "legacyTypeIds": [
+        "dog-crates-kennels",
+        "dog-toys",
+        "dog-treats",
+        "dog-waste-bags"
+      ],
+      "derivation": "group"
+    },
+    {
       "id": "dog-crates-kennels",
       "label": "Dog Crates & Kennels",
-      "parentId": "dog-supplies",
+      "parentId": "dog",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -244,9 +256,22 @@
       "derivation": "type_1to1"
     },
     {
+      "id": "dog-food",
+      "label": "Dog Food",
+      "parentId": "dog",
+      "classifiable": false,
+      "facetProfileId": null,
+      "departmentId": "pet-supplies",
+      "legacyTypeIds": [
+        "dog-food-dry",
+        "dog-food-wet"
+      ],
+      "derivation": "family"
+    },
+    {
       "id": "dog-food-dry",
       "label": "Dry Dog Food",
-      "parentId": "dog-supplies",
+      "parentId": "dog-food",
       "classifiable": true,
       "facetProfileId": "profile-pet-food",
       "departmentId": "pet-supplies",
@@ -258,7 +283,7 @@
     {
       "id": "dog-food-wet",
       "label": "Wet Dog Food",
-      "parentId": "dog-supplies",
+      "parentId": "dog-food",
       "classifiable": true,
       "facetProfileId": "profile-pet-food",
       "departmentId": "pet-supplies",
@@ -268,25 +293,9 @@
       "derivation": "type_1to1"
     },
     {
-      "id": "dog-supplies",
-      "label": "Dog Supplies",
-      "parentId": "pet-supplies",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "pet-supplies",
-      "legacyTypeIds": [
-        "dog-food-dry",
-        "dog-food-wet",
-        "dog-treats",
-        "dog-toys",
-        "dog-crates-kennels"
-      ],
-      "derivation": "group"
-    },
-    {
       "id": "dog-toys",
       "label": "Dog Toys",
-      "parentId": "dog-supplies",
+      "parentId": "dog",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -298,7 +307,7 @@
     {
       "id": "dog-treats",
       "label": "Dog Treats",
-      "parentId": "dog-supplies",
+      "parentId": "dog",
       "classifiable": true,
       "facetProfileId": "profile-pet-food",
       "departmentId": "pet-supplies",
@@ -310,7 +319,7 @@
     {
       "id": "dog-waste-bags",
       "label": "Dog Waste Bags",
-      "parentId": "pet-supplies-other",
+      "parentId": "dog",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -322,7 +331,7 @@
     {
       "id": "electric-fence-chargers",
       "label": "Electric Fence Chargers",
-      "parentId": "fencing-supplies",
+      "parentId": "fencing-agriculture-containment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "fencing-agriculture-containment",
@@ -334,7 +343,7 @@
     {
       "id": "electric-fence-insulators",
       "label": "Electric Fence Insulators",
-      "parentId": "fencing-supplies",
+      "parentId": "fencing-agriculture-containment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "fencing-agriculture-containment",
@@ -346,7 +355,7 @@
     {
       "id": "equine-grooming-hoof",
       "label": "Equine Grooming & Hoof Care",
-      "parentId": "equine-supplies",
+      "parentId": "equine-horse-care",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "equine-horse-care",
@@ -372,25 +381,9 @@
       "derivation": "department"
     },
     {
-      "id": "equine-supplies",
-      "label": "Equine Supplies",
-      "parentId": "equine-horse-care",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "equine-horse-care",
-      "legacyTypeIds": [
-        "horse-feed",
-        "horse-treats-supplements",
-        "fly-control-equine",
-        "equine-grooming-hoof",
-        "horse-blankets-tack"
-      ],
-      "derivation": "group"
-    },
-    {
       "id": "fence-wire-mesh",
       "label": "Fence Wire & Mesh",
-      "parentId": "fencing-supplies",
+      "parentId": "fencing-agriculture-containment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "fencing-agriculture-containment",
@@ -417,26 +410,9 @@
       "derivation": "department"
     },
     {
-      "id": "fencing-supplies",
-      "label": "Fencing Supplies",
-      "parentId": "fencing-agriculture-containment",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "fencing-agriculture-containment",
-      "legacyTypeIds": [
-        "electric-fence-chargers",
-        "fence-wire-mesh",
-        "t-posts-wooden-posts",
-        "corral-panels-gates",
-        "electric-fence-insulators",
-        "fencing-tools"
-      ],
-      "derivation": "group"
-    },
-    {
       "id": "fencing-tools",
       "label": "Fencing Tools & Accessories",
-      "parentId": "fencing-supplies",
+      "parentId": "fencing-agriculture-containment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "fencing-agriculture-containment",
@@ -448,7 +424,7 @@
     {
       "id": "firewood-kindling",
       "label": "Firewood & Kindling",
-      "parentId": "heating-fuel",
+      "parentId": "heating-fuel-climate-control",
       "classifiable": true,
       "facetProfileId": "profile-heating",
       "departmentId": "heating-fuel-climate-control",
@@ -460,7 +436,7 @@
     {
       "id": "flea-tick-treatment",
       "label": "Flea & Tick Treatment",
-      "parentId": "pet-health",
+      "parentId": "pet-health-wellness",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -472,7 +448,7 @@
     {
       "id": "fly-control-equine",
       "label": "Equine Fly & Pest Control",
-      "parentId": "equine-supplies",
+      "parentId": "equine-horse-care",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "equine-horse-care",
@@ -484,7 +460,7 @@
     {
       "id": "fly-insect-control-livestock",
       "label": "Fly & Pest Control for Livestock",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "livestock-farm-animals",
@@ -496,7 +472,7 @@
     {
       "id": "garage-barn-heaters",
       "label": "Garage & Barn Heaters",
-      "parentId": "heating-fuel",
+      "parentId": "heating-fuel-climate-control",
       "classifiable": true,
       "facetProfileId": "profile-heating",
       "departmentId": "heating-fuel-climate-control",
@@ -508,7 +484,7 @@
     {
       "id": "garden-hoses-reels",
       "label": "Garden Hoses & Reels",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -520,7 +496,7 @@
     {
       "id": "goat-sheep-feed",
       "label": "Goat & Sheep Feed",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-feed",
       "departmentId": "livestock-farm-animals",
@@ -532,7 +508,7 @@
     {
       "id": "grass-seed",
       "label": "Grass Seed",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -544,7 +520,7 @@
     {
       "id": "grooming",
       "label": "Grooming",
-      "parentId": "pet-supplies-other",
+      "parentId": "pet-supplies",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -556,7 +532,7 @@
     {
       "id": "hand-tools",
       "label": "Hand Garden Tools",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -564,23 +540,6 @@
         "hand-tools"
       ],
       "derivation": "type_1to1"
-    },
-    {
-      "id": "heating-fuel",
-      "label": "Heating & Fuel",
-      "parentId": "heating-fuel-climate-control",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "heating-fuel-climate-control",
-      "legacyTypeIds": [
-        "heating-pellets-wood",
-        "firewood-kindling",
-        "propane-heaters",
-        "garage-barn-heaters",
-        "coop-barn-heat-lamps",
-        "stove-pipe-chimney-care"
-      ],
-      "derivation": "group"
     },
     {
       "id": "heating-fuel-climate-control",
@@ -602,7 +561,7 @@
     {
       "id": "heating-pellets-wood",
       "label": "Heating Wood Pellets",
-      "parentId": "heating-fuel",
+      "parentId": "heating-fuel-climate-control",
       "classifiable": true,
       "facetProfileId": "profile-heating",
       "departmentId": "heating-fuel-climate-control",
@@ -614,7 +573,7 @@
     {
       "id": "horse-blankets-tack",
       "label": "Horse Blankets & Tack",
-      "parentId": "equine-supplies",
+      "parentId": "equine-horse-care",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "equine-horse-care",
@@ -626,7 +585,7 @@
     {
       "id": "horse-feed",
       "label": "Horse Feed",
-      "parentId": "equine-supplies",
+      "parentId": "equine-horse-care",
       "classifiable": true,
       "facetProfileId": "profile-livestock-feed",
       "departmentId": "equine-horse-care",
@@ -638,7 +597,7 @@
     {
       "id": "horse-treats-supplements",
       "label": "Horse Treats & Supplements",
-      "parentId": "equine-supplies",
+      "parentId": "equine-horse-care",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "equine-horse-care",
@@ -650,7 +609,7 @@
     {
       "id": "insect-control",
       "label": "Insect & Pest Control",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -662,7 +621,7 @@
     {
       "id": "lawn-fertilizer",
       "label": "Lawn Fertilizer",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -670,26 +629,6 @@
         "lawn-fertilizer"
       ],
       "derivation": "type_1to1"
-    },
-    {
-      "id": "lawn-garden",
-      "label": "Lawn & Garden",
-      "parentId": "lawn-garden-landscaping",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "lawn-garden-landscaping",
-      "legacyTypeIds": [
-        "lawn-fertilizer",
-        "grass-seed",
-        "weed-control",
-        "insect-control",
-        "potting-soil",
-        "hand-tools",
-        "garden-hoses-reels",
-        "sprinklers-nozzles",
-        "plant-food-fertilizer"
-      ],
-      "derivation": "group"
     },
     {
       "id": "lawn-garden-landscaping",
@@ -714,7 +653,7 @@
     {
       "id": "lawn-mowers",
       "label": "Lawn Mowers",
-      "parentId": "power-equipment",
+      "parentId": "power-equipment-tools",
       "classifiable": true,
       "facetProfileId": "profile-power-equipment",
       "departmentId": "power-equipment-tools",
@@ -748,7 +687,7 @@
     {
       "id": "livestock-feeders",
       "label": "Livestock Feeders",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "livestock-farm-animals",
@@ -760,7 +699,7 @@
     {
       "id": "livestock-health-dewormers",
       "label": "Livestock Health & Dewormers",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "livestock-farm-animals",
@@ -770,31 +709,9 @@
       "derivation": "type_1to1"
     },
     {
-      "id": "livestock-supplies",
-      "label": "Livestock Supplies",
-      "parentId": "livestock-farm-animals",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "livestock-farm-animals",
-      "legacyTypeIds": [
-        "poultry-feed",
-        "poultry-coops-equipment",
-        "cattle-feed",
-        "goat-sheep-feed",
-        "pig-swine-feed",
-        "stock-tanks-waterers",
-        "livestock-feeders",
-        "livestock-health-dewormers",
-        "fly-insect-control-livestock",
-        "stall-mats-bedding",
-        "bee-supplies"
-      ],
-      "derivation": "group"
-    },
-    {
       "id": "overalls-coveralls",
       "label": "Overalls & Coveralls",
-      "parentId": "apparel-supplies",
+      "parentId": "apparel-workwear",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "apparel-workwear",
@@ -806,7 +723,7 @@
     {
       "id": "pet-beds",
       "label": "Pet Beds",
-      "parentId": "pet-supplies-other",
+      "parentId": "pet-supplies",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "pet-supplies",
@@ -816,14 +733,15 @@
       "derivation": "type_1to1"
     },
     {
-      "id": "pet-health",
-      "label": "Pet Health",
+      "id": "pet-health-wellness",
+      "label": "Pet Health & Wellness",
       "parentId": "pet-supplies",
       "classifiable": false,
       "facetProfileId": null,
       "departmentId": "pet-supplies",
       "legacyTypeIds": [
-        "flea-tick-treatment"
+        "flea-tick-treatment",
+        "supplements"
       ],
       "derivation": "group"
     },
@@ -856,27 +774,9 @@
       "derivation": "department"
     },
     {
-      "id": "pet-supplies-other",
-      "label": "Other Pet Supplies",
-      "parentId": "pet-supplies",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "pet-supplies",
-      "legacyTypeIds": [
-        "dog-waste-bags",
-        "cat-toys",
-        "pet-beds",
-        "grooming",
-        "supplements",
-        "collars-leashes",
-        "small-animal-feed-bedding"
-      ],
-      "derivation": "group"
-    },
-    {
       "id": "pig-swine-feed",
       "label": "Pig & Swine Feed",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-feed",
       "departmentId": "livestock-farm-animals",
@@ -888,7 +788,7 @@
     {
       "id": "plant-food-fertilizer",
       "label": "Plant Food & Garden Fertilizer",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -900,7 +800,7 @@
     {
       "id": "potting-soil",
       "label": "Potting Soil & Mulch",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -912,7 +812,7 @@
     {
       "id": "poultry-coops-equipment",
       "label": "Poultry Coops & Equipment",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "livestock-farm-animals",
@@ -924,7 +824,7 @@
     {
       "id": "poultry-feed",
       "label": "Poultry Feed",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-feed",
       "departmentId": "livestock-farm-animals",
@@ -932,23 +832,6 @@
         "poultry-feed"
       ],
       "derivation": "type_1to1"
-    },
-    {
-      "id": "power-equipment",
-      "label": "Power Equipment",
-      "parentId": "power-equipment-tools",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "power-equipment-tools",
-      "legacyTypeIds": [
-        "lawn-mowers",
-        "string-trimmers-edgers",
-        "chainsaws-log-splitters",
-        "pressure-washers",
-        "power-tool-accessories",
-        "air-compressors-hoses"
-      ],
-      "derivation": "group"
     },
     {
       "id": "power-equipment-tools",
@@ -970,7 +853,7 @@
     {
       "id": "power-tool-accessories",
       "label": "Power Tool Accessories",
-      "parentId": "power-equipment",
+      "parentId": "power-equipment-tools",
       "classifiable": true,
       "facetProfileId": "profile-power-equipment",
       "departmentId": "power-equipment-tools",
@@ -982,7 +865,7 @@
     {
       "id": "pressure-washers",
       "label": "Pressure Washers",
-      "parentId": "power-equipment",
+      "parentId": "power-equipment-tools",
       "classifiable": true,
       "facetProfileId": "profile-power-equipment",
       "departmentId": "power-equipment-tools",
@@ -994,7 +877,7 @@
     {
       "id": "propane-heaters",
       "label": "Propane Heaters",
-      "parentId": "heating-fuel",
+      "parentId": "heating-fuel-climate-control",
       "classifiable": true,
       "facetProfileId": "profile-heating",
       "departmentId": "heating-fuel-climate-control",
@@ -1006,7 +889,7 @@
     {
       "id": "small-animal-feed-bedding",
       "label": "Small Animal Feed & Bedding",
-      "parentId": "pet-supplies-other",
+      "parentId": "pet-supplies",
       "classifiable": true,
       "facetProfileId": "profile-livestock-feed",
       "departmentId": "pet-supplies",
@@ -1018,7 +901,7 @@
     {
       "id": "sprinklers-nozzles",
       "label": "Sprinklers & Hose Nozzles",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -1030,7 +913,7 @@
     {
       "id": "stall-mats-bedding",
       "label": "Stall Mats & Bedding",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "livestock-farm-animals",
@@ -1042,7 +925,7 @@
     {
       "id": "stock-tanks-waterers",
       "label": "Stock Tanks & Waterers",
-      "parentId": "livestock-supplies",
+      "parentId": "livestock-farm-animals",
       "classifiable": true,
       "facetProfileId": "profile-livestock-equipment",
       "departmentId": "livestock-farm-animals",
@@ -1054,7 +937,7 @@
     {
       "id": "stove-pipe-chimney-care",
       "label": "Stove Pipe & Chimney Care",
-      "parentId": "heating-fuel",
+      "parentId": "heating-fuel-climate-control",
       "classifiable": true,
       "facetProfileId": "profile-heating",
       "departmentId": "heating-fuel-climate-control",
@@ -1066,7 +949,7 @@
     {
       "id": "string-trimmers-edgers",
       "label": "String Trimmers & Edgers",
-      "parentId": "power-equipment",
+      "parentId": "power-equipment-tools",
       "classifiable": true,
       "facetProfileId": "profile-power-equipment",
       "departmentId": "power-equipment-tools",
@@ -1078,7 +961,7 @@
     {
       "id": "suet-cakes",
       "label": "Suet Cakes",
-      "parentId": "wild-bird-supplies",
+      "parentId": "wild-bird",
       "classifiable": true,
       "facetProfileId": "profile-wild-bird",
       "departmentId": "wild-bird-wildlife",
@@ -1090,7 +973,7 @@
     {
       "id": "supplements",
       "label": "Supplements",
-      "parentId": "pet-supplies-other",
+      "parentId": "pet-health-wellness",
       "classifiable": true,
       "facetProfileId": "profile-pet-food",
       "departmentId": "pet-supplies",
@@ -1102,7 +985,7 @@
     {
       "id": "t-posts-wooden-posts",
       "label": "T-Posts & Wooden Fence Posts",
-      "parentId": "fencing-supplies",
+      "parentId": "fencing-agriculture-containment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "fencing-agriculture-containment",
@@ -1114,7 +997,7 @@
     {
       "id": "tie-down-straps-chains",
       "label": "Tie-Down Straps & Chains",
-      "parentId": "towing-equipment",
+      "parentId": "trailer-towing-equipment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "trailer-towing-equipment",
@@ -1126,7 +1009,7 @@
     {
       "id": "towing-couplers-jacks",
       "label": "Trailer Couplers & Jacks",
-      "parentId": "towing-equipment",
+      "parentId": "trailer-towing-equipment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "trailer-towing-equipment",
@@ -1136,24 +1019,9 @@
       "derivation": "type_1to1"
     },
     {
-      "id": "towing-equipment",
-      "label": "Towing Equipment",
-      "parentId": "trailer-towing-equipment",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "trailer-towing-equipment",
-      "legacyTypeIds": [
-        "trailer-hitches-balls",
-        "towing-couplers-jacks",
-        "trailer-lights-wiring",
-        "tie-down-straps-chains"
-      ],
-      "derivation": "group"
-    },
-    {
       "id": "trailer-hitches-balls",
       "label": "Trailer Hitches & Hitch Balls",
-      "parentId": "towing-equipment",
+      "parentId": "trailer-towing-equipment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "trailer-towing-equipment",
@@ -1165,7 +1033,7 @@
     {
       "id": "trailer-lights-wiring",
       "label": "Trailer Lights & Wiring",
-      "parentId": "towing-equipment",
+      "parentId": "trailer-towing-equipment",
       "classifiable": true,
       "facetProfileId": "profile-fencing-towing",
       "departmentId": "trailer-towing-equipment",
@@ -1192,7 +1060,7 @@
     {
       "id": "weed-control",
       "label": "Weed Control",
-      "parentId": "lawn-garden",
+      "parentId": "lawn-garden-landscaping",
       "classifiable": true,
       "facetProfileId": "profile-garden",
       "departmentId": "lawn-garden-landscaping",
@@ -1202,9 +1070,24 @@
       "derivation": "type_1to1"
     },
     {
+      "id": "wild-bird",
+      "label": "Wild Bird",
+      "parentId": "wild-bird-wildlife",
+      "classifiable": false,
+      "facetProfileId": null,
+      "departmentId": "wild-bird-wildlife",
+      "legacyTypeIds": [
+        "bird-food",
+        "bird-houses-baths",
+        "suet-cakes",
+        "wild-bird-feeders"
+      ],
+      "derivation": "family"
+    },
+    {
       "id": "wild-bird-feeders",
       "label": "Wild Bird Feeders",
-      "parentId": "wild-bird-supplies",
+      "parentId": "wild-bird",
       "classifiable": true,
       "facetProfileId": "profile-wild-bird",
       "departmentId": "wild-bird-wildlife",
@@ -1212,22 +1095,6 @@
         "wild-bird-feeders"
       ],
       "derivation": "type_1to1"
-    },
-    {
-      "id": "wild-bird-supplies",
-      "label": "Wild Bird Supplies",
-      "parentId": "wild-bird-wildlife",
-      "classifiable": false,
-      "facetProfileId": null,
-      "departmentId": "wild-bird-wildlife",
-      "legacyTypeIds": [
-        "bird-food",
-        "suet-cakes",
-        "wild-bird-feeders",
-        "bird-houses-baths",
-        "deer-wildlife-feed"
-      ],
-      "derivation": "group"
     },
     {
       "id": "wild-bird-wildlife",
@@ -1248,7 +1115,7 @@
     {
       "id": "work-boots",
       "label": "Work Boots & Barn Boots",
-      "parentId": "apparel-supplies",
+      "parentId": "apparel-workwear",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "apparel-workwear",
@@ -1260,7 +1127,7 @@
     {
       "id": "work-gloves",
       "label": "Work Gloves",
-      "parentId": "apparel-supplies",
+      "parentId": "apparel-workwear",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "apparel-workwear",
@@ -1272,7 +1139,7 @@
     {
       "id": "workwear-outerwear",
       "label": "Workwear Outerwear",
-      "parentId": "apparel-supplies",
+      "parentId": "apparel-workwear",
       "classifiable": true,
       "facetProfileId": "profile-accessories",
       "departmentId": "apparel-workwear",

@@ -55,7 +55,38 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "cat-litter-profile",
+        "cat-toys-profile",
+        "collars-leashes-profile",
+        "dog-crates-kennels-profile",
+        "dog-toys-profile",
+        "dog-waste-bags-profile",
+        "flea-tick-treatment-profile",
+        "grooming-profile",
+        "overalls-coveralls-profile",
+        "pet-beds-profile",
+        "work-boots-profile",
+        "work-gloves-profile",
+        "workwear-outerwear-profile"
+      ],
+      "canonicalNodeIds": [
+        "cat-litter",
+        "cat-toys",
+        "collars-leashes",
+        "dog-crates-kennels",
+        "dog-toys",
+        "dog-waste-bags",
+        "flea-tick-treatment",
+        "grooming",
+        "overalls-coveralls",
+        "pet-beds",
+        "work-boots",
+        "work-gloves",
+        "workwear-outerwear"
+      ],
+      "behaviorFingerprint": "bb4a2007ba2142c315ba4708"
     },
     {
       "id": "profile-fencing-towing",
@@ -97,7 +128,32 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "corral-panels-gates-profile",
+        "electric-fence-chargers-profile",
+        "electric-fence-insulators-profile",
+        "fence-wire-mesh-profile",
+        "fencing-tools-profile",
+        "t-posts-wooden-posts-profile",
+        "tie-down-straps-chains-profile",
+        "towing-couplers-jacks-profile",
+        "trailer-hitches-balls-profile",
+        "trailer-lights-wiring-profile"
+      ],
+      "canonicalNodeIds": [
+        "corral-panels-gates",
+        "electric-fence-chargers",
+        "electric-fence-insulators",
+        "fence-wire-mesh",
+        "fencing-tools",
+        "t-posts-wooden-posts",
+        "tie-down-straps-chains",
+        "towing-couplers-jacks",
+        "trailer-hitches-balls",
+        "trailer-lights-wiring"
+      ],
+      "behaviorFingerprint": "9005261e3a80a8437a0db4ca"
     },
     {
       "id": "profile-garden",
@@ -157,7 +213,30 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "garden-hoses-reels-profile",
+        "grass-seed-profile",
+        "hand-tools-profile",
+        "insect-control-profile",
+        "lawn-fertilizer-profile",
+        "plant-food-fertilizer-profile",
+        "potting-soil-profile",
+        "sprinklers-nozzles-profile",
+        "weed-control-profile"
+      ],
+      "canonicalNodeIds": [
+        "garden-hoses-reels",
+        "grass-seed",
+        "hand-tools",
+        "insect-control",
+        "lawn-fertilizer",
+        "plant-food-fertilizer",
+        "potting-soil",
+        "sprinklers-nozzles",
+        "weed-control"
+      ],
+      "behaviorFingerprint": "06b4fa6604933cef0642bd62"
     },
     {
       "id": "profile-heating",
@@ -190,7 +269,24 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "coop-barn-heat-lamps-profile",
+        "firewood-kindling-profile",
+        "garage-barn-heaters-profile",
+        "heating-pellets-wood-profile",
+        "propane-heaters-profile",
+        "stove-pipe-chimney-care-profile"
+      ],
+      "canonicalNodeIds": [
+        "coop-barn-heat-lamps",
+        "firewood-kindling",
+        "garage-barn-heaters",
+        "heating-pellets-wood",
+        "propane-heaters",
+        "stove-pipe-chimney-care"
+      ],
+      "behaviorFingerprint": "77a7da5749ad69ecc3e450da"
     },
     {
       "id": "profile-livestock-equipment",
@@ -241,7 +337,34 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "bee-supplies-profile",
+        "equine-grooming-hoof-profile",
+        "fly-control-equine-profile",
+        "fly-insect-control-livestock-profile",
+        "horse-blankets-tack-profile",
+        "horse-treats-supplements-profile",
+        "livestock-feeders-profile",
+        "livestock-health-dewormers-profile",
+        "poultry-coops-equipment-profile",
+        "stall-mats-bedding-profile",
+        "stock-tanks-waterers-profile"
+      ],
+      "canonicalNodeIds": [
+        "bee-supplies",
+        "equine-grooming-hoof",
+        "fly-control-equine",
+        "fly-insect-control-livestock",
+        "horse-blankets-tack",
+        "horse-treats-supplements",
+        "livestock-feeders",
+        "livestock-health-dewormers",
+        "poultry-coops-equipment",
+        "stall-mats-bedding",
+        "stock-tanks-waterers"
+      ],
+      "behaviorFingerprint": "644bff366883bcb4c11aca7f"
     },
     {
       "id": "profile-livestock-feed",
@@ -283,7 +406,24 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "cattle-feed-profile",
+        "goat-sheep-feed-profile",
+        "horse-feed-profile",
+        "pig-swine-feed-profile",
+        "poultry-feed-profile",
+        "small-animal-feed-bedding-profile"
+      ],
+      "canonicalNodeIds": [
+        "cattle-feed",
+        "goat-sheep-feed",
+        "horse-feed",
+        "pig-swine-feed",
+        "poultry-feed",
+        "small-animal-feed-bedding"
+      ],
+      "behaviorFingerprint": "1a714dcfc078f6320cacf983"
     },
     {
       "id": "profile-pet-food",
@@ -370,7 +510,26 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "cat-food-dry-profile",
+        "cat-food-wet-profile",
+        "cat-treats-profile",
+        "dog-food-dry-profile",
+        "dog-food-wet-profile",
+        "dog-treats-profile",
+        "supplements-profile"
+      ],
+      "canonicalNodeIds": [
+        "cat-food-dry",
+        "cat-food-wet",
+        "cat-treats",
+        "dog-food-dry",
+        "dog-food-wet",
+        "dog-treats",
+        "supplements"
+      ],
+      "behaviorFingerprint": "37e1d9a35bdbf630ca12cd48"
     },
     {
       "id": "profile-power-equipment",
@@ -403,7 +562,24 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "air-compressors-hoses-profile",
+        "chainsaws-log-splitters-profile",
+        "lawn-mowers-profile",
+        "power-tool-accessories-profile",
+        "pressure-washers-profile",
+        "string-trimmers-edgers-profile"
+      ],
+      "canonicalNodeIds": [
+        "air-compressors-hoses",
+        "chainsaws-log-splitters",
+        "lawn-mowers",
+        "power-tool-accessories",
+        "pressure-washers",
+        "string-trimmers-edgers"
+      ],
+      "behaviorFingerprint": "b3422050ef1b906c1d7a58b5"
     },
     {
       "id": "profile-wild-bird",
@@ -445,7 +621,22 @@
           "required": false,
           "valueAliases": []
         }
-      ]
+      ],
+      "sourceV3ProfileIds": [
+        "bird-food-profile",
+        "bird-houses-baths-profile",
+        "deer-wildlife-feed-profile",
+        "suet-cakes-profile",
+        "wild-bird-feeders-profile"
+      ],
+      "canonicalNodeIds": [
+        "bird-food",
+        "bird-houses-baths",
+        "deer-wildlife-feed",
+        "suet-cakes",
+        "wild-bird-feeders"
+      ],
+      "behaviorFingerprint": "5b7f894d311a6064a9dac343"
     }
   ]
 }
