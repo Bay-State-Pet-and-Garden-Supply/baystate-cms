@@ -15,11 +15,37 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/48
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { canonicalJsonStringify, hashCanonicalJson } from '../../shared/stable-id';
 
 /** Current supported artifact envelope schema version (semver). */
 export const SPECIALIST_ARTIFACT_SCHEMA_VERSION = '1.0.0' as const;
+
+/**
+ * Capture the build identity without embedding a guessed commit in an
+ * artifact. Deployments can provide a deterministic build value; local runs
+ * fall back to the checked-out HEAD using the same convention as PI runs.
+ */
+export function captureSpecialistCodeCommit(): string | null {
+  const configured = [
+    process.env.BAYSTATE_CMS_CODE_COMMIT,
+    process.env.GIT_COMMIT,
+    process.env.SOURCE_VERSION,
+    process.env.COMMIT_SHA,
+  ].find((value) => typeof value === 'string' && value.trim().length > 0)?.trim();
+  if (configured) return configured.slice(0, 64);
+  try {
+    const head = readFileSync(join(process.cwd(), '.git', 'HEAD'), 'utf8').trim();
+    if (head.startsWith('ref:')) {
+      return readFileSync(join(process.cwd(), '.git', head.slice(5).trim()), 'utf8').trim().slice(0, 64) || null;
+    }
+    return head.slice(0, 64) || null;
+  } catch {
+    return null;
+  }
+}
 
 export const SemverStringSchema = z
   .string()

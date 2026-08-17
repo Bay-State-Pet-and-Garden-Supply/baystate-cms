@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import { evidenceId, type PageExtractionContract, type PageExtractionResult } from '../tools/contract';
 import {
+  captureSpecialistCodeCommit,
   finalizeSpecialistArtifact,
   SpecialistArtifactSchemaRegistry,
   type SpecialistArtifactEnvelope,
@@ -112,8 +113,12 @@ export const DiscoveryIdentifierSchema = z.object({
   kind: z.enum(['gtin', 'sku']),
   value: z.string().trim().min(1).max(64),
   method: z.string().trim().min(1).max(128),
-  /** Evidence ids bind the identifier to the source extraction that observed it. */
-  evidenceIds: z.array(z.string().trim().min(1).max(256)).max(MAX_EVIDENCE_IDS),
+  /** Exact path in the page/artifact where this identifier was observed. */
+  sourcePath: z.string().trim().min(1).max(1024),
+  /** Artifact containing this identifier observation, never a candidate URL. */
+  sourceArtifactId: z.string().trim().min(1).max(256),
+  /** Evidence ids bind the identifier to its own source extraction. */
+  evidenceIds: z.array(z.string().trim().min(1).max(256)).min(1).max(MAX_EVIDENCE_IDS),
 }).strict();
 export type DiscoveryIdentifier = z.infer<typeof DiscoveryIdentifierSchema>;
 
@@ -227,6 +232,8 @@ export interface DiscoverySpecialistOptions {
   /** Hard cap on page verification/extraction calls. */
   maxVerificationRequests?: number;
   maxCandidates?: number;
+  /** Deterministic build identity for artifact provenance; env/git is the fallback. */
+  codeCommit?: string | null;
 }
 
 export interface DiscoveryRun {
@@ -255,9 +262,20 @@ function tokenOverlap(expected: string, actual: string): { score: number; abbrev
   const exact = left.filter((token) => rightSet.has(token));
   const prefix = left.filter((token) => token.length >= 3 && right.some((other) => other.startsWith(token) || token.startsWith(other)));
   const intersection = new Set([...exact, ...prefix]).size;
+  // Supplier abbreviations commonly use initials ("WS" for "Wild Salmon").
+  // Treat that as an alignment only when the short token maps to a contiguous
+  // run of extracted words; generic short-token overlap remains untrusted.
+  const abbreviated = left.some((token) => {
+    if (token.length < 2 || token.length > 4) return false;
+    for (let start = 0; start < right.length; start += 1) {
+      for (let length = 2; length <= Math.min(3, right.length - start); length += 1) {
+        if (right.slice(start, start + length).map((word) => word[0]).join('') === token) return true;
+      }
+    }
+    return false;
+  });
   const score = intersection / new Set([...left, ...right]).size;
-  const abbreviation = left.length <= 5 && left.length >= 2 && left.every((token) => token.length <= 4) && intersection >= Math.max(2, left.length - 1);
-  return { score: Math.min(1, score + (abbreviation ? 0.18 : 0)), abbreviated: abbreviation };
+  return { score: Math.min(1, score + (abbreviated ? 0.18 : 0)), abbreviated };
 }
 
 function extractSize(value: string): string | null {
@@ -326,6 +344,7 @@ export class DiscoverySpecialist {
       maxSearchRequests: Math.max(0, Math.min(4, options.maxSearchRequests ?? DEFAULT_MAX_SEARCH_REQUESTS)),
       maxVerificationRequests: Math.max(0, Math.min(50, options.maxVerificationRequests ?? DEFAULT_MAX_VERIFICATION_REQUESTS)),
       maxCandidates: Math.max(1, Math.min(MAX_SOURCES, options.maxCandidates ?? DEFAULT_MAX_CANDIDATES)),
+      codeCommit: options.codeCommit ?? null,
     };
   }
 
@@ -402,9 +421,27 @@ export class DiscoverySpecialist {
       const extractedSku = page?.sku ?? page?.fields.find((field) => field.field === 'sku')?.value ?? null;
       if (extractedSku && normalize(extractedSku) === normalize(input.productSeed.sku)) add('sku_match', 'extracted SKU equals ProductSeed SKU', 0.18);
       const extractedGtins = page?.gtins.map((gtin) => gtin.value.replace(/\D/gu, '')) ?? [];
+      const identifierEvidence = (entry: {
+        sourcePath?: string;
+        sourceArtifactId?: string | null;
+        evidenceIds?: string[];
+      }, fallbackArtifactId: string | null): Pick<DiscoveryIdentifier, 'sourcePath' | 'sourceArtifactId' | 'evidenceIds'> | null => {
+        const sourcePath = entry.sourcePath?.trim();
+        const sourceArtifactId = entry.sourceArtifactId?.trim() || fallbackArtifactId?.trim();
+        const ownEvidenceIds = entry.evidenceIds?.map((id) => id.trim()).filter(Boolean) ?? [];
+        if (!sourcePath || !sourceArtifactId || ownEvidenceIds.length === 0) return null;
+        return { sourcePath, sourceArtifactId, evidenceIds: [...new Set(ownEvidenceIds)].slice(0, MAX_EVIDENCE_IDS) };
+      };
       const identifiers: DiscoveryIdentifier[] = [
-        ...(page?.gtins ?? []).map((gtin) => ({ kind: 'gtin' as const, value: gtin.value.replace(/\D/gu, ''), method: gtin.method, evidenceIds })),
-        ...(extractedSku ? [{ kind: 'sku' as const, value: extractedSku, method: page?.fields.find((field) => field.field === 'sku')?.method ?? 'page_extraction', evidenceIds }] : []),
+        ...(page?.gtins ?? []).flatMap((gtin) => {
+          const provenance = identifierEvidence(gtin, page?.artifactRef ?? null);
+          return provenance ? [{ kind: 'gtin' as const, value: gtin.value.replace(/\D/gu, ''), method: gtin.method, ...provenance }] : [];
+        }),
+        ...(extractedSku ? (() => {
+          const skuField = page?.fields.find((field) => field.field === 'sku' && field.value === extractedSku);
+          const provenance = identifierEvidence(page?.skuEvidence ?? skuField ?? {}, page?.artifactRef ?? null);
+          return provenance ? [{ kind: 'sku' as const, value: extractedSku, method: page?.skuEvidence?.method ?? skuField?.method ?? 'page_extraction', ...provenance }] : [];
+        })() : []),
       ].slice(0, 20);
       if (input.discoveredGtin && extractedGtins.includes(input.discoveredGtin)) add('exact_gtin', 'discovered GTIN occurs in extracted page evidence', 0.42);
       if (page && extractedGtins.length > 1 && input.discoveredGtin && !extractedGtins.includes(input.discoveredGtin)) add('gtin_conflict', 'page exposes GTINs but not the requested GTIN', -0.35);
@@ -451,7 +488,17 @@ export class DiscoverySpecialist {
     const top = candidates[0];
     const distinctBrands = new Set(candidates.map((candidate) => normalize(candidate.extracted.brand ?? '')).filter(Boolean));
     const ambiguous = candidates.length > 1 && (Math.abs(top.score - candidates[1].score) <= 0.08 || distinctBrands.size > 1);
-    const disposition: DiscoveryDisposition = distinctBrands.size > 1 ? 'human_review' : ambiguous || top.pageKind === 'wrong_variant' || top.pageKind === 'parent_family_page' ? 'needs_targeted_evidence' : 'ranked';
+    // A ranked result must contain only verified, resolved page identities. A
+    // lead that could not be extracted (including budget-exhausted work) is
+    // still useful for targeted follow-up, but can never be presented as a
+    // resolved ranking.
+    const unresolvedEvidence = candidates.some((candidate) =>
+      candidate.pageKind === 'unresolved_lead' || candidate.extractionStatus !== 'verified');
+    const disposition: DiscoveryDisposition = distinctBrands.size > 1
+      ? 'human_review'
+      : ambiguous || unresolvedEvidence || top.pageKind === 'wrong_variant' || top.pageKind === 'parent_family_page'
+        ? 'needs_targeted_evidence'
+        : 'ranked';
     const budget: z.infer<typeof DiscoveryBudgetSchema> = {
       searchRequestsUsed,
       verificationRequestsUsed,
@@ -483,6 +530,7 @@ export class DiscoverySpecialist {
         specialist: DISCOVERY_SPECIALIST_NAME,
         specialistVersion: DISCOVERY_SPECIALIST_VERSION,
         policyConfigId: context.policy.configId,
+        codeCommit: this.options.codeCommit ?? captureSpecialistCodeCommit(),
         durationMs,
       },
     });

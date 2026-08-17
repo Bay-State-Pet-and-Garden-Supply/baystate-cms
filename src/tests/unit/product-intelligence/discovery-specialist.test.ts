@@ -58,17 +58,73 @@ describe('Discovery / Identity specialist (#49)', () => {
     expect(result.output.candidates[0].source.sourceRef).toBe('manufacturer:fixture');
     expect(result.output.candidates[0].signals.some((s) => s.kind === 'name_alignment')).toBe(true);
     expect(result.output.authority).toBe('none');
+    expect(result.artifact.provenance.codeCommit).toBeTruthy();
   });
 
   it('uses a supplier-only SKU as a ranking signal, never as a GTIN assertion', async () => {
-    const skuPage = page(candidate.url, { sku: seed.sku, productName: 'Chicken Broth 16 oz', fields: [{ field: 'sku', value: seed.sku, method: 'fixture' }] });
+    const skuPage = page(candidate.url, {
+      sku: seed.sku,
+      skuEvidence: {
+        value: seed.sku,
+        method: 'fixture',
+        sourcePath: 'json_ld.offers.sku',
+        sourceArtifactId: 'fixture-artifact-sku',
+        evidenceIds: ['fixture-evidence-sku'],
+      },
+      productName: 'Chicken Broth 16 oz',
+      fields: [{ field: 'sku', value: seed.sku, method: 'fixture', sourcePath: 'json_ld.offers.sku' }],
+    });
     const result = await specialist(new Map([[candidate.url, skuPage]])).discover({ productSeed: seed, sourceCandidates: [candidate] }, context);
     if (!('artifact' in result)) throw new Error('expected discovery artifact');
     expect(result.output.discoveredGtin).toBeNull();
     expect(result.output.candidates[0].signals.some((s) => s.kind === 'sku_match')).toBe(true);
     expect(result.output.candidates[0].extracted.gtins).toEqual([]);
     expect(result.output.candidates[0].extracted.identifiers[0]).toMatchObject({ kind: 'sku', value: seed.sku, method: 'fixture' });
-    expect(result.output.candidates[0].extracted.identifiers[0].evidenceIds.length).toBeGreaterThan(0);
+    expect(result.output.candidates[0].extracted.identifiers[0].evidenceIds).toEqual(['fixture-evidence-sku']);
+    expect(result.output.candidates[0].extracted.identifiers[0].sourcePath).toBe('json_ld.offers.sku');
+    expect(result.output.candidates[0].extracted.identifiers[0].sourceArtifactId).toBe('fixture-artifact-sku');
+  });
+
+  it('ranks a real supplier abbreviation and marks the alignment explicitly', async () => {
+    const abbreviatedSeed = { ...seed, name: 'Acme WS Salmon 5 oz' };
+    const abbreviated = source('https://acme.example/products/wild-salmon-5oz', 'manufacturer');
+    const unrelated = source('https://other.example/products/salmon-5oz', 'manufacturer');
+    const pages = new Map([
+      [abbreviated.url, page(abbreviated.url, { productName: 'Acme Wild Salmon 5 oz', brand: 'Acme', size: '5 oz' })],
+      [unrelated.url, page(unrelated.url, { productName: 'Other Salmon 5 oz', brand: 'Other', size: '5 oz' })],
+    ]);
+    const result = await specialist(pages).discover({ productSeed: abbreviatedSeed, sourceCandidates: [unrelated, abbreviated] }, context);
+    if (!('artifact' in result)) throw new Error('expected discovery artifact');
+    expect(result.output.candidates[0].source.url).toBe(abbreviated.url);
+    expect(result.output.candidates[0].signals.some((s) => s.kind === 'abbreviated_name_alignment')).toBe(true);
+  });
+
+  it('does not rank unresolved leads when extraction is unavailable or budget is exhausted', async () => {
+    const unavailable = await new DiscoverySpecialist({}, { codeCommit: 'test-build-49' }).discover({ productSeed: seed, sourceCandidates: [candidate] }, context);
+    if (!('artifact' in unavailable)) throw new Error('expected discovery artifact');
+    expect(unavailable.output.disposition).toBe('needs_targeted_evidence');
+    expect(unavailable.output.nextEvidence.length).toBeGreaterThan(0);
+    expect(unavailable.output.candidates[0].extractionStatus).toBe('unverified');
+    expect(unavailable.artifact.provenance.codeCommit).toBe('test-build-49');
+
+    const exhausted = await specialist(new Map([[candidate.url, page(candidate.url)]],), { maxVerificationRequests: 0 }).discover({ productSeed: seed, sourceCandidates: [candidate] }, context);
+    if (!('artifact' in exhausted)) throw new Error('expected discovery artifact');
+    expect(exhausted.output.disposition).not.toBe('ranked');
+    expect(exhausted.output.nextEvidence).toContain('additional_source');
+  });
+
+  it('retains identifier-specific path, artifact, method, and evidence provenance', async () => {
+    const identified = page(candidate.url, {
+      gtins: [{ value: '012345678905', method: 'json_ld', sourcePath: 'json_ld.offers.gtin13', sourceArtifactId: 'fixture-page-artifact', evidenceIds: ['fixture-gtin-evidence'] }],
+      sku: 'ACME-16',
+      skuEvidence: { value: 'ACME-16', method: 'selector', sourcePath: 'article[data-sku]', sourceArtifactId: 'fixture-page-artifact', evidenceIds: ['fixture-sku-evidence'] },
+    });
+    const result = await specialist(new Map([[candidate.url, identified]])).discover({ productSeed: seed, sourceCandidates: [candidate] }, context);
+    if (!('artifact' in result)) throw new Error('expected discovery artifact');
+    expect(result.output.candidates[0].extracted.identifiers).toEqual([
+      expect.objectContaining({ kind: 'gtin', method: 'json_ld', sourcePath: 'json_ld.offers.gtin13', sourceArtifactId: 'fixture-page-artifact', evidenceIds: ['fixture-gtin-evidence'] }),
+      expect.objectContaining({ kind: 'sku', method: 'selector', sourcePath: 'article[data-sku]', sourceArtifactId: 'fixture-page-artifact', evidenceIds: ['fixture-sku-evidence'] }),
+    ]);
   });
 
   it('distinguishes an exact PDP from a wrong-size page', async () => {

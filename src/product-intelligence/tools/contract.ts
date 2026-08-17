@@ -180,6 +180,28 @@ export interface ExtractedFieldEvidence {
   method: string;
   /** Where in the page the value came from (CSS path / meta name / JSON-LD type). */
   sourcePath?: string;
+  /** Artifact containing this field observation, when retained. */
+  sourceArtifactId?: string | null;
+  /** Field-specific durable evidence ids for this observation. */
+  evidenceIds?: string[];
+}
+
+/**
+ * Identifier evidence is deliberately separate from page-level evidence. A
+ * GTIN or SKU can be present on a page without being the identifier for the
+ * selected product, so consumers must retain the exact source path, artifact,
+ * and evidence ids for each observed value.
+ */
+export interface ExtractedIdentifierEvidence {
+  value: string;
+  /** Deterministic extraction method (e.g. 'json_ld', 'selectors'). */
+  method: string;
+  /** Exact source path for this identifier observation. */
+  sourcePath?: string;
+  /** Artifact containing this identifier observation. */
+  sourceArtifactId?: string | null;
+  /** Durable evidence ids for this identifier observation. */
+  evidenceIds?: string[];
 }
 
 export interface ExtractedImageCandidate {
@@ -199,9 +221,11 @@ export interface PageExtractionResult {
   /** Artifact reference (worker artifact id) when the page was archived. */
   artifactRef: string | null;
   fields: ExtractedFieldEvidence[];
-  /** GTINs found on the page, with their extraction method. */
-  gtins: Array<{ value: string; method: string }>;
+  /** GTINs found on the page, with identifier-specific provenance. */
+  gtins: ExtractedIdentifierEvidence[];
   sku: string | null;
+  /** Identifier-specific provenance for the extracted SKU. */
+  skuEvidence?: ExtractedIdentifierEvidence | null;
   brand: string | null;
   productName: string | null;
   variant: { name?: string; id?: string; sku?: string } | null;
