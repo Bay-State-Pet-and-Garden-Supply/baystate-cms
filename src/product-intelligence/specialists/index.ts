@@ -14,3 +14,4 @@ export * from './contracts';
 export * from './artifacts';
 export * from './registry';
 export * from './policies';
+export * from './discovery';
