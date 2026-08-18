@@ -17,3 +17,4 @@ export * from './policies';
 export * from './discovery';
 export * from './profile-engineer';
 export * from './resolver';
+export * from './curator';
