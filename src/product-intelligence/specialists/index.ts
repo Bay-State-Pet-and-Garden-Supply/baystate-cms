@@ -16,3 +16,4 @@ export * from './registry';
 export * from './policies';
 export * from './discovery';
 export * from './profile-engineer';
+export * from './resolver';
