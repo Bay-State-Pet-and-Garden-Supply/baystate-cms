@@ -1500,6 +1500,153 @@ export const DomainDiagnosticsResponseSchema = z.object({
 });
 export type DomainDiagnosticsResponse = z.infer<typeof DomainDiagnosticsResponseSchema>;
 
+// ─── Sitemap Health & Brand URL Index Schemas (Epic #61) ──────────────────────
+
+export const SitemapHealthStatusEnum = z.enum([
+  'healthy',
+  'stale',
+  'missing',
+  'error',
+  'blocked',
+  'unknown',
+]);
+export type SitemapHealthStatus = z.infer<typeof SitemapHealthStatusEnum>;
+
+export const DomainSitemapSummarySchema = z.object({
+  domain: z.string(),
+  status: SitemapHealthStatusEnum,
+  statusReason: z.string().nullable(),
+  needsAttention: z.boolean(),
+  attentionReasons: z.array(z.string()),
+  totalUrlsCount: z.number().int(),
+  productUrlsCount: z.number().int(),
+  activeUrlsCount: z.number().int(),
+  inactiveUrlsCount: z.number().int(),
+  sitemapSourceUrl: z.string().nullable(),
+  lastRefreshedAt: z.string().nullable(),
+  lastRefreshDurationMs: z.number().nullable(),
+  lastRefreshStatus: z.enum(['success', 'failed', 'blocked']).nullable(),
+  lastRefreshAddedCount: z.number().int(),
+  lastRefreshRemovedCount: z.number().int(),
+  localHitRate: z.number(),
+  totalLookups: z.number().int(),
+  serperCallsAvoided: z.number().int(),
+  brandAssociations: z.array(DomainDiagnosticsBrandAssociationSchema).optional().default(() => []),
+  productUrlPattern: z.string().nullable().optional(),
+});
+export type DomainSitemapSummary = z.infer<typeof DomainSitemapSummarySchema>;
+
+export const SitemapsOverviewResponseSchema = z.object({
+  domains: z.array(DomainSitemapSummarySchema),
+  totals: z.object({
+    totalDomains: z.number().int(),
+    healthyCount: z.number().int(),
+    staleCount: z.number().int(),
+    errorCount: z.number().int(),
+    missingCount: z.number().int(),
+    needsAttentionCount: z.number().int(),
+    totalIndexedUrls: z.number().int(),
+    totalProductUrls: z.number().int(),
+    overallLocalHitRate: z.number(),
+    totalSerperCallsAvoided: z.number().int(),
+  }),
+  generatedAt: z.string(),
+});
+export type SitemapsOverviewResponse = z.infer<typeof SitemapsOverviewResponseSchema>;
+
+export const SitemapRefreshHistoryItemSchema = z.object({
+  id: z.string(),
+  domain: z.string(),
+  startedAt: z.string(),
+  completedAt: z.string(),
+  status: z.enum(['success', 'failed', 'blocked']),
+  sourceUrl: z.string().nullable(),
+  totalUrlsObserved: z.number().int(),
+  productUrlsEligible: z.number().int(),
+  addedCount: z.number().int(),
+  updatedCount: z.number().int(),
+  inactivatedCount: z.number().int(),
+  durationMs: z.number().int(),
+  errorMessage: z.string().nullable(),
+  httpStatus: z.number().nullable(),
+});
+export type SitemapRefreshHistoryItem = z.infer<typeof SitemapRefreshHistoryItemSchema>;
+
+export const BrandUrlItemSchema = z.object({
+  id: z.string(),
+  domain: z.string(),
+  url: z.string(),
+  path: z.string(),
+  slug: z.string().nullable(),
+  pageType: z.enum(['product', 'category', 'article', 'other', 'unknown']),
+  sitemapSourceUrl: z.string().nullable(),
+  firstSeenAt: z.string(),
+  lastSeenAt: z.string(),
+  lastSitemapRefreshAt: z.string(),
+  active: z.number().int(),
+  lastmod: z.string().nullable(),
+  title: z.string().nullable(),
+  h1: z.string().nullable(),
+  upc: z.string().nullable(),
+  sku: z.string().nullable(),
+  mpn: z.string().nullable(),
+  brand: z.string().nullable(),
+  lastFetchedAt: z.string().nullable(),
+  extractionStatus: z.string().nullable(),
+});
+export type BrandUrlItem = z.infer<typeof BrandUrlItemSchema>;
+
+export const BrandUrlsListResponseSchema = z.object({
+  domain: z.string(),
+  urls: z.array(BrandUrlItemSchema),
+  total: z.number().int(),
+  limit: z.number().int(),
+  offset: z.number().int(),
+});
+export type BrandUrlsListResponse = z.infer<typeof BrandUrlsListResponseSchema>;
+
+export const SitemapDomainDetailResponseSchema = z.object({
+  summary: DomainSitemapSummarySchema,
+  history: z.array(SitemapRefreshHistoryItemSchema),
+  productUrlPattern: z.string().nullable(),
+});
+export type SitemapDomainDetailResponse = z.infer<typeof SitemapDomainDetailResponseSchema>;
+
+export const SitemapTestLookupRequestSchema = z.object({
+  upc: z.string().optional(),
+  name: z.string().optional(),
+  sku: z.string().optional(),
+  brandHint: z.string().optional(),
+  price: z.number().optional(),
+});
+export type SitemapTestLookupRequest = z.infer<typeof SitemapTestLookupRequestSchema>;
+
+export const SitemapTestLookupCandidateSchema = z.object({
+  url: z.string(),
+  confidence: z.number(),
+  sourceMethod: z.string(),
+  matchType: z.string(),
+  title: z.string().nullable().optional(),
+  upc: z.string().nullable().optional(),
+  sku: z.string().nullable().optional(),
+  signals: z.object({
+    upcMatched: z.boolean(),
+    skuMatched: z.boolean(),
+    tokenOverlapRatio: z.number(),
+    patternMatched: z.boolean(),
+    llmSelected: z.boolean(),
+    enrichedMetadataPresent: z.boolean(),
+  }),
+});
+export type SitemapTestLookupCandidate = z.infer<typeof SitemapTestLookupCandidateSchema>;
+
+export const SitemapTestLookupResponseSchema = z.object({
+  domain: z.string(),
+  candidates: z.array(SitemapTestLookupCandidateSchema),
+  testedAt: z.string(),
+});
+export type SitemapTestLookupResponse = z.infer<typeof SitemapTestLookupResponseSchema>;
+
 export const ProfileBlockedItemSchema = z.object({
   itemId: z.string(),
   upc: z.string(),

@@ -20,8 +20,9 @@ import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worke
 import { ViewHeader } from './common/ViewHeader';
 import { colors } from '../theme';
 import { DistributorConnectionsPanel } from './onboarding-settings/DistributorConnectionsPanel';
+import { SitemapHealthView } from './sitemap-health/SitemapHealthView';
 
-type OnboardingSettingsTab = 'general' | 'curation' | 'profiles' | 'distributors';
+type OnboardingSettingsTab = 'general' | 'curation' | 'profiles' | 'sitemaps' | 'distributors';
 
 interface OnboardingSettingsProps {
   onBack: () => void;
@@ -232,6 +233,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           { id: 'general', label: 'General' },
           { id: 'curation', label: 'Curation' },
           { id: 'profiles', label: 'Extractor Profiles' },
+          { id: 'sitemaps', label: 'Sitemaps & Brand URLs' },
           { id: 'distributors', label: 'Distributors' },
         ].map(tab => (
           <button
@@ -742,6 +744,18 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           </div>
         )}
       </div>
+      </div>
+
+      <div style={{ display: settingsTab === 'sitemaps' ? 'block' : 'none' }}>
+        <div style={{ marginBottom: 16 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 600, margin: '0 0 8px', color: '#111827' }}>
+            Sitemaps & Brand URL Index
+          </h2>
+          <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>
+            Persistent domain sitemap inventory, freshness monitoring, and local retrieval ladder for zero-cost discovery.
+          </p>
+        </div>
+        <SitemapHealthView />
       </div>
 
       <div style={{ display: settingsTab === 'distributors' ? 'block' : 'none' }}>

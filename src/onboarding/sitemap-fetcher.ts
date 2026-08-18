@@ -56,8 +56,21 @@
  */
 
 import { recordDomainStatus } from '../db/repositories/domain-status-repo';
+import {
+  reconcileSitemapUrls,
+  normalizeDomain,
+  type BrandUrlPageType,
+  type ReconcileResult,
+} from '../db/repositories/brand-url-index-repo';
+import { recordRefreshRun } from '../db/repositories/sitemap-telemetry-repo';
 
 // ── Public types ────────────────────────────────────────────────────────────
+
+export interface SitemapUrlEntry {
+  url: string;
+  lastmod?: string | null;
+  pageType?: BrandUrlPageType;
+}
 
 export interface SitemapFetchResult {
   urls: string[];
@@ -68,6 +81,10 @@ export interface SitemapFetchResult {
    * was found.
    */
   sourceUrl: string;
+  /** Detailed parsed URL entries with lastmod and inferred pageType */
+  entries?: SitemapUrlEntry[];
+  /** Reconciliation summary against brand_url_index if persisted */
+  reconcileResult?: ReconcileResult;
 }
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -112,31 +129,37 @@ const GZIP_MAGIC = [0x1f, 0x8b];
 
 // ── Main entry point ────────────────────────────────────────────────────────
 
-/**
- * Discover, fetch, and parse the sitemap for a brand domain.
- *
- * @param domain             The brand/retailer domain, with or without
- *                           a `www.` prefix and with or without a
- *                           scheme. Anything that `new URL(...)` can
- *                           resolve against `https://` is accepted.
- * @param productUrlPattern  Optional regex string. When provided and
- *                           valid, only URLs that match it are kept.
- *                           When omitted or invalid, the full set of
- *                           URLs returned by the sitemap is returned.
- * @returns A `{ urls, sourceUrl }` pair. `urls` is a flat, deduplicated
- *          array. `sourceUrl` is the URL of the first sitemap document
- *          that produced a result; empty when nothing was found.
- */
-
 /** Minimal structural fetch signature — lets callers inject the PI
  *  policy-gateway bound fetch (P0-1). */
 type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Infer page type from URL string and optional productUrlPattern.
+ */
+function inferPageType(url: string, pattern: RegExp | null): BrandUrlPageType {
+  if (pattern && pattern.test(url)) return 'product';
+  const lower = url.toLowerCase();
+  if (/\/(products?|items?|dp|p|goods|catalog)\//i.test(lower)) return 'product';
+  if (/\/(collections?|category|categories|department|dept)\//i.test(lower)) return 'category';
+  if (/\/(blogs?|news|articles?|pages?|about|contact|policies?)\//i.test(lower)) return 'article';
+  return 'product';
+}
+
+/**
+ * Discover, fetch, and parse the sitemap for a brand domain.
+ * Automatically reconciles observed URLs into `brand_url_index` and records refresh history.
+ */
 export async function fetchAndParseSitemap(
   domain: string,
   productUrlPattern?: string | null,
   fetchFn: NetworkFetch = fetch,
+  options?: { persistIndex?: boolean },
 ): Promise<SitemapFetchResult> {
   const origin = normalizeOrigin(domain);
+  const normDomain = normalizeDomain(domain);
+  const startTime = Date.now();
+  const startedAt = new Date(startTime).toISOString();
+
   if (!origin) {
     console.warn(`[SitemapFetcher] Cannot derive origin from "${domain}" — returning empty result.`);
     return { urls: [], sourceUrl: '' };
@@ -144,57 +167,134 @@ export async function fetchAndParseSitemap(
 
   console.log(`[SitemapFetcher] Discovering sitemap for ${origin}`);
 
-  // Compile the optional product URL pattern once. Invalid patterns
-  // disable filtering rather than aborting the whole fetch.
   const pattern = compilePattern(productUrlPattern);
+  const shouldPersist = options?.persistIndex !== false;
+
+  let matchedResult: { entries: SitemapUrlEntry[]; sourceUrl: string } | null = null;
+  let lastErrorStatus: number | null = null;
+  let lastErrorMessage: string | null = null;
 
   // ── Step 1: try standard sitemap paths ────────────────────────────────
   for (const path of STANDARD_SITEMAP_PATHS) {
     const url = origin + path;
     const result = await tryFetchSitemap(url, 0, fetchFn);
     if (result) {
-      const filtered = applyPattern(result.urls, pattern);
-      console.log(
-        `[SitemapFetcher] Sitemap found via standard path ${path} (${filtered.length} URL(s) after filter).`,
-      );
-      try { recordDomainStatus(stripWww(origin), 'ok'); } catch { /* non-critical */ }
-      return { urls: filtered, sourceUrl: result.sourceUrl };
+      matchedResult = result;
+      break;
     }
   }
 
-  console.log(
-    `[SitemapFetcher] All standard paths failed for ${origin}; falling back to /robots.txt.`,
-  );
-
   // ── Step 2: try robots.txt Sitemap: directives ────────────────────────
-  const robotsUrls = await parseRobotsSitemaps(origin + '/robots.txt', fetchFn);
-  for (const robotsUrl of robotsUrls) {
-    const result = await tryFetchSitemap(robotsUrl, 0, fetchFn);
-    if (result) {
-      const filtered = applyPattern(result.urls, pattern);
-      console.log(
-        `[SitemapFetcher] Sitemap found via robots.txt directive ${robotsUrl} (${filtered.length} URL(s) after filter).`,
-      );
-      try { recordDomainStatus(stripWww(origin), 'ok'); } catch { /* non-critical */ }
-      return { urls: filtered, sourceUrl: result.sourceUrl };
+  if (!matchedResult) {
+    console.log(
+      `[SitemapFetcher] All standard paths failed for ${origin}; falling back to /robots.txt.`,
+    );
+    const robotsUrls = await parseRobotsSitemaps(origin + '/robots.txt', fetchFn);
+    for (const robotsUrl of robotsUrls) {
+      const result = await tryFetchSitemap(robotsUrl, 0, fetchFn);
+      if (result) {
+        matchedResult = result;
+        break;
+      }
     }
   }
 
   // ── Step 3: try Shopify-specific paths ────────────────────────────────
-  for (const path of SHOPIFY_SITEMAP_PATHS) {
-    const url = origin + path;
-    const result = await tryFetchSitemap(url, 0, fetchFn);
-    if (result) {
-      const filtered = applyPattern(result.urls, pattern);
-      console.log(
-        `[SitemapFetcher] Sitemap found via Shopify path ${path} (${filtered.length} URL(s) after filter).`,
-      );
-      try { recordDomainStatus(stripWww(origin), 'ok'); } catch { /* non-critical */ }
-      return { urls: filtered, sourceUrl: result.sourceUrl };
+  if (!matchedResult) {
+    for (const path of SHOPIFY_SITEMAP_PATHS) {
+      const url = origin + path;
+      const result = await tryFetchSitemap(url, 0, fetchFn);
+      if (result) {
+        matchedResult = result;
+        break;
+      }
     }
   }
 
+  const completedAt = new Date().toISOString();
+  const durationMs = Date.now() - startTime;
+
+  if (matchedResult && matchedResult.entries.length > 0) {
+    // Enrich entries with page type
+    const enrichedEntries: SitemapUrlEntry[] = matchedResult.entries.map((e) => ({
+      ...e,
+      pageType: inferPageType(e.url, pattern),
+    }));
+
+    const urls = enrichedEntries.map((e) => e.url);
+    const filteredUrls = applyPattern(urls, pattern);
+    const productCount = enrichedEntries.filter((e) => e.pageType === 'product').length;
+
+    try { recordDomainStatus(stripWww(origin), 'ok'); } catch { /* non-critical */ }
+
+    let reconcileResult: ReconcileResult | undefined;
+    if (shouldPersist) {
+      try {
+        reconcileResult = reconcileSitemapUrls(
+          normDomain,
+          enrichedEntries,
+          matchedResult.sourceUrl,
+          completedAt,
+        );
+      } catch (err) {
+        console.error(`[SitemapFetcher] Failed to reconcile URLs for ${normDomain}:`, err);
+      }
+
+      try {
+        recordRefreshRun({
+          domain: normDomain,
+          started_at: startedAt,
+          completed_at: completedAt,
+          status: 'success',
+          source_url: matchedResult.sourceUrl,
+          total_urls_observed: enrichedEntries.length,
+          product_urls_eligible: productCount,
+          added_count: reconcileResult?.addedCount ?? 0,
+          updated_count: reconcileResult?.updatedCount ?? 0,
+          inactivated_count: reconcileResult?.inactivatedCount ?? 0,
+          duration_ms: durationMs,
+          error_message: null,
+          http_status: 200,
+        });
+      } catch (err) {
+        console.error(`[SitemapFetcher] Failed to record refresh history for ${normDomain}:`, err);
+      }
+    }
+
+    console.log(
+      `[SitemapFetcher] Sitemap resolved for ${origin} via ${matchedResult.sourceUrl} (${filteredUrls.length}/${urls.length} URLs eligible).`,
+    );
+
+    return {
+      urls: filteredUrls,
+      sourceUrl: matchedResult.sourceUrl,
+      entries: enrichedEntries,
+      reconcileResult,
+    };
+  }
+
+  // Failed to discover sitemap
   console.log(`[SitemapFetcher] No sitemap discovered for ${origin}.`);
+  if (shouldPersist) {
+    try {
+      recordRefreshRun({
+        domain: normDomain,
+        started_at: startedAt,
+        completed_at: completedAt,
+        status: 'failed',
+        source_url: null,
+        total_urls_observed: 0,
+        product_urls_eligible: 0,
+        added_count: 0,
+        updated_count: 0,
+        inactivated_count: 0,
+        duration_ms: durationMs,
+        error_message: lastErrorMessage || 'No sitemap discovered',
+        http_status: lastErrorStatus,
+      });
+    } catch { /* best effort */ }
+  }
+
   return { urls: [], sourceUrl: '' };
 }
 
@@ -218,7 +318,7 @@ async function tryFetchSitemap(
   url: string,
   depth: number,
   fetchFn: NetworkFetch = fetch,
-): Promise<SitemapFetchResult | null> {
+): Promise<{ urls: string[]; entries: SitemapUrlEntry[]; sourceUrl: string } | null> {
   const body = await fetchSitemapBody(url, fetchFn);
   if (body === null) return null;
 
@@ -233,25 +333,27 @@ async function tryFetchSitemap(
       console.warn(
         `[SitemapFetcher] Sitemap index at ${url} exceeds max depth ${MAX_INDEX_DEPTH}; skipping children.`,
       );
-      return { urls: [], sourceUrl: url };
+      return { urls: [], entries: [], sourceUrl: url };
     }
     const childUrls = extractAllLocs(body);
     console.log(
       `[SitemapFetcher] ${url} is a sitemap index with ${childUrls.length} child sitemap(s); recursing (depth ${depth + 1}).`,
     );
-    const collected: string[] = [];
+    const collected: SitemapUrlEntry[] = [];
     for (const child of childUrls) {
       const childResult = await tryFetchSitemap(child, depth + 1, fetchFn);
       if (childResult) {
-        for (const u of childResult.urls) collected.push(u);
+        for (const e of childResult.entries) collected.push(e);
       }
     }
-    return { urls: dedupe(collected), sourceUrl: url };
+    const deduped = dedupeEntries(collected);
+    return { urls: deduped.map((e) => e.url), entries: deduped, sourceUrl: url };
   }
 
   // detected === 'urlset'
-  const urls = extractAllLocs(body);
-  return { urls: dedupe(urls), sourceUrl: url };
+  const entries = extractAllUrlEntries(body);
+  const deduped = dedupeEntries(entries);
+  return { urls: deduped.map((e) => e.url), entries: deduped, sourceUrl: url };
 }
 
 // ── Network helpers ────────────────────────────────────────────────────────
@@ -427,6 +529,55 @@ function extractAllLocs(body: string): string[] {
     if (value) out.push(value);
   }
   return out;
+}
+
+/**
+ * Extract every `<url>` block payload with `<loc>` and optional `<lastmod>`.
+ */
+function extractAllUrlEntries(body: string): SitemapUrlEntry[] {
+  const entries: SitemapUrlEntry[] = [];
+  const urlBlockRegex = /<url[\s>]([\s\S]*?)<\/url>/gi;
+  let blockMatch: RegExpExecArray | null;
+
+  while ((blockMatch = urlBlockRegex.exec(body)) !== null) {
+    const block = blockMatch[1];
+    const locMatch = /<loc>([^<]+)<\/loc>/i.exec(block);
+    if (!locMatch) continue;
+    const url = locMatch[1].trim();
+    if (!url) continue;
+
+    const lastmodMatch = /<lastmod>([^<]+)<\/lastmod>/i.exec(block);
+    const lastmod = lastmodMatch ? lastmodMatch[1].trim() : null;
+
+    entries.push({ url, lastmod });
+  }
+
+  // Fallback if <url> blocks were not well-formed but <loc> tags exist
+  if (entries.length === 0) {
+    const locs = extractAllLocs(body);
+    for (const loc of locs) {
+      entries.push({ url: loc });
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Deduplicate URL entries while preserving first-encountered order and latest lastmod.
+ */
+function dedupeEntries(entries: SitemapUrlEntry[]): SitemapUrlEntry[] {
+  const seen = new Map<string, SitemapUrlEntry>();
+  for (const entry of entries) {
+    const key = entry.url.toLowerCase();
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, entry);
+    } else if (!existing.lastmod && entry.lastmod) {
+      existing.lastmod = entry.lastmod;
+    }
+  }
+  return Array.from(seen.values());
 }
 
 // ── Pattern + URL helpers ───────────────────────────────────────────────────

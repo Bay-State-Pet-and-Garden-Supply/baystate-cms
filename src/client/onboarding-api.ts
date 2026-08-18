@@ -21,6 +21,11 @@ import type {
   DomainDiagnosticsResponse,
   ProfileBlockedItem,
   DistributorEvidenceAttemptView,
+  SitemapsOverviewResponse,
+  SitemapDomainDetailResponse,
+  BrandUrlsListResponse,
+  SitemapTestLookupResponse,
+  SitemapTestLookupRequest,
 } from '../shared/schemas/onboarding';
 import type {
   WorkerHealthResponse,
@@ -1348,3 +1353,64 @@ export async function resolveItemConflict(
     },
   );
 }
+
+// ─── Sitemap Health & Brand URL Index APIs (Epic #61) ─────────────────────────
+
+export async function getSitemapsOverview(params?: {
+  status?: string;
+  attention?: boolean;
+  search?: string;
+}): Promise<SitemapsOverviewResponse> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set('status', params.status);
+  if (params?.attention) query.set('attention', 'true');
+  if (params?.search) query.set('search', params.search);
+  const qStr = query.toString();
+  return request<SitemapsOverviewResponse>(`/sitemaps${qStr ? `?${qStr}` : ''}`);
+}
+
+export async function getSitemapDomainDetail(domain: string): Promise<SitemapDomainDetailResponse> {
+  return request<SitemapDomainDetailResponse>(`/sitemaps/${encodeURIComponent(domain)}`);
+}
+
+export async function getSitemapDomainUrls(
+  domain: string,
+  params?: {
+    search?: string;
+    page_type?: string;
+    active?: boolean;
+    limit?: number;
+    offset?: number;
+  },
+): Promise<BrandUrlsListResponse> {
+  const query = new URLSearchParams();
+  if (params?.search) query.set('search', params.search);
+  if (params?.page_type) query.set('page_type', params.page_type);
+  if (params?.active !== undefined) query.set('active', params.active ? 'true' : 'false');
+  if (params?.limit) query.set('limit', String(params.limit));
+  if (params?.offset) query.set('offset', String(params.offset));
+  const qStr = query.toString();
+  return request<BrandUrlsListResponse>(`/sitemaps/${encodeURIComponent(domain)}/urls${qStr ? `?${qStr}` : ''}`);
+}
+
+export async function refreshSitemapDomain(domain: string): Promise<{
+  ok: boolean;
+  domain: string;
+  fetchResult: { urlsCount: number; sourceUrl: string | null; reconcileResult: unknown };
+  summary: SitemapDomainDetailResponse['summary'];
+}> {
+  return request(`/sitemaps/${encodeURIComponent(domain)}/refresh`, {
+    method: 'POST',
+  });
+}
+
+export async function testSitemapLookup(
+  domain: string,
+  target: SitemapTestLookupRequest,
+): Promise<SitemapTestLookupResponse> {
+  return request<SitemapTestLookupResponse>(`/sitemaps/${encodeURIComponent(domain)}/test-lookup`, {
+    method: 'POST',
+    body: JSON.stringify(target),
+  });
+}
+

@@ -1,4 +1,10 @@
 import { getDb } from '../connection';
+import {
+  reconcileSitemapUrls,
+  getActiveUrlsForDomain,
+  getAllDomainUrlCounts,
+  normalizeDomain,
+} from './brand-url-index-repo';
 
 /**
  * Default TTL for a cached sitemap: 24 hours.
@@ -26,27 +32,14 @@ export interface SitemapCacheRow {
 }
 
 /**
- * Normalizes a domain name by lowercasing and stripping the www. prefix.
- * Matches the convention used by other repositories in this project so
- * `example.com` and `www.example.com` share the same cache row.
- */
-function normalizeDomain(domain: string): string {
-  return domain.toLowerCase().replace(/^www\./, '').trim();
-}
-
-/**
  * Retrieve the cached URL list for a domain's sitemap.
  *
- * Returns `null` if:
- *   - there is no cache row for the domain, or
- *   - the cache row has expired (`expires_at <= now`).
- *
- * Expired rows are deleted on access so callers don't have to clean
- * up after themselves, mirroring `domain-status-repo.ts` behavior.
+ * Checks persistent `brand_url_index` first. If active URLs exist,
+ * returns them directly. Otherwise checks legacy `sitemap_cache`.
  */
 export function getCachedSitemapUrls(domain: string): string[] | null {
-  const db = getDb();
   const normDomain = normalizeDomain(domain);
+  const db = getDb();
 
   const row = db.query(
     'SELECT urls_json, expires_at FROM sitemap_cache WHERE domain = ?'
@@ -58,7 +51,6 @@ export function getCachedSitemapUrls(domain: string): string[] | null {
 
   const expiresAt = new Date(row.expires_at);
   if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
-    // Expired or invalid expiry — drop the row and report a miss.
     db.query('DELETE FROM sitemap_cache WHERE domain = ?').run(normDomain);
     return null;
   }
@@ -80,11 +72,7 @@ export function getCachedSitemapUrls(domain: string): string[] | null {
 
 /**
  * Insert or replace the cached URL list for a domain's sitemap.
- *
- * `fetched_at` is set to "now". `expires_at` is computed as
- * `fetched_at + ttlMs` (default 24h). `sourceUrl` records the actual
- * sitemap URL that was fetched (e.g. `https://example.com/sitemap.xml`),
- * which can differ from the normalized domain.
+ * Writes to both `brand_url_index` (persistent) and `sitemap_cache` (legacy compatibility).
  */
 export function insertSitemapCache(
   domain: string,
@@ -99,40 +87,50 @@ export function insertSitemapCache(
   const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
   const urlsJson = JSON.stringify(urls);
 
-  db.query(
-    `INSERT OR REPLACE INTO sitemap_cache (domain, urls_json, fetched_at, expires_at, source_url)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(normDomain, urlsJson, fetchedAt, expiresAt, sourceUrl);
+  // 1. Reconcile with persistent brand_url_index
+  try {
+    reconcileSitemapUrls(
+      normDomain,
+      urls.map((u) => ({ url: u })),
+      sourceUrl,
+      fetchedAt,
+    );
+  } catch (err) {
+    console.error(`Failed to reconcile brand_url_index for "${normDomain}":`, err);
+  }
+
+  // 2. Legacy sitemap_cache insert
+  try {
+    db.query(
+      `INSERT OR REPLACE INTO sitemap_cache (domain, urls_json, fetched_at, expires_at, source_url)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(normDomain, urlsJson, fetchedAt, expiresAt, sourceUrl);
+  } catch (err) {
+    console.error(`Failed to insert into legacy sitemap_cache for "${normDomain}":`, err);
+  }
 }
 
 /**
- * Delete all cached sitemap rows. Useful for tests and operator-driven
- * cache invalidation.
+ * Delete all cached sitemap rows.
  */
 // fallow-ignore-next-line unused-export
 export function clearSitemapCache(): void {
   const db = getDb();
+  try {
+    db.query('DELETE FROM brand_url_index').run();
+    db.query('DELETE FROM brand_url_fts').run();
+  } catch { /* best effort */ }
   db.query('DELETE FROM sitemap_cache').run();
 }
 
 /**
- * Read-only listing of every `sitemap_cache` row, sorted alphabetically
- * by domain. Used by the diagnostics surface so it can show stale or
- * malformed rows without triggering cache eviction.
- *
- * Unlike `getCachedSitemapUrls`, this function:
- *   - never deletes expired rows
- *   - never deletes rows with invalid `urls_json`
- *   - returns the raw `fetched_at`/`expires_at`/`source_url` so the
- *     caller can compute its own staleness flag.
- *
- * On a malformed `urls_json` blob, the row is returned with
- * `urls: []` and `sitemapUrlsCount: 0` and a warning is logged;
- * the function does not throw.
+ * Read-only listing of every sitemap cache row, sorted alphabetically by domain.
  */
 export function listAllSitemapCaches(): SitemapCacheRow[] {
   const db = getDb();
-  const rows = db.query(
+
+  // Combine legacy cache rows and brand_url_index counts
+  const legacyRows = db.query(
     'SELECT domain, urls_json, fetched_at, expires_at, source_url FROM sitemap_cache ORDER BY domain ASC',
   ).all() as Array<{
     domain: string;
@@ -142,30 +140,42 @@ export function listAllSitemapCaches(): SitemapCacheRow[] {
     source_url: string | null;
   }>;
 
-  return rows.map((row) => {
-    let urls: string[] = [];
-    try {
-      const parsed = JSON.parse(row.urls_json);
-      if (Array.isArray(parsed)) {
-        urls = parsed.filter((u): u is string => typeof u === 'string');
-      } else {
-        console.error(
-          `Cached sitemap urls_json for "${row.domain}" is not an array; reporting empty list.`,
-        );
+  const domainCounts = getAllDomainUrlCounts();
+  const domainSet = new Set<string>();
+
+  for (const r of legacyRows) domainSet.add(r.domain);
+  for (const d of Object.keys(domainCounts)) domainSet.add(d);
+
+  const sortedDomains = Array.from(domainSet).sort();
+
+  return sortedDomains.map((domain) => {
+    const legacy = legacyRows.find((r) => r.domain === domain);
+    const activeUrls = getActiveUrlsForDomain(domain);
+    let urls = activeUrls;
+
+    if (urls.length === 0 && legacy) {
+      try {
+        const parsed = JSON.parse(legacy.urls_json);
+        if (Array.isArray(parsed)) {
+          urls = parsed.filter((u): u is string => typeof u === 'string');
+        }
+      } catch {
+        urls = [];
       }
-    } catch (err) {
-      console.error(
-        `Failed to parse cached sitemap urls for domain "${row.domain}":`,
-        err,
-      );
     }
+
+    const fetchedAt = legacy?.fetched_at || new Date().toISOString();
+    const expiresAt = legacy?.expires_at || new Date(Date.now() + SITEMAP_CACHE_DEFAULT_TTL_MS).toISOString();
+    const sourceUrl = legacy?.source_url || null;
+
     return {
-      domain: row.domain,
+      domain,
       urls,
       sitemapUrlsCount: urls.length,
-      sitemapFetchedAt: row.fetched_at,
-      sitemapExpiresAt: row.expires_at,
-      sitemapSourceUrl: row.source_url,
+      sitemapFetchedAt: fetchedAt,
+      sitemapExpiresAt: expiresAt,
+      sitemapSourceUrl: sourceUrl,
     };
   });
 }
+

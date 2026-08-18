@@ -28,6 +28,7 @@ import {
 import { verifyTopCandidates, type VerificationResult } from './page-verifier';
 import { findBrandSites, insertBrandSiteIfAbsent } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
+import { enrichUrlMetadata } from '../db/repositories/brand-url-index-repo';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItemWithPipeline } from './product-curator';
 import { refreshCandidateCohorts } from './curation-cohort-service';
@@ -1657,6 +1658,17 @@ export class OnboardingWorker {
           imagesJson: null,
           rawStructuredDataJson: JSON.stringify(extractedData.fieldProvenance),
         });
+
+        if (item.sourceUrl) {
+          try {
+            enrichUrlMetadata(item.sourceUrl, {
+              title: extractedData.title,
+              brand: extractedData.brand,
+              upc: item.upc || null,
+              lastFetchedAt: new Date().toISOString(),
+            });
+          } catch { /* best effort */ }
+        }
 
         const db = getDb();
         db.query('UPDATE onboarding_items SET extraction_data_json = ?, updated_at = ? WHERE id = ?').run(

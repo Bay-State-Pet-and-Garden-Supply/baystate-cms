@@ -23,6 +23,7 @@ import catalogClassificationRoutes from './routes/catalog-classification-routes'
 import embeddingRoutes from './routes/embedding-routes';
 import benchmarkRoutes from './routes/benchmark-routes';
 import productIntelligenceRoutes from './routes/product-intelligence-routes';
+import { sitemapRoutes } from './routes/sitemap-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
@@ -88,6 +89,7 @@ app.route('/api', embeddingRoutes);
 // Mounted exactly once under /api; route internals use /benchmark/... paths.
 app.route('/api', benchmarkRoutes);
 app.route('/api', productIntelligenceRoutes);
+app.route('/api', sitemapRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

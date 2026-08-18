@@ -10,6 +10,7 @@ import { type ExtractionData, ExtractionDataSchema } from '../shared/schemas/onb
 import { findProfileByDomain, type ExtractorProfile } from '../db/repositories/extractor-profile-repo';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { recordDomainStatus } from '../db/repositories/domain-status-repo';
+import { enrichUrlMetadata } from '../db/repositories/brand-url-index-repo';
 import { validateExtraction, type ValidationResult } from './extraction-validator';
 import { runProfileExtraction } from './profile-runner-client';
 import {
@@ -18,7 +19,6 @@ import {
   cleanAndDeduplicateImages,
   collectImageSourcesFromElement,
 } from './image-utils';
-
 
 interface RawExtraction {
   custom: Record<string, string | string[]> | null;
@@ -29,6 +29,51 @@ interface RawExtraction {
   images: string[];
   networkProducts: Record<string, unknown>[];
   productJSON?: Record<string, any> | null;
+}
+
+/**
+ * Extract product identifiers (UPC, SKU, MPN, H1) from raw extraction layers
+ * and enrich brand_url_index.
+ */
+function enrichBrandUrlFromRaw(url: string, raw: RawExtraction, title?: string | null, brand?: string | null): void {
+  try {
+    let upc: string | null = null;
+    let sku: string | null = null;
+    let mpn: string | null = null;
+
+    if (raw.jsonLd) {
+      const gtin = raw.jsonLd.gtin13 || raw.jsonLd.gtin12 || raw.jsonLd.gtin8 || raw.jsonLd.gtin || raw.jsonLd.productID;
+      if (typeof gtin === 'string') upc = gtin.replace(/\D/g, '').trim();
+      if (typeof raw.jsonLd.sku === 'string') sku = raw.jsonLd.sku.trim();
+      if (typeof raw.jsonLd.mpn === 'string') mpn = raw.jsonLd.mpn.trim();
+    }
+
+    if (!upc && raw.microdata) {
+      const mGtin = raw.microdata['gtin13'] || raw.microdata['gtin12'] || raw.microdata['gtin'] || raw.microdata['productID'];
+      if (mGtin) upc = mGtin.replace(/\D/g, '').trim();
+      if (!sku && raw.microdata['sku']) sku = raw.microdata['sku'].trim();
+    }
+
+    if (!sku && raw.metaTags) {
+      const metaSku = raw.metaTags['product:retailer_item_id'] || raw.metaTags['product:sku'];
+      if (metaSku) sku = metaSku.trim();
+    }
+
+    const h1 = typeof raw.htmlHeuristics?.['h1'] === 'string' ? raw.htmlHeuristics['h1'] : null;
+
+    enrichUrlMetadata(url, {
+      title: title || null,
+      brand: brand || null,
+      upc: upc || null,
+      sku: sku || null,
+      mpn: mpn || null,
+      h1: h1 || null,
+      jsonLdIdentifiers: raw.jsonLd,
+      lastFetchedAt: new Date().toISOString(),
+    });
+  } catch {
+    // Non-critical background enrichment
+  }
 }
 
 /** Standard browser User-Agent used for HTTP and Playwright fetches. */
@@ -145,8 +190,11 @@ export async function extractViaHttpDetailed(
     productJSON,
   };
 
+  const merged = mergeExtractionLayers(raw, url, expected);
+  enrichBrandUrlFromRaw(url, raw, merged.title, merged.brand);
+
   return {
-    data: mergeExtractionLayers(raw, url, expected),
+    data: merged,
     html,
     raw,
     customHadAnyValue: customSelectorsHadAnyValue(custom),

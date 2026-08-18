@@ -4307,6 +4307,172 @@ export function runMigrations(): void {
     db.query("UPDATE app_meta SET value = '2' WHERE key = 'profile_engineer_workflow_schema_version'").run();
   }
 
+  // ── Brand URL Index & Sitemap Health (epic #61) ──────────────────────────
+  const brandUrlIndexVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('brand_url_index_schema_version') as { value: string } | undefined;
+
+  if (!brandUrlIndexVersion) {
+    console.log('[Migrations] Running brand URL index & sitemap health schema migration...');
+    db.transaction(() => {
+      // 1. Persistent brand URL inventory
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS brand_url_index (
+          id TEXT PRIMARY KEY,
+          domain TEXT NOT NULL,
+          url TEXT NOT NULL,
+          canonical_url TEXT,
+          path TEXT NOT NULL,
+          slug TEXT,
+          page_type TEXT NOT NULL DEFAULT 'product',
+          sitemap_source_url TEXT,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          last_sitemap_refresh_at TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          lastmod TEXT,
+          title TEXT,
+          h1 TEXT,
+          upc TEXT,
+          sku TEXT,
+          mpn TEXT,
+          brand TEXT,
+          variant_tokens_json TEXT,
+          json_ld_identifiers_json TEXT,
+          last_fetched_at TEXT,
+          extraction_status TEXT
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_brand_url_index_domain_url
+          ON brand_url_index(domain, url);
+        CREATE INDEX IF NOT EXISTS idx_brand_url_index_domain_active
+          ON brand_url_index(domain, active);
+        CREATE INDEX IF NOT EXISTS idx_brand_url_index_upc
+          ON brand_url_index(upc);
+        CREATE INDEX IF NOT EXISTS idx_brand_url_index_sku
+          ON brand_url_index(sku);
+        CREATE INDEX IF NOT EXISTS idx_brand_url_index_domain_page_type
+          ON brand_url_index(domain, page_type);
+      `);
+
+      // 2. FTS5 table for fast lexical / token matching
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS brand_url_fts USING fts5(
+          domain UNINDEXED,
+          url,
+          path,
+          slug,
+          title,
+          h1,
+          brand,
+          tokenize='unicode61 remove_diacritics 2'
+        );
+      `);
+
+      // 3. Sitemap refresh history
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sitemap_refresh_history (
+          id TEXT PRIMARY KEY,
+          domain TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          completed_at TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('success', 'failed', 'blocked')),
+          source_url TEXT,
+          total_urls_observed INTEGER NOT NULL DEFAULT 0,
+          product_urls_eligible INTEGER NOT NULL DEFAULT 0,
+          added_count INTEGER NOT NULL DEFAULT 0,
+          updated_count INTEGER NOT NULL DEFAULT 0,
+          inactivated_count INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          error_message TEXT,
+          http_status INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sitemap_refresh_history_domain_completed
+          ON sitemap_refresh_history(domain, completed_at DESC);
+      `);
+
+      // 4. Sitemap discovery events
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sitemap_discovery_events (
+          id TEXT PRIMARY KEY,
+          item_id TEXT,
+          upc TEXT,
+          domain TEXT,
+          created_at TEXT NOT NULL,
+          satisfied_locally INTEGER NOT NULL,
+          paid_search_fallback INTEGER NOT NULL,
+          candidate_url TEXT,
+          confidence REAL,
+          source_method TEXT,
+          serper_calls_avoided INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sitemap_discovery_events_domain_created
+          ON sitemap_discovery_events(domain, created_at);
+      `);
+
+      // Backfill from sitemap_cache if existing rows exist
+      try {
+        const existingCacheRows = db.query(
+          'SELECT domain, urls_json, fetched_at, source_url FROM sitemap_cache'
+        ).all() as Array<{ domain: string; urls_json: string; fetched_at: string; source_url: string | null }>;
+
+        const insertStmt = db.prepare(`
+          INSERT OR IGNORE INTO brand_url_index (
+            id, domain, url, path, slug, page_type, sitemap_source_url,
+            first_seen_at, last_seen_at, last_sitemap_refresh_at, active
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        `);
+
+        const ftsInsert = db.prepare(`
+          INSERT INTO brand_url_fts (rowid, domain, url, path, slug, title, h1, brand)
+          SELECT rowid, domain, url, path, slug, title, h1, brand FROM brand_url_index WHERE url = ?
+        `);
+
+        for (const row of existingCacheRows) {
+          try {
+            const urls = JSON.parse(row.urls_json);
+            if (Array.isArray(urls)) {
+              for (const u of urls) {
+                if (typeof u !== 'string' || !u.startsWith('http')) continue;
+                try {
+                  const parsedUrl = new URL(u);
+                  const path = parsedUrl.pathname;
+                  const segments = path.split('/').filter(Boolean);
+                  const slug = segments[segments.length - 1] || '';
+                  const id = `bui_${crypto.randomUUID()}`;
+                  insertStmt.run(
+                    id,
+                    row.domain.toLowerCase().replace(/^www\./, ''),
+                    u,
+                    path,
+                    slug,
+                    'product',
+                    row.source_url,
+                    row.fetched_at || new Date().toISOString(),
+                    row.fetched_at || new Date().toISOString(),
+                    row.fetched_at || new Date().toISOString(),
+                  );
+                  ftsInsert.run(u);
+                } catch {
+                  // ignore malformed URL
+                }
+              }
+            }
+          } catch {
+            // ignore malformed cache JSON
+          }
+        }
+      } catch {
+        // sitemap_cache table may not exist or be empty
+      }
+
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('brand_url_index_schema_version', '1');");
+    })();
+    console.log('[Migrations] Brand URL index & sitemap health schema migration complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

@@ -45,6 +45,9 @@ import { scoreBrandDomainMatch } from './discovery/official-domain';
 import { resolveVariantsForCandidates } from './variant-url-resolver';
 import { isOfficialDomainMatch } from './domain-utils';
 import { inferBrandFromSearchResults, type BrandInferenceResult } from './brand-inferrer';
+import { findLocalBrandCandidates } from './local-brand-url-finder';
+import { getActiveUrlsForDomain } from '../db/repositories/brand-url-index-repo';
+import { recordDiscoveryEvent } from '../db/repositories/sitemap-telemetry-repo';
 import type { OnboardingSource } from '../shared/schemas/onboarding';
 
 interface SerperSearchResult {
@@ -99,11 +102,6 @@ export async function discoverSources(
   inferredBrand?: BrandInferenceResult | null;
   noDomainMapped?: boolean;
 }> {
-  const apiKeyRow = getApiKey('serper');
-  if (!apiKeyRow) {
-    throw new Error('Serper.dev API key not configured. Go to Onboarding Settings to add it.');
-  }
-
   const candidates: InsertSourceData[] = [];
   const seenUrls = new Set<string>();
 
@@ -120,9 +118,107 @@ export async function discoverSources(
     }
   }
 
-  // Kick off sitemap fetch in parallel if we have a domain initially.
-  // Otherwise, we'll kick it off dynamically after brand/domain inference.
   let primaryDomain: string | null = activeBrandDomains[0] ?? null;
+
+  // ── Step 0: Priority Local Brand URL Index Lookup ─────────────────────────
+  // When a brand domain is mapped, attempt cheap local discovery first.
+  // If a high-confidence match (confidence >= 0.85) is found and verified,
+  // we bypass external Serper paid search completely.
+  if (primaryDomain && activeBrandDomains.length > 0) {
+    const activeUrls = getActiveUrlsForDomain(primaryDomain);
+    if (activeUrls.length === 0) {
+      try {
+        await fetchSitemapForDiscovery(primaryDomain, options?.networkFetch);
+      } catch { /* best effort */ }
+    }
+
+    try {
+      const localMatches = await findLocalBrandCandidates(
+        primaryDomain,
+        {
+          upc,
+          name,
+          brandHint: activeBrandHint,
+          price: options?.price,
+        },
+        { modelPolicy: options?.modelPolicy }
+      );
+
+      const topLocal = localMatches[0];
+      if (topLocal && topLocal.confidence >= 0.85) {
+        console.log(`[SourceDiscovery] ✓ High-confidence local sitemap match for UPC ${upc} on ${primaryDomain} (${topLocal.url}, confidence: ${topLocal.confidence.toFixed(2)}). Validating URL...`);
+
+        let isValid = true;
+        const fetchFn = options?.networkFetch || fetch;
+        try {
+          const checkRes = await fetchFn(topLocal.url, {
+            method: 'HEAD',
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+            signal: AbortSignal.timeout(6000),
+          });
+          if (!checkRes.ok && checkRes.status !== 405) {
+            const getRes = await fetchFn(topLocal.url, {
+              method: 'GET',
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+              signal: AbortSignal.timeout(6000),
+            });
+            if (!getRes.ok) isValid = false;
+          }
+        } catch {
+          if (topLocal.matchType !== 'upc_exact') {
+            isValid = false;
+          }
+        }
+
+        if (isValid) {
+          console.log(`[SourceDiscovery] ✓ Local match validated for ${topLocal.url}. Bypassing Serper paid search.`);
+
+          const localCandidates: InsertSourceData[] = localMatches.map((m) => {
+            const rankSignals = buildRankSignals(activeBrandHint, primaryDomain!);
+            return {
+              url: m.url,
+              title: m.title || null,
+              snippet: sitemapSnippetFor(m.matchType),
+              domain: primaryDomain!,
+              confidence: m.confidence,
+              sourceMethod: m.sourceMethod as InsertSourceData['sourceMethod'],
+              ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
+            };
+          });
+
+          try {
+            recordDiscoveryEvent({
+              upc,
+              domain: primaryDomain,
+              satisfied_locally: 1,
+              paid_search_fallback: 0,
+              candidate_url: topLocal.url,
+              confidence: topLocal.confidence,
+              source_method: topLocal.sourceMethod,
+              serper_calls_avoided: 2,
+            });
+          } catch { /* best effort */ }
+
+          return {
+            candidates: localCandidates,
+            consolidatedName: topLocal.title || name,
+            inferredBrand: null,
+          };
+        } else {
+          console.log(`[SourceDiscovery] Local candidate ${topLocal.url} failed validation. Falling back to paid search.`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[SourceDiscovery] Local candidate search failed for ${primaryDomain}:`, err);
+    }
+  }
+
+  // ── Fallback to External Serper Paid Search ───────────────────────────────
+  const apiKeyRow = getApiKey('serper');
+  if (!apiKeyRow) {
+    throw new Error('Serper.dev API key not configured. Go to Onboarding Settings to add it.');
+  }
+
   let sitemapFetchPromise: Promise<SitemapFetched | null> = primaryDomain
     ? fetchSitemapForDiscovery(primaryDomain, options?.networkFetch)
     : Promise.resolve(null);
@@ -430,6 +526,19 @@ export async function discoverSources(
   } else {
     console.log(`[SourceDiscovery] No matching source URLs found for UPC ${upc}. Search name used: "${consolidatedName || name}"`);
   }
+
+  try {
+    recordDiscoveryEvent({
+      upc,
+      domain: primaryDomain,
+      satisfied_locally: 0,
+      paid_search_fallback: 1,
+      candidate_url: topCandidates[0]?.url || null,
+      confidence: topCandidates[0]?.confidence || null,
+      source_method: topCandidates[0]?.sourceMethod || 'serper_upc',
+      serper_calls_avoided: hasHighConfidenceSitemapMatch ? 1 : 0,
+    });
+  } catch { /* best effort */ }
 
   return {
     candidates: topCandidates,
@@ -821,13 +930,16 @@ function convertSitemapMatchToCandidate(
   };
 }
 
-function sitemapSnippetFor(matchType: SitemapMatchResult['matchType']): string {
+function sitemapSnippetFor(matchType: string): string {
   switch (matchType) {
     case 'upc_exact':
       return 'Sitemap match: UPC exact';
+    case 'sku_exact':
+      return 'Sitemap match: SKU exact';
     case 'llm_selected':
       return 'Sitemap match: LLM-selected by product name';
     case 'token_overlap':
+    default:
       return 'Sitemap match: name-token overlap';
   }
 }

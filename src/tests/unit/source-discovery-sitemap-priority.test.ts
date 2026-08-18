@@ -1,0 +1,110 @@
+import { unlinkSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
+import { runMigrations } from '../../db/migrations';
+import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
+import { reconcileSitemapUrls, enrichUrlMetadata } from '../../db/repositories/brand-url-index-repo';
+import { getDiscoveryEconomics } from '../../db/repositories/sitemap-telemetry-repo';
+import { discoverSources } from '../../onboarding/source-discovery';
+
+describe('Source Discovery - Local Brand URL Index Priority', () => {
+  const testDbPath = '/tmp/baystate-cms-source-discovery-priority-test.db';
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
+
+  beforeEach(() => {
+    const db = getDb();
+    db.query('DELETE FROM brand_sites').run();
+    db.query('DELETE FROM brand_url_index').run();
+    db.query('DELETE FROM brand_url_fts').run();
+    db.query('DELETE FROM sitemap_refresh_history').run();
+    db.query('DELETE FROM sitemap_discovery_events').run();
+  });
+
+  it('should satisfy discovery locally and bypass Serper when high-confidence UPC match is in brand_url_index', async () => {
+    // 1. Map brand domain
+    upsertBrandSite('Purina', 'purina.com');
+
+    // 2. Populate brand_url_index with sitemap URLs
+    reconcileSitemapUrls(
+      'purina.com',
+      [
+        { url: 'https://purina.com/pro-plan/puppy-chicken-rice-038100130839' },
+        { url: 'https://purina.com/pro-plan/adult-salmon' },
+      ],
+      'https://purina.com/sitemap.xml',
+    );
+
+    // Mock network fetch for validation HEAD/GET check
+    const mockFetch = async (input: RequestInfo | URL | string) => {
+      const urlStr = String(input);
+      if (urlStr.includes('038100130839')) {
+        return new Response('<html><head><title>Puppy Chicken & Rice</title></head></html>', { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+
+    // 3. Execute discoverSources without Serper API key configured
+    const result = await discoverSources(
+      '038100130839',
+      'Purina Pro Plan Puppy Chicken & Rice',
+      'Purina',
+      { networkFetch: mockFetch as any },
+    );
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0].url).toBe('https://purina.com/pro-plan/puppy-chicken-rice-038100130839');
+    expect(result.candidates[0].confidence).toBeGreaterThanOrEqual(0.95);
+    expect(result.candidates[0].sourceMethod).toBe('local_upc');
+
+    // 4. Verify discovery economics recorded 2 Serper calls avoided
+    const economics = getDiscoveryEconomics('purina.com');
+    expect(economics.totalLookups).toBe(1);
+    expect(economics.localHitCount).toBe(1);
+    expect(economics.paidSearchFallbackCount).toBe(0);
+    expect(economics.serperCallsAvoided).toBe(2);
+  });
+
+  it('should satisfy discovery locally using enriched metadata without calling Serper', async () => {
+    upsertBrandSite('KONG', 'kongcompany.com');
+
+    reconcileSitemapUrls(
+      'kongcompany.com',
+      [{ url: 'https://www.kongcompany.com/products/classic-red-medium' }],
+      'https://www.kongcompany.com/sitemap.xml',
+    );
+
+    enrichUrlMetadata('https://www.kongcompany.com/products/classic-red-medium', {
+      title: 'KONG Classic Dog Toy Medium',
+      upc: '035585111116',
+      sku: 'T1',
+    });
+
+    const mockFetch = async () => new Response('OK', { status: 200 });
+
+    const result = await discoverSources(
+      '035585111116',
+      'KONG Classic Dog Toy',
+      'KONG',
+      { networkFetch: mockFetch as any },
+    );
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0].url).toBe('https://www.kongcompany.com/products/classic-red-medium');
+    expect(result.candidates[0].confidence).toBeGreaterThanOrEqual(0.95);
+    expect(result.candidates[0].sourceMethod).toBe('local_upc');
+
+    const economics = getDiscoveryEconomics('kongcompany.com');
+    expect(economics.localHitCount).toBe(1);
+    expect(economics.serperCallsAvoided).toBe(2);
+  });
+});
