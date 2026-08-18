@@ -330,20 +330,25 @@ export function verifyCuratedDraft(
       }
     }
 
-    // Name tokens alignment
+    // Name tokens alignment: require at least 50% substantive token match
     if (titleFact?.status === 'resolved' && titleFact.value) {
-      const nameTokens = normalizeVal(titleFact.value)
+      const cleanTitleFact = normalizeVal(titleFact.value);
+      const nameTokens = cleanTitleFact
         .split(/[\s,&/\\-]+/)
-        .filter((w) => w.length >= 4 && !['with', 'from', 'organic', 'food', 'product'].includes(w));
-      const hasNameMatch = nameTokens.some((tok) => normalizeVal(curatedDraft.catalogTitle).includes(tok));
-      if (nameTokens.length > 0 && !hasNameMatch) {
-        checks.push({
-          checkName: 'catalog_title_name_alignment',
-          passed: false,
-          severity: 'blocking',
-          field: 'catalogTitle',
-          details: `Catalog title '${curatedDraft.catalogTitle}' does not align with resolved title '${titleFact.value}'`,
-        });
+        .filter((w) => w.length >= 3 && !['with', 'from', 'the', 'and', 'for', 'organic', 'product'].includes(w));
+      
+      if (nameTokens.length > 0) {
+        const matchedCount = nameTokens.filter((tok) => normalizeVal(curatedDraft.catalogTitle).includes(tok)).length;
+        const matchRatio = matchedCount / nameTokens.length;
+        if (matchRatio < 0.5) {
+          checks.push({
+            checkName: 'catalog_title_name_alignment',
+            passed: false,
+            severity: 'blocking',
+            field: 'catalogTitle',
+            details: `Catalog title '${curatedDraft.catalogTitle}' matches only ${Math.round(matchRatio * 100)}% of substantive name tokens from resolved title '${titleFact.value}'`,
+          });
+        }
       }
     }
   }
@@ -534,7 +539,7 @@ export function verifyCuratedDraft(
     for (const line of lines) {
       const bulletMatch = /^\s*(?:-|\*)\s*([^:]+):\s*(.+)$/.exec(line);
       if (!bulletMatch) {
-        // Free prose line: check for ungrounded quantity claims
+        // Free prose line: check for ungrounded claims (unsupported claims, medical claims, ungrounded quantities)
         const freeQtyMatch = /\b\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|lb|lbs|kg|g|ml|l)\b/i.exec(line);
         if (freeQtyMatch) {
           const qty = freeQtyMatch[0];
@@ -547,6 +552,25 @@ export function verifyCuratedDraft(
               severity: 'blocking',
               field: 'description',
               details: `Description free prose contains ungrounded quantity '${qty}'`,
+            });
+          }
+        }
+
+        const ungroundedPatterns = [
+          { pattern: /\b(?:clinically\s+proven|veterinarian\s+recommended|vet\s+approved)\b/i, label: 'health/clinical claim' },
+          { pattern: /\b(?:made\s+in\s+[a-z\s]+|product\s+of\s+[a-z\s]+)\b/i, label: 'origin claim' },
+          { pattern: /\b(?:grain-free|gluten-free|hypoallergenic)\b/i, label: 'dietary claim' },
+        ];
+
+        for (const { pattern, label } of ungroundedPatterns) {
+          const match = pattern.exec(line);
+          if (match) {
+            checks.push({
+              checkName: 'unsupported_description_claim',
+              passed: false,
+              severity: 'blocking',
+              field: 'description',
+              details: `Description contains ungrounded ${label}: '${match[0]}'`,
             });
           }
         }

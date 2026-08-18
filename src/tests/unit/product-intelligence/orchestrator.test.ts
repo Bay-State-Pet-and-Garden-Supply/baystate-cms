@@ -245,14 +245,19 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.verifierOutput?.verdict).toBe('pass');
     expect(result.curatorOutput?.catalogTitle).toContain('ACME');
     expect(result.events.length).toBeGreaterThanOrEqual(5);
+    expect(result.workflowState).toBeDefined();
+    expect(result.workflowState.status).toBe('completed');
+    expect(result.workflowState.currentPhase).toBe('completed');
   });
 
   it('routes to Profile Engineer and holds for manual review when extraction reports profile_failed', async () => {
     let profileCalls = 0;
+    let capturedInput: any = null;
 
     const mockProfileEngineer = {
-      execute: async (): Promise<SpecialistResult> => {
+      execute: async (input: any): Promise<SpecialistResult> => {
         profileCalls += 1;
+        capturedInput = input;
         return {
           specialist: 'profile_engineer',
           outcome: 'succeeded',
@@ -269,14 +274,14 @@ describe('Specialist Orchestrator (#56)', () => {
               validation: [
                 {
                   url: 'https://acme.example/products/chicken-broth-16oz',
-                  artifactRefs: ['ev:1'],
+                  artifactRefs: ['art-1'],
                   identityStatus: 'exact',
                   fields: {},
                   overall: 'pass',
                 },
                 {
                   url: 'https://acme.example/products/beef-broth-16oz',
-                  artifactRefs: ['ev:2'],
+                  artifactRefs: ['art-2'],
                   identityStatus: 'exact',
                   fields: {},
                   overall: 'pass',
@@ -308,7 +313,6 @@ describe('Specialist Orchestrator (#56)', () => {
     } as any;
 
     const mockExtractionRunner = async (url: string): Promise<ExtractionEvidenceBundle> => {
-      // First call without approved profile reports profile_failed
       return {
         schemaVersion: 1,
         runnerVersion: '1.0.0',
@@ -359,9 +363,76 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.profileOutput).toBeDefined();
     expect(result.profileOutput?.authority).toBe('proposal_only');
     expect(result.events.some((e) => e.action === 'profile_review_hold')).toBe(true);
+
+    // Check that Profile Engineer was called with proper product_name and titleSelector hints
+    expect(capturedInput.samples[0].observedFields.product_name).toBeDefined();
+    expect(capturedInput.samples[0].selectorHints.titleSelector).toBeDefined();
+    expect(capturedInput.samples[0].artifactRefs).toBeDefined();
   });
 
-  it('promotes genuinely discovered GTIN to expected identity', async () => {
+  it('rejects 14-digit GTIN from consumer unit scope and does not promote to expected consumer GTIN', async () => {
+    const discovery = new DiscoverySpecialist(
+      {
+        search: async () => ({
+          candidates: [createDiscoveryCandidate()],
+        }),
+        extraction: {
+          name: 'mock_extractor',
+          version: '1.0.0',
+          extract: async (req: any) => ({
+            requestedUrl: req.url,
+            url: req.url,
+            finalUrl: req.url,
+            canonicalUrl: req.url,
+            fetchModes: ['http_detailed'],
+            contentHash: sha256Hex(req.url),
+            artifactRef: 'art-1',
+            title: 'ACME Organic Chicken Broth 16 fl oz Case',
+            productName: 'Organic Chicken Broth',
+            brand: 'ACME',
+            sku: 'SUP-56',
+            gtin: '10012345678908', // 14-digit case barcode!
+            gtins: [{ kind: 'gtin' as const, value: '10012345678908', method: 'json_ld', sourcePath: 'product.gtin', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] }],
+            fields: [
+              { field: 'brand', value: 'ACME', rawValue: 'ACME', method: 'json_ld', sourcePath: 'product.brand', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
+              { field: 'weight', value: '16 fl oz', rawValue: '16 fl oz', method: 'json_ld', sourcePath: 'product.weight', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
+            ],
+            skuEvidence: { kind: 'sku' as const, value: 'SUP-56', method: 'json_ld', sourcePath: 'product.sku', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
+            brandEvidence: { kind: 'brand' as const, value: 'ACME', method: 'json_ld', sourcePath: 'product.brand', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
+            variant: null,
+            size: '16 fl oz',
+            packCount: 1,
+            images: [],
+            conflicts: [],
+            identityStatus: 'exact_match' as const,
+            identityReasons: ['exact match'],
+            deterministicOnly: true,
+          }),
+        },
+      },
+      { codeCommit: 'commit-56' },
+    );
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      context,
+      { discoveredGtin: '10012345678908' }, // 14-digit supplied without scope
+    );
+
+    // 14-digit is not promoted as consumer GTIN
+    expect(result.resolverOutput?.expectedIdentity?.gtin ?? null).toBeNull();
+  });
+
+  it('promotes genuinely discovered 12-digit GTIN to expected consumer identity', async () => {
     const discovery = new DiscoverySpecialist(
       {
         search: async () => ({
@@ -408,6 +479,7 @@ describe('Specialist Orchestrator (#56)', () => {
     const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
 
     expect(result.status).toBe('abstained');
+    expect(result.workflowState.status).toBe('abstained');
     expect(result.events.some((e) => e.action === 'discover_candidates' && e.status === 'succeeded')).toBe(true);
   });
 
@@ -565,6 +637,7 @@ describe('Specialist Orchestrator (#56)', () => {
 
     expect(result.status).toBe('needs_review');
     expect(result.retriesCount).toBe(2);
+    expect(result.workflowState.status).toBe('needs_review');
   });
 
   it('enforces total dispatch limit as hard stop with multiple parallel candidate workers', async () => {
@@ -595,6 +668,7 @@ describe('Specialist Orchestrator (#56)', () => {
 
     expect(result.status).toBe('budget_exceeded');
     expect(result.totalDispatches).toBeLessThanOrEqual(2);
+    expect(result.workflowState.status).toBe('budget_exceeded');
   });
 
   it('aborts immediately with cancelled status when AbortSignal is triggered', async () => {
@@ -608,6 +682,7 @@ describe('Specialist Orchestrator (#56)', () => {
     });
 
     expect(result.status).toBe('cancelled');
+    expect(result.workflowState.status).toBe('cancelled');
   });
 
   it('transitions to budget_exceeded when deadline is exceeded', async () => {
@@ -618,6 +693,7 @@ describe('Specialist Orchestrator (#56)', () => {
     });
 
     expect(result.status).toBe('budget_exceeded');
+    expect(result.workflowState.status).toBe('budget_exceeded');
   });
 
   it('fails closed when a specialist execution fails', async () => {
@@ -639,5 +715,6 @@ describe('Specialist Orchestrator (#56)', () => {
 
     expect(result.status).toBe('failed');
     expect(result.error).toContain('Serper rate limit');
+    expect(result.workflowState.status).toBe('failed');
   });
 });
