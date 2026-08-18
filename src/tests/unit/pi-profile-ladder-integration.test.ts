@@ -138,4 +138,95 @@ describe('PI ladder profile wiring', () => {
     expect(opts.profiles).toBeDefined();
     expect(opts.profiles).toHaveLength(1);
   });
+
+  it('lazyProfileResolver.extract preserves the worker true method/path keyed by title (real worker provenance shape)', async () => {
+    // The extraction worker reports provenance/details under ITS field keys
+    // (title, brand, description, price, primaryImage) — not the ladder's
+    // (product_name, ...). This stubs the lazily-loaded worker/DB modules and
+    // feeds the resolver a response shaped exactly like the real worker, then
+    // proves the true selector/meta/JSON-LD method+path passes through instead
+    // of a fabricated profile_fallback / fallback:product_name entry.
+    const profile = {
+      id: 'prof_123',
+      domain: 'acmepet.com',
+      runtime: 'static' as const,
+      updatedAt: '2024-01-01T00:00:00.000Z',
+    };
+    const workerResponse = {
+      ok: true,
+      data: {
+        title: 'Acme Premium Kibble 15lb',
+        brand: 'Acme Pet',
+        description: 'Delicious kibble',
+        price: '9.99',
+        primaryImage: 'https://acmepet.com/images/kibble.jpg',
+        additionalImages: [] as string[],
+        fieldProvenance: {
+          title: 'profile-selector',
+          brand: 'json-ld',
+          description: 'meta',
+          price: 'spreadsheet-import',
+          primaryImage: 'profile-selector',
+        },
+      },
+      fieldProvenance: {
+        title: 'profile-selector',
+        brand: 'json-ld',
+        description: 'meta',
+        price: 'spreadsheet-import',
+        primaryImage: 'profile-selector',
+      },
+      fieldProvenanceDetails: {
+        title: { method: 'profile_selector', sourcePath: 'h1.title' },
+        brand: { method: 'json_ld', sourcePath: 'json-ld:Product.brand' },
+        description: { method: 'meta', sourcePath: 'meta:og:description' },
+        price: { method: 'spreadsheet-import', sourcePath: 'expected:price' },
+        primaryImage: { method: 'profile_selector', sourcePath: '.gallery img' },
+      },
+      sourceContentHash: 'hash123',
+      sourceArtifactId: 'artifact-1',
+    };
+    const fakeRequireFn = (id: string): unknown => {
+      if (id === '../../db/connection') return { isDbInitialized: () => true };
+      if (id === '../../db/repositories/extractor-profile-repo') {
+        return { findProfileByDomain: (d: string) => (d === 'acmepet.com' ? profile : null) };
+      }
+      if (id === '../../onboarding/profile-runner-client') {
+        return { runProfileExtraction: async () => workerResponse };
+      }
+      throw new Error(`unexpected lazy require in test: ${id}`);
+    };
+
+    const resolver = lazyProfileResolver(['acmepet.com'], fakeRequireFn)!;
+    const extracted = await resolver[0].extract(
+      'https://acmepet.com/products/kibble-15lb',
+      new AbortController().signal,
+      5000,
+      { name: 'Acme Premium Kibble 15lb', brandHint: null },
+    );
+
+    expect(extracted).not.toBeNull();
+    const byField = Object.fromEntries(extracted!.fields.map((f) => [f.field, f]));
+
+    // product_name maps to the worker's `title` key: the true selector method
+    // and path are preserved (NOT a fabricated profile_fallback entry).
+    expect(byField['product_name'].value).toBe('Acme Premium Kibble 15lb');
+    expect(byField['product_name'].method).toBe('profile_selector');
+    expect(byField['product_name'].sourcePath).toBe('h1.title');
+    expect(byField['product_name'].sourceContentHash).toBe('hash123');
+    expect(byField['product_name'].sourceArtifactId).toBe('artifact-1');
+
+    // The other worker-keyed fields keep their true method/path too.
+    expect(byField['brand'].method).toBe('json_ld');
+    expect(byField['brand'].sourcePath).toBe('json-ld:Product.brand');
+    expect(byField['description'].method).toBe('meta');
+    expect(byField['description'].sourcePath).toBe('meta:og:description');
+    expect(byField['price'].method).toBe('spreadsheet-import');
+    expect(byField['price'].sourcePath).toBe('expected:price');
+
+    // The primary image preserves the true selector path.
+    expect(extracted!.images).toHaveLength(1);
+    expect(extracted!.images[0].url).toBe('https://acmepet.com/images/kibble.jpg');
+    expect(extracted!.images[0].sourcePath).toBe('.gallery img');
+  });
 });

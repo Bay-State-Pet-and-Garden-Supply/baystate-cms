@@ -23,6 +23,7 @@ import {
   doStaticExtract,
 } from './extract';
 import type { ExtractRequest } from '../../shared/schemas/extraction-worker';
+import { guardedRouteHandler } from '../browser/rendered-page-runner';
 
 const publicLookup = async (): Promise<Array<{ address: string }>> => [{ address: '203.0.113.7' }];
 const privateLookup = async (): Promise<Array<{ address: string }>> => [{ address: '10.0.0.1' }];
@@ -269,5 +270,67 @@ describe('doStaticExtract provenance details (end-to-end)', () => {
       primaryImage: { method: 'profile_selector', sourcePath: '.gallery img' },
       'custom.flavor': { method: 'profile_selector', sourcePath: '.flavor' },
     });
+  });
+});
+
+describe('guardedRouteHandler (rendered sub-resources + redirects pass through the guard)', () => {
+  // Run one request through the single authoritative rendered-route handler
+  // using the REAL profileNetworkGuard (SSRF floor + source-domain allowlist),
+  // and record both the guard invocations and the route outcome.
+  function runGuarded(url: string, allowlist: string[]) {
+    const guardCalls: string[] = [];
+    const routeCalls: string[] = [];
+    const guard = async (u: string): Promise<boolean> => {
+      guardCalls.push(u);
+      return profileNetworkGuard(u, allowlist, { lookupFn: publicLookup });
+    };
+    const route = {
+      request: () => ({ url: () => url }),
+      continue: async () => { routeCalls.push('continue'); },
+      abort: async (reason?: string) => { routeCalls.push(reason ?? 'abort'); },
+    };
+    return { guard, route, guardCalls, routeCalls };
+  }
+
+  it('routes an in-allowlist sub-resource through the guard and continues it', async () => {
+    const { guard, route, guardCalls, routeCalls } = runGuarded('https://brand.example.com/img/product.jpg', ['brand.example.com']);
+    await guardedRouteHandler(route, guard);
+    expect(guardCalls).toEqual(['https://brand.example.com/img/product.jpg']);
+    expect(routeCalls).toEqual(['continue']);
+  });
+
+  it('routes a sub-resource on a public domain outside the allowlist through the guard and aborts it', async () => {
+    const { guard, route, guardCalls, routeCalls } = runGuarded('https://cdn.evil.example.com/img/product.jpg', ['brand.example.com']);
+    await guardedRouteHandler(route, guard);
+    expect(guardCalls).toEqual(['https://cdn.evil.example.com/img/product.jpg']);
+    expect(routeCalls).toEqual(['blockedbyclient']);
+  });
+
+  it('routes a redirect hop to an in-allowlist destination through the guard and continues it', async () => {
+    const { guard, route, guardCalls, routeCalls } = runGuarded('https://www.brand.example.com/p/1', ['brand.example.com']);
+    await guardedRouteHandler(route, guard);
+    expect(guardCalls).toEqual(['https://www.brand.example.com/p/1']);
+    expect(routeCalls).toEqual(['continue']);
+  });
+
+  it('routes a redirect hop to a public domain outside the allowlist through the guard and aborts it', async () => {
+    const { guard, route, guardCalls, routeCalls } = runGuarded('https://redirect.evil.example.com/x', ['brand.example.com']);
+    await guardedRouteHandler(route, guard);
+    expect(guardCalls).toEqual(['https://redirect.evil.example.com/x']);
+    expect(routeCalls).toEqual(['blockedbyclient']);
+  });
+
+  it('aborts a tracker sub-resource even when it is on an in-allowlist domain', async () => {
+    const { guard, route, guardCalls, routeCalls } = runGuarded('https://brand.example.com/analytics.js', ['brand.example.com']);
+    await guardedRouteHandler(route, guard);
+    expect(guardCalls).toEqual(['https://brand.example.com/analytics.js']);
+    expect(routeCalls).toEqual(['blockedbyclient']);
+  });
+
+  it('aborts a private destination even when allowlisted (SSRF floor still applies)', async () => {
+    const { guard, route, guardCalls, routeCalls } = runGuarded('https://10.0.0.5/p/1', ['10.0.0.5']);
+    await guardedRouteHandler(route, guard);
+    expect(guardCalls).toEqual(['https://10.0.0.5/p/1']);
+    expect(routeCalls).toEqual(['blockedbyclient']);
   });
 });

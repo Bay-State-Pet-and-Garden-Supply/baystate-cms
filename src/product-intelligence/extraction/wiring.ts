@@ -120,12 +120,36 @@ function lazySnapshotFn(sourcesAllowlist: string[] | undefined): BrowserSnapshot
 }
 
 /**
+ * The extraction worker reports field provenance/details under ITS field keys
+ * (title, brand, description, price, primaryImage, additionalImages), not the
+ * ladder's field names (product_name, ...). Translate a ladder field name to
+ * the worker key before looking up provenance so a true selector/meta/JSON-LD
+ * method+path is preserved instead of fabricating a profile_fallback entry on
+ * success. Fields the worker does not report (size, ingredients, variants,
+ * sku, gtin) have no worker key and fall through to the explicit fallback.
+ */
+const WORKER_FIELD_KEYS: Record<string, string> = {
+  product_name: 'title',
+  brand: 'brand',
+  description: 'description',
+  price: 'price',
+  primaryImage: 'primaryImage',
+  additionalImages: 'additionalImages',
+};
+
+/**
  * Lazy domain profile resolver: connects approved domain extractor profiles from
  * the database to the extraction worker runner. When an approved profile matches
  * the domain of the URL being extracted, trusted CSS selector extraction runs
  * deterministically without LLM fallback.
+ *
+ * `requireFn` is injectable for tests so the lazily-loaded worker/DB modules can
+ * be stubbed; production callers use the real createRequire-based loader.
  */
-export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions['profiles'] {
+export function lazyProfileResolver(
+  sourcesAllowlist?: string[],
+  requireFn: (id: string) => unknown = lazyRequire,
+): LadderOptions['profiles'] {
   return [
     {
       name: 'onboarding_domain_profiles',
@@ -137,9 +161,9 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
           if (sourcesAllowlist && sourcesAllowlist.length > 0 && !sourcesAllowlist.includes(domain)) {
             return false;
           }
-          const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+          const conn = requireFn('../../db/connection') as { isDbInitialized?: () => boolean };
           if (!conn.isDbInitialized?.()) return false;
-          const repo = lazyRequire('../../db/repositories/extractor-profile-repo') as {
+          const repo = requireFn('../../db/repositories/extractor-profile-repo') as {
             findProfileByDomain?: (d: string) => { id: string } | null;
           };
           return !!repo.findProfileByDomain?.(domain);
@@ -163,13 +187,13 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
           const domain = parsed.hostname.toLowerCase().replace(/^www\./, '').trim();
           if (!domain) return null;
 
-          const repo = lazyRequire('../../db/repositories/extractor-profile-repo') as {
+          const repo = requireFn('../../db/repositories/extractor-profile-repo') as {
             findProfileByDomain?: (d: string) => import('../../db/repositories/extractor-profile-repo').ExtractorProfile | null;
           };
           const profile = repo.findProfileByDomain?.(domain);
           if (!profile) return null;
 
-          const runner = lazyRequire('../../onboarding/profile-runner-client') as {
+          const runner = requireFn('../../onboarding/profile-runner-client') as {
             runProfileExtraction?: (opts: {
               sourceUrl: string;
               profile: typeof profile;
@@ -205,12 +229,17 @@ export function lazyProfileResolver(sourcesAllowlist?: string[]): LadderOptions[
           const fields: ExtractedFieldEvidence[] = [];
           const source = { sourceArtifactId, sourceContentHash };
           const provenanceFor = (field: string, selectorPath: string): { method: string; sourcePath: string } => {
-            const detail = provenanceDetails[field];
+            // The worker keys provenance by ITS field names (title, brand, ...),
+            // not the ladder's (product_name, ...). Resolve the worker key first
+            // so the true method/path is preserved instead of fabricating a
+            // profile_fallback entry on success.
+            const workerKey = WORKER_FIELD_KEYS[field] ?? field;
+            const detail = provenanceDetails[workerKey];
             if (detail && (detail.method === 'profile_selector' || detail.method === 'profile-selector')) {
               return { method: 'profile_selector', sourcePath: detail.sourcePath };
             }
             if (detail) return { method: detail.method, sourcePath: detail.sourcePath };
-            const declared = String(provenance[field] ?? '').trim().toLowerCase();
+            const declared = String(provenance[workerKey] ?? '').trim().toLowerCase();
             if (declared === 'profile-selector' || declared === 'profile_selector') {
               return { method: 'profile_selector', sourcePath: selectorPath };
             }

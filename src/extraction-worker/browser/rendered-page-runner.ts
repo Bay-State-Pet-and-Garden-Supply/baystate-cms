@@ -85,6 +85,33 @@ export interface PageExtractor<T> {
   (ctx: PlaywrightCrawlingContext, dwellMs: number): Promise<T>;
 }
 
+/**
+ * Minimal structural shape of a Playwright route, sufficient for the guarded
+ * route handler. Kept structural (not a Playwright type import) so the handler
+ * is unit-testable without a browser.
+ */
+export interface GuardedRoute {
+  request(): { url(): string };
+  continue(): Promise<void>;
+  abort(reason?: string): Promise<void>;
+}
+
+/**
+ * The single authoritative rendered-route handler: EVERY request the page
+ * issues (navigation, redirect hops, sub-resources) is passed to
+ * `networkGuard`; allowed requests continue, denied requests are aborted.
+ * This is the ONLY route handler the runner installs — no later handler may
+ * continue an unchecked request.
+ */
+export async function guardedRouteHandler(
+  route: GuardedRoute,
+  networkGuard: (url: string) => Promise<boolean>,
+): Promise<void> {
+  const allowed = await networkGuard(route.request().url());
+  if (allowed) await route.continue();
+  else await route.abort('blockedbyclient');
+}
+
 // ─── Single page runner ────────────────────────────────────────────────────
 
 /**
@@ -122,11 +149,11 @@ export async function runRenderedPage<T>(
   const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConfig,
     preNavigationHooks: input.networkGuard ? [async ({ page }) => {
-      await page.route('**/*', async (route) => {
-        const allowed = await input.networkGuard!(route.request().url());
-        if (allowed) await route.continue();
-        else await route.abort('blockedbyclient');
-      });
+      // One authoritative guard for the whole page lifecycle: the '**/*' route
+      // intercepts navigation, every redirect hop, and every sub-resource, and
+      // each request is decided by `guardedRouteHandler` (never bypassed by a
+      // later route.continue()).
+      await page.route('**/*', (route) => guardedRouteHandler(route, input.networkGuard!));
     }] : undefined,
     maxConcurrency: 1,
     useSessionPool: true,
