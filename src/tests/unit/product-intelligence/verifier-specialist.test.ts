@@ -103,13 +103,88 @@ function sampleFactSet(overrides: Partial<ResolvedFactSet> = {}): ResolvedFactSe
         contradictingEvidence: [],
         notes: null,
       },
+      {
+        field: 'size',
+        status: 'resolved',
+        value: '16 fl oz',
+        canonicalQuantity: { value: 16, unit: 'fl oz', kind: 'volume', rawValue: '16 fl oz' },
+        identifierScope: null,
+        dimensionScope: null,
+        confidence: 0.85,
+        supportingEvidence: [
+          {
+            id: 'ev:size:1',
+            sourceKind: 'manufacturer',
+            candidateId: 'cand:acme',
+            url: 'https://acme.example/products/chicken-broth-16oz',
+            field: 'size',
+            rawValue: '16 fl oz',
+            contentHash: null,
+            scope: null,
+            method: 'json_ld',
+            sourcePath: 'product.size',
+          },
+        ],
+        contradictingEvidence: [],
+        notes: null,
+      },
+      {
+        field: 'packCount',
+        status: 'resolved',
+        value: '1',
+        canonicalQuantity: { value: 1, unit: 'count', kind: 'count', rawValue: '1' },
+        identifierScope: null,
+        dimensionScope: null,
+        confidence: 0.9,
+        supportingEvidence: [
+          {
+            id: 'ev:pack:1',
+            sourceKind: 'manufacturer',
+            candidateId: 'cand:acme',
+            url: 'https://acme.example/products/chicken-broth-16oz',
+            field: 'packCount',
+            rawValue: '1',
+            contentHash: null,
+            scope: null,
+            method: 'json_ld',
+            sourcePath: 'product.packCount',
+          },
+        ],
+        contradictingEvidence: [],
+        notes: null,
+      },
+      {
+        field: 'dimensions',
+        status: 'resolved',
+        value: '3 x 3 x 7 in',
+        canonicalQuantity: { value: 3, unit: 'in', kind: 'length', rawValue: '3 x 3 x 7 in' },
+        identifierScope: null,
+        dimensionScope: 'product',
+        confidence: 0.8,
+        supportingEvidence: [
+          {
+            id: 'ev:dim:1',
+            sourceKind: 'manufacturer',
+            candidateId: 'cand:acme',
+            url: 'https://acme.example/products/chicken-broth-16oz',
+            field: 'dimensions',
+            rawValue: '3 x 3 x 7 in',
+            contentHash: null,
+            scope: null,
+            method: 'json_ld',
+            sourcePath: 'product.dimensions',
+          },
+        ],
+        contradictingEvidence: [],
+        notes: null,
+      },
     ],
     fieldCompleteness: {
       total: 12,
-      resolved: 2,
+      resolved: 5,
       conflicts: 0,
       needsMoreEvidence: 2,
-      abstained: 8,
+      abstained: 5,
     },
     conflicts: [],
     evidenceRegistry: {},
@@ -137,12 +212,15 @@ function sampleDraft(overrides: Partial<CuratedProductDraft> = {}): CuratedProdu
     gtin: '012345678901',
     upc: '012345678901',
     subtitle: 'ACME - 16 fl oz',
-    description: '**ACME Organic Chicken Broth 16 fl oz**\n\n### Product Details\n- Brand: ACME\n- Net Weight: 16 fl oz',
+    description: '**ACME Organic Chicken Broth 16 fl oz**\n\n### Product Details\n- Brand: ACME\n- Net Weight: 16 fl oz\n- Size: 16 fl oz\n- Package Count: 1\n- Dimensions: 3 x 3 x 7 in',
     productTypeId: 'pt_broth',
     categoryIds: ['cat_canned_food'],
     attributes: {
       brand: 'ACME',
       weight: '16 fl oz',
+      size: '16 fl oz',
+      packCount: '1',
+      dimensions: '3 x 3 x 7 in',
     },
     images: [],
     grounding: [
@@ -159,6 +237,24 @@ function sampleDraft(overrides: Partial<CuratedProductDraft> = {}): CuratedProdu
         evidenceIds: ['ev:weight:1'],
       },
       {
+        field: 'size',
+        claim: 'Product size: 16 fl oz',
+        supportingFactFields: ['size'],
+        evidenceIds: ['ev:size:1'],
+      },
+      {
+        field: 'packCount',
+        claim: 'Pack count: 1',
+        supportingFactFields: ['packCount'],
+        evidenceIds: ['ev:pack:1'],
+      },
+      {
+        field: 'dimensions',
+        claim: 'Dimensions: 3 x 3 x 7 in',
+        supportingFactFields: ['dimensions'],
+        evidenceIds: ['ev:dim:1'],
+      },
+      {
         field: 'catalogTitle',
         claim: 'Synthesized catalog title: ACME Organic Chicken Broth 16 fl oz',
         supportingFactFields: ['brand', 'weight'],
@@ -167,8 +263,8 @@ function sampleDraft(overrides: Partial<CuratedProductDraft> = {}): CuratedProdu
       {
         field: 'description',
         claim: 'Structured product description bullets',
-        supportingFactFields: ['brand', 'weight'],
-        evidenceIds: ['ev:brand:1', 'ev:weight:1'],
+        supportingFactFields: ['brand', 'weight', 'size', 'packCount', 'dimensions'],
+        evidenceIds: ['ev:brand:1', 'ev:weight:1', 'ev:size:1', 'ev:pack:1', 'ev:dim:1'],
       },
     ],
     abstentions: [],
@@ -231,14 +327,14 @@ describe('Verifier specialist (#55)', () => {
     expect(report.retryRequest?.conflictingFields).toContain('weight');
   });
 
-  it('catches unassociated or forged evidence IDs in draft grounding and triggers retry_curator', () => {
+  it('catches cross-fact evidence misassociation and triggers retry_curator', () => {
     const draft = sampleDraft({
       grounding: [
         {
           field: 'brand',
           claim: 'Brand name: ACME',
           supportingFactFields: ['brand'],
-          evidenceIds: ['ev:forged:999'], // Forged evidence ID not in fact or registry
+          evidenceIds: ['ev:weight:1'], // Cites weight fact's real evidence ID under brand!
         },
       ],
     });
@@ -252,7 +348,106 @@ describe('Verifier specialist (#55)', () => {
     });
 
     expect(report.verdict).toBe('retry_curator');
-    expect(report.checks.some((c) => c.checkName === 'grounding_evidence_integrity' && !c.passed)).toBe(true);
+    expect(report.checks.some((c) => c.checkName === 'grounding_evidence_misassociation' && !c.passed)).toBe(true);
+  });
+
+  it('catches synthetic fact reference misassociation and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      grounding: [
+        {
+          field: 'brand',
+          claim: 'Brand name: ACME',
+          supportingFactFields: ['brand'],
+          evidenceIds: ['resolved_fact:weight'], // References resolved_fact:weight under brand grounding!
+        },
+      ],
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'grounding_evidence_misassociation' && !c.passed)).toBe(true);
+  });
+
+  it('catches draft brand mismatching resolved brand fact and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      brand: 'WrongBrand',
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'brand_fidelity' && !c.passed)).toBe(true);
+  });
+
+  it('catches structured bullet description mismatches (Brand, Size, Count, Dimensions) and triggers retry_curator', () => {
+    // 1. Mutated Brand claim in description
+    const draftBrand = sampleDraft({
+      description: '**ACME Broth**\n\n### Product Details\n- Brand: CompetitorBrand',
+    });
+    const reportBrand = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draftBrand,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+    expect(reportBrand.verdict).toBe('retry_curator');
+    expect(reportBrand.checks.some((c) => c.checkName === 'description_claim_mismatch' && !c.passed)).toBe(true);
+
+    // 2. Mutated Size claim in description
+    const draftSize = sampleDraft({
+      description: '**ACME Broth**\n\n### Product Details\n- Size: 64 fl oz',
+    });
+    const reportSize = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draftSize,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+    expect(reportSize.verdict).toBe('retry_curator');
+    expect(reportSize.checks.some((c) => c.checkName === 'description_claim_mismatch' && !c.passed)).toBe(true);
+
+    // 3. Mutated Package Count claim in description
+    const draftCount = sampleDraft({
+      description: '**ACME Broth**\n\n### Product Details\n- Package Count: 24',
+    });
+    const reportCount = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draftCount,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+    expect(reportCount.verdict).toBe('retry_curator');
+    expect(reportCount.checks.some((c) => c.checkName === 'description_claim_mismatch' && !c.passed)).toBe(true);
+
+    // 4. Mutated Dimensions claim in description
+    const draftDim = sampleDraft({
+      description: '**ACME Broth**\n\n### Product Details\n- Dimensions: 10 x 10 x 10 in',
+    });
+    const reportDim = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draftDim,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+    expect(reportDim.verdict).toBe('retry_curator');
+    expect(reportDim.checks.some((c) => c.checkName === 'description_claim_mismatch' && !c.passed)).toBe(true);
   });
 
   it('catches draft GTIN mismatching resolved identity GTIN and triggers retry_discovery', () => {
@@ -270,23 +465,6 @@ describe('Verifier specialist (#55)', () => {
 
     expect(report.verdict).toBe('retry_discovery');
     expect(report.checks.some((c) => c.checkName === 'identity_gtin_fidelity' && !c.passed)).toBe(true);
-  });
-
-  it('catches wrong description prose claims and triggers retry_curator', () => {
-    const draft = sampleDraft({
-      description: '**ACME Broth**\n\n### Product Details\n- Net Weight: 50 lb', // Claims 50 lb instead of 16 fl oz
-    });
-
-    const report = verifyCuratedDraft({
-      schemaVersion: '1.0.0',
-      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
-      resolvedFacts: sampleFactSet(),
-      curatedDraft: draft,
-      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
-    });
-
-    expect(report.verdict).toBe('retry_curator');
-    expect(report.checks.some((c) => c.checkName === 'description_prose_fidelity' && !c.passed)).toBe(true);
   });
 
   it('triggers retry_discovery when identity status is conflict or unresolved', () => {

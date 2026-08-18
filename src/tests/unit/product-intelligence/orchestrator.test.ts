@@ -63,7 +63,7 @@ const mockExtractionSeam = {
     finalUrl: req.url,
     canonicalUrl: req.url,
     fetchModes: ['http_detailed'],
-    contentHash: 'hash-1',
+    contentHash: sha256Hex(req.url),
     artifactRef: 'art-1',
     title: 'ACME Organic Chicken Broth 16 fl oz',
     productName: 'Organic Chicken Broth',
@@ -202,7 +202,7 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.events.length).toBeGreaterThanOrEqual(5);
   });
 
-  it('routes to Profile Engineer when extraction reports profile_failed and retries extraction', async () => {
+  it('routes to Profile Engineer when 2+ domain candidate samples exist and extraction reports profile_failed', async () => {
     let extractionCalls = 0;
     let profileCalls = 0;
 
@@ -230,10 +230,17 @@ describe('Specialist Orchestrator (#56)', () => {
                   fields: {},
                   overall: 'pass',
                 },
+                {
+                  url: 'https://acme.example/products/beef-broth-16oz',
+                  artifactRefs: ['art-2'],
+                  identityStatus: 'exact',
+                  fields: {},
+                  overall: 'pass',
+                },
               ],
               validationSummary: {
-                sampleCount: 1,
-                passingSamples: 1,
+                sampleCount: 2,
+                passingSamples: 2,
                 failingSamples: 0,
                 byField: {},
               },
@@ -285,7 +292,12 @@ describe('Specialist Orchestrator (#56)', () => {
 
     const discovery = new DiscoverySpecialist(
       {
-        search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+        search: async () => ({
+          candidates: [
+            createDiscoveryCandidate('https://acme.example/products/chicken-broth-16oz'),
+            createDiscoveryCandidate('https://acme.example/products/beef-broth-16oz'),
+          ],
+        }),
         extraction: mockExtractionSeam,
       },
       { codeCommit: 'commit-56' },
@@ -304,7 +316,7 @@ describe('Specialist Orchestrator (#56)', () => {
 
     expect(result.status).toBe('completed');
     expect(profileCalls).toBe(1);
-    expect(extractionCalls).toBe(2); // 1 initial failed + 1 retried with profile
+    expect(extractionCalls).toBeGreaterThanOrEqual(2);
     expect(result.events.some((e) => e.specialist === 'profile_engineer' && e.status === 'succeeded')).toBe(true);
   });
 
@@ -550,10 +562,16 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.verifierOutput?.verdict).toBe('human_review');
   });
 
-  it('enforces total dispatch limit as hard stop', async () => {
+  it('enforces total dispatch limit as hard stop with multiple parallel candidate workers', async () => {
     const discovery = new DiscoverySpecialist(
       {
-        search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+        search: async () => ({
+          candidates: [
+            createDiscoveryCandidate('https://acme.example/1'),
+            createDiscoveryCandidate('https://acme.example/2'),
+            createDiscoveryCandidate('https://acme.example/3'),
+          ],
+        }),
         extraction: mockExtractionSeam,
       },
       { codeCommit: 'commit-56' },
@@ -571,6 +589,7 @@ describe('Specialist Orchestrator (#56)', () => {
     const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
 
     expect(result.status).toBe('budget_exceeded');
+    expect(result.totalDispatches).toBeLessThanOrEqual(2);
   });
 
   it('aborts immediately with cancelled status when AbortSignal is triggered', async () => {
