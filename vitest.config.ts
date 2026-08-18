@@ -262,6 +262,8 @@ export default defineConfig({
       'src/tests/unit/onboarding-work-state.test.ts',
       'src/tests/unit/onboarding-review-state.test.ts',
       'src/tests/unit/onboarding-telemetry.test.ts',
+      // Product intelligence seed persistence (bun:test / bun:sqlite — run under bun test via test:db)
+      'src/tests/unit/product-intelligence/product-seed-persistence.test.ts',
     ],
   },
 });

@@ -14,6 +14,8 @@ import { VerifierSpecialist } from '../../../product-intelligence/specialists/ve
 import { ProductIntelligencePolicySchema } from '../../../product-intelligence/contracts';
 import type { SpecialistContext, SpecialistResult } from '../../../product-intelligence/specialists/contracts';
 import type { ProductSeed } from '../../../product-intelligence/product-seed';
+import type { ExtractionEvidenceBundle } from '../../../product-intelligence/extraction/evidence';
+import { sha256Hex } from '../../../shared/stable-id';
 
 const FIXED_NOW = '2026-08-18T12:00:00.000Z';
 
@@ -40,9 +42,9 @@ const context: SpecialistContext = {
   }),
 };
 
-function createDiscoveryCandidate(): DiscoverySourceCandidate {
+function createDiscoveryCandidate(url = 'https://acme.example/products/chicken-broth-16oz'): DiscoverySourceCandidate {
   return {
-    url: 'https://acme.example/products/chicken-broth-16oz',
+    url,
     sourceType: 'manufacturer',
     sourceRef: 'manufacturer:official',
     sourceMethod: 'mock',
@@ -86,8 +88,91 @@ const mockExtractionSeam = {
   }),
 };
 
+function createMockExtractionBundle(url: string, brand = 'ACME'): ExtractionEvidenceBundle {
+  const hash = sha256Hex(url);
+  return {
+    schemaVersion: 1,
+    runnerVersion: '1.0.0',
+    requestedUrl: url,
+    finalUrl: url,
+    retrievedAt: FIXED_NOW,
+    contentHash: hash,
+    artifactRefs: ['art-1'],
+    profile: null,
+    extractionPath: [{ layer: 'json_ld', method: 'json_ld', sourcePath: 'product', artifactId: 'art-1' }],
+    observations: [
+      {
+        id: 'obs:brand',
+        field: 'brand',
+        value: brand,
+        method: 'json_ld',
+        sourcePath: 'product.brand',
+        sourceUrl: url,
+        finalUrl: url,
+        contentHash: hash,
+        artifactId: 'art-1',
+        profileId: null,
+        profileVersion: null,
+        variantRef: null,
+        provenanceQuality: 'exact_path',
+      },
+      {
+        id: 'obs:weight',
+        field: 'weight',
+        value: '16 fl oz',
+        method: 'json_ld',
+        sourcePath: 'product.weight',
+        sourceUrl: url,
+        finalUrl: url,
+        contentHash: hash,
+        artifactId: 'art-1',
+        profileId: null,
+        profileVersion: null,
+        variantRef: null,
+        provenanceQuality: 'exact_path',
+      },
+      {
+        id: 'obs:title',
+        field: 'title',
+        value: 'Organic Chicken Broth',
+        method: 'json_ld',
+        sourcePath: 'product.name',
+        sourceUrl: url,
+        finalUrl: url,
+        contentHash: hash,
+        artifactId: 'art-1',
+        profileId: null,
+        profileVersion: null,
+        variantRef: null,
+        provenanceQuality: 'exact_path',
+      },
+      {
+        id: 'obs:gtin',
+        field: 'gtin',
+        value: '012345678901',
+        method: 'json_ld',
+        sourcePath: 'product.gtin',
+        sourceUrl: url,
+        finalUrl: url,
+        contentHash: hash,
+        artifactId: 'art-1',
+        profileId: null,
+        profileVersion: null,
+        variantRef: null,
+        provenanceQuality: 'exact_path',
+      },
+    ],
+    images: [],
+    variant: null,
+    identityStatus: 'exact_match',
+    identityReasons: ['exact match'],
+    failures: [],
+    deterministicOnly: true,
+  };
+}
+
 describe('Specialist Orchestrator (#56)', () => {
-  it('executes end-to-end happy path to terminal status completed', async () => {
+  it('executes end-to-end happy path to terminal status completed with verified extraction runner', async () => {
     const discovery = new DiscoverySpecialist(
       {
         search: async () => ({ candidates: [createDiscoveryCandidate()] }),
@@ -99,6 +184,7 @@ describe('Specialist Orchestrator (#56)', () => {
     const orchestrator = new SpecialistOrchestrator({
       dependencies: {
         discovery,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
       },
       now: () => FIXED_NOW,
     });
@@ -112,8 +198,114 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.curatorOutput).toBeDefined();
     expect(result.verifierOutput).toBeDefined();
     expect(result.verifierOutput?.verdict).toBe('pass');
-    expect(result.curatorOutput?.catalogTitle).toBe('ACME Organic Chicken Broth');
+    expect(result.curatorOutput?.catalogTitle).toContain('ACME Organic Chicken Broth');
     expect(result.events.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('routes to Profile Engineer when extraction reports profile_failed and retries extraction', async () => {
+    let extractionCalls = 0;
+    let profileCalls = 0;
+
+    const mockProfileEngineer = {
+      execute: async (): Promise<SpecialistResult> => {
+        profileCalls += 1;
+        return {
+          specialist: 'profile_engineer',
+          outcome: 'succeeded',
+          output: {
+            artifactType: 'profile_engineer_result',
+            schemaVersion: '1.0.0',
+            payload: {
+              domain: 'acme.example',
+              proposedVersion: 1,
+              strategy: 'json_ld',
+              selectors: { titleSelector: 'h1.product-title' },
+              runtime: 'rendered',
+              metadata: {},
+              validation: [
+                {
+                  url: 'https://acme.example/products/chicken-broth-16oz',
+                  artifactRefs: ['art-1'],
+                  identityStatus: 'exact',
+                  fields: {},
+                  overall: 'pass',
+                },
+              ],
+              validationSummary: {
+                sampleCount: 1,
+                passingSamples: 1,
+                failingSamples: 0,
+                byField: {},
+              },
+              authority: 'proposal_only',
+              activation: 'manual_review_required',
+            },
+            lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+            provenance: {
+              specialist: 'profile_engineer',
+              specialistVersion: '1.0.0',
+              codeCommit: 'commit-56',
+              invokedBy: 'orchestrator',
+              durationMs: 10,
+              createdAt: FIXED_NOW,
+            },
+            contentHash: sha256Hex('profile-1'),
+          },
+          durationMs: 10,
+        };
+      },
+    } as any;
+
+    const mockExtractionRunner = async (url: string, _ctx: any, profile?: any): Promise<ExtractionEvidenceBundle> => {
+      extractionCalls += 1;
+      if (!profile) {
+        // First call without profile reports profile_failed
+        return {
+          schemaVersion: 1,
+          runnerVersion: '1.0.0',
+          requestedUrl: url,
+          finalUrl: url,
+          retrievedAt: FIXED_NOW,
+          contentHash: sha256Hex('fail-1'),
+          artifactRefs: ['art-1'],
+          profile: null,
+          extractionPath: [],
+          observations: [],
+          images: [],
+          variant: null,
+          identityStatus: 'insufficient_evidence',
+          identityReasons: ['Profile required'],
+          failures: [{ code: 'profile_failed', stage: 'profile_selector', message: 'Selector extraction failed', retryable: true }],
+          deterministicOnly: true,
+        };
+      }
+      // Second call with synthesized profile succeeds
+      return createMockExtractionBundle(url);
+    };
+
+    const discovery = new DiscoverySpecialist(
+      {
+        search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+        extraction: mockExtractionSeam,
+      },
+      { codeCommit: 'commit-56' },
+    );
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery,
+        profileEngineer: mockProfileEngineer,
+        extractionRunner: mockExtractionRunner,
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+
+    expect(result.status).toBe('completed');
+    expect(profileCalls).toBe(1);
+    expect(extractionCalls).toBe(2); // 1 initial failed + 1 retried with profile
+    expect(result.events.some((e) => e.specialist === 'profile_engineer' && e.status === 'succeeded')).toBe(true);
   });
 
   it('transitions to abstained when Discovery finds no candidates', async () => {
@@ -142,7 +334,6 @@ describe('Specialist Orchestrator (#56)', () => {
         verifierCalls += 1;
         const verifier = new VerifierSpecialist({ now: () => FIXED_NOW });
         if (verifierCalls === 1) {
-          // Simulate first call requesting curator retry
           return {
             specialist: 'verifier',
             outcome: 'succeeded',
@@ -184,12 +375,11 @@ describe('Specialist Orchestrator (#56)', () => {
                 durationMs: 10,
                 createdAt: FIXED_NOW,
               },
-              contentHash: 'hash-verifier-1',
+              contentHash: sha256Hex('verifier-1'),
             },
             durationMs: 10,
           };
         }
-        // Second call passes
         return verifier.execute(rawInput, ctx);
       },
     } as any;
@@ -207,6 +397,7 @@ describe('Specialist Orchestrator (#56)', () => {
       dependencies: {
         discovery,
         verifier: mockVerifier,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
       },
       now: () => FIXED_NOW,
     });
@@ -262,7 +453,7 @@ describe('Specialist Orchestrator (#56)', () => {
             durationMs: 10,
             createdAt: FIXED_NOW,
           },
-          contentHash: 'hash-failing-verifier',
+          contentHash: sha256Hex('failing-verifier'),
         },
         durationMs: 10,
       }),
@@ -271,6 +462,7 @@ describe('Specialist Orchestrator (#56)', () => {
     const discovery = new DiscoverySpecialist(
       {
         search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+        extraction: mockExtractionSeam,
       },
       { codeCommit: 'commit-56' },
     );
@@ -280,6 +472,7 @@ describe('Specialist Orchestrator (#56)', () => {
       dependencies: {
         discovery,
         verifier: mockFailingVerifier,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
       },
       now: () => FIXED_NOW,
     });
@@ -328,7 +521,7 @@ describe('Specialist Orchestrator (#56)', () => {
             durationMs: 10,
             createdAt: FIXED_NOW,
           },
-          contentHash: 'hash-review-verifier',
+          contentHash: sha256Hex('review-verifier'),
         },
         durationMs: 10,
       }),
@@ -337,6 +530,7 @@ describe('Specialist Orchestrator (#56)', () => {
     const discovery = new DiscoverySpecialist(
       {
         search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+        extraction: mockExtractionSeam,
       },
       { codeCommit: 'commit-56' },
     );
@@ -345,6 +539,7 @@ describe('Specialist Orchestrator (#56)', () => {
       dependencies: {
         discovery,
         verifier: mockReviewVerifier,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
       },
       now: () => FIXED_NOW,
     });
@@ -353,6 +548,29 @@ describe('Specialist Orchestrator (#56)', () => {
 
     expect(result.status).toBe('needs_review');
     expect(result.verifierOutput?.verdict).toBe('human_review');
+  });
+
+  it('enforces total dispatch limit as hard stop', async () => {
+    const discovery = new DiscoverySpecialist(
+      {
+        search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+        extraction: mockExtractionSeam,
+      },
+      { codeCommit: 'commit-56' },
+    );
+
+    const orchestrator = new SpecialistOrchestrator({
+      limits: { maxTotalDispatches: 2 }, // Only allow 2 dispatches total
+      dependencies: {
+        discovery,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+
+    expect(result.status).toBe('budget_exceeded');
   });
 
   it('aborts immediately with cancelled status when AbortSignal is triggered', async () => {
@@ -372,7 +590,7 @@ describe('Specialist Orchestrator (#56)', () => {
     const orchestrator = new SpecialistOrchestrator({ now: () => FIXED_NOW });
     const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, {
       ...context,
-      deadlineAt: Date.now() - 1000, // already expired
+      deadlineAt: Date.now() - 1000,
     });
 
     expect(result.status).toBe('budget_exceeded');

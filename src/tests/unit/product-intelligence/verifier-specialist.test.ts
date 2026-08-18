@@ -158,6 +158,18 @@ function sampleDraft(overrides: Partial<CuratedProductDraft> = {}): CuratedProdu
         supportingFactFields: ['weight'],
         evidenceIds: ['ev:weight:1'],
       },
+      {
+        field: 'catalogTitle',
+        claim: 'Synthesized catalog title: ACME Organic Chicken Broth 16 fl oz',
+        supportingFactFields: ['brand', 'weight'],
+        evidenceIds: ['ev:brand:1', 'ev:weight:1'],
+      },
+      {
+        field: 'description',
+        claim: 'Structured product description bullets',
+        supportingFactFields: ['brand', 'weight'],
+        evidenceIds: ['ev:brand:1', 'ev:weight:1'],
+      },
     ],
     abstentions: [],
     curatedAt: FIXED_NOW,
@@ -196,6 +208,85 @@ describe('Verifier specialist (#55)', () => {
     expect(report.blockingIssuesCount).toBe(0);
     expect(report.retryRequest).toBeNull();
     expect(report.score).toBe(1.0);
+  });
+
+  it('catches wrong attribute value (e.g. weight mutated to 50 lb instead of 16 fl oz) and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      attributes: {
+        brand: 'ACME',
+        weight: '50 lb', // Mutated value!
+      },
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'attribute_value_fidelity' && !c.passed)).toBe(true);
+    expect(report.retryRequest?.conflictingFields).toContain('weight');
+  });
+
+  it('catches unassociated or forged evidence IDs in draft grounding and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      grounding: [
+        {
+          field: 'brand',
+          claim: 'Brand name: ACME',
+          supportingFactFields: ['brand'],
+          evidenceIds: ['ev:forged:999'], // Forged evidence ID not in fact or registry
+        },
+      ],
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'grounding_evidence_integrity' && !c.passed)).toBe(true);
+  });
+
+  it('catches draft GTIN mismatching resolved identity GTIN and triggers retry_discovery', () => {
+    const draft = sampleDraft({
+      gtin: '999999999999', // Mismatched GTIN
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_discovery');
+    expect(report.checks.some((c) => c.checkName === 'identity_gtin_fidelity' && !c.passed)).toBe(true);
+  });
+
+  it('catches wrong description prose claims and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      description: '**ACME Broth**\n\n### Product Details\n- Net Weight: 50 lb', // Claims 50 lb instead of 16 fl oz
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'description_prose_fidelity' && !c.passed)).toBe(true);
   });
 
   it('triggers retry_discovery when identity status is conflict or unresolved', () => {

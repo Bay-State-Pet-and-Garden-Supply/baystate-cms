@@ -182,32 +182,54 @@ function matchTaxonomy(
   if (options.length === 0 || terms.length === 0) return null;
   const normalizedTerms = terms.map((t) => t.toLowerCase().trim()).filter(Boolean);
 
+  let bestOption: TaxonomyOption | null = null;
+  let bestScore = 0;
+
   for (const option of options) {
     const optName = option.name.toLowerCase().trim();
-    const optSearchText = `${option.name} ${option.path ?? ''}`.toLowerCase().trim();
+    const optPath = (option.path ?? '').toLowerCase().trim();
+    const optNameTokens = optName.split(/[\s,&/\\-]+/).filter((w) => w.length >= 3 && !['and', 'the', 'for', 'with'].includes(w));
+
+    let score = 0;
+
+    // Check exact phrase matches first
     for (const term of normalizedTerms) {
-      if (optSearchText === term || optSearchText.includes(term) || term.includes(optName)) {
-        return option;
+      if (term === optName || term.includes(optName) || (optName.length > 5 && optName.includes(term))) {
+        score += 50;
+      }
+      if (optPath && optPath.includes(term)) {
+        score += 5;
       }
     }
-    const optTokens = optSearchText.split(/[\s,&/\\-]+/).filter((w) => w.length >= 3 && !['and', 'the', 'for'].includes(w));
+
+    // Token matching
+    let matchedNameTokens = 0;
     for (const term of normalizedTerms) {
       const termTokens = term.split(/[\s,&/\\-]+/).filter((w) => w.length >= 3);
-      const hasMatch = optTokens.some((optTok) =>
-        termTokens.some((termTok) => {
-          if (optTok === termTok) return true;
-          if (optTok.length >= 4 && termTok.length >= 4) {
-            return optTok.startsWith(termTok) || termTok.startsWith(optTok);
-          }
-          return false;
-        }),
-      );
-      if (hasMatch) {
-        return option;
+      for (const optTok of optNameTokens) {
+        if (termTokens.includes(optTok)) {
+          score += 10;
+          matchedNameTokens += 1;
+        } else if (termTokens.some((tt) => (tt.length >= 4 && optTok.length >= 4) && (tt.startsWith(optTok) || optTok.startsWith(tt)))) {
+          score += 6;
+          matchedNameTokens += 1;
+        }
       }
     }
+
+    // Specificity / precision penalty: penalize options with many tokens where only one generic token matched
+    if (optNameTokens.length > 1 && matchedNameTokens > 0) {
+      const matchRatio = matchedNameTokens / optNameTokens.length;
+      score *= (0.5 + 0.5 * matchRatio);
+    }
+
+    if (score > bestScore && score >= 6) {
+      bestScore = score;
+      bestOption = option;
+    }
   }
-  return null;
+
+  return bestOption;
 }
 
 // ── Synthesis Logic ──────────────────────────────────────────────────────────
@@ -244,6 +266,7 @@ export function curateProductDraft(
   // Title synthesis.
   const candidateName = resolvedIdentityName ?? sourceTitle;
   const catalogTitle = cleanTitle(brand, candidateName, sizeOrWeight);
+  const subtitle = sizeOrWeight ? `${brand ?? ''} - ${sizeOrWeight}`.trim().replace(/^-\s*/, '') : null;
 
   // Grounding and attributes.
   const attributes: Record<string, string> = {};
@@ -305,6 +328,45 @@ export function curateProductDraft(
     }
   }
 
+  // Grounding for catalog title, subtitle, and description prose
+  const titleSupportingFacts: string[] = [];
+  const titleEvidenceIds: string[] = [];
+  if (brandFact?.status === 'resolved') {
+    titleSupportingFacts.push('brand');
+    titleEvidenceIds.push(...brandFact.supportingEvidence.map((e) => e.id));
+  }
+  if (titleFact?.status === 'resolved') {
+    titleSupportingFacts.push('title');
+    titleEvidenceIds.push(...titleFact.supportingEvidence.map((e) => e.id));
+  }
+  if (weightFact?.status === 'resolved') {
+    titleSupportingFacts.push('weight');
+    titleEvidenceIds.push(...weightFact.supportingEvidence.map((e) => e.id));
+  }
+  if (sizeFact?.status === 'resolved') {
+    titleSupportingFacts.push('size');
+    titleEvidenceIds.push(...sizeFact.supportingEvidence.map((e) => e.id));
+  }
+
+  if (catalogTitle && titleSupportingFacts.length > 0) {
+    grounding.push({
+      field: 'catalogTitle',
+      claim: `Synthesized catalog title: ${catalogTitle}`,
+      supportingFactFields: titleSupportingFacts,
+      evidenceIds: titleEvidenceIds.length > 0 ? [...new Set(titleEvidenceIds)] : ['resolved_fact:title'],
+    });
+  }
+
+  if (subtitle && (weightFact?.status === 'resolved' || sizeFact?.status === 'resolved')) {
+    const subFacts = ['brand', weightFact?.status === 'resolved' ? 'weight' : 'size'].filter(Boolean);
+    grounding.push({
+      field: 'subtitle',
+      claim: `Product subtitle: ${subtitle}`,
+      supportingFactFields: subFacts,
+      evidenceIds: titleEvidenceIds.length > 0 ? [...new Set(titleEvidenceIds)] : ['resolved_fact:subtitle'],
+    });
+  }
+
   // Description construction: strictly grounded in resolved facts.
   const descriptionLines: string[] = [];
   if (catalogTitle) {
@@ -324,6 +386,25 @@ export function curateProductDraft(
   }
 
   const description = descriptionLines.join('\n');
+
+  if (description && titleSupportingFacts.length > 0) {
+    const descFacts = [
+      ...titleSupportingFacts,
+      ...(packCountFact?.status === 'resolved' ? ['packCount'] : []),
+      ...(dimensionsFact?.status === 'resolved' ? ['dimensions'] : []),
+    ];
+    const descEvidenceIds = [
+      ...titleEvidenceIds,
+      ...(packCountFact?.supportingEvidence.map((e) => e.id) ?? []),
+      ...(dimensionsFact?.supportingEvidence.map((e) => e.id) ?? []),
+    ];
+    grounding.push({
+      field: 'description',
+      claim: 'Structured product description bullets',
+      supportingFactFields: [...new Set(descFacts)],
+      evidenceIds: descEvidenceIds.length > 0 ? [...new Set(descEvidenceIds)] : ['resolved_fact:description'],
+    });
+  }
 
   // Classification matching: strictly from provided configuration.
   let productTypeId: string | null = null;

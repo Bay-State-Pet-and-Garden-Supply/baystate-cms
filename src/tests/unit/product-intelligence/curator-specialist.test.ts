@@ -320,6 +320,57 @@ describe('Curator specialist (#54)', () => {
     expect(draft.categoryIds).not.toContain('cat_treats');
   });
 
+  it('selects Dog Food over Dog Treats for Fromm Adult Dog Food even when Dog Treats is first in list', () => {
+    const input: CuratorSpecialistInput = {
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'FROMM-1', name: 'Fromm Adult Dog Food 15 lb', price: '49.99' },
+      resolvedFacts: sampleFactSet({
+        facts: [
+          {
+            field: 'brand',
+            status: 'resolved',
+            value: 'Fromm',
+            canonicalQuantity: null,
+            identifierScope: null,
+            dimensionScope: null,
+            confidence: 0.95,
+            supportingEvidence: [],
+            contradictingEvidence: [],
+            notes: null,
+          },
+          {
+            field: 'title',
+            status: 'resolved',
+            value: 'Fromm Adult Dog Food',
+            canonicalQuantity: null,
+            identifierScope: null,
+            dimensionScope: null,
+            confidence: 0.95,
+            supportingEvidence: [],
+            contradictingEvidence: [],
+            notes: null,
+          },
+        ],
+      }),
+      classificationContext: {
+        availableProductTypes: [
+          { id: 'pt_treats', name: 'Dog Treats' }, // listed first
+          { id: 'pt_food', name: 'Dog Food' },     // listed second
+        ],
+        availableCategories: [
+          { id: 'cat_treats', name: 'Dog Treats', path: 'Dog > Treats' }, // listed first
+          { id: 'cat_food', name: 'Dog Food', path: 'Dog > Food' },       // listed second
+        ],
+        attributeProfiles: [],
+      },
+    };
+
+    const draft = curateProductDraft(input, { now: () => FIXED_NOW });
+    expect(draft.productTypeId).toBe('pt_food');
+    expect(draft.categoryIds).toContain('cat_food');
+    expect(draft.categoryIds).not.toContain('cat_treats');
+  });
+
   it('abstains from classification rather than inventing taxonomy terms when none match', () => {
     const input: CuratorSpecialistInput = {
       schemaVersion: '1.0.0',

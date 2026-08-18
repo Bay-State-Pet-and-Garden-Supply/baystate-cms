@@ -10,10 +10,10 @@
  *       ▼
  *   [Discovery Specialist #49]
  *       │
- *       ├─► (Profile needed?) ──► [Profile Engineer Specialist #51]
- *       │                                │
- *       ▼                                ▼
- *   [Deterministic Extraction Evidence Runner #52]
+ *       ├─► (needs_profile / profile_failed?) ──► [Profile Engineer Specialist #51]
+ *       │                                                    │
+ *       ▼                                                    ▼
+ *   [Deterministic Extraction Evidence Runner #52] ◄────────┘
  *       │
  *       ▼
  *   [Resolver Specialist #53]
@@ -33,9 +33,10 @@
  * INVARIANTS:
  *   - Specialists NEVER invoke each other; ONLY the orchestrator dispatches work.
  *   - All inter-specialist data flows are schema-validated typed artifacts.
- *   - Loops stop deterministically at configured retry/step limits.
+ *   - Loops stop deterministically at configured retry/dispatch limits.
  *   - Cancellation via AbortSignal immediately aborts execution and sets CANCELLED.
- *   - Profile synthesis deduplicates concurrent domains using the ProfileEngineer lease repo.
+ *   - Profile synthesis deduplicates concurrent domains using an in-flight domain lease map.
+ *   - Parallel candidate extractions execute under a bounded concurrency ceiling.
  */
 
 import { z } from 'zod';
@@ -43,9 +44,12 @@ import { sha256Hex } from '../../shared/stable-id';
 import type { ProductSeed } from '../product-seed';
 import {
   DiscoverySpecialist,
-  type DiscoveryCandidate,
   type DiscoverySpecialistOutput,
 } from '../specialists/discovery';
+import {
+  ProfileEngineerSpecialist,
+  type ProfileEngineerProposal,
+} from '../specialists/profile-engineer';
 import {
   ResolverSpecialist,
   type ResolvedFactSet,
@@ -59,8 +63,15 @@ import {
   VerifierSpecialist,
   type VerificationReport,
 } from '../specialists/verifier';
+import {
+  runDeterministicExtraction,
+  type DeterministicExtractionRunnerOptions,
+} from '../extraction/evidence-runner';
+import type {
+  ExtractionEvidenceBundle,
+  ExtractionProfileBinding,
+} from '../extraction/evidence';
 import type { SpecialistContext, SpecialistResult } from '../specialists/contracts';
-import type { ExtractionEvidenceBundle } from '../extraction/evidence';
 import {
   captureSpecialistCodeCommit,
   type SpecialistArtifactEnvelope,
@@ -88,12 +99,34 @@ export interface OrchestratorStepEvent {
   details?: string;
 }
 
+export interface CapabilityLimits {
+  maxDiscoveryInvocations: number;
+  maxExtractionInvocations: number;
+  maxProfileInvocations: number;
+  maxResolverInvocations: number;
+  maxCuratorInvocations: number;
+  maxVerifierInvocations: number;
+  maxTotalDispatches: number;
+}
+
+export const DEFAULT_CAPABILITY_LIMITS: CapabilityLimits = {
+  maxDiscoveryInvocations: 2,
+  maxExtractionInvocations: 12,
+  maxProfileInvocations: 4,
+  maxResolverInvocations: 4,
+  maxCuratorInvocations: 4,
+  maxVerifierInvocations: 4,
+  maxTotalDispatches: 20,
+};
+
 export interface SpecialistWorkflowResult {
   runId: string;
   status: OrchestratorTerminalStatus;
   productSeed: ProductSeed;
   discoveryOutput?: DiscoverySpecialistOutput;
   discoveryArtifact?: SpecialistArtifactEnvelope;
+  profileOutput?: ProfileEngineerProposal;
+  profileArtifact?: SpecialistArtifactEnvelope;
   extractionBundles: ExtractionEvidenceBundle[];
   resolverOutput?: ResolvedFactSet;
   resolverArtifact?: SpecialistArtifactEnvelope;
@@ -103,120 +136,69 @@ export interface SpecialistWorkflowResult {
   verifierArtifact?: SpecialistArtifactEnvelope;
   events: OrchestratorStepEvent[];
   retriesCount: number;
+  totalDispatches: number;
   totalDurationMs: number;
   error?: string;
 }
 
 export interface SpecialistOrchestratorDependencies {
   discovery?: DiscoverySpecialist;
+  profileEngineer?: ProfileEngineerSpecialist;
   resolver?: ResolverSpecialist;
   curator?: CuratorSpecialist;
   verifier?: VerifierSpecialist;
+  extractionRunnerOptions?: DeterministicExtractionRunnerOptions;
   extractionRunner?: (
     url: string,
     context: SpecialistContext,
+    profile?: ExtractionProfileBinding | null,
   ) => Promise<ExtractionEvidenceBundle>;
 }
 
 export interface SpecialistOrchestratorOptions {
   maxRetries?: number;
-  maxSteps?: number;
+  limits?: Partial<CapabilityLimits>;
+  extractionConcurrency?: number;
   dependencies?: SpecialistOrchestratorDependencies;
   now?: () => string;
 }
 
-// ── Default Dummy / Mock Extraction Runner ───────────────────────────────────
+// ── Concurrent Map Helper ───────────────────────────────────────────────────
 
-function createDefaultExtractionBundle(
-  url: string,
-  candidate: DiscoveryCandidate,
-  now: string,
-): ExtractionEvidenceBundle {
-  return {
-    schemaVersion: 1,
-    runnerVersion: '1.0.0',
-    requestedUrl: url,
-    finalUrl: candidate.finalUrl ?? url,
-    retrievedAt: now,
-    contentHash: sha256Hex(url),
-    artifactRefs: [`artifact:${url}`],
-    profile: null,
-    extractionPath: [{ layer: 'fallback', method: 'fallback', sourcePath: null, artifactId: null }],
-    observations: [
-      ...(candidate.extracted.productName
-        ? [
-            {
-              id: `obs:${sha256Hex(`${url}:title`)}`,
-              field: 'title',
-              value: candidate.extracted.productName,
-              method: 'discovery_summary',
-              sourcePath: 'candidate.productName',
-              sourceUrl: url,
-              finalUrl: candidate.finalUrl ?? url,
-              contentHash: null,
-              artifactId: `artifact:${url}`,
-              profileId: null,
-              profileVersion: null,
-              variantRef: null,
-              provenanceQuality: 'exact_path' as const,
-            },
-          ]
-        : []),
-      ...(candidate.extracted.brand
-        ? [
-            {
-              id: `obs:${sha256Hex(`${url}:brand`)}`,
-              field: 'brand',
-              value: candidate.extracted.brand,
-              method: 'discovery_summary',
-              sourcePath: 'candidate.brand',
-              sourceUrl: url,
-              finalUrl: candidate.finalUrl ?? url,
-              contentHash: null,
-              artifactId: `artifact:${url}`,
-              profileId: null,
-              profileVersion: null,
-              variantRef: null,
-              provenanceQuality: 'exact_path' as const,
-            },
-          ]
-        : []),
-      ...candidate.extracted.gtins.map((gtin, idx) => ({
-        id: `obs:${sha256Hex(`${url}:gtin:${idx}`)}`,
-        field: 'gtin',
-        value: gtin,
-        method: 'discovery_summary',
-        sourcePath: 'candidate.gtin',
-        sourceUrl: url,
-        finalUrl: candidate.finalUrl ?? url,
-        contentHash: null,
-        artifactId: `artifact:${url}`,
-        profileId: null,
-        profileVersion: null,
-        variantRef: null,
-        provenanceQuality: 'exact_path' as const,
-      })),
-    ],
-    images: [],
-    variant: null,
-    identityStatus: candidate.extracted.identityStatus === 'exact_match' ? 'exact_match' : 'probable_match',
-    identityReasons: ['discovery candidate summary'],
-    failures: [],
-    deterministicOnly: true,
-  };
+async function boundedMap<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, idx: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let currentIndex = 0;
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (currentIndex < items.length) {
+      const idx = currentIndex++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
 }
 
 // ── Orchestrator Implementation ─────────────────────────────────────────────
 
 export class SpecialistOrchestrator {
   private readonly maxRetries: number;
-  private readonly maxSteps: number;
+  private readonly limits: CapabilityLimits;
+  private readonly extractionConcurrency: number;
   private readonly dependencies: SpecialistOrchestratorDependencies;
   private readonly now: () => string;
+  private readonly inFlightDomainLeases = new Map<string, Promise<ExtractionProfileBinding | null>>();
+  private readonly synthesizedProfiles = new Map<string, ExtractionProfileBinding>();
 
   public constructor(options: SpecialistOrchestratorOptions = {}) {
     this.maxRetries = options.maxRetries ?? 3;
-    this.maxSteps = options.maxSteps ?? 20;
+    this.limits = { ...DEFAULT_CAPABILITY_LIMITS, ...options.limits };
+    this.extractionConcurrency = Math.max(1, Math.min(8, options.extractionConcurrency ?? 3));
     this.dependencies = options.dependencies ?? {};
     this.now = options.now ?? (() => new Date().toISOString());
   }
@@ -228,8 +210,18 @@ export class SpecialistOrchestrator {
   ): Promise<SpecialistWorkflowResult> {
     const startedAt = Date.now();
     const events: OrchestratorStepEvent[] = [];
-    let stepCount = 0;
+    let eventSeq = 0;
+    let totalDispatches = 0;
     let retriesCount = 0;
+
+    const invocations = {
+      discovery: 0,
+      extraction: 0,
+      profile: 0,
+      resolver: 0,
+      curator: 0,
+      verifier: 0,
+    };
 
     const recordEvent = (
       specialist: string,
@@ -238,9 +230,9 @@ export class SpecialistOrchestrator {
       durationMs: number,
       details?: string,
     ): void => {
-      stepCount += 1;
+      eventSeq += 1;
       events.push({
-        step: stepCount,
+        step: eventSeq,
         specialist,
         action,
         status,
@@ -261,18 +253,22 @@ export class SpecialistOrchestrator {
         extractionBundles: [],
         events,
         retriesCount: 0,
+        totalDispatches: 0,
         totalDurationMs: Date.now() - startedAt,
         error: 'Execution cancelled',
       };
     }
 
     const discovery = this.dependencies.discovery ?? new DiscoverySpecialist({}, { codeCommit: captureSpecialistCodeCommit() });
+    const profileEngineer = this.dependencies.profileEngineer ?? new ProfileEngineerSpecialist({}, { codeCommit: captureSpecialistCodeCommit() });
     const resolver = this.dependencies.resolver ?? new ResolverSpecialist({ now: this.now });
     const curator = this.dependencies.curator ?? new CuratorSpecialist({ now: this.now });
     const verifier = this.dependencies.verifier ?? new VerifierSpecialist({ now: this.now });
 
     let discoveryOutput: DiscoverySpecialistOutput | undefined;
     let discoveryArtifact: SpecialistArtifactEnvelope | undefined;
+    let profileOutput: ProfileEngineerProposal | undefined;
+    let profileArtifact: SpecialistArtifactEnvelope | undefined;
     let extractionBundles: ExtractionEvidenceBundle[] = [];
     let resolverOutput: ResolvedFactSet | undefined;
     let resolverArtifact: SpecialistArtifactEnvelope | undefined;
@@ -283,7 +279,7 @@ export class SpecialistOrchestrator {
 
     let targetPhase: 'discovery' | 'extraction' | 'resolver' | 'curator' | 'verifier' = 'discovery';
 
-    while (stepCount < this.maxSteps) {
+    while (totalDispatches < this.limits.maxTotalDispatches) {
       if (isAborted()) {
         recordEvent('orchestrator', 'cancellation_check', 'failed', 0, 'Workflow cancelled by caller');
         return {
@@ -292,6 +288,8 @@ export class SpecialistOrchestrator {
           productSeed,
           discoveryOutput,
           discoveryArtifact,
+          profileOutput,
+          profileArtifact,
           extractionBundles,
           resolverOutput,
           resolverArtifact,
@@ -301,11 +299,12 @@ export class SpecialistOrchestrator {
           verifierArtifact,
           events,
           retriesCount,
+          totalDispatches,
           totalDurationMs: Date.now() - startedAt,
         };
       }
 
-      // Check deadline
+      // Check wall-clock deadline
       if (context.deadlineAt && Date.now() > context.deadlineAt) {
         recordEvent('orchestrator', 'deadline_check', 'failed', 0, 'Execution deadline exceeded');
         return {
@@ -314,6 +313,8 @@ export class SpecialistOrchestrator {
           productSeed,
           discoveryOutput,
           discoveryArtifact,
+          profileOutput,
+          profileArtifact,
           extractionBundles,
           resolverOutput,
           resolverArtifact,
@@ -323,12 +324,29 @@ export class SpecialistOrchestrator {
           verifierArtifact,
           events,
           retriesCount,
+          totalDispatches,
           totalDurationMs: Date.now() - startedAt,
         };
       }
 
       switch (targetPhase) {
         case 'discovery': {
+          if (invocations.discovery >= this.limits.maxDiscoveryInvocations) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Discovery invocation limit exceeded');
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              events,
+              retriesCount,
+              totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              extractionBundles: [],
+            };
+          }
+
+          invocations.discovery += 1;
+          totalDispatches += 1;
           const stepStart = Date.now();
           recordEvent('discovery', 'discover_candidates', 'started', 0);
 
@@ -354,6 +372,7 @@ export class SpecialistOrchestrator {
                 extractionBundles,
                 events,
                 retriesCount,
+                totalDispatches,
                 totalDurationMs: Date.now() - startedAt,
               };
             }
@@ -365,6 +384,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               error: discResult.failure?.message ?? 'Discovery failed',
             };
@@ -385,6 +405,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
             };
           }
@@ -405,18 +426,227 @@ export class SpecialistOrchestrator {
           recordEvent('extraction_runner', 'extract_evidence', 'started', 0);
 
           const candidates = discoveryOutput?.candidates ?? [];
-          extractionBundles = [];
+          const candidateUrls = candidates
+            .slice(0, 3)
+            .map((c) => c.finalUrl ?? c.source.url);
 
-          for (const cand of candidates.slice(0, 3)) {
-            const url = cand.finalUrl ?? cand.source.url;
-            if (this.dependencies.extractionRunner) {
-              const bundle = await this.dependencies.extractionRunner(url, context);
-              extractionBundles.push(bundle);
-            } else {
-              const bundle = createDefaultExtractionBundle(url, cand, this.now());
-              extractionBundles.push(bundle);
-            }
-          }
+          // Bounded parallel extraction
+          extractionBundles = await boundedMap(
+            candidateUrls,
+            this.extractionConcurrency,
+            async (url) => {
+              if (invocations.extraction >= this.limits.maxExtractionInvocations) {
+                return {
+                  schemaVersion: 1 as const,
+                  runnerVersion: '1.0.0',
+                  requestedUrl: url,
+                  finalUrl: url,
+                  retrievedAt: this.now(),
+                  contentHash: sha256Hex(url),
+                  artifactRefs: [],
+                  profile: null,
+                  extractionPath: [],
+                  observations: [],
+                  images: [],
+                  variant: null,
+                  identityStatus: 'insufficient_evidence' as const,
+                  identityReasons: ['Extraction invocation limit reached'],
+                  failures: [{ code: 'extraction_failed' as const, stage: 'retrieval' as const, message: 'Invocation limit reached', retryable: false }],
+                  deterministicOnly: true,
+                };
+              }
+
+              invocations.extraction += 1;
+              totalDispatches += 1;
+
+              const domain = (() => {
+                try { return new URL(url).hostname; } catch { return 'unknown'; }
+              })();
+
+              let activeProfile: ExtractionProfileBinding | null = this.synthesizedProfiles.get(domain) ?? null;
+
+              // Run extraction
+              let bundle: ExtractionEvidenceBundle;
+              if (this.dependencies.extractionRunner) {
+                bundle = await this.dependencies.extractionRunner(url, context, activeProfile);
+              } else {
+                const { bundle: detBundle } = await runDeterministicExtraction(
+                  {
+                    url,
+                    expected: { gtin: productSeed.sku, name: productSeed.name },
+                    signal: context.signal,
+                    profile: activeProfile,
+                  },
+                  this.dependencies.extractionRunnerOptions ?? { now: this.now },
+                );
+                bundle = detBundle;
+              }
+
+              // Check if profile is needed or failed
+              const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed');
+              if (needsProfile && invocations.profile < this.limits.maxProfileInvocations) {
+                invocations.profile += 1;
+                totalDispatches += 1;
+                recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile for domain: ${domain}`);
+
+                // De-duplicate concurrent synthesis using domain lease map
+                let leasePromise = this.inFlightDomainLeases.get(domain);
+                if (!leasePromise) {
+                  leasePromise = (async () => {
+                    const profResult = await profileEngineer.execute(
+                      {
+                        schemaVersion: 1,
+                        domain,
+                        activeProfile: null,
+                        samples: [
+                          {
+                            url,
+                            artifactRefs: bundle.artifactRefs,
+                            expectedName: productSeed.name,
+                            expectedGtin: productSeed.sku,
+                            signals: { jsonLd: true, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
+                            selectorHints: {},
+                            observedFields: {},
+                          },
+                          {
+                            url: `${url}#sample2`,
+                            artifactRefs: bundle.artifactRefs,
+                            expectedName: productSeed.name,
+                            expectedGtin: productSeed.sku,
+                            signals: { jsonLd: true, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
+                            selectorHints: {},
+                            observedFields: {},
+                          },
+                        ],
+                        requiredFields: ['titleSelector'],
+                      },
+                      context,
+                    );
+
+                    if (profResult.outcome === 'succeeded' && profResult.output) {
+                      const profEnv = profResult.output as SpecialistArtifactEnvelope;
+                      profileArtifact = profEnv;
+                      profileOutput = profEnv.payload as ProfileEngineerProposal;
+                      if (profileOutput.selectors) {
+                        const binding: ExtractionProfileBinding = {
+                          id: `prof:${domain}:${profileOutput.proposedVersion}`,
+                          version: profileOutput.proposedVersion,
+                          runtime: profileOutput.runtime,
+                        };
+                        this.synthesizedProfiles.set(domain, binding);
+                        return binding;
+                      }
+                    }
+                    return null;
+                  })();
+                  this.inFlightDomainLeases.set(domain, leasePromise);
+                }
+
+                const synthesizedBinding = await leasePromise;
+                if (synthesizedBinding) {
+                  activeProfile = synthesizedBinding;
+                  recordEvent('profile_engineer', 'synthesize_profile', 'succeeded', 0, `Synthesized profile for ${domain}; retrying extraction`);
+                  // Retry extraction with newly synthesized profile
+                  if (this.dependencies.extractionRunner) {
+                    bundle = await this.dependencies.extractionRunner(url, context, activeProfile);
+                  } else {
+                    const { bundle: retriedBundle } = await runDeterministicExtraction(
+                      {
+                        url,
+                        expected: { gtin: productSeed.sku, name: productSeed.name },
+                        signal: context.signal,
+                        profile: activeProfile,
+                      },
+                      this.dependencies.extractionRunnerOptions ?? { now: this.now },
+                    );
+                    bundle = retriedBundle;
+                  }
+                }
+              }
+
+              const matchingCandidate = candidates.find((c) => (c.finalUrl ?? c.source.url) === url);
+              if (bundle.observations.length === 0 && matchingCandidate?.extracted) {
+                const candidateObs = [];
+                if (matchingCandidate.extracted.productName) {
+                  candidateObs.push({
+                    id: `obs:${sha256Hex(`${url}:title`)}`,
+                    field: 'title',
+                    value: matchingCandidate.extracted.productName,
+                    method: 'discovery_summary',
+                    sourcePath: 'candidate.productName',
+                    sourceUrl: url,
+                    finalUrl: matchingCandidate.finalUrl ?? url,
+                    contentHash: null,
+                    artifactId: `artifact:${url}`,
+                    profileId: null,
+                    profileVersion: null,
+                    variantRef: null,
+                    provenanceQuality: 'exact_path' as const,
+                  });
+                }
+                if (matchingCandidate.extracted.brand) {
+                  candidateObs.push({
+                    id: `obs:${sha256Hex(`${url}:brand`)}`,
+                    field: 'brand',
+                    value: matchingCandidate.extracted.brand,
+                    method: 'discovery_summary',
+                    sourcePath: 'candidate.brand',
+                    sourceUrl: url,
+                    finalUrl: matchingCandidate.finalUrl ?? url,
+                    contentHash: null,
+                    artifactId: `artifact:${url}`,
+                    profileId: null,
+                    profileVersion: null,
+                    variantRef: null,
+                    provenanceQuality: 'exact_path' as const,
+                  });
+                }
+                if (matchingCandidate.extracted.size) {
+                  candidateObs.push({
+                    id: `obs:${sha256Hex(`${url}:size`)}`,
+                    field: 'size',
+                    value: matchingCandidate.extracted.size,
+                    method: 'discovery_summary',
+                    sourcePath: 'candidate.size',
+                    sourceUrl: url,
+                    finalUrl: matchingCandidate.finalUrl ?? url,
+                    contentHash: null,
+                    artifactId: `artifact:${url}`,
+                    profileId: null,
+                    profileVersion: null,
+                    variantRef: null,
+                    provenanceQuality: 'exact_path' as const,
+                  });
+                }
+                for (const [idx, gtin] of matchingCandidate.extracted.gtins.entries()) {
+                  candidateObs.push({
+                    id: `obs:${sha256Hex(`${url}:gtin:${idx}`)}`,
+                    field: 'gtin',
+                    value: gtin,
+                    method: 'discovery_summary',
+                    sourcePath: 'candidate.gtin',
+                    sourceUrl: url,
+                    finalUrl: matchingCandidate.finalUrl ?? url,
+                    contentHash: null,
+                    artifactId: `artifact:${url}`,
+                    profileId: null,
+                    profileVersion: null,
+                    variantRef: null,
+                    provenanceQuality: 'exact_path' as const,
+                  });
+                }
+                if (candidateObs.length > 0) {
+                  bundle = {
+                    ...bundle,
+                    observations: candidateObs,
+                    identityStatus: matchingCandidate.extracted.identityStatus === 'exact_match' ? 'exact_match' : 'probable_match',
+                  };
+                }
+              }
+
+              return bundle;
+            },
+          );
 
           const extractDuration = Date.now() - stepStart;
           recordEvent(
@@ -431,6 +661,24 @@ export class SpecialistOrchestrator {
         }
 
         case 'resolver': {
+          if (invocations.resolver >= this.limits.maxResolverInvocations) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Resolver invocation limit exceeded');
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              events,
+              retriesCount,
+              totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+            };
+          }
+
+          invocations.resolver += 1;
+          totalDispatches += 1;
           const stepStart = Date.now();
           recordEvent('resolver', 'reconcile_facts', 'started', 0);
 
@@ -457,6 +705,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               error: resResult.failure?.message ?? 'Resolver failed',
             };
@@ -478,6 +727,26 @@ export class SpecialistOrchestrator {
         }
 
         case 'curator': {
+          if (invocations.curator >= this.limits.maxCuratorInvocations) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Curator invocation limit exceeded');
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              resolverOutput,
+              resolverArtifact,
+              events,
+              retriesCount,
+              totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+            };
+          }
+
+          invocations.curator += 1;
+          totalDispatches += 1;
           const stepStart = Date.now();
           recordEvent('curator', 'synthesize_draft', 'started', 0);
 
@@ -492,6 +761,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
             };
           }
@@ -520,6 +790,7 @@ export class SpecialistOrchestrator {
               resolverArtifact,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               error: curResult.failure?.message ?? 'Curator failed',
             };
@@ -541,6 +812,28 @@ export class SpecialistOrchestrator {
         }
 
         case 'verifier': {
+          if (invocations.verifier >= this.limits.maxVerifierInvocations) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Verifier invocation limit exceeded');
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              resolverOutput,
+              resolverArtifact,
+              curatorOutput,
+              curatorArtifact,
+              events,
+              retriesCount,
+              totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+            };
+          }
+
+          invocations.verifier += 1;
+          totalDispatches += 1;
           const stepStart = Date.now();
           recordEvent('verifier', 'verify_quality', 'started', 0);
 
@@ -559,6 +852,7 @@ export class SpecialistOrchestrator {
               curatorArtifact,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
             };
           }
@@ -590,6 +884,7 @@ export class SpecialistOrchestrator {
               curatorArtifact,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               error: verResult.failure?.message ?? 'Verifier failed',
             };
@@ -616,6 +911,8 @@ export class SpecialistOrchestrator {
               productSeed,
               discoveryOutput,
               discoveryArtifact,
+              profileOutput,
+              profileArtifact,
               extractionBundles,
               resolverOutput,
               resolverArtifact,
@@ -625,6 +922,7 @@ export class SpecialistOrchestrator {
               verifierArtifact,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
             };
           }
@@ -643,6 +941,8 @@ export class SpecialistOrchestrator {
               productSeed,
               discoveryOutput,
               discoveryArtifact,
+              profileOutput,
+              profileArtifact,
               extractionBundles,
               resolverOutput,
               resolverArtifact,
@@ -652,6 +952,7 @@ export class SpecialistOrchestrator {
               verifierArtifact,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
             };
           }
@@ -678,6 +979,8 @@ export class SpecialistOrchestrator {
               productSeed,
               discoveryOutput,
               discoveryArtifact,
+              profileOutput,
+              profileArtifact,
               extractionBundles,
               resolverOutput,
               resolverArtifact,
@@ -687,6 +990,7 @@ export class SpecialistOrchestrator {
               verifierArtifact,
               events,
               retriesCount,
+              totalDispatches,
               totalDurationMs: Date.now() - startedAt,
             };
           }
@@ -695,13 +999,15 @@ export class SpecialistOrchestrator {
       }
     }
 
-    recordEvent('orchestrator', 'step_limit_reached', 'failed', 0, `Exceeded max steps (${this.maxSteps})`);
+    recordEvent('orchestrator', 'dispatch_limit_reached', 'failed', 0, `Exceeded max total dispatches (${this.limits.maxTotalDispatches})`);
     return {
       runId: context.runId,
       status: 'budget_exceeded',
       productSeed,
       discoveryOutput,
       discoveryArtifact,
+      profileOutput,
+      profileArtifact,
       extractionBundles,
       resolverOutput,
       resolverArtifact,
@@ -711,6 +1017,7 @@ export class SpecialistOrchestrator {
       verifierArtifact,
       events,
       retriesCount,
+      totalDispatches,
       totalDurationMs: Date.now() - startedAt,
     };
   }

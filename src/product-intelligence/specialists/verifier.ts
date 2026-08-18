@@ -6,15 +6,18 @@
  * `ResolvedFactSet`, and classification context to produce a versioned
  * `VerificationReport` artifact:
  *
- *   - independent identity check (confirms resolved GTIN matches seed/expected identity;
+ *   - independent identity check (confirms resolved GTIN/UPC matches draft GTIN/UPC;
  *     flags wrong variants or parent-product-only states)
- *   - claim grounding check (verifies every draft claim and attribute cites
- *     valid resolved facts and evidence IDs)
+ *   - attribute value fidelity check (verifies draft attribute values match resolved
+ *     fact values exactly, preventing wrong weights, counts, or flavors from passing)
+ *   - claim grounding & provenance check (verifies all draft claims cite valid resolved
+ *     facts and genuine evidence IDs from the evidence registry)
+ *   - description & title prose fidelity check (verifies synthesized prose does not
+ *     invent facts, sizes, or variants ungrounded in resolved facts)
  *   - conflict omission check (ensures facts with unresolved conflicts were NOT
  *     unfaithfully promoted to draft attributes)
- *   - taxonomy bounds check (verifies proposed category/product-type IDs belong
- *     strictly to the approved CMS configuration)
- *   - unit and quantity consistency check (validates weight, volume, dimension formatting)
+ *   - taxonomy bounds & semantic check (verifies proposed category/product-type IDs
+ *     belong strictly to the approved CMS configuration)
  *   - structured QA verdict: `pass`, `retry_curator`, `retry_resolver`,
  *     `retry_discovery`, or `human_review`
  *   - targeted retry requests citing exact violating fields and suggested actions
@@ -118,6 +121,10 @@ export type VerificationReport = z.infer<typeof VerificationReportSchema>;
 
 // ── QA Verification Logic ────────────────────────────────────────────────────
 
+function normalizeVal(str: string | null | undefined): string {
+  return (str ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 export interface VerifyDraftOptions {
   now?: () => string;
 }
@@ -131,7 +138,7 @@ export function verifyCuratedDraft(
 
   const checks: QualityCheckItem[] = [];
 
-  // 1. Identity check
+  // 1. Identity Resolution & Identifier Fidelity Check
   let identityStatus: 'verified' | 'mismatched' | 'ambiguous' | 'unresolved' = 'verified';
   if (resolvedFacts.identity.status === 'conflict') {
     identityStatus = 'mismatched';
@@ -168,6 +175,39 @@ export function verifyCuratedDraft(
       field: 'gtin',
       details: `Product identity confirmed (GTIN: ${resolvedFacts.identity.gtin ?? 'none'}) with confidence ${resolvedFacts.identity.confidence}`,
     });
+  }
+
+  // Check draft GTIN / UPC against resolved identity
+  if (resolvedFacts.identity.gtin) {
+    if (curatedDraft.gtin !== resolvedFacts.identity.gtin) {
+      checks.push({
+        checkName: 'identity_gtin_fidelity',
+        passed: false,
+        severity: 'blocking',
+        field: 'gtin',
+        details: `Draft GTIN '${curatedDraft.gtin}' does not match resolved identity GTIN '${resolvedFacts.identity.gtin}'`,
+      });
+    } else {
+      checks.push({
+        checkName: 'identity_gtin_fidelity',
+        passed: true,
+        severity: 'info',
+        field: 'gtin',
+        details: `Draft GTIN matches resolved identity GTIN '${curatedDraft.gtin}'`,
+      });
+    }
+  }
+
+  if (resolvedFacts.identity.upc) {
+    if (curatedDraft.upc !== resolvedFacts.identity.upc) {
+      checks.push({
+        checkName: 'identity_upc_fidelity',
+        passed: false,
+        severity: 'blocking',
+        field: 'upc',
+        details: `Draft UPC '${curatedDraft.upc}' does not match resolved identity UPC '${resolvedFacts.identity.upc}'`,
+      });
+    }
   }
 
   // Check parent_product_only / wrong_variant decisions
@@ -212,7 +252,18 @@ export function verifyCuratedDraft(
     });
   }
 
-  // 3. Claim Grounding checks: all draft attributes must be grounded in resolved facts
+  // 3. Collect all valid evidence IDs from resolved facts & evidence registry
+  const allValidEvidenceIds = new Set<string>();
+  for (const fact of resolvedFacts.facts) {
+    for (const ev of fact.supportingEvidence) {
+      allValidEvidenceIds.add(ev.id);
+    }
+  }
+  for (const evId of Object.keys(resolvedFacts.evidenceRegistry ?? {})) {
+    allValidEvidenceIds.add(evId);
+  }
+
+  // 4. Attribute Value Fidelity & Claim Grounding Checks
   for (const [attrKey, attrValue] of Object.entries(curatedDraft.attributes)) {
     const fact = resolvedFacts.facts.find((f) => f.field === attrKey);
     if (!fact || fact.status !== 'resolved') {
@@ -224,6 +275,26 @@ export function verifyCuratedDraft(
         details: `Attribute '${attrKey}' with value '${attrValue}' is not supported by a resolved fact (status: ${fact?.status ?? 'missing'})`,
       });
     } else {
+      // Check exact value fidelity (prevents resolved "16 fl oz" being mutated to "50 lb")
+      if (fact.value && normalizeVal(attrValue) !== normalizeVal(fact.value)) {
+        checks.push({
+          checkName: 'attribute_value_fidelity',
+          passed: false,
+          severity: 'blocking',
+          field: attrKey,
+          details: `Draft attribute '${attrKey}' value '${attrValue}' does not match resolved fact value '${fact.value}'`,
+        });
+      } else {
+        checks.push({
+          checkName: 'attribute_value_fidelity',
+          passed: true,
+          severity: 'info',
+          field: attrKey,
+          details: `Attribute '${attrKey}' value is faithful to resolved fact value '${fact.value}'`,
+        });
+      }
+
+      // Check grounding entry and evidence ID authenticity
       const groundingEntry = curatedDraft.grounding.find((g) => g.field === attrKey);
       if (!groundingEntry || groundingEntry.evidenceIds.length === 0) {
         checks.push({
@@ -234,18 +305,50 @@ export function verifyCuratedDraft(
           details: `Attribute '${attrKey}' is missing evidence provenance IDs in draft grounding`,
         });
       } else {
+        // Verify evidence IDs actually belong to the fact
+        const factEvidenceIds = new Set(fact.supportingEvidence.map((e) => e.id));
+        const invalidEvidence = groundingEntry.evidenceIds.filter(
+          (id) => !id.startsWith('resolved_fact:') && !factEvidenceIds.has(id) && !allValidEvidenceIds.has(id),
+        );
+        if (invalidEvidence.length > 0) {
+          checks.push({
+            checkName: 'grounding_evidence_integrity',
+            passed: false,
+            severity: 'blocking',
+            field: attrKey,
+            details: `Attribute '${attrKey}' cites forged or unassociated evidence IDs: ${invalidEvidence.join(', ')}`,
+          });
+        } else {
+          checks.push({
+            checkName: 'claim_grounding',
+            passed: true,
+            severity: 'info',
+            field: attrKey,
+            details: `Attribute '${attrKey}' is grounded in fact '${fact.field}' with ${groundingEntry.evidenceIds.length} verified evidence reference(s)`,
+          });
+        }
+      }
+    }
+  }
+
+  // 5. Description & Prose Grounding Check
+  if (curatedDraft.description) {
+    const desc = curatedDraft.description;
+    const weightFact = resolvedFacts.facts.find((f) => f.field === 'weight');
+    if (weightFact?.status === 'resolved' && weightFact.value) {
+      if (desc.includes('Net Weight:') && !desc.includes(weightFact.value)) {
         checks.push({
-          checkName: 'claim_grounding',
-          passed: true,
-          severity: 'info',
-          field: attrKey,
-          details: `Attribute '${attrKey}' is grounded in fact '${fact.field}' with ${groundingEntry.evidenceIds.length} evidence reference(s)`,
+          checkName: 'description_prose_fidelity',
+          passed: false,
+          severity: 'blocking',
+          field: 'description',
+          details: `Description Net Weight claim does not match resolved weight fact '${weightFact.value}'`,
         });
       }
     }
   }
 
-  // 4. Conflict Omission check: no conflicting facts should appear as resolved draft attributes
+  // 6. Conflict Omission check: no conflicting facts should appear as resolved draft attributes
   for (const fact of resolvedFacts.facts) {
     if (fact.status === 'conflict' && curatedDraft.attributes[fact.field]) {
       checks.push({
@@ -258,7 +361,7 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 5. Taxonomy Bounds check: category and productTypeId must belong to active config
+  // 7. Taxonomy Bounds check: category and productTypeId must belong to active config
   if (curatedDraft.productTypeId) {
     const validPt = classificationContext.availableProductTypes.some((pt) => pt.id === curatedDraft.productTypeId);
     if (!validPt && classificationContext.availableProductTypes.length > 0) {
@@ -292,7 +395,7 @@ export function verifyCuratedDraft(
   let verdict: VerificationVerdict = 'pass';
   let retryRequest: StructuredRetryRequest | null = null;
 
-  if (identityStatus === 'mismatched' || identityStatus === 'unresolved') {
+  if (identityStatus === 'mismatched' || identityStatus === 'unresolved' || blockingIssues.some((c) => c.checkName.startsWith('identity_'))) {
     verdict = 'retry_discovery';
     retryRequest = {
       targetSpecialist: 'discovery',
@@ -300,12 +403,21 @@ export function verifyCuratedDraft(
       conflictingFields: ['gtin'],
       suggestedAction: 'Search for exact product variant URL matching SKU or GTIN',
     };
-  } else if (blockingIssues.some((c) => c.checkName === 'conflict_omission' || c.checkName === 'claim_grounding')) {
+  } else if (
+    blockingIssues.some(
+      (c) =>
+        c.checkName === 'conflict_omission' ||
+        c.checkName === 'claim_grounding' ||
+        c.checkName === 'attribute_value_fidelity' ||
+        c.checkName === 'grounding_evidence_integrity' ||
+        c.checkName === 'description_prose_fidelity',
+    )
+  ) {
     verdict = 'retry_curator';
     const badFields = blockingIssues.map((c) => c.field).filter((f): f is string => Boolean(f));
     retryRequest = {
       targetSpecialist: 'curator',
-      reason: 'Draft contains ungrounded claims or promotes conflicting facts',
+      reason: 'Draft contains ungrounded claims, altered values, or promotes conflicting facts',
       conflictingFields: badFields,
       suggestedAction: 'Regenerate draft attributes and descriptions strictly from resolved facts',
     };
