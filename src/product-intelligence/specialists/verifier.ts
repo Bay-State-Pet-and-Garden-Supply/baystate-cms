@@ -10,11 +10,12 @@
  *     flags wrong variants or parent-product-only states)
  *   - attribute value fidelity check (verifies draft attribute values match resolved
  *     fact values exactly, preventing wrong weights, counts, or flavors from passing)
- *   - claim grounding & provenance check (verifies every grounding entry cites valid
- *     resolved facts and that all evidence IDs strictly belong to the cited fact(s))
- *   - structured prose fidelity check (verifies synthesized title, subtitle, and
- *     description claims—including Brand, Net Weight, Size, Count, Dimensions bullets—
- *     faithfully reflect resolved facts without cross-fact or invented claims)
+ *   - mandatory grounding existence check (verifies EVERY emitted attribute, catalog
+ *     title, subtitle, and description has a non-empty grounding entry with valid evidence)
+ *   - strict per-fact evidence isolation (verifies grounding evidence IDs strictly
+ *     belong to the declared supporting fact(s) and synthetic references validate)
+ *   - comprehensive prose QA (verifies catalog title brand/weight alignment and parses
+ *     all bullet claims in description—rejecting unsupported claims and value contradictions)
  *   - conflict omission check (ensures facts with unresolved conflicts were NOT
  *     unfaithfully promoted to draft attributes)
  *   - taxonomy bounds & semantic check (verifies proposed category/product-type IDs
@@ -124,6 +125,30 @@ export type VerificationReport = z.infer<typeof VerificationReportSchema>;
 
 function normalizeVal(str: string | null | undefined): string {
   return (str ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function mapBulletLabelToField(label: string): string {
+  const norm = normalizeVal(label);
+  switch (norm) {
+    case 'brand': return 'brand';
+    case 'net weight':
+    case 'weight': return 'weight';
+    case 'size':
+    case 'volume': return 'size';
+    case 'package count':
+    case 'pack count':
+    case 'count': return 'packCount';
+    case 'dimensions': return 'dimensions';
+    case 'case dimensions': return 'caseDimensions';
+    case 'shipping dimensions': return 'shippingDimensions';
+    case 'gtin':
+    case 'upc': return 'gtin';
+    case 'sku': return 'sku';
+    case 'flavor': return 'flavor';
+    case 'color': return 'color';
+    case 'material': return 'material';
+    default: return norm.replace(/[^a-z0-9]/g, '');
+  }
 }
 
 export interface VerifyDraftOptions {
@@ -248,7 +273,8 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 3. Catalog Title check
+  // 3. Catalog Title Quality and Alignment
+  const weightFact = resolvedFacts.facts.find((f) => f.field === 'weight');
   if (!curatedDraft.catalogTitle || curatedDraft.catalogTitle.trim() === 'Untitled Product') {
     checks.push({
       checkName: 'catalog_title_quality',
@@ -265,9 +291,34 @@ export function verifyCuratedDraft(
       field: 'catalogTitle',
       details: `Catalog title '${curatedDraft.catalogTitle}' is well-formed`,
     });
+
+    if (brandFact?.status === 'resolved' && brandFact.value) {
+      if (!normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(brandFact.value))) {
+        checks.push({
+          checkName: 'catalog_title_brand_alignment',
+          passed: false,
+          severity: 'blocking',
+          field: 'catalogTitle',
+          details: `Catalog title '${curatedDraft.catalogTitle}' is missing resolved brand '${brandFact.value}'`,
+        });
+      }
+    }
+
+    if (weightFact?.status === 'resolved' && weightFact.value) {
+      const weightMatch = /\b\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|lb|lbs|kg|g|ml|l)\b/i.exec(curatedDraft.catalogTitle);
+      if (weightMatch && !normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(weightFact.value))) {
+        checks.push({
+          checkName: 'catalog_title_weight_alignment',
+          passed: false,
+          severity: 'blocking',
+          field: 'catalogTitle',
+          details: `Catalog title '${curatedDraft.catalogTitle}' mentions weight '${weightMatch[0]}' mismatching resolved weight '${weightFact.value}'`,
+        });
+      }
+    }
   }
 
-  // 4. Attribute Value Fidelity Checks
+  // 4. Mandatory Grounding Coverage Checks (every output field must have valid grounding)
   for (const [attrKey, attrValue] of Object.entries(curatedDraft.attributes)) {
     const fact = resolvedFacts.facts.find((f) => f.field === attrKey);
     if (!fact || fact.status !== 'resolved') {
@@ -288,26 +339,66 @@ export function verifyCuratedDraft(
           field: attrKey,
           details: `Draft attribute '${attrKey}' value '${attrValue}' does not match resolved fact value '${fact.value}'`,
         });
-      } else {
+      }
+
+      // Grounding entry existence for attribute
+      const groundingEntry = curatedDraft.grounding.find((g) => g.field === attrKey);
+      if (!groundingEntry || groundingEntry.evidenceIds.length === 0) {
         checks.push({
-          checkName: 'attribute_value_fidelity',
-          passed: true,
-          severity: 'info',
+          checkName: 'missing_attribute_grounding',
+          passed: false,
+          severity: 'blocking',
           field: attrKey,
-          details: `Attribute '${attrKey}' value is faithful to resolved fact value '${fact.value}'`,
+          details: `Attribute '${attrKey}' is missing required grounding provenance entry in draft`,
         });
       }
     }
   }
 
-  // 5. Strict Grounding & Evidence Integrity Check (Per-Fact Evidence Isolation)
+  // Required grounding for catalogTitle, description, and subtitle
+  const titleGrounding = curatedDraft.grounding.find((g) => g.field === 'catalogTitle');
+  if (!titleGrounding || titleGrounding.evidenceIds.length === 0) {
+    checks.push({
+      checkName: 'missing_title_grounding',
+      passed: false,
+      severity: 'blocking',
+      field: 'catalogTitle',
+      details: 'Catalog title is missing required grounding entry in draft',
+    });
+  }
+
+  const descGrounding = curatedDraft.grounding.find((g) => g.field === 'description');
+  if (!descGrounding || descGrounding.evidenceIds.length === 0) {
+    checks.push({
+      checkName: 'missing_description_grounding',
+      passed: false,
+      severity: 'blocking',
+      field: 'description',
+      details: 'Product description is missing required grounding entry in draft',
+    });
+  }
+
+  if (curatedDraft.subtitle) {
+    const subtitleGrounding = curatedDraft.grounding.find((g) => g.field === 'subtitle');
+    if (!subtitleGrounding || subtitleGrounding.evidenceIds.length === 0) {
+      checks.push({
+        checkName: 'missing_subtitle_grounding',
+        passed: false,
+        severity: 'blocking',
+        field: 'subtitle',
+        details: 'Product subtitle is missing required grounding entry in draft',
+      });
+    }
+  }
+
+  // 5. Strict Per-Fact Grounding Evidence Isolation
   for (const groundingEntry of curatedDraft.grounding) {
     const citedFields = groundingEntry.supportingFactFields;
     if (citedFields.length === 0) {
       checks.push({
-        checkName: 'claim_provenance',
+        checkName: 'grounding_evidence_misassociation',
         passed: false,
-        severity: 'warning',
+        severity: 'blocking',
         field: groundingEntry.field,
         details: `Grounding entry for '${groundingEntry.field}' specifies no supporting fact fields`,
       });
@@ -349,80 +440,35 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 6. Description & Structured Prose Claims QA
+  // 6. Comprehensive Description Prose & Bullet Claims QA
   if (curatedDraft.description) {
     const desc = curatedDraft.description;
+    const lines = desc.split('\n');
 
-    // Check Brand bullet claim
-    const brandMatch = /(?:-|\*)\s*Brand:\s*([^\n\r]+)/i.exec(desc);
-    if (brandMatch && brandFact?.status === 'resolved' && brandFact.value) {
-      if (normalizeVal(brandMatch[1]) !== normalizeVal(brandFact.value)) {
+    for (const line of lines) {
+      const bulletMatch = /^\s*(?:-|\*)\s*([^:]+):\s*(.+)$/.exec(line);
+      if (!bulletMatch) continue;
+
+      const rawLabel = bulletMatch[1].trim();
+      const rawClaimValue = bulletMatch[2].trim();
+      const mappedField = mapBulletLabelToField(rawLabel);
+
+      const fact = resolvedFacts.facts.find((f) => f.field === mappedField);
+      if (!fact || fact.status !== 'resolved') {
         checks.push({
-          checkName: 'description_claim_mismatch',
+          checkName: 'unsupported_description_claim',
           passed: false,
           severity: 'blocking',
           field: 'description',
-          details: `Description Brand claim '${brandMatch[1].trim()}' does not match resolved brand fact '${brandFact.value}'`,
+          details: `Description claims '${rawLabel}: ${rawClaimValue}', but '${mappedField}' is not a resolved fact (status: ${fact?.status ?? 'missing'})`,
         });
-      }
-    }
-
-    // Check Net Weight bullet claim
-    const weightFact = resolvedFacts.facts.find((f) => f.field === 'weight');
-    const weightMatch = /(?:-|\*)\s*Net Weight:\s*([^\n\r]+)/i.exec(desc);
-    if (weightMatch && weightFact?.status === 'resolved' && weightFact.value) {
-      if (normalizeVal(weightMatch[1]) !== normalizeVal(weightFact.value)) {
+      } else if (fact.value && normalizeVal(rawClaimValue) !== normalizeVal(fact.value)) {
         checks.push({
           checkName: 'description_claim_mismatch',
           passed: false,
           severity: 'blocking',
           field: 'description',
-          details: `Description Net Weight claim '${weightMatch[1].trim()}' does not match resolved weight fact '${weightFact.value}'`,
-        });
-      }
-    }
-
-    // Check Size bullet claim
-    const sizeFact = resolvedFacts.facts.find((f) => f.field === 'size');
-    const sizeMatch = /(?:-|\*)\s*Size:\s*([^\n\r]+)/i.exec(desc);
-    if (sizeMatch && sizeFact?.status === 'resolved' && sizeFact.value) {
-      if (normalizeVal(sizeMatch[1]) !== normalizeVal(sizeFact.value)) {
-        checks.push({
-          checkName: 'description_claim_mismatch',
-          passed: false,
-          severity: 'blocking',
-          field: 'description',
-          details: `Description Size claim '${sizeMatch[1].trim()}' does not match resolved size fact '${sizeFact.value}'`,
-        });
-      }
-    }
-
-    // Check Package Count bullet claim
-    const packFact = resolvedFacts.facts.find((f) => f.field === 'packCount');
-    const packMatch = /(?:-|\*)\s*Package Count:\s*([^\n\r]+)/i.exec(desc);
-    if (packMatch && packFact?.status === 'resolved' && packFact.value) {
-      if (normalizeVal(packMatch[1]) !== normalizeVal(packFact.value)) {
-        checks.push({
-          checkName: 'description_claim_mismatch',
-          passed: false,
-          severity: 'blocking',
-          field: 'description',
-          details: `Description Package Count claim '${packMatch[1].trim()}' does not match resolved packCount fact '${packFact.value}'`,
-        });
-      }
-    }
-
-    // Check Dimensions bullet claim
-    const dimFact = resolvedFacts.facts.find((f) => f.field === 'dimensions');
-    const dimMatch = /(?:-|\*)\s*Dimensions:\s*([^\n\r]+)/i.exec(desc);
-    if (dimMatch && dimFact?.status === 'resolved' && dimFact.value) {
-      if (normalizeVal(dimMatch[1]) !== normalizeVal(dimFact.value)) {
-        checks.push({
-          checkName: 'description_claim_mismatch',
-          passed: false,
-          severity: 'blocking',
-          field: 'description',
-          details: `Description Dimensions claim '${dimMatch[1].trim()}' does not match resolved dimensions fact '${dimFact.value}'`,
+          details: `Description claims '${rawLabel}: ${rawClaimValue}', but resolved fact value is '${fact.value}'`,
         });
       }
     }
@@ -490,7 +536,13 @@ export function verifyCuratedDraft(
         c.checkName === 'claim_grounding' ||
         c.checkName === 'attribute_value_fidelity' ||
         c.checkName === 'brand_fidelity' ||
+        c.checkName === 'catalog_title_brand_alignment' ||
+        c.checkName === 'missing_attribute_grounding' ||
+        c.checkName === 'missing_title_grounding' ||
+        c.checkName === 'missing_description_grounding' ||
+        c.checkName === 'missing_subtitle_grounding' ||
         c.checkName === 'grounding_evidence_misassociation' ||
+        c.checkName === 'unsupported_description_claim' ||
         c.checkName === 'description_claim_mismatch',
     )
   ) {
@@ -498,9 +550,9 @@ export function verifyCuratedDraft(
     const badFields = blockingIssues.map((c) => c.field).filter((f): f is string => Boolean(f));
     retryRequest = {
       targetSpecialist: 'curator',
-      reason: 'Draft contains ungrounded claims, altered values, or promotes conflicting facts',
+      reason: 'Draft contains ungrounded claims, altered values, missing required grounding, or promotes conflicting facts',
       conflictingFields: badFields,
-      suggestedAction: 'Regenerate draft attributes and descriptions strictly from resolved facts',
+      suggestedAction: 'Regenerate draft attributes and descriptions strictly from resolved facts with complete grounding',
     };
   } else if (blockingIssues.length > 0) {
     verdict = 'human_review';

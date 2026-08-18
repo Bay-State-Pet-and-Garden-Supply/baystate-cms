@@ -266,6 +266,12 @@ function sampleDraft(overrides: Partial<CuratedProductDraft> = {}): CuratedProdu
         supportingFactFields: ['brand', 'weight', 'size', 'packCount', 'dimensions'],
         evidenceIds: ['ev:brand:1', 'ev:weight:1', 'ev:size:1', 'ev:pack:1', 'ev:dim:1'],
       },
+      {
+        field: 'subtitle',
+        claim: 'Product subtitle: ACME - 16 fl oz',
+        supportingFactFields: ['brand', 'weight'],
+        evidenceIds: ['ev:brand:1', 'ev:weight:1'],
+      },
     ],
     abstentions: [],
     curatedAt: FIXED_NOW,
@@ -306,11 +312,33 @@ describe('Verifier specialist (#55)', () => {
     expect(report.score).toBe(1.0);
   });
 
+  it('rejects draft with deleted grounding (grounding: []) and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      grounding: [], // All grounding removed!
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'missing_attribute_grounding' && !c.passed)).toBe(true);
+    expect(report.checks.some((c) => c.checkName === 'missing_title_grounding' && !c.passed)).toBe(true);
+    expect(report.checks.some((c) => c.checkName === 'missing_description_grounding' && !c.passed)).toBe(true);
+  });
+
   it('catches wrong attribute value (e.g. weight mutated to 50 lb instead of 16 fl oz) and triggers retry_curator', () => {
     const draft = sampleDraft({
       attributes: {
         brand: 'ACME',
         weight: '50 lb', // Mutated value!
+        size: '16 fl oz',
+        packCount: '1',
+        dimensions: '3 x 3 x 7 in',
       },
     });
 
@@ -325,6 +353,40 @@ describe('Verifier specialist (#55)', () => {
     expect(report.verdict).toBe('retry_curator');
     expect(report.checks.some((c) => c.checkName === 'attribute_value_fidelity' && !c.passed)).toBe(true);
     expect(report.retryRequest?.conflictingFields).toContain('weight');
+  });
+
+  it('catches arbitrary unsupported description claims (e.g. - Flavor: Turkey) and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      description: '**ACME Broth**\n\n### Product Details\n- Brand: ACME\n- Net Weight: 16 fl oz\n- Flavor: Savory Turkey', // Flavor not in resolved facts!
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'unsupported_description_claim' && !c.passed)).toBe(true);
+  });
+
+  it('catches catalog title missing resolved brand and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      catalogTitle: 'Organic Chicken Broth 16 fl oz', // Missing brand "ACME"
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'catalog_title_brand_alignment' && !c.passed)).toBe(true);
   });
 
   it('catches cross-fact evidence misassociation and triggers retry_curator', () => {
@@ -395,7 +457,7 @@ describe('Verifier specialist (#55)', () => {
   it('catches structured bullet description mismatches (Brand, Size, Count, Dimensions) and triggers retry_curator', () => {
     // 1. Mutated Brand claim in description
     const draftBrand = sampleDraft({
-      description: '**ACME Broth**\n\n### Product Details\n- Brand: CompetitorBrand',
+      description: '**ACME Organic Chicken Broth 16 fl oz**\n\n### Product Details\n- Brand: CompetitorBrand\n- Net Weight: 16 fl oz\n- Size: 16 fl oz\n- Package Count: 1\n- Dimensions: 3 x 3 x 7 in',
     });
     const reportBrand = verifyCuratedDraft({
       schemaVersion: '1.0.0',
@@ -409,7 +471,7 @@ describe('Verifier specialist (#55)', () => {
 
     // 2. Mutated Size claim in description
     const draftSize = sampleDraft({
-      description: '**ACME Broth**\n\n### Product Details\n- Size: 64 fl oz',
+      description: '**ACME Organic Chicken Broth 16 fl oz**\n\n### Product Details\n- Brand: ACME\n- Net Weight: 16 fl oz\n- Size: 64 fl oz\n- Package Count: 1\n- Dimensions: 3 x 3 x 7 in',
     });
     const reportSize = verifyCuratedDraft({
       schemaVersion: '1.0.0',
@@ -423,7 +485,7 @@ describe('Verifier specialist (#55)', () => {
 
     // 3. Mutated Package Count claim in description
     const draftCount = sampleDraft({
-      description: '**ACME Broth**\n\n### Product Details\n- Package Count: 24',
+      description: '**ACME Organic Chicken Broth 16 fl oz**\n\n### Product Details\n- Brand: ACME\n- Net Weight: 16 fl oz\n- Size: 16 fl oz\n- Package Count: 24\n- Dimensions: 3 x 3 x 7 in',
     });
     const reportCount = verifyCuratedDraft({
       schemaVersion: '1.0.0',
@@ -437,7 +499,7 @@ describe('Verifier specialist (#55)', () => {
 
     // 4. Mutated Dimensions claim in description
     const draftDim = sampleDraft({
-      description: '**ACME Broth**\n\n### Product Details\n- Dimensions: 10 x 10 x 10 in',
+      description: '**ACME Organic Chicken Broth 16 fl oz**\n\n### Product Details\n- Brand: ACME\n- Net Weight: 16 fl oz\n- Size: 16 fl oz\n- Package Count: 1\n- Dimensions: 10 x 10 x 10 in',
     });
     const reportDim = verifyCuratedDraft({
       schemaVersion: '1.0.0',
@@ -509,6 +571,9 @@ describe('Verifier specialist (#55)', () => {
       attributes: {
         brand: 'ACME',
         weight: '16 fl oz',
+        size: '16 fl oz',
+        packCount: '1',
+        dimensions: '3 x 3 x 7 in',
         flavor: 'Savory Turkey', // Not in resolvedFacts
       },
     });

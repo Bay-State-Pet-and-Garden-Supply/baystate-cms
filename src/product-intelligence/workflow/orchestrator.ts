@@ -5,15 +5,17 @@
  * The orchestrator owns ALL sequencing, routing, retries, backtracking, budgets,
  * cancellation propagation, and terminal state transitions across specialists:
  *
- *   ProductSeed
+ *   ProductSeed (+ optional discoveredGtin)
  *       │
  *       ▼
  *   [Discovery Specialist #49]
  *       │
  *       ├─► (needs_profile / profile_failed?) ──► [Profile Engineer Specialist #51]
  *       │                                                    │
- *       ▼                                                    ▼
- *   [Deterministic Extraction Evidence Runner #52] ◄────────┘
+ *       │                                                    ▼ (proposal_only: manual review required)
+ *       │                                             Hold: NEEDS_REVIEW
+ *       ▼
+ *   [Deterministic Extraction Evidence Runner #52]
  *       │
  *       ▼
  *   [Resolver Specialist #53]
@@ -37,7 +39,7 @@
  *   - Cancellation via AbortSignal immediately aborts execution and sets CANCELLED.
  *   - Atomic dispatch reservation enforces hard limits before every invocation.
  *   - Supplier SKUs are NEVER passed as expected GTINs (only genuinely discovered GTINs).
- *   - Real extraction failures are never replaced with manufactured observations in production.
+ *   - Profile Engineer proposals require governance/manual review before activation.
  */
 
 import { z } from 'zod';
@@ -157,6 +159,10 @@ export interface SpecialistOrchestratorDependencies {
   ) => Promise<ExtractionEvidenceBundle>;
 }
 
+export interface RunWorkflowOptions {
+  discoveredGtin?: string | null;
+}
+
 export interface SpecialistOrchestratorOptions {
   maxRetries?: number;
   limits?: Partial<CapabilityLimits>;
@@ -194,8 +200,6 @@ export class SpecialistOrchestrator {
   private readonly extractionConcurrency: number;
   private readonly dependencies: SpecialistOrchestratorDependencies;
   private readonly now: () => string;
-  private readonly inFlightDomainLeases = new Map<string, Promise<ExtractionProfileBinding | null>>();
-  private readonly synthesizedProfiles = new Map<string, ExtractionProfileBinding>();
 
   public constructor(options: SpecialistOrchestratorOptions = {}) {
     this.maxRetries = options.maxRetries ?? 3;
@@ -209,6 +213,7 @@ export class SpecialistOrchestrator {
     productSeed: ProductSeed,
     classificationContext: ClassificationContext,
     context: SpecialistContext,
+    workflowOptions: RunWorkflowOptions = {},
   ): Promise<SpecialistWorkflowResult> {
     const startedAt = Date.now();
     const events: OrchestratorStepEvent[] = [];
@@ -249,6 +254,17 @@ export class SpecialistOrchestrator {
         return false;
       }
       totalDispatches += count;
+      return true;
+    };
+
+    const reserveExtractionDispatch = (): boolean => {
+      if (invocations.extraction >= this.limits.maxExtractionInvocations) {
+        return false;
+      }
+      if (!reserveDispatch(1)) {
+        return false;
+      }
+      invocations.extraction += 1;
       return true;
     };
 
@@ -359,11 +375,13 @@ export class SpecialistOrchestrator {
           const stepStart = Date.now();
           recordEvent('discovery', 'discover_candidates', 'started', 0);
 
+          const initialDiscoveredGtin = workflowOptions.discoveredGtin ?? null;
+
           const discResult: SpecialistResult = await discovery.execute(
             {
               schemaVersion: 1,
               productSeed,
-              discoveredGtin: null,
+              discoveredGtin: initialDiscoveredGtin,
               batchContext: null,
               sourceCandidates: [],
             },
@@ -439,15 +457,21 @@ export class SpecialistOrchestrator {
             .slice(0, 3)
             .map((c) => c.finalUrl ?? c.source.url);
 
-          // Genuinely discovered GTIN (never use supplier SKU as expected GTIN)
-          const genuineDiscoveredGtin = discoveryOutput?.discoveredGtin ?? null;
+          // Discovered GTIN promotion: check input option, discovery output, or verified candidate extraction
+          const candidateVerifiedGtin = candidates[0]?.extracted?.gtins?.find(
+            (g) => [8, 12, 13, 14].includes(g.replace(/\D/g, '').length),
+          ) ?? null;
+          const genuineDiscoveredGtin = workflowOptions.discoveredGtin ?? discoveryOutput?.discoveredGtin ?? candidateVerifiedGtin ?? null;
+
+          let requiresProfileHold = false;
+          const processedProfileDomains = new Set<string>();
 
           // Bounded parallel extraction
           extractionBundles = await boundedMap(
             candidateUrls,
             this.extractionConcurrency,
             async (url) => {
-              if (invocations.extraction >= this.limits.maxExtractionInvocations || !reserveDispatch(1)) {
+              if (!reserveExtractionDispatch()) {
                 return {
                   schemaVersion: 1 as const,
                   runnerVersion: '1.0.0',
@@ -468,18 +492,14 @@ export class SpecialistOrchestrator {
                 };
               }
 
-              invocations.extraction += 1;
-
               const domain = (() => {
                 try { return new URL(url).hostname; } catch { return 'unknown'; }
               })();
 
-              let activeProfile: ExtractionProfileBinding | null = this.synthesizedProfiles.get(domain) ?? null;
-
               // Run extraction
               let bundle: ExtractionEvidenceBundle;
               if (this.dependencies.extractionRunner) {
-                bundle = await this.dependencies.extractionRunner(url, context, activeProfile);
+                bundle = await this.dependencies.extractionRunner(url, context, null);
               } else {
                 const { bundle: detBundle } = await runDeterministicExtraction(
                   {
@@ -489,7 +509,6 @@ export class SpecialistOrchestrator {
                       name: productSeed.name,
                     },
                     signal: context.signal,
-                    profile: activeProfile,
                   },
                   this.dependencies.extractionRunnerOptions ?? { now: this.now },
                 );
@@ -497,8 +516,9 @@ export class SpecialistOrchestrator {
               }
 
               // Check if profile is needed or failed
-              const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed');
-              if (needsProfile && invocations.profile < this.limits.maxProfileInvocations) {
+              const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed' || f.code === 'profile_missing');
+              if (needsProfile && !processedProfileDomains.has(domain) && invocations.profile < this.limits.maxProfileInvocations) {
+                processedProfileDomains.add(domain);
                 // Find independent candidate URLs on this domain for profile synthesis
                 const domainCandidates = candidates.filter((c: DiscoveryCandidate) => {
                   try {
@@ -512,88 +532,58 @@ export class SpecialistOrchestrator {
                 // Profile Engineer strictly requires 2 independent sample pages
                 if (domainCandidates.length >= 2 && reserveDispatch(1)) {
                   invocations.profile += 1;
-                  recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile for domain: ${domain}`);
+                  recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
 
-                  // De-duplicate concurrent synthesis using domain lease map
-                  let leasePromise = this.inFlightDomainLeases.get(domain);
-                  if (!leasePromise) {
-                    leasePromise = (async () => {
-                      const sample1 = domainCandidates[0];
-                      const sample2 = domainCandidates[1];
-                      const sample1Url = sample1.finalUrl ?? sample1.source.url;
-                      const sample2Url = sample2.finalUrl ?? sample2.source.url;
+                  const sample1 = domainCandidates[0];
+                  const sample2 = domainCandidates[1];
+                  const sample1Url = sample1.finalUrl ?? sample1.source.url;
+                  const sample2Url = sample2.finalUrl ?? sample2.source.url;
 
-                      const profResult = await profileEngineer.execute(
+                  const profResult = await profileEngineer.execute(
+                    {
+                      schemaVersion: 1,
+                      domain,
+                      activeProfile: null,
+                      samples: [
                         {
-                          schemaVersion: 1,
-                          domain,
-                          activeProfile: null,
-                          samples: [
-                            {
-                              url: sample1Url,
-                              artifactRefs: bundle.artifactRefs,
-                              expectedName: productSeed.name,
-                              expectedGtin: genuineDiscoveredGtin ?? undefined,
-                              signals: { jsonLd: true, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
-                              selectorHints: {},
-                              observedFields: {},
-                            },
-                            {
-                              url: sample2Url,
-                              artifactRefs: bundle.artifactRefs,
-                              expectedName: productSeed.name,
-                              expectedGtin: genuineDiscoveredGtin ?? undefined,
-                              signals: { jsonLd: true, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
-                              selectorHints: {},
-                              observedFields: {},
-                            },
-                          ],
-                          requiredFields: ['titleSelector'],
+                          url: sample1Url,
+                          artifactRefs: sample1.evidenceIds,
+                          expectedName: productSeed.name,
+                          expectedGtin: genuineDiscoveredGtin ?? undefined,
+                          signals: { jsonLd: true, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
+                          selectorHints: {},
+                          observedFields: {},
                         },
-                        context,
-                      );
-
-                      if (profResult.outcome === 'succeeded' && profResult.output) {
-                        const profEnv = profResult.output as SpecialistArtifactEnvelope;
-                        profileArtifact = profEnv;
-                        profileOutput = profEnv.payload as ProfileEngineerProposal;
-                        if (profileOutput.selectors) {
-                          const binding: ExtractionProfileBinding = {
-                            id: `prof:${domain}:${profileOutput.proposedVersion}`,
-                            version: profileOutput.proposedVersion,
-                            runtime: profileOutput.runtime,
-                          };
-                          this.synthesizedProfiles.set(domain, binding);
-                          return binding;
-                        }
-                      }
-                      return null;
-                    })();
-                    this.inFlightDomainLeases.set(domain, leasePromise);
-                  }
-
-                  const synthesizedBinding = await leasePromise;
-                  if (synthesizedBinding && reserveDispatch(1)) {
-                    activeProfile = synthesizedBinding;
-                    recordEvent('profile_engineer', 'synthesize_profile', 'succeeded', 0, `Synthesized profile for ${domain}; retrying extraction`);
-                    // Retry extraction with newly synthesized profile
-                    if (this.dependencies.extractionRunner) {
-                      bundle = await this.dependencies.extractionRunner(url, context, activeProfile);
-                    } else {
-                      const { bundle: retriedBundle } = await runDeterministicExtraction(
                         {
-                          url,
-                          expected: {
-                            gtin: genuineDiscoveredGtin ?? undefined,
-                            name: productSeed.name,
-                          },
-                          signal: context.signal,
-                          profile: activeProfile,
+                          url: sample2Url,
+                          artifactRefs: sample2.evidenceIds,
+                          expectedName: productSeed.name,
+                          expectedGtin: genuineDiscoveredGtin ?? undefined,
+                          signals: { jsonLd: true, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
+                          selectorHints: {},
+                          observedFields: {},
                         },
-                        this.dependencies.extractionRunnerOptions ?? { now: this.now },
-                      );
-                      bundle = retriedBundle;
-                    }
+                      ],
+                      requiredFields: ['titleSelector'],
+                    },
+                    context,
+                  );
+
+                  if (profResult.outcome === 'succeeded' && profResult.output) {
+                    const profEnv = profResult.output as SpecialistArtifactEnvelope;
+                    profileArtifact = profEnv;
+                    profileOutput = profEnv.payload as ProfileEngineerProposal;
+
+                    // Per ADR 0023/ADR 0028: Profile proposals are proposal_only with manual_review_required.
+                    // The proposal artifact is captured and the workflow holds for review in Profile Builder.
+                    recordEvent(
+                      'profile_engineer',
+                      'synthesize_profile',
+                      'succeeded',
+                      0,
+                      `Proposed profile for ${domain}; held for manual review/activation`,
+                    );
+                    requiresProfileHold = true;
                   }
                 }
               }
@@ -610,6 +600,31 @@ export class SpecialistOrchestrator {
             extractDuration,
             `Collected ${extractionBundles.length} extraction bundle(s)`,
           );
+
+          if (requiresProfileHold) {
+            recordEvent(
+              'orchestrator',
+              'profile_review_hold',
+              'succeeded',
+              0,
+              'Holding workflow for manual review and activation of proposed profile in Profile Builder',
+            );
+            return {
+              runId: context.runId,
+              status: 'needs_review',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              profileOutput,
+              profileArtifact,
+              extractionBundles,
+              events,
+              retriesCount,
+              totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+            };
+          }
+
           targetPhase = 'resolver';
           break;
         }
@@ -635,7 +650,10 @@ export class SpecialistOrchestrator {
           const stepStart = Date.now();
           recordEvent('resolver', 'reconcile_facts', 'started', 0);
 
-          const genuineDiscoveredGtin = discoveryOutput?.discoveredGtin ?? null;
+          const candidateVerifiedGtin = discoveryOutput?.candidates?.[0]?.extracted?.gtins?.find(
+            (g) => [8, 12, 13, 14].includes(g.replace(/\D/g, '').length),
+          ) ?? null;
+          const genuineDiscoveredGtin = workflowOptions.discoveredGtin ?? discoveryOutput?.discoveredGtin ?? candidateVerifiedGtin ?? null;
 
           const resResult: SpecialistResult = await resolver.execute(
             {

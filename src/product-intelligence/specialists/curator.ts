@@ -358,13 +358,27 @@ export function curateProductDraft(
   }
 
   if (subtitle && (weightFact?.status === 'resolved' || sizeFact?.status === 'resolved')) {
-    const subFacts = ['brand', weightFact?.status === 'resolved' ? 'weight' : 'size'].filter(Boolean);
-    grounding.push({
-      field: 'subtitle',
-      claim: `Product subtitle: ${subtitle}`,
-      supportingFactFields: subFacts,
-      evidenceIds: titleEvidenceIds.length > 0 ? [...new Set(titleEvidenceIds)] : ['resolved_fact:subtitle'],
-    });
+    const subFacts: string[] = [];
+    const subEvidenceIds: string[] = [];
+    if (brandFact?.status === 'resolved') {
+      subFacts.push('brand');
+      subEvidenceIds.push(...brandFact.supportingEvidence.map((e) => e.id));
+    }
+    if (weightFact?.status === 'resolved') {
+      subFacts.push('weight');
+      subEvidenceIds.push(...weightFact.supportingEvidence.map((e) => e.id));
+    } else if (sizeFact?.status === 'resolved') {
+      subFacts.push('size');
+      subEvidenceIds.push(...sizeFact.supportingEvidence.map((e) => e.id));
+    }
+    if (subFacts.length > 0) {
+      grounding.push({
+        field: 'subtitle',
+        claim: `Product subtitle: ${subtitle}`,
+        supportingFactFields: subFacts,
+        evidenceIds: subEvidenceIds.length > 0 ? [...new Set(subEvidenceIds)] : ['resolved_fact:subtitle'],
+      });
+    }
   }
 
   // Description construction: strictly grounded in resolved facts.
