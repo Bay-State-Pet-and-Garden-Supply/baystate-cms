@@ -112,6 +112,48 @@ export async function guardedRouteHandler(
   else await route.abort('blockedbyclient');
 }
 
+/**
+ * Minimal structural shape of a Playwright page, sufficient for installing
+ * the guarded route. Kept structural (not a Playwright type import) so the
+ * hook is unit-testable without a browser.
+ */
+export interface GuardedPage {
+  route(pattern: string, handler: (route: GuardedRoute) => void | Promise<void>): Promise<void>;
+}
+
+/**
+ * Build the preNavigationHooks for a set of rendered-page inputs. The hook
+ * installs, for each page, the SAME single authoritative catch-all route the
+ * singular path installs (all URLs), driven by THAT input's networkGuard:
+ * every request the page issues (navigation, redirect hops, sub-resources) is
+ * decided by `guardedRouteHandler` and never bypassed by a later
+ * route.continue().
+ *
+ * Inputs without a networkGuard get no route — identical semantics to
+ * `runRenderedPage()`. Used by both the single and batch runners so the guard
+ * installation cannot diverge between them.
+ */
+export function buildGuardPreNavigationHooks(
+  inputs: RenderedPageInput[],
+): ((ctx: { page: GuardedPage; request: { url: string } }) => Promise<void>)[] {
+  const guardByUrl = new Map<string, (url: string) => Promise<boolean>>();
+  for (const input of inputs) {
+    if (input.networkGuard) guardByUrl.set(input.url, input.networkGuard);
+  }
+  if (guardByUrl.size === 0) return [];
+  return [
+    async ({ page, request }) => {
+      const guard = guardByUrl.get(request.url);
+      if (!guard) return;
+      // One authoritative guard for the whole page lifecycle: the '**/*' route
+      // intercepts navigation, every redirect hop, and every sub-resource, and
+      // each request is decided by `guardedRouteHandler` (never bypassed by a
+      // later route.continue()).
+      await page.route('**/*', (route) => guardedRouteHandler(route, guard));
+    },
+  ];
+}
+
 // ─── Single page runner ────────────────────────────────────────────────────
 
 /**
@@ -148,13 +190,7 @@ export async function runRenderedPage<T>(
 
   const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConfig,
-    preNavigationHooks: input.networkGuard ? [async ({ page }) => {
-      // One authoritative guard for the whole page lifecycle: the '**/*' route
-      // intercepts navigation, every redirect hop, and every sub-resource, and
-      // each request is decided by `guardedRouteHandler` (never bypassed by a
-      // later route.continue()).
-      await page.route('**/*', (route) => guardedRouteHandler(route, input.networkGuard!));
-    }] : undefined,
+    preNavigationHooks: input.networkGuard ? buildGuardPreNavigationHooks([input]) : undefined,
     maxConcurrency: 1,
     useSessionPool: true,
     persistCookiesPerSession: true,
@@ -236,6 +272,11 @@ export async function runRenderedPages<T>(
 
   const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConfig,
+    // Per-input network guards: every request each page issues (navigation,
+    // redirect hops, sub-resources) is decided by THAT input's networkGuard via
+    // the single authoritative '**/*' route — same installation as the
+    // singular path, so no batch request can bypass the guard.
+    preNavigationHooks: buildGuardPreNavigationHooks(inputs),
     maxConcurrency: Math.min(cfg.maxConcurrency, inputs.length),
     useSessionPool: true,
     persistCookiesPerSession: true,

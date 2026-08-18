@@ -23,7 +23,12 @@ import {
   doStaticExtract,
 } from './extract';
 import type { ExtractRequest } from '../../shared/schemas/extraction-worker';
-import { guardedRouteHandler } from '../browser/rendered-page-runner';
+import {
+  guardedRouteHandler,
+  buildGuardPreNavigationHooks,
+  type GuardedPage,
+  type GuardedRoute,
+} from '../browser/rendered-page-runner';
 
 const publicLookup = async (): Promise<Array<{ address: string }>> => [{ address: '203.0.113.7' }];
 const privateLookup = async (): Promise<Array<{ address: string }>> => [{ address: '10.0.0.1' }];
@@ -332,5 +337,106 @@ describe('guardedRouteHandler (rendered sub-resources + redirects pass through t
     await guardedRouteHandler(route, guard);
     expect(guardCalls).toEqual(['https://10.0.0.5/p/1']);
     expect(routeCalls).toEqual(['blockedbyclient']);
+  });
+});
+
+describe('buildGuardPreNavigationHooks (batch path installs the same authoritative guard)', () => {
+  // Regression: runRenderedPages() used to accept per-input networkGuards but
+  // install NO preNavigationHooks at all, so batch-path navigation, redirect
+  // hops, and sub-resources bypassed profileNetworkGuard/allowedSourceDomains.
+  // These tests drive the REAL hooks the batch runner passes to the crawler
+  // with a fake page (same structural-fake pattern as the guardedRouteHandler
+  // tests above) and the REAL profileNetworkGuard.
+
+  function makeFakePage() {
+    const routes: Array<{ pattern: string; handler: (route: GuardedRoute) => void | Promise<void> }> = [];
+    const page: GuardedPage = {
+      route: async (pattern, handler) => { routes.push({ pattern, handler }); },
+    };
+    return { page, routes };
+  }
+
+  function makeRoute(url: string) {
+    const calls: string[] = [];
+    const route: GuardedRoute = {
+      request: () => ({ url: () => url }),
+      continue: async () => { calls.push('continue'); },
+      abort: async (reason?: string) => { calls.push(reason ?? 'abort'); },
+    };
+    return { route, calls };
+  }
+
+  it('routes a sub-resource and a redirect hop through the batch-path guard (allowed continue, out-of-allowlist deny)', async () => {
+    const guardCalls: string[] = [];
+    const guard = async (u: string): Promise<boolean> => {
+      guardCalls.push(u);
+      return profileNetworkGuard(u, ['brand.example.com'], { lookupFn: publicLookup });
+    };
+    const hooks = buildGuardPreNavigationHooks([
+      { url: 'https://brand.example.com/p/1', networkGuard: guard },
+    ]);
+    expect(hooks).toHaveLength(1);
+
+    const { page, routes } = makeFakePage();
+    await hooks[0]({ page, request: { url: 'https://brand.example.com/p/1' } });
+    expect(routes).toHaveLength(1);
+    expect(routes[0].pattern).toBe('**/*');
+
+    // Sub-resource on an in-allowlist domain → guard allows → continue
+    const sub = makeRoute('https://brand.example.com/img/product.jpg');
+    await routes[0].handler(sub.route);
+    expect(sub.calls).toEqual(['continue']);
+
+    // Redirect hop to a public domain outside the allowlist → guard denies → abort
+    const redir = makeRoute('https://redirect.evil.example.com/x');
+    await routes[0].handler(redir.route);
+    expect(redir.calls).toEqual(['blockedbyclient']);
+
+    // Every request was decided by the per-input guard — nothing bypassed it
+    expect(guardCalls).toEqual([
+      'https://brand.example.com/img/product.jpg',
+      'https://redirect.evil.example.com/x',
+    ]);
+  });
+
+  it('installs each input’s own guard (per-input isolation) and no route for unguarded inputs', async () => {
+    const aCalls: string[] = [];
+    const bCalls: string[] = [];
+    const hooks = buildGuardPreNavigationHooks([
+      { url: 'https://a.example.com/p', networkGuard: async (u) => { aCalls.push(u); return true; } },
+      { url: 'https://b.example.com/p', networkGuard: async (u) => { bCalls.push(u); return false; } },
+      { url: 'https://unguarded.example.com/p' },
+    ]);
+    expect(hooks).toHaveLength(1);
+
+    const a = makeFakePage();
+    await hooks[0]({ page: a.page, request: { url: 'https://a.example.com/p' } });
+    const b = makeFakePage();
+    await hooks[0]({ page: b.page, request: { url: 'https://b.example.com/p' } });
+    const c = makeFakePage();
+    await hooks[0]({ page: c.page, request: { url: 'https://unguarded.example.com/p' } });
+
+    expect(a.routes).toHaveLength(1);
+    expect(b.routes).toHaveLength(1);
+
+    // Input A’s guard decides A’s requests (allowed → continue)
+    const subA = makeRoute('https://a.example.com/img/x.jpg');
+    await a.routes[0].handler(subA.route);
+    expect(subA.calls).toEqual(['continue']);
+    expect(aCalls).toEqual(['https://a.example.com/img/x.jpg']);
+
+    // Input B’s guard decides B’s requests (denied → abort); A’s guard never sees it
+    const subB = makeRoute('https://b.example.com/img/x.jpg');
+    await b.routes[0].handler(subB.route);
+    expect(subB.calls).toEqual(['blockedbyclient']);
+    expect(bCalls).toEqual(['https://b.example.com/img/x.jpg']);
+    expect(aCalls).not.toContain('https://b.example.com/img/x.jpg');
+
+    // Unguarded input: no route installed at all (singular-path semantics)
+    expect(c.routes).toHaveLength(0);
+  });
+
+  it('returns no hooks when no input declares a guard', () => {
+    expect(buildGuardPreNavigationHooks([{ url: 'https://x.example.com/p' }])).toEqual([]);
   });
 });
