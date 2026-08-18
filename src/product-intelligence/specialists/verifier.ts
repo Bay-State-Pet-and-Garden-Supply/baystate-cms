@@ -7,23 +7,23 @@
  * `VerificationReport` artifact:
  *
  *   - independent identity check (confirms resolved GTIN/UPC matches draft GTIN/UPC;
- *     flags wrong variants or parent-product-only states)
+ *     flags wrong variants, parent-product-only states, or case-pack GTINs promoted to consumer units)
+ *   - separate identity and product-data scoring & decisions
+ *   - image compliance QA (verifies variant identity match, rights status, and commerce approval)
  *   - attribute value fidelity check (verifies draft attribute values match resolved
  *     fact values exactly, preventing wrong weights, counts, or flavors from passing)
  *   - mandatory grounding coverage check (verifies EVERY emitted attribute, catalog
  *     title, subtitle, and description has a non-empty grounding entry with valid evidence)
  *   - strict per-fact evidence isolation (every supportingFactField must exist as a resolved
  *     fact; evidence IDs must belong exclusively to declared supporting facts)
- *   - comprehensive catalog prose QA (verifies catalog title brand, size/weight, and name
- *     alignment; verifies subtitle brand and quantity; parses and validates all description
- *     claims against resolved facts—rejecting unsupported statements)
+ *   - fail-closed description QA (only grounded headers and validated bullet claims are accepted;
+ *     arbitrary ungrounded free prose is strictly rejected)
  *   - conflict omission check (ensures facts with unresolved conflicts were NOT
  *     unfaithfully promoted to draft attributes)
  *   - taxonomy bounds & semantic check (verifies proposed category/product-type IDs
  *     belong strictly to the approved CMS configuration)
  *   - structured QA verdict: `pass`, `retry_curator`, `retry_resolver`,
  *     `retry_discovery`, or `human_review`
- *   - targeted retry requests citing exact violating fields and suggested actions
  */
 
 import { z } from 'zod';
@@ -86,8 +86,12 @@ export type VerificationVerdict = z.infer<typeof VerificationVerdictSchema>;
 export const QualityCheckSeveritySchema = z.enum(['blocking', 'warning', 'info']);
 export type QualityCheckSeverity = z.infer<typeof QualityCheckSeveritySchema>;
 
+export const QualityCheckCategorySchema = z.enum(['identity', 'product_data', 'image_rights', 'taxonomy']);
+export type QualityCheckCategory = z.infer<typeof QualityCheckCategorySchema>;
+
 export const QualityCheckItemSchema = z.object({
   checkName: z.string().min(1).max(128),
+  category: QualityCheckCategorySchema.default('product_data'),
   passed: z.boolean(),
   severity: QualityCheckSeveritySchema,
   field: z.string().min(1).max(128).nullable(),
@@ -109,7 +113,11 @@ export const VerificationReportSchema = z.object({
   specialistVersion: z.literal(VERIFIER_SPECIALIST_VERSION),
   verdict: VerificationVerdictSchema,
   score: z.number().min(0).max(1),
+  identityScore: z.number().min(0).max(1),
+  productDataScore: z.number().min(0).max(1),
   identityStatus: z.enum(['verified', 'mismatched', 'ambiguous', 'unresolved']),
+  identityDecision: z.enum(['pass', 'fail', 'ambiguous']),
+  productDataDecision: z.enum(['pass', 'fail', 'needs_review']),
   checks: z.array(QualityCheckItemSchema).min(1).max(64),
   retryRequest: StructuredRetryRequestSchema.nullable(),
   blockingIssuesCount: z.number().int().min(0),
@@ -122,6 +130,10 @@ export type VerificationReport = z.infer<typeof VerificationReportSchema>;
 
 function normalizeVal(str: string | null | undefined): string {
   return (str ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function extractDigits(str: string | null | undefined): string {
+  return (str ?? '').replace(/\D/g, '');
 }
 
 function mapBulletLabelToField(label: string): string {
@@ -167,6 +179,7 @@ export function verifyCuratedDraft(
     identityStatus = 'mismatched';
     checks.push({
       checkName: 'identity_resolution',
+      category: 'identity',
       passed: false,
       severity: 'blocking',
       field: 'gtin',
@@ -176,6 +189,7 @@ export function verifyCuratedDraft(
     identityStatus = 'unresolved';
     checks.push({
       checkName: 'identity_resolution',
+      category: 'identity',
       passed: false,
       severity: 'blocking',
       field: 'gtin',
@@ -185,6 +199,7 @@ export function verifyCuratedDraft(
     identityStatus = 'ambiguous';
     checks.push({
       checkName: 'identity_resolution',
+      category: 'identity',
       passed: false,
       severity: 'warning',
       field: 'gtin',
@@ -193,6 +208,7 @@ export function verifyCuratedDraft(
   } else {
     checks.push({
       checkName: 'identity_resolution',
+      category: 'identity',
       passed: true,
       severity: 'info',
       field: 'gtin',
@@ -200,11 +216,14 @@ export function verifyCuratedDraft(
     });
   }
 
-  // Check draft GTIN / UPC against resolved identity
-  if (resolvedFacts.identity.gtin) {
+  // Check draft GTIN / UPC against resolved identity (for consumer-unit identities)
+  const isCaseIdentity = resolvedFacts.expectedIdentity?.gtinScope === 'case' || Boolean(resolvedFacts.identity.gtin && extractDigits(resolvedFacts.identity.gtin).length === 14);
+
+  if (!isCaseIdentity && resolvedFacts.identity.gtin) {
     if (curatedDraft.gtin !== resolvedFacts.identity.gtin) {
       checks.push({
         checkName: 'identity_gtin_fidelity',
+        category: 'identity',
         passed: false,
         severity: 'blocking',
         field: 'gtin',
@@ -213,6 +232,7 @@ export function verifyCuratedDraft(
     } else {
       checks.push({
         checkName: 'identity_gtin_fidelity',
+        category: 'identity',
         passed: true,
         severity: 'info',
         field: 'gtin',
@@ -225,10 +245,26 @@ export function verifyCuratedDraft(
     if (curatedDraft.upc !== resolvedFacts.identity.upc) {
       checks.push({
         checkName: 'identity_upc_fidelity',
+        category: 'identity',
         passed: false,
         severity: 'blocking',
         field: 'upc',
         details: `Draft UPC '${curatedDraft.upc}' does not match resolved identity UPC '${resolvedFacts.identity.upc}'`,
+      });
+    }
+  }
+
+  // Case-pack GTIN protection: ensure 14-digit GTINs are never promoted as consumer units
+  if (curatedDraft.gtin) {
+    const draftGtinDigits = extractDigits(curatedDraft.gtin);
+    if (draftGtinDigits.length === 14 && resolvedFacts.expectedIdentity?.gtinScope !== 'case') {
+      checks.push({
+        checkName: 'case_gtin_assigned_to_consumer_unit',
+        category: 'identity',
+        passed: false,
+        severity: 'blocking',
+        field: 'gtin',
+        details: `14-digit case GTIN '${curatedDraft.gtin}' was improperly assigned as a consumer unit GTIN`,
       });
     }
   }
@@ -238,6 +274,7 @@ export function verifyCuratedDraft(
   if (parentDecision && resolvedFacts.identity.status !== 'resolved') {
     checks.push({
       checkName: 'exact_variant_verification',
+      category: 'identity',
       passed: false,
       severity: 'blocking',
       field: 'candidateUrl',
@@ -249,6 +286,7 @@ export function verifyCuratedDraft(
   if (wrongVariantDecision && resolvedFacts.identity.status !== 'resolved') {
     checks.push({
       checkName: 'exact_variant_verification',
+      category: 'identity',
       passed: false,
       severity: 'blocking',
       field: 'candidateUrl',
@@ -266,6 +304,7 @@ export function verifyCuratedDraft(
     if (curatedDraft.brand && normalizeVal(curatedDraft.brand) !== normalizeVal(brandFact.value)) {
       checks.push({
         checkName: 'brand_fidelity',
+        category: 'product_data',
         passed: false,
         severity: 'blocking',
         field: 'brand',
@@ -278,6 +317,7 @@ export function verifyCuratedDraft(
   if (!curatedDraft.catalogTitle || curatedDraft.catalogTitle.trim() === 'Untitled Product') {
     checks.push({
       checkName: 'catalog_title_quality',
+      category: 'product_data',
       passed: false,
       severity: 'blocking',
       field: 'catalogTitle',
@@ -286,6 +326,7 @@ export function verifyCuratedDraft(
   } else {
     checks.push({
       checkName: 'catalog_title_quality',
+      category: 'product_data',
       passed: true,
       severity: 'info',
       field: 'catalogTitle',
@@ -296,6 +337,7 @@ export function verifyCuratedDraft(
       if (!normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(brandFact.value))) {
         checks.push({
           checkName: 'catalog_title_brand_alignment',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: 'catalogTitle',
@@ -311,6 +353,7 @@ export function verifyCuratedDraft(
         if (!normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(weightFact.value))) {
           checks.push({
             checkName: 'catalog_title_weight_alignment',
+            category: 'product_data',
             passed: false,
             severity: 'blocking',
             field: 'catalogTitle',
@@ -321,6 +364,7 @@ export function verifyCuratedDraft(
         if (!normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(sizeFact.value))) {
           checks.push({
             checkName: 'catalog_title_size_alignment',
+            category: 'product_data',
             passed: false,
             severity: 'blocking',
             field: 'catalogTitle',
@@ -336,13 +380,14 @@ export function verifyCuratedDraft(
       const nameTokens = cleanTitleFact
         .split(/[\s,&/\\-]+/)
         .filter((w) => w.length >= 3 && !['with', 'from', 'the', 'and', 'for', 'organic', 'product'].includes(w));
-      
+
       if (nameTokens.length > 0) {
         const matchedCount = nameTokens.filter((tok) => normalizeVal(curatedDraft.catalogTitle).includes(tok)).length;
         const matchRatio = matchedCount / nameTokens.length;
         if (matchRatio < 0.5) {
           checks.push({
             checkName: 'catalog_title_name_alignment',
+            category: 'product_data',
             passed: false,
             severity: 'blocking',
             field: 'catalogTitle',
@@ -360,6 +405,7 @@ export function verifyCuratedDraft(
       if (!subtitleNorm.includes(normalizeVal(brandFact.value))) {
         checks.push({
           checkName: 'subtitle_brand_mismatch',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: 'subtitle',
@@ -374,6 +420,7 @@ export function verifyCuratedDraft(
         if (!subtitleNorm.includes(normalizeVal(weightFact.value))) {
           checks.push({
             checkName: 'subtitle_quantity_mismatch',
+            category: 'product_data',
             passed: false,
             severity: 'blocking',
             field: 'subtitle',
@@ -384,6 +431,7 @@ export function verifyCuratedDraft(
         if (!subtitleNorm.includes(normalizeVal(sizeFact.value))) {
           checks.push({
             checkName: 'subtitle_quantity_mismatch',
+            category: 'product_data',
             passed: false,
             severity: 'blocking',
             field: 'subtitle',
@@ -400,6 +448,7 @@ export function verifyCuratedDraft(
     if (!fact || fact.status !== 'resolved') {
       checks.push({
         checkName: 'claim_grounding',
+        category: 'product_data',
         passed: false,
         severity: 'blocking',
         field: attrKey,
@@ -410,6 +459,7 @@ export function verifyCuratedDraft(
       if (fact.value && normalizeVal(attrValue) !== normalizeVal(fact.value)) {
         checks.push({
           checkName: 'attribute_value_fidelity',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: attrKey,
@@ -422,6 +472,7 @@ export function verifyCuratedDraft(
       if (!groundingEntry || groundingEntry.evidenceIds.length === 0) {
         checks.push({
           checkName: 'missing_attribute_grounding',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: attrKey,
@@ -436,6 +487,7 @@ export function verifyCuratedDraft(
   if (!titleGrounding || titleGrounding.evidenceIds.length === 0) {
     checks.push({
       checkName: 'missing_title_grounding',
+      category: 'product_data',
       passed: false,
       severity: 'blocking',
       field: 'catalogTitle',
@@ -447,6 +499,7 @@ export function verifyCuratedDraft(
   if (!descGrounding || descGrounding.evidenceIds.length === 0) {
     checks.push({
       checkName: 'missing_description_grounding',
+      category: 'product_data',
       passed: false,
       severity: 'blocking',
       field: 'description',
@@ -459,6 +512,7 @@ export function verifyCuratedDraft(
     if (!subtitleGrounding || subtitleGrounding.evidenceIds.length === 0) {
       checks.push({
         checkName: 'missing_subtitle_grounding',
+        category: 'product_data',
         passed: false,
         severity: 'blocking',
         field: 'subtitle',
@@ -473,6 +527,7 @@ export function verifyCuratedDraft(
     if (citedFields.length === 0) {
       checks.push({
         checkName: 'grounding_evidence_misassociation',
+        category: 'product_data',
         passed: false,
         severity: 'blocking',
         field: groundingEntry.field,
@@ -487,6 +542,7 @@ export function verifyCuratedDraft(
       if (!fact || fact.status !== 'resolved') {
         checks.push({
           checkName: 'grounding_unresolved_fact_reference',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: groundingEntry.field,
@@ -513,6 +569,7 @@ export function verifyCuratedDraft(
         if (!citedFields.includes(factField) || !resolvedFact || resolvedFact.status !== 'resolved') {
           checks.push({
             checkName: 'grounding_evidence_misassociation',
+            category: 'product_data',
             passed: false,
             severity: 'blocking',
             field: groundingEntry.field,
@@ -522,6 +579,7 @@ export function verifyCuratedDraft(
       } else if (!validEvidenceIdsForEntry.has(evId)) {
         checks.push({
           checkName: 'grounding_evidence_misassociation',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: groundingEntry.field,
@@ -531,49 +589,31 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 6. Comprehensive Description Prose & Bullet Claims QA
+  // 6. Fail-Closed Description QA: Header lines & structured bullets allowed; ungrounded prose rejected
   if (curatedDraft.description) {
     const desc = curatedDraft.description;
     const lines = desc.split('\n');
 
     for (const line of lines) {
-      const bulletMatch = /^\s*(?:-|\*)\s*([^:]+):\s*(.+)$/.exec(line);
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      // Allow Markdown headers (e.g. #, ##, ###, ****)
+      if (trimmed.startsWith('#') || (trimmed.startsWith('**') && trimmed.endsWith('**'))) {
+        continue;
+      }
+
+      const bulletMatch = /^\s*(?:-|\*)\s*([^:]+):\s*(.+)$/.exec(trimmed);
       if (!bulletMatch) {
-        // Free prose line: check for ungrounded claims (unsupported claims, medical claims, ungrounded quantities)
-        const freeQtyMatch = /\b\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|lb|lbs|kg|g|ml|l)\b/i.exec(line);
-        if (freeQtyMatch) {
-          const qty = freeQtyMatch[0];
-          const hasWeightMatch = weightFact?.status === 'resolved' && weightFact.value && normalizeVal(qty) === normalizeVal(weightFact.value);
-          const hasSizeMatch = sizeFact?.status === 'resolved' && sizeFact.value && normalizeVal(qty) === normalizeVal(sizeFact.value);
-          if (!hasWeightMatch && !hasSizeMatch) {
-            checks.push({
-              checkName: 'unsupported_description_claim',
-              passed: false,
-              severity: 'blocking',
-              field: 'description',
-              details: `Description free prose contains ungrounded quantity '${qty}'`,
-            });
-          }
-        }
-
-        const ungroundedPatterns = [
-          { pattern: /\b(?:clinically\s+proven|veterinarian\s+recommended|vet\s+approved)\b/i, label: 'health/clinical claim' },
-          { pattern: /\b(?:made\s+in\s+[a-z\s]+|product\s+of\s+[a-z\s]+)\b/i, label: 'origin claim' },
-          { pattern: /\b(?:grain-free|gluten-free|hypoallergenic)\b/i, label: 'dietary claim' },
-        ];
-
-        for (const { pattern, label } of ungroundedPatterns) {
-          const match = pattern.exec(line);
-          if (match) {
-            checks.push({
-              checkName: 'unsupported_description_claim',
-              passed: false,
-              severity: 'blocking',
-              field: 'description',
-              details: `Description contains ungrounded ${label}: '${match[0]}'`,
-            });
-          }
-        }
+        // Fail-closed check: Any non-header, non-bullet prose must be backed by an explicit fact
+        checks.push({
+          checkName: 'unsupported_description_claim',
+          category: 'product_data',
+          passed: false,
+          severity: 'blocking',
+          field: 'description',
+          details: `Description contains ungrounded non-bullet prose: '${trimmed}'`,
+        });
         continue;
       }
 
@@ -585,6 +625,7 @@ export function verifyCuratedDraft(
       if (!fact || fact.status !== 'resolved') {
         checks.push({
           checkName: 'unsupported_description_claim',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: 'description',
@@ -593,6 +634,7 @@ export function verifyCuratedDraft(
       } else if (fact.value && normalizeVal(rawClaimValue) !== normalizeVal(fact.value)) {
         checks.push({
           checkName: 'description_claim_mismatch',
+          category: 'product_data',
           passed: false,
           severity: 'blocking',
           field: 'description',
@@ -602,11 +644,48 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 7. Conflict Omission check: no conflicting facts should appear as resolved draft attributes
+  // 7. Image Variant & Rights QA
+  for (const image of curatedDraft.images) {
+    if (image.role === 'primary' && !image.commerceApproved) {
+      checks.push({
+        checkName: 'primary_image_commerce_approval',
+        category: 'image_rights',
+        passed: false,
+        severity: 'blocking',
+        field: 'images',
+        details: `Primary image '${image.url}' is not commerce approved`,
+      });
+    }
+
+    if (image.rightsStatus === 'denied') {
+      checks.push({
+        checkName: 'image_rights_compliance',
+        category: 'image_rights',
+        passed: false,
+        severity: 'blocking',
+        field: 'images',
+        details: `Image '${image.url}' has rightsStatus 'denied'`,
+      });
+    }
+
+    if (image.identityMatch === 'wrong_variant' || image.identityMatch === 'parent_product_only') {
+      checks.push({
+        checkName: 'image_variant_compliance',
+        category: 'image_rights',
+        passed: false,
+        severity: 'blocking',
+        field: 'images',
+        details: `Image '${image.url}' matches '${image.identityMatch}' rather than exact variant`,
+      });
+    }
+  }
+
+  // 8. Conflict Omission check: no conflicting facts should appear as resolved draft attributes
   for (const fact of resolvedFacts.facts) {
     if (fact.status === 'conflict' && curatedDraft.attributes[fact.field]) {
       checks.push({
         checkName: 'conflict_omission',
+        category: 'product_data',
         passed: false,
         severity: 'blocking',
         field: fact.field,
@@ -615,12 +694,13 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 8. Taxonomy Bounds check: category and productTypeId must belong to active config
+  // 9. Taxonomy Bounds check: category and productTypeId must belong to active config
   if (curatedDraft.productTypeId) {
     const validPt = classificationContext.availableProductTypes.some((pt) => pt.id === curatedDraft.productTypeId);
     if (!validPt && classificationContext.availableProductTypes.length > 0) {
       checks.push({
         checkName: 'taxonomy_bounds',
+        category: 'taxonomy',
         passed: false,
         severity: 'blocking',
         field: 'productTypeId',
@@ -634,6 +714,7 @@ export function verifyCuratedDraft(
     if (!validCat && classificationContext.availableCategories.length > 0) {
       checks.push({
         checkName: 'taxonomy_bounds',
+        category: 'taxonomy',
         passed: false,
         severity: 'blocking',
         field: 'categoryIds',
@@ -646,10 +727,30 @@ export function verifyCuratedDraft(
   const blockingIssues = checks.filter((c) => !c.passed && c.severity === 'blocking');
   const warnings = checks.filter((c) => !c.passed && c.severity === 'warning');
 
+  // Separate identity and product data scoring & decisions
+  const identityChecks = checks.filter((c) => c.category === 'identity');
+  const productDataChecks = checks.filter((c) => c.category !== 'identity');
+
+  const identityPassed = identityChecks.filter((c) => c.passed).length;
+  const identityScore = identityChecks.length > 0 ? Math.round((identityPassed / identityChecks.length) * 100) / 100 : 1;
+  const identityDecision = identityStatus === 'mismatched' || identityStatus === 'unresolved' || identityChecks.some((c) => !c.passed && c.severity === 'blocking')
+    ? 'fail'
+    : identityStatus === 'ambiguous'
+      ? 'ambiguous'
+      : 'pass';
+
+  const productDataPassed = productDataChecks.filter((c) => c.passed).length;
+  const productDataScore = productDataChecks.length > 0 ? Math.round((productDataPassed / productDataChecks.length) * 100) / 100 : 1;
+  const productDataDecision = productDataChecks.some((c) => !c.passed && c.severity === 'blocking')
+    ? 'fail'
+    : productDataChecks.some((c) => !c.passed && c.severity === 'warning')
+      ? 'needs_review'
+      : 'pass';
+
   let verdict: VerificationVerdict = 'pass';
   let retryRequest: StructuredRetryRequest | null = null;
 
-  if (identityStatus === 'mismatched' || identityStatus === 'unresolved' || blockingIssues.some((c) => c.checkName.startsWith('identity_'))) {
+  if (identityDecision === 'fail' || blockingIssues.some((c) => c.category === 'identity')) {
     verdict = 'retry_discovery';
     retryRequest = {
       targetSpecialist: 'discovery',
@@ -677,16 +778,19 @@ export function verifyCuratedDraft(
         c.checkName === 'grounding_unresolved_fact_reference' ||
         c.checkName === 'grounding_evidence_misassociation' ||
         c.checkName === 'unsupported_description_claim' ||
-        c.checkName === 'description_claim_mismatch',
+        c.checkName === 'description_claim_mismatch' ||
+        c.checkName === 'primary_image_commerce_approval' ||
+        c.checkName === 'image_rights_compliance' ||
+        c.checkName === 'image_variant_compliance',
     )
   ) {
     verdict = 'retry_curator';
     const badFields = blockingIssues.map((c) => c.field).filter((f): f is string => Boolean(f));
     retryRequest = {
       targetSpecialist: 'curator',
-      reason: 'Draft contains ungrounded claims, altered values, missing required grounding, or promotes conflicting facts',
+      reason: 'Draft contains ungrounded claims, altered values, missing required grounding, invalid image rights, or promotes conflicting facts',
       conflictingFields: badFields,
-      suggestedAction: 'Regenerate draft attributes and descriptions strictly from resolved facts with complete grounding',
+      suggestedAction: 'Regenerate draft attributes, images, and descriptions strictly from resolved facts with complete grounding',
     };
   } else if (blockingIssues.length > 0) {
     verdict = 'human_review';
@@ -697,15 +801,19 @@ export function verifyCuratedDraft(
   }
 
   const passedChecksCount = checks.filter((c) => c.passed).length;
-  const score = checks.length > 0 ? Math.round((passedChecksCount / checks.length) * 100) / 100 : 0;
+  const overallScore = checks.length > 0 ? Math.round((passedChecksCount / checks.length) * 100) / 100 : 0;
 
   return {
     schemaVersion: VERIFIER_OUTPUT_SCHEMA_VERSION,
     specialist: VERIFIER_SPECIALIST_NAME,
     specialistVersion: VERIFIER_SPECIALIST_VERSION,
     verdict,
-    score,
+    score: overallScore,
+    identityScore,
+    productDataScore,
     identityStatus,
+    identityDecision,
+    productDataDecision,
     checks,
     retryRequest,
     blockingIssuesCount: blockingIssues.length,

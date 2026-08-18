@@ -5,6 +5,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   SpecialistOrchestrator,
+  normalizeScopedIdentifier,
+  type SpecialistWorkflowRecord,
 } from '../../../product-intelligence/workflow/orchestrator';
 import {
   DiscoverySpecialist,
@@ -217,7 +219,28 @@ function createMockExtractionBundle(url: string, brand = 'ACME'): ExtractionEvid
 }
 
 describe('Specialist Orchestrator (#56)', () => {
-  it('executes end-to-end happy path to terminal status completed with verified extraction runner', async () => {
+  it('normalizes identifiers once and rejects 14-digit GTIN from consumer unit scope', () => {
+    const unscoped14 = normalizeScopedIdentifier('10012345678908');
+    expect(unscoped14.gtin).toBeNull();
+    expect(unscoped14.scope).toBe('consumer_unit');
+
+    const case14 = normalizeScopedIdentifier('10012345678908', 'case');
+    expect(case14.gtin).toBe('10012345678908');
+    expect(case14.scope).toBe('case');
+
+    const consumer12 = normalizeScopedIdentifier('012345678901');
+    expect(consumer12.gtin).toBe('012345678901');
+    expect(consumer12.scope).toBe('consumer_unit');
+  });
+
+  it('executes end-to-end happy path to terminal status completed with verified extraction runner and persistence', async () => {
+    const savedRecords: SpecialistWorkflowRecord[] = [];
+    const mockPersistence = {
+      save: (rec: SpecialistWorkflowRecord) => {
+        savedRecords.push(rec);
+      },
+    };
+
     const discovery = new DiscoverySpecialist(
       {
         search: async () => ({ candidates: [createDiscoveryCandidate()] }),
@@ -229,6 +252,7 @@ describe('Specialist Orchestrator (#56)', () => {
     const orchestrator = new SpecialistOrchestrator({
       dependencies: {
         discovery,
+        workflowPersistence: mockPersistence,
         extractionRunner: async (url) => createMockExtractionBundle(url),
       },
       now: () => FIXED_NOW,
@@ -248,9 +272,11 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.workflowState).toBeDefined();
     expect(result.workflowState.status).toBe('completed');
     expect(result.workflowState.currentPhase).toBe('completed');
+    expect(savedRecords.length).toBeGreaterThan(0);
+    expect(savedRecords[savedRecords.length - 1].status).toBe('completed');
   });
 
-  it('routes to Profile Engineer and holds for manual review when extraction reports profile_failed', async () => {
+  it('routes to Profile Engineer and holds for manual review when extraction reports profile_failed with real evidence', async () => {
     let profileCalls = 0;
     let capturedInput: any = null;
 
@@ -357,58 +383,36 @@ describe('Specialist Orchestrator (#56)', () => {
 
     const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
 
-    // Governed path: unapproved profile proposals hold for manual review
     expect(result.status).toBe('needs_review');
     expect(profileCalls).toBe(1);
     expect(result.profileOutput).toBeDefined();
     expect(result.profileOutput?.authority).toBe('proposal_only');
     expect(result.events.some((e) => e.action === 'profile_review_hold')).toBe(true);
 
-    // Check that Profile Engineer was called with proper product_name and titleSelector hints
     expect(capturedInput.samples[0].observedFields.product_name).toBeDefined();
-    expect(capturedInput.samples[0].selectorHints.titleSelector).toBeDefined();
-    expect(capturedInput.samples[0].artifactRefs).toBeDefined();
+    expect(capturedInput.samples[0].artifactRefs).toEqual(['art-1']);
   });
 
-  it('rejects 14-digit GTIN from consumer unit scope and does not promote to expected consumer GTIN', async () => {
+  it('rejects 14-digit GTIN without case scope and runs through resolver with null expected consumer GTIN', async () => {
+    const caseExtractionSeam = {
+      name: 'mock_case_extractor',
+      version: '1.0.0',
+      extract: async (req: any) => {
+        const base = await mockExtractionSeam.extract(req);
+        return {
+          ...base,
+          gtin: '10012345678908',
+          gtins: [{ kind: 'gtin' as const, value: '10012345678908', method: 'json_ld', sourcePath: 'product.gtin', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] }],
+        };
+      },
+    };
+
     const discovery = new DiscoverySpecialist(
       {
         search: async () => ({
           candidates: [createDiscoveryCandidate()],
         }),
-        extraction: {
-          name: 'mock_extractor',
-          version: '1.0.0',
-          extract: async (req: any) => ({
-            requestedUrl: req.url,
-            url: req.url,
-            finalUrl: req.url,
-            canonicalUrl: req.url,
-            fetchModes: ['http_detailed'],
-            contentHash: sha256Hex(req.url),
-            artifactRef: 'art-1',
-            title: 'ACME Organic Chicken Broth 16 fl oz Case',
-            productName: 'Organic Chicken Broth',
-            brand: 'ACME',
-            sku: 'SUP-56',
-            gtin: '10012345678908', // 14-digit case barcode!
-            gtins: [{ kind: 'gtin' as const, value: '10012345678908', method: 'json_ld', sourcePath: 'product.gtin', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] }],
-            fields: [
-              { field: 'brand', value: 'ACME', rawValue: 'ACME', method: 'json_ld', sourcePath: 'product.brand', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
-              { field: 'weight', value: '16 fl oz', rawValue: '16 fl oz', method: 'json_ld', sourcePath: 'product.weight', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
-            ],
-            skuEvidence: { kind: 'sku' as const, value: 'SUP-56', method: 'json_ld', sourcePath: 'product.sku', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
-            brandEvidence: { kind: 'brand' as const, value: 'ACME', method: 'json_ld', sourcePath: 'product.brand', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] },
-            variant: null,
-            size: '16 fl oz',
-            packCount: 1,
-            images: [],
-            conflicts: [],
-            identityStatus: 'exact_match' as const,
-            identityReasons: ['exact match'],
-            deterministicOnly: true,
-          }),
-        },
+        extraction: caseExtractionSeam,
       },
       { codeCommit: 'commit-56' },
     );
@@ -428,8 +432,60 @@ describe('Specialist Orchestrator (#56)', () => {
       { discoveredGtin: '10012345678908' }, // 14-digit supplied without scope
     );
 
-    // 14-digit is not promoted as consumer GTIN
-    expect(result.resolverOutput?.expectedIdentity?.gtin ?? null).toBeNull();
+    expect(result.status).toBe('completed');
+    expect(result.resolverOutput).toBeDefined();
+    expect(result.resolverOutput?.expectedIdentity?.gtin).toBeNull();
+    expect(result.resolverOutput?.expectedIdentity?.gtinScope).toBe('consumer_unit');
+  });
+
+  it('accepts 14-digit GTIN when explicitly scoped to case', async () => {
+    const caseExtractionSeam = {
+      name: 'mock_case_extractor',
+      version: '1.0.0',
+      extract: async (req: any) => {
+        const base = await mockExtractionSeam.extract(req);
+        return {
+          ...base,
+          gtin: '10012345678908',
+          gtins: [{ kind: 'gtin' as const, value: '10012345678908', method: 'json_ld', sourcePath: 'product.gtin', sourceArtifactId: 'art-1', evidenceIds: ['ev:1'] }],
+        };
+      },
+    };
+
+    const discovery = new DiscoverySpecialist(
+      {
+        search: async () => ({
+          candidates: [createDiscoveryCandidate()],
+        }),
+        extraction: caseExtractionSeam,
+      },
+      { codeCommit: 'commit-56' },
+    );
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery,
+        extractionRunner: async (url) => {
+          const base = createMockExtractionBundle(url);
+          const gtinObs = base.observations.find((o) => o.field === 'gtin');
+          if (gtinObs) gtinObs.value = '10012345678908';
+          return base;
+        },
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      context,
+      { discoveredGtin: '10012345678908', gtinScope: 'case' },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.resolverOutput).toBeDefined();
+    expect(result.resolverOutput?.expectedIdentity?.gtin).toBe('10012345678908');
+    expect(result.resolverOutput?.expectedIdentity?.gtinScope).toBe('case');
   });
 
   it('promotes genuinely discovered 12-digit GTIN to expected consumer identity', async () => {
@@ -502,10 +558,15 @@ describe('Specialist Orchestrator (#56)', () => {
                 specialistVersion: '1.0.0',
                 verdict: 'retry_curator',
                 score: 0.5,
+                identityScore: 1.0,
+                productDataScore: 0.5,
                 identityStatus: 'verified',
+                identityDecision: 'pass',
+                productDataDecision: 'fail',
                 checks: [
                   {
                     checkName: 'claim_grounding',
+                    category: 'product_data',
                     passed: false,
                     severity: 'blocking',
                     field: 'flavor',
@@ -580,10 +641,15 @@ describe('Specialist Orchestrator (#56)', () => {
             specialistVersion: '1.0.0',
             verdict: 'retry_curator',
             score: 0.2,
+            identityScore: 1.0,
+            productDataScore: 0.2,
             identityStatus: 'verified',
+            identityDecision: 'pass',
+            productDataDecision: 'fail',
             checks: [
               {
                 checkName: 'claim_grounding',
+                category: 'product_data',
                 passed: false,
                 severity: 'blocking',
                 field: 'title',

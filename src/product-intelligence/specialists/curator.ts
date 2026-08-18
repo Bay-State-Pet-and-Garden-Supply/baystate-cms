@@ -454,6 +454,10 @@ export function curateProductDraft(
   const images: CuratedImage[] = [];
   // Downstream image rights verification ensures only commerce-approved assets are selected.
 
+  const isCaseIdentity = factSet.expectedIdentity?.gtinScope === 'case' || Boolean(factSet.identity.gtin && factSet.identity.gtin.replace(/\D/g, '').length === 14);
+  const consumerGtin = isCaseIdentity ? null : factSet.identity.gtin;
+  const consumerUpc = isCaseIdentity ? null : factSet.identity.upc;
+
   return {
     schemaVersion: CURATOR_OUTPUT_SCHEMA_VERSION,
     specialist: CURATOR_SPECIALIST_NAME,
@@ -463,8 +467,8 @@ export function curateProductDraft(
     sourceTitle,
     resolvedIdentityName,
     brand,
-    gtin: factSet.identity.gtin,
-    upc: factSet.identity.upc,
+    gtin: consumerGtin,
+    upc: consumerUpc,
     subtitle: sizeOrWeight ? `${brand ?? ''} - ${sizeOrWeight}`.trim().replace(/^-\s*/, '') : null,
     description: description || null,
     productTypeId,

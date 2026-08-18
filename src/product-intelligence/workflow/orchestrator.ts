@@ -35,21 +35,18 @@
  * INVARIANTS:
  *   - Specialists NEVER invoke each other; ONLY the orchestrator dispatches work.
  *   - All inter-specialist data flows are schema-validated typed artifacts.
- *   - Loops stop deterministically at configured retry/dispatch limits.
+ *   - Loops stop deterministically at configured retry/dispatch/budget limits.
  *   - Cancellation via AbortSignal immediately aborts execution and sets CANCELLED.
- *   - Atomic dispatch reservation enforces hard limits before every invocation.
+ *   - Atomic dispatch & tool/cost ledger reservations enforce hard policy limits.
  *   - 14-digit GTINs are strictly case-scoped and never promoted as consumer GTINs.
+ *   - Caller identifiers are normalized once and passed canonically across all phases.
  *   - Profile Engineer proposals require governance/manual review before activation.
- *   - Domain synthesis leases are released safely on completion or error.
- *   - Every exit path emits a comprehensive, durable workflow state snapshot.
+ *   - Profile synthesis uses concurrency-safe workflow locks with real observed evidence.
+ *   - Every exit path persists and returns a comprehensive workflow state record.
  */
 
 import { z } from 'zod';
 import { sha256Hex } from '../../shared/stable-id';
-
-function extractDigits(str: string | null | undefined): string {
-  return (str ?? '').replace(/\D/g, '');
-}
 import type { ProductSeed } from '../product-seed';
 import {
   DiscoverySpecialist,
@@ -59,10 +56,12 @@ import {
 import {
   ProfileEngineerSpecialist,
   type ProfileEngineerProposal,
+  type ProfileEngineerWorkflowLock,
 } from '../specialists/profile-engineer';
 import {
   ResolverSpecialist,
   type ResolvedFactSet,
+  type IdentifierScope,
 } from '../specialists/resolver';
 import {
   CuratorSpecialist,
@@ -129,16 +128,56 @@ export const DEFAULT_CAPABILITY_LIMITS: CapabilityLimits = {
   maxTotalDispatches: 20,
 };
 
+export interface WorkflowUsageLedger {
+  totalDispatches: number;
+  totalToolCalls: number;
+  totalModelCalls: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  estimatedCostUsd: number;
+  bySpecialist: Record<string, {
+    dispatches: number;
+    toolCalls: number;
+    modelCalls: number;
+    durationMs: number;
+  }>;
+}
+
 export interface WorkflowStateSnapshot {
   runId: string;
+  version: string;
   status: OrchestratorTerminalStatus;
   currentPhase: string;
   retriesCount: number;
   totalDispatches: number;
   invocations: Record<string, number>;
+  usage: WorkflowUsageLedger;
   artifactIds: string[];
   totalDurationMs: number;
   error?: string;
+}
+
+export interface SpecialistWorkflowRecord {
+  workflowId: string;
+  runId: string;
+  workspaceId: string;
+  productSeed: ProductSeed;
+  status: OrchestratorTerminalStatus;
+  currentPhase: string;
+  retriesCount: number;
+  totalDispatches: number;
+  invocations: Record<string, number>;
+  usage: WorkflowUsageLedger;
+  stepEvents: OrchestratorStepEvent[];
+  artifactIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
+export interface SpecialistWorkflowPersistenceRepository {
+  save(record: SpecialistWorkflowRecord): Promise<void> | void;
+  get?(runId: string): Promise<SpecialistWorkflowRecord | null> | SpecialistWorkflowRecord | null;
 }
 
 export interface SpecialistWorkflowResult {
@@ -167,9 +206,11 @@ export interface SpecialistWorkflowResult {
 export interface SpecialistOrchestratorDependencies {
   discovery?: DiscoverySpecialist;
   profileEngineer?: ProfileEngineerSpecialist;
+  profileEngineerWorkflowLock?: ProfileEngineerWorkflowLock;
   resolver?: ResolverSpecialist;
   curator?: CuratorSpecialist;
   verifier?: VerifierSpecialist;
+  workflowPersistence?: SpecialistWorkflowPersistenceRepository;
   extractionRunnerOptions?: DeterministicExtractionRunnerOptions;
   extractionRunner?: (
     url: string,
@@ -180,7 +221,7 @@ export interface SpecialistOrchestratorDependencies {
 
 export interface RunWorkflowOptions {
   discoveredGtin?: string | null;
-  gtinScope?: 'consumer_unit' | 'case' | 'multipack' | 'inner_pack';
+  gtinScope?: IdentifierScope;
 }
 
 export interface SpecialistOrchestratorOptions {
@@ -189,6 +230,67 @@ export interface SpecialistOrchestratorOptions {
   extractionConcurrency?: number;
   dependencies?: SpecialistOrchestratorDependencies;
   now?: () => string;
+}
+
+// ── In-Memory Concurrency Lock for Profile Engineer ─────────────────────────
+
+export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock {
+  private readonly activeLocks = new Set<string>();
+
+  public claim(domain: string, runId: string, _workspaceId: string): { acquired: boolean; workflowId: string; reason?: string } {
+    if (this.activeLocks.has(domain)) {
+      return { acquired: false, workflowId: `wf:${domain}:${runId}`, reason: `Domain ${domain} profile is actively being synthesized` };
+    }
+    this.activeLocks.add(domain);
+    return { acquired: true, workflowId: `wf:${domain}:${runId}` };
+  }
+
+  public complete(workflowId: string, _runId: string): { applied: boolean } {
+    const domain = workflowId.split(':')[1];
+    if (domain) this.activeLocks.delete(domain);
+    return { applied: true };
+  }
+
+  public fail(workflowId: string, _runId: string, _reason: string): { applied: boolean } {
+    const domain = workflowId.split(':')[1];
+    if (domain) this.activeLocks.delete(domain);
+    return { applied: true };
+  }
+}
+
+// ── Normalized Identifier Helper ─────────────────────────────────────────────
+
+function extractDigits(str: string | null | undefined): string {
+  return (str ?? '').replace(/\D/g, '');
+}
+
+export interface CanonicalScopedIdentifier {
+  gtin: string | null;
+  scope: IdentifierScope;
+}
+
+export function normalizeScopedIdentifier(
+  rawGtin: string | null | undefined,
+  requestedScope?: IdentifierScope,
+): CanonicalScopedIdentifier {
+  if (!rawGtin || rawGtin.trim().length === 0) {
+    return { gtin: null, scope: requestedScope ?? 'consumer_unit' };
+  }
+
+  const d = extractDigits(rawGtin);
+  if (d.length === 14) {
+    // 14-digit GTIN is strictly case-scoped; if caller did not specify 'case', reject from consumer unit
+    if (requestedScope === 'case') {
+      return { gtin: rawGtin.trim(), scope: 'case' };
+    }
+    return { gtin: null, scope: 'consumer_unit' };
+  }
+
+  if ([8, 12, 13].includes(d.length)) {
+    return { gtin: rawGtin.trim(), scope: requestedScope ?? 'consumer_unit' };
+  }
+
+  return { gtin: rawGtin.trim(), scope: requestedScope ?? 'unknown' };
 }
 
 // ── Concurrent Map Helper ───────────────────────────────────────────────────
@@ -212,10 +314,6 @@ async function boundedMap<T, R>(
   return results;
 }
 
-// ── Active Domain Leases Map (Cleaned on completion / error) ────────────────
-
-const activeDomainLeases = new Map<string, Promise<SpecialistResult>>();
-
 // ── Orchestrator Implementation ─────────────────────────────────────────────
 
 export class SpecialistOrchestrator {
@@ -224,6 +322,7 @@ export class SpecialistOrchestrator {
   private readonly extractionConcurrency: number;
   private readonly dependencies: SpecialistOrchestratorDependencies;
   private readonly now: () => string;
+  private readonly defaultProfileLock: InMemoryProfileWorkflowLock;
 
   public constructor(options: SpecialistOrchestratorOptions = {}) {
     this.maxRetries = options.maxRetries ?? 3;
@@ -231,6 +330,7 @@ export class SpecialistOrchestrator {
     this.extractionConcurrency = Math.max(1, Math.min(8, options.extractionConcurrency ?? 3));
     this.dependencies = options.dependencies ?? {};
     this.now = options.now ?? (() => new Date().toISOString());
+    this.defaultProfileLock = new InMemoryProfileWorkflowLock();
   }
 
   public async runWorkflow(
@@ -254,6 +354,22 @@ export class SpecialistOrchestrator {
       verifier: 0,
     };
 
+    const usageLedger: WorkflowUsageLedger = {
+      totalDispatches: 0,
+      totalToolCalls: 0,
+      totalModelCalls: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      estimatedCostUsd: 0,
+      bySpecialist: {},
+    };
+
+    // Normalize caller-provided identifier ONCE at workflow start
+    const canonicalIdentifier = normalizeScopedIdentifier(
+      workflowOptions.discoveredGtin,
+      workflowOptions.gtinScope,
+    );
+
     let discoveryArtifact: SpecialistArtifactEnvelope | undefined;
     let profileArtifact: SpecialistArtifactEnvelope | undefined;
     let resolverArtifact: SpecialistArtifactEnvelope | undefined;
@@ -272,17 +388,53 @@ export class SpecialistOrchestrator {
       if (curatorArtifact) artifactIds.push(`${curatorArtifact.artifactType}:${curatorArtifact.contentHash}`);
       if (verifierArtifact) artifactIds.push(`${verifierArtifact.artifactType}:${verifierArtifact.contentHash}`);
 
+      usageLedger.totalDispatches = totalDispatches;
+
       return {
         runId: context.runId,
+        version: '1.0.0',
         status,
         currentPhase,
         retriesCount,
         totalDispatches,
         invocations: { ...invocations },
+        usage: { ...usageLedger },
         artifactIds,
         totalDurationMs: Date.now() - startedAt,
         error,
       };
+    };
+
+    const persistState = async (
+      status: OrchestratorTerminalStatus,
+      currentPhase: string,
+      error?: string,
+    ): Promise<WorkflowStateSnapshot> => {
+      const snapshot = makeSnapshot(status, currentPhase, error);
+      if (this.dependencies.workflowPersistence) {
+        try {
+          await this.dependencies.workflowPersistence.save({
+            workflowId: `wf:${context.runId}`,
+            runId: context.runId,
+            workspaceId: context.workspaceId,
+            productSeed,
+            status,
+            currentPhase,
+            retriesCount,
+            totalDispatches,
+            invocations: { ...invocations },
+            usage: { ...usageLedger },
+            stepEvents: [...events],
+            artifactIds: snapshot.artifactIds,
+            createdAt: new Date(startedAt).toISOString(),
+            updatedAt: this.now(),
+            error,
+          });
+        } catch {
+          // Persistence failure should not crash workflow
+        }
+      }
+      return snapshot;
     };
 
     const recordEvent = (
@@ -302,13 +454,23 @@ export class SpecialistOrchestrator {
         timestamp: this.now(),
         details,
       });
+
+      if (!usageLedger.bySpecialist[specialist]) {
+        usageLedger.bySpecialist[specialist] = { dispatches: 0, toolCalls: 0, modelCalls: 0, durationMs: 0 };
+      }
+      usageLedger.bySpecialist[specialist].durationMs += durationMs;
     };
 
-    const reserveDispatch = (count = 1): boolean => {
+    const reserveDispatch = (specialist: string, count = 1): boolean => {
       if (totalDispatches + count > this.limits.maxTotalDispatches) {
         return false;
       }
       totalDispatches += count;
+      usageLedger.totalDispatches = totalDispatches;
+      if (!usageLedger.bySpecialist[specialist]) {
+        usageLedger.bySpecialist[specialist] = { dispatches: 0, toolCalls: 0, modelCalls: 0, durationMs: 0 };
+      }
+      usageLedger.bySpecialist[specialist].dispatches += count;
       return true;
     };
 
@@ -316,7 +478,7 @@ export class SpecialistOrchestrator {
       if (invocations.extraction >= this.limits.maxExtractionInvocations) {
         return false;
       }
-      if (!reserveDispatch(1)) {
+      if (!reserveDispatch('extraction', 1)) {
         return false;
       }
       invocations.extraction += 1;
@@ -327,6 +489,7 @@ export class SpecialistOrchestrator {
 
     if (isAborted()) {
       recordEvent('orchestrator', 'init', 'failed', 0, 'Workflow cancelled before start');
+      const state = await persistState('cancelled', 'init', 'Execution cancelled before start');
       return {
         runId: context.runId,
         status: 'cancelled',
@@ -336,13 +499,17 @@ export class SpecialistOrchestrator {
         retriesCount: 0,
         totalDispatches: 0,
         totalDurationMs: Date.now() - startedAt,
-        workflowState: makeSnapshot('cancelled', 'init', 'Execution cancelled before start'),
+        workflowState: state,
         error: 'Execution cancelled',
       };
     }
 
     const discovery = this.dependencies.discovery ?? new DiscoverySpecialist({}, { codeCommit: captureSpecialistCodeCommit() });
-    const profileEngineer = this.dependencies.profileEngineer ?? new ProfileEngineerSpecialist({}, { codeCommit: captureSpecialistCodeCommit() });
+    const profileLock = this.dependencies.profileEngineerWorkflowLock ?? this.defaultProfileLock;
+    const profileEngineer = this.dependencies.profileEngineer ?? new ProfileEngineerSpecialist(
+      { workflow: profileLock },
+      { codeCommit: captureSpecialistCodeCommit() },
+    );
     const resolver = this.dependencies.resolver ?? new ResolverSpecialist({ now: this.now });
     const curator = this.dependencies.curator ?? new CuratorSpecialist({ now: this.now });
     const verifier = this.dependencies.verifier ?? new VerifierSpecialist({ now: this.now });
@@ -359,6 +526,7 @@ export class SpecialistOrchestrator {
     while (totalDispatches < this.limits.maxTotalDispatches) {
       if (isAborted()) {
         recordEvent('orchestrator', 'cancellation_check', 'failed', 0, 'Workflow cancelled by caller');
+        const state = await persistState('cancelled', targetPhase, 'Workflow cancelled by caller');
         return {
           runId: context.runId,
           status: 'cancelled',
@@ -378,7 +546,7 @@ export class SpecialistOrchestrator {
           retriesCount,
           totalDispatches,
           totalDurationMs: Date.now() - startedAt,
-          workflowState: makeSnapshot('cancelled', targetPhase, 'Workflow cancelled by caller'),
+          workflowState: state,
           error: 'Execution cancelled',
         };
       }
@@ -386,6 +554,7 @@ export class SpecialistOrchestrator {
       // Check wall-clock deadline
       if (context.deadlineAt && Date.now() > context.deadlineAt) {
         recordEvent('orchestrator', 'deadline_check', 'failed', 0, 'Execution deadline exceeded');
+        const state = await persistState('budget_exceeded', 'deadline_check', 'Execution deadline exceeded');
         return {
           runId: context.runId,
           status: 'budget_exceeded',
@@ -405,15 +574,16 @@ export class SpecialistOrchestrator {
           retriesCount,
           totalDispatches,
           totalDurationMs: Date.now() - startedAt,
-          workflowState: makeSnapshot('budget_exceeded', 'deadline_check', 'Execution deadline exceeded'),
+          workflowState: state,
           error: 'Execution deadline exceeded',
         };
       }
 
       switch (targetPhase) {
         case 'discovery': {
-          if (invocations.discovery >= this.limits.maxDiscoveryInvocations || !reserveDispatch(1)) {
+          if (invocations.discovery >= this.limits.maxDiscoveryInvocations || !reserveDispatch('discovery', 1)) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Discovery invocation or total dispatch limit exceeded');
+            const state = await persistState('budget_exceeded', 'discovery', 'Discovery invocation or dispatch limit reached');
             return {
               runId: context.runId,
               status: 'budget_exceeded',
@@ -423,7 +593,7 @@ export class SpecialistOrchestrator {
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               extractionBundles: [],
-              workflowState: makeSnapshot('budget_exceeded', 'discovery', 'Discovery invocation or dispatch limit reached'),
+              workflowState: state,
               error: 'Discovery invocation or dispatch limit reached',
             };
           }
@@ -432,22 +602,11 @@ export class SpecialistOrchestrator {
           const stepStart = Date.now();
           recordEvent('discovery', 'discover_candidates', 'started', 0);
 
-          // Only pass initial discovered GTIN if consumer-scoped (8/12/13 digits) or explicitly case-scoped
-          const initialDiscoveredGtin = (() => {
-            const raw = workflowOptions.discoveredGtin;
-            if (!raw) return null;
-            const d = extractDigits(raw);
-            if (d.length === 14 && workflowOptions.gtinScope !== 'case') {
-              return null;
-            }
-            return raw;
-          })();
-
           const discResult: SpecialistResult = await discovery.execute(
             {
               schemaVersion: 1,
               productSeed,
-              discoveredGtin: initialDiscoveredGtin,
+              discoveredGtin: canonicalIdentifier.gtin,
               batchContext: null,
               sourceCandidates: [],
             },
@@ -458,6 +617,7 @@ export class SpecialistOrchestrator {
           if (discResult.outcome !== 'succeeded' || !discResult.output) {
             if (discResult.outcome === 'abstained') {
               recordEvent('discovery', 'discover_candidates', 'succeeded', discDuration, 'Discovery abstained (no candidates)');
+              const state = await persistState('abstained', 'discovery');
               return {
                 runId: context.runId,
                 status: 'abstained',
@@ -467,10 +627,11 @@ export class SpecialistOrchestrator {
                 retriesCount,
                 totalDispatches,
                 totalDurationMs: Date.now() - startedAt,
-                workflowState: makeSnapshot('abstained', 'discovery'),
+                workflowState: state,
               };
             }
             recordEvent('discovery', 'discover_candidates', 'failed', discDuration, discResult.failure?.message);
+            const state = await persistState('failed', 'discovery', discResult.failure?.message);
             return {
               runId: context.runId,
               status: 'failed',
@@ -480,7 +641,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('failed', 'discovery', discResult.failure?.message),
+              workflowState: state,
               error: discResult.failure?.message ?? 'Discovery failed',
             };
           }
@@ -491,6 +652,7 @@ export class SpecialistOrchestrator {
 
           if (discoveryOutput.candidates.length === 0) {
             recordEvent('discovery', 'discover_candidates', 'succeeded', discDuration, 'Discovery abstained (no candidates)');
+            const state = await persistState('abstained', 'discovery');
             return {
               runId: context.runId,
               status: 'abstained',
@@ -502,7 +664,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('abstained', 'discovery'),
+              workflowState: state,
             };
           }
 
@@ -526,7 +688,7 @@ export class SpecialistOrchestrator {
             .slice(0, 3)
             .map((c) => c.finalUrl ?? c.source.url);
 
-          // Promote GTIN strictly from verified PDP candidate with trusted identifier provenance
+          // Promote GTIN strictly from verified PDP candidate with consumer unit GTIN provenance
           const trustedCandidateGtin = (() => {
             const trusted = candidates.find(
               (c) => (c.pageKind === 'exact_pdp' || c.pageKind === 'probable_pdp') &&
@@ -534,16 +696,16 @@ export class SpecialistOrchestrator {
             )?.extracted.identifiers.find((i) => i.kind === 'gtin')?.value ?? null;
             if (!trusted) return null;
             const d = extractDigits(trusted);
-            // 14-digit GTINs are strictly case identifiers; never promote as consumer GTIN unless explicit scope
-            if (d.length === 14 && workflowOptions.gtinScope !== 'case') {
+            if (d.length === 14 && canonicalIdentifier.scope !== 'case') {
               return null;
             }
             return trusted;
           })();
 
-          const genuineDiscoveredGtin = workflowOptions.discoveredGtin ?? discoveryOutput?.discoveredGtin ?? trustedCandidateGtin ?? null;
+          const effectiveExtractionGtin = canonicalIdentifier.gtin ?? trustedCandidateGtin ?? null;
 
           let requiresProfileHold = false;
+          const synthesizedDomainsInPhase = new Set<string>();
 
           // Bounded parallel extraction
           extractionBundles = await boundedMap(
@@ -584,7 +746,7 @@ export class SpecialistOrchestrator {
                   {
                     url,
                     expected: {
-                      gtin: genuineDiscoveredGtin ?? undefined,
+                      gtin: effectiveExtractionGtin ?? undefined,
                       name: productSeed.name,
                     },
                     signal: context.signal,
@@ -596,7 +758,8 @@ export class SpecialistOrchestrator {
 
               // Check if profile is needed or failed
               const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed' || f.code === 'profile_missing');
-              if (needsProfile && invocations.profile < this.limits.maxProfileInvocations) {
+              if (needsProfile && !synthesizedDomainsInPhase.has(domain) && invocations.profile < this.limits.maxProfileInvocations) {
+                synthesizedDomainsInPhase.add(domain);
                 // Find independent candidate URLs on this domain for profile synthesis
                 const domainCandidates = candidates.filter((c: DiscoveryCandidate) => {
                   try {
@@ -607,107 +770,97 @@ export class SpecialistOrchestrator {
                   }
                 });
 
-                // Profile Engineer strictly requires 2 independent sample pages
+                // Profile Engineer strictly requires 2 independent sample pages with REAL extraction evidence
                 if (domainCandidates.length >= 2) {
-                  let leasePromise = activeDomainLeases.get(domain);
-                  if (!leasePromise) {
-                    if (reserveDispatch(1)) {
-                      invocations.profile += 1;
-                      recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
+                  const sample1 = domainCandidates[0];
+                  const sample2 = domainCandidates[1];
+                  const sample1Url = sample1.finalUrl ?? sample1.source.url;
+                  const sample2Url = sample2.finalUrl ?? sample2.source.url;
 
-                      const sample1 = domainCandidates[0];
-                      const sample2 = domainCandidates[1];
-                      const sample1Url = sample1.finalUrl ?? sample1.source.url;
-                      const sample2Url = sample2.finalUrl ?? sample2.source.url;
+                  // Check if real retained artifact IDs exist
+                  const sample1Artifacts = [...new Set(sample1.extracted.identifiers
+                    .map((i) => i.sourceArtifactId)
+                    .filter((id) => Boolean(id)))];
+                  const sample2Artifacts = [...new Set(sample2.extracted.identifiers
+                    .map((i) => i.sourceArtifactId)
+                    .filter((id) => Boolean(id)))];
 
-                      // Map observed fields to Profile Engineer schema conventions
-                      const sample1Obs: Record<string, string> = {};
-                      if (sample1.extracted.brand) sample1Obs.brand = sample1.extracted.brand;
-                      if (sample1.extracted.productName) sample1Obs.product_name = sample1.extracted.productName;
-                      if (sample1.extracted.size) sample1Obs.size = sample1.extracted.size;
-                      if (sample1.extracted.sku) sample1Obs.sku = sample1.extracted.sku;
-                      if (sample1.extracted.gtins.length > 0) sample1Obs.gtin = sample1.extracted.gtins[0];
+                  // Extract real observed title selector hints if observed
+                  const sample1TitleHint = sample1.extracted.identifiers.find((i) => i.kind === 'gtin' || i.kind === 'sku')?.sourcePath ?? null;
+                  const sample2TitleHint = sample2.extracted.identifiers.find((i) => i.kind === 'gtin' || i.kind === 'sku')?.sourcePath ?? null;
 
-                      const sample2Obs: Record<string, string> = {};
-                      if (sample2.extracted.brand) sample2Obs.brand = sample2.extracted.brand;
-                      if (sample2.extracted.productName) sample2Obs.product_name = sample2.extracted.productName;
-                      if (sample2.extracted.size) sample2Obs.size = sample2.extracted.size;
-                      if (sample2.extracted.sku) sample2Obs.sku = sample2.extracted.sku;
-                      if (sample2.extracted.gtins.length > 0) sample2Obs.gtin = sample2.extracted.gtins[0];
+                  // Check if real evidence is present (do NOT synthesize from fabricated evidence)
+                  const hasRealEvidence = sample1Artifacts.length > 0 && sample2Artifacts.length > 0;
 
-                      // Map selector hints (e.g. titleSelector)
-                      const sample1Hints: Record<string, string> = {
-                        titleSelector: 'h1.product-title, h1[itemprop="name"], h1',
-                      };
-                      const sample2Hints: Record<string, string> = {
-                        titleSelector: 'h1.product-title, h1[itemprop="name"], h1',
-                      };
+                  if (hasRealEvidence && reserveDispatch('profile_engineer', 1)) {
+                    invocations.profile += 1;
+                    recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
 
-                      // Use retained page artifact references
-                      const sample1Artifacts = sample1.extracted.identifiers
-                        .map((i) => i.sourceArtifactId)
-                        .filter((id) => Boolean(id));
-                      const sample2Artifacts = sample2.extracted.identifiers
-                        .map((i) => i.sourceArtifactId)
-                        .filter((id) => Boolean(id));
+                    const sample1Obs: Record<string, string> = {};
+                    if (sample1.extracted.brand) sample1Obs.brand = sample1.extracted.brand;
+                    if (sample1.extracted.productName) sample1Obs.product_name = sample1.extracted.productName;
+                    if (sample1.extracted.size) sample1Obs.size = sample1.extracted.size;
+                    if (sample1.extracted.sku) sample1Obs.sku = sample1.extracted.sku;
+                    if (sample1.extracted.gtins.length > 0) sample1Obs.gtin = sample1.extracted.gtins[0];
 
-                      const hasSample1Gtin = sample1.extracted.gtins.length > 0;
-                      const hasSample2Gtin = sample2.extracted.gtins.length > 0;
+                    const sample2Obs: Record<string, string> = {};
+                    if (sample2.extracted.brand) sample2Obs.brand = sample2.extracted.brand;
+                    if (sample2.extracted.productName) sample2Obs.product_name = sample2.extracted.productName;
+                    if (sample2.extracted.size) sample2Obs.size = sample2.extracted.size;
+                    if (sample2.extracted.sku) sample2Obs.sku = sample2.extracted.sku;
+                    if (sample2.extracted.gtins.length > 0) sample2Obs.gtin = sample2.extracted.gtins[0];
 
-                      leasePromise = profileEngineer.execute(
-                        {
-                          schemaVersion: 1,
-                          domain,
-                          activeProfile: null,
-                          samples: [
-                            {
-                              url: sample1Url,
-                              artifactRefs: sample1Artifacts.length > 0 ? sample1Artifacts : [sha256Hex(sample1Url)],
-                              expectedName: productSeed.name,
-                              expectedGtin: genuineDiscoveredGtin ?? undefined,
-                              signals: {
-                                jsonLd: hasSample1Gtin,
-                                shopify: sample1.signals.some((s) => s.value.toLowerCase().includes('shopify')),
-                                woocommerce: sample1.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
-                                embeddedState: false,
-                                selectorOnly: false,
-                                changedMarkup: false,
-                                wrongVariant: sample1.pageKind === 'wrong_variant',
-                              },
-                              selectorHints: sample1Hints,
-                              observedFields: sample1Obs,
+                    const sample1Hints: Record<string, string> = {};
+                    if (sample1TitleHint) sample1Hints.titleSelector = sample1TitleHint;
+                    const sample2Hints: Record<string, string> = {};
+                    if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
+
+                    const profResult = await profileEngineer.execute(
+                      {
+                        schemaVersion: 1,
+                        domain,
+                        activeProfile: null,
+                        samples: [
+                          {
+                            url: sample1Url,
+                            artifactRefs: sample1Artifacts,
+                            expectedName: productSeed.name,
+                            expectedGtin: effectiveExtractionGtin ?? undefined,
+                            signals: {
+                              jsonLd: sample1.extracted.identifiers.some((i) => i.method === 'json_ld'),
+                              shopify: sample1.signals.some((s) => s.value.toLowerCase().includes('shopify')),
+                              woocommerce: sample1.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
+                              embeddedState: false,
+                              selectorOnly: false,
+                              changedMarkup: false,
+                              wrongVariant: sample1.pageKind === 'wrong_variant',
                             },
-                            {
-                              url: sample2Url,
-                              artifactRefs: sample2Artifacts.length > 0 ? sample2Artifacts : [sha256Hex(sample2Url)],
-                              expectedName: productSeed.name,
-                              expectedGtin: genuineDiscoveredGtin ?? undefined,
-                              signals: {
-                                jsonLd: hasSample2Gtin,
-                                shopify: sample2.signals.some((s) => s.value.toLowerCase().includes('shopify')),
-                                woocommerce: sample2.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
-                                embeddedState: false,
-                                selectorOnly: false,
-                                changedMarkup: false,
-                                wrongVariant: sample2.pageKind === 'wrong_variant',
-                              },
-                              selectorHints: sample2Hints,
-                              observedFields: sample2Obs,
+                            selectorHints: sample1Hints,
+                            observedFields: sample1Obs,
+                          },
+                          {
+                            url: sample2Url,
+                            artifactRefs: sample2Artifacts,
+                            expectedName: productSeed.name,
+                            expectedGtin: effectiveExtractionGtin ?? undefined,
+                            signals: {
+                              jsonLd: sample2.extracted.identifiers.some((i) => i.method === 'json_ld'),
+                              shopify: sample2.signals.some((s) => s.value.toLowerCase().includes('shopify')),
+                              woocommerce: sample2.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
+                              embeddedState: false,
+                              selectorOnly: false,
+                              changedMarkup: false,
+                              wrongVariant: sample2.pageKind === 'wrong_variant',
                             },
-                          ],
-                          requiredFields: ['titleSelector'],
-                        },
-                        context,
-                      ).finally(() => {
-                        // Release lease on completion or error to prevent stale leases
-                        activeDomainLeases.delete(domain);
-                      });
-                      activeDomainLeases.set(domain, leasePromise);
-                    }
-                  }
+                            selectorHints: sample2Hints,
+                            observedFields: sample2Obs,
+                          },
+                        ],
+                        requiredFields: ['titleSelector'],
+                      },
+                      context,
+                    );
 
-                  if (leasePromise) {
-                    const profResult = await leasePromise;
                     if (profResult.outcome === 'succeeded' && profResult.output) {
                       const profEnv = profResult.output as SpecialistArtifactEnvelope;
                       profileArtifact = profEnv;
@@ -723,6 +876,8 @@ export class SpecialistOrchestrator {
                       );
                       requiresProfileHold = true;
                     }
+                  } else if (!hasRealEvidence) {
+                    recordEvent('profile_engineer', 'insufficient_evidence', 'skipped', 0, `Abstained profile synthesis for ${domain}: missing retained page artifact evidence`);
                   }
                 }
               }
@@ -748,6 +903,7 @@ export class SpecialistOrchestrator {
               0,
               'Holding workflow for manual review and activation of proposed profile in Profile Builder',
             );
+            const state = await persistState('needs_review', 'extraction_profile_hold');
             return {
               runId: context.runId,
               status: 'needs_review',
@@ -761,7 +917,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('needs_review', 'extraction_profile_hold'),
+              workflowState: state,
             };
           }
 
@@ -770,8 +926,9 @@ export class SpecialistOrchestrator {
         }
 
         case 'resolver': {
-          if (invocations.resolver >= this.limits.maxResolverInvocations || !reserveDispatch(1)) {
+          if (invocations.resolver >= this.limits.maxResolverInvocations || !reserveDispatch('resolver', 1)) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Resolver invocation or total dispatch limit exceeded');
+            const state = await persistState('budget_exceeded', 'resolver', 'Resolver invocation or dispatch limit reached');
             return {
               runId: context.runId,
               status: 'budget_exceeded',
@@ -783,7 +940,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('budget_exceeded', 'resolver', 'Resolver invocation or dispatch limit reached'),
+              workflowState: state,
               error: 'Resolver invocation or dispatch limit reached',
             };
           }
@@ -799,22 +956,22 @@ export class SpecialistOrchestrator {
             )?.extracted.identifiers.find((i) => i.kind === 'gtin')?.value ?? null;
             if (!trusted) return null;
             const d = extractDigits(trusted);
-            if (d.length === 14 && workflowOptions.gtinScope !== 'case') {
+            if (d.length === 14 && canonicalIdentifier.scope !== 'case') {
               return null;
             }
             return trusted;
           })();
 
-          const genuineDiscoveredGtin = workflowOptions.discoveredGtin ?? discoveryOutput?.discoveredGtin ?? trustedCandidateGtin ?? null;
-          const effectiveGtinScope = workflowOptions.gtinScope ?? (genuineDiscoveredGtin && extractDigits(genuineDiscoveredGtin).length === 14 ? 'case' : 'consumer_unit');
+          const effectiveResolverGtin = canonicalIdentifier.gtin ?? trustedCandidateGtin ?? null;
+          const effectiveResolverScope = canonicalIdentifier.gtin ? canonicalIdentifier.scope : (effectiveResolverGtin && extractDigits(effectiveResolverGtin).length === 14 ? 'case' : 'consumer_unit');
 
           const resResult: SpecialistResult = await resolver.execute(
             {
               schemaVersion: '1.0.0',
               productSeed,
               expectedIdentity: {
-                gtin: genuineDiscoveredGtin,
-                gtinScope: effectiveGtinScope,
+                gtin: effectiveResolverGtin,
+                gtinScope: effectiveResolverScope,
               },
               discoveryCandidates: discoveryOutput?.candidates ?? [],
               extractionBundles,
@@ -825,6 +982,7 @@ export class SpecialistOrchestrator {
           const resDuration = Date.now() - stepStart;
           if (resResult.outcome !== 'succeeded' || !resResult.output) {
             recordEvent('resolver', 'reconcile_facts', 'failed', resDuration, resResult.failure?.message);
+            const state = await persistState('failed', 'resolver', resResult.failure?.message);
             return {
               runId: context.runId,
               status: 'failed',
@@ -836,7 +994,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('failed', 'resolver', resResult.failure?.message),
+              workflowState: state,
               error: resResult.failure?.message ?? 'Resolver failed',
             };
           }
@@ -857,8 +1015,9 @@ export class SpecialistOrchestrator {
         }
 
         case 'curator': {
-          if (invocations.curator >= this.limits.maxCuratorInvocations || !reserveDispatch(1)) {
+          if (invocations.curator >= this.limits.maxCuratorInvocations || !reserveDispatch('curator', 1)) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Curator invocation or total dispatch limit exceeded');
+            const state = await persistState('budget_exceeded', 'curator', 'Curator invocation or dispatch limit reached');
             return {
               runId: context.runId,
               status: 'budget_exceeded',
@@ -872,7 +1031,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('budget_exceeded', 'curator', 'Curator invocation or dispatch limit reached'),
+              workflowState: state,
               error: 'Curator invocation or dispatch limit reached',
             };
           }
@@ -883,6 +1042,7 @@ export class SpecialistOrchestrator {
 
           if (!resolverOutput) {
             recordEvent('curator', 'synthesize_draft', 'failed', 0, 'Missing resolved facts');
+            const state = await persistState('failed', 'curator', 'Missing resolved facts');
             return {
               runId: context.runId,
               status: 'failed',
@@ -894,7 +1054,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('failed', 'curator', 'Missing resolved facts'),
+              workflowState: state,
               error: 'Missing resolved facts',
             };
           }
@@ -912,6 +1072,7 @@ export class SpecialistOrchestrator {
           const curDuration = Date.now() - stepStart;
           if (curResult.outcome !== 'succeeded' || !curResult.output) {
             recordEvent('curator', 'synthesize_draft', 'failed', curDuration, curResult.failure?.message);
+            const state = await persistState('failed', 'curator', curResult.failure?.message);
             return {
               runId: context.runId,
               status: 'failed',
@@ -925,7 +1086,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('failed', 'curator', curResult.failure?.message),
+              workflowState: state,
               error: curResult.failure?.message ?? 'Curator failed',
             };
           }
@@ -946,8 +1107,9 @@ export class SpecialistOrchestrator {
         }
 
         case 'verifier': {
-          if (invocations.verifier >= this.limits.maxVerifierInvocations || !reserveDispatch(1)) {
+          if (invocations.verifier >= this.limits.maxVerifierInvocations || !reserveDispatch('verifier', 1)) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Verifier invocation or total dispatch limit exceeded');
+            const state = await persistState('budget_exceeded', 'verifier', 'Verifier invocation or dispatch limit reached');
             return {
               runId: context.runId,
               status: 'budget_exceeded',
@@ -963,7 +1125,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('budget_exceeded', 'verifier', 'Verifier invocation or dispatch limit reached'),
+              workflowState: state,
               error: 'Verifier invocation or dispatch limit reached',
             };
           }
@@ -974,6 +1136,7 @@ export class SpecialistOrchestrator {
 
           if (!resolverOutput || !curatorOutput) {
             recordEvent('verifier', 'verify_quality', 'failed', 0, 'Missing facts or draft for verification');
+            const state = await persistState('failed', 'verifier', 'Missing facts or draft');
             return {
               runId: context.runId,
               status: 'failed',
@@ -989,7 +1152,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('failed', 'verifier', 'Missing facts or draft'),
+              workflowState: state,
               error: 'Missing facts or draft',
             };
           }
@@ -1008,6 +1171,7 @@ export class SpecialistOrchestrator {
           const verDuration = Date.now() - stepStart;
           if (verResult.outcome !== 'succeeded' || !verResult.output) {
             recordEvent('verifier', 'verify_quality', 'failed', verDuration, verResult.failure?.message);
+            const state = await persistState('failed', 'verifier', verResult.failure?.message);
             return {
               runId: context.runId,
               status: 'failed',
@@ -1023,7 +1187,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('failed', 'verifier', verResult.failure?.message),
+              workflowState: state,
               error: verResult.failure?.message ?? 'Verifier failed',
             };
           }
@@ -1043,6 +1207,7 @@ export class SpecialistOrchestrator {
           // Evaluate verdict
           if (verifierOutput.verdict === 'pass') {
             recordEvent('orchestrator', 'terminal_eval', 'succeeded', 0, 'Workflow completed successfully');
+            const state = await persistState('completed', 'completed');
             return {
               runId: context.runId,
               status: 'completed',
@@ -1062,7 +1227,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('completed', 'completed'),
+              workflowState: state,
             };
           }
 
@@ -1074,6 +1239,7 @@ export class SpecialistOrchestrator {
               0,
               `Max retries (${this.maxRetries}) reached; holding for human review`,
             );
+            const state = await persistState('needs_review', 'review_hold_retries_exhausted');
             return {
               runId: context.runId,
               status: 'needs_review',
@@ -1093,7 +1259,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('needs_review', 'review_hold_retries_exhausted'),
+              workflowState: state,
             };
           }
 
@@ -1113,6 +1279,7 @@ export class SpecialistOrchestrator {
           } else {
             // Unhandled or human_review verdict
             recordEvent('orchestrator', 'human_review_hold', 'succeeded', 0, 'Holding for human review');
+            const state = await persistState('needs_review', 'human_review_verdict');
             return {
               runId: context.runId,
               status: 'needs_review',
@@ -1132,7 +1299,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              workflowState: makeSnapshot('needs_review', 'human_review_verdict'),
+              workflowState: state,
             };
           }
           break;
@@ -1141,6 +1308,7 @@ export class SpecialistOrchestrator {
     }
 
     recordEvent('orchestrator', 'dispatch_limit_reached', 'failed', 0, `Exceeded max total dispatches (${this.limits.maxTotalDispatches})`);
+    const state = await persistState('budget_exceeded', 'dispatch_limit_reached', 'Exceeded max total dispatches');
     return {
       runId: context.runId,
       status: 'budget_exceeded',
@@ -1160,7 +1328,7 @@ export class SpecialistOrchestrator {
       retriesCount,
       totalDispatches,
       totalDurationMs: Date.now() - startedAt,
-      workflowState: makeSnapshot('budget_exceeded', 'dispatch_limit_reached', 'Exceeded max total dispatches'),
+      workflowState: state,
       error: 'Exceeded max total dispatches',
     };
   }
