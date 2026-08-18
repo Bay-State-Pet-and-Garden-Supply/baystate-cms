@@ -10,12 +10,13 @@
  *     flags wrong variants or parent-product-only states)
  *   - attribute value fidelity check (verifies draft attribute values match resolved
  *     fact values exactly, preventing wrong weights, counts, or flavors from passing)
- *   - mandatory grounding existence check (verifies EVERY emitted attribute, catalog
+ *   - mandatory grounding coverage check (verifies EVERY emitted attribute, catalog
  *     title, subtitle, and description has a non-empty grounding entry with valid evidence)
- *   - strict per-fact evidence isolation (verifies grounding evidence IDs strictly
- *     belong to the declared supporting fact(s) and synthetic references validate)
- *   - comprehensive prose QA (verifies catalog title brand/weight alignment and parses
- *     all bullet claims in description—rejecting unsupported claims and value contradictions)
+ *   - strict per-fact evidence isolation (every supportingFactField must exist as a resolved
+ *     fact; evidence IDs must belong exclusively to declared supporting facts)
+ *   - comprehensive catalog prose QA (verifies catalog title brand, size/weight, and name
+ *     alignment; verifies subtitle brand and quantity; parses and validates all description
+ *     claims against resolved facts—rejecting unsupported statements)
  *   - conflict omission check (ensures facts with unresolved conflicts were NOT
  *     unfaithfully promoted to draft attributes)
  *   - taxonomy bounds & semantic check (verifies proposed category/product-type IDs
@@ -23,10 +24,6 @@
  *   - structured QA verdict: `pass`, `retry_curator`, `retry_resolver`,
  *     `retry_discovery`, or `human_review`
  *   - targeted retry requests citing exact violating fields and suggested actions
- *
- * The verifier is a pure QA specialist behind the #48 specialist boundary.
- * It NEVER silently rewrites or mutates the draft, NEVER invokes other specialists,
- * and NEVER writes catalog state directly.
  */
 
 import { z } from 'zod';
@@ -261,6 +258,10 @@ export function verifyCuratedDraft(
 
   // 2. Draft Brand Fidelity
   const brandFact = resolvedFacts.facts.find((f) => f.field === 'brand');
+  const titleFact = resolvedFacts.facts.find((f) => f.field === 'title');
+  const weightFact = resolvedFacts.facts.find((f) => f.field === 'weight');
+  const sizeFact = resolvedFacts.facts.find((f) => f.field === 'size');
+
   if (brandFact?.status === 'resolved' && brandFact.value) {
     if (curatedDraft.brand && normalizeVal(curatedDraft.brand) !== normalizeVal(brandFact.value)) {
       checks.push({
@@ -274,7 +275,6 @@ export function verifyCuratedDraft(
   }
 
   // 3. Catalog Title Quality and Alignment
-  const weightFact = resolvedFacts.facts.find((f) => f.field === 'weight');
   if (!curatedDraft.catalogTitle || curatedDraft.catalogTitle.trim() === 'Untitled Product') {
     checks.push({
       checkName: 'catalog_title_quality',
@@ -304,16 +304,87 @@ export function verifyCuratedDraft(
       }
     }
 
-    if (weightFact?.status === 'resolved' && weightFact.value) {
-      const weightMatch = /\b\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|lb|lbs|kg|g|ml|l)\b/i.exec(curatedDraft.catalogTitle);
-      if (weightMatch && !normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(weightFact.value))) {
+    // Weight/size alignment in catalog title
+    const titleQtyMatch = /\b\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|lb|lbs|kg|g|ml|l)\b/i.exec(curatedDraft.catalogTitle);
+    if (titleQtyMatch) {
+      if (weightFact?.status === 'resolved' && weightFact.value) {
+        if (!normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(weightFact.value))) {
+          checks.push({
+            checkName: 'catalog_title_weight_alignment',
+            passed: false,
+            severity: 'blocking',
+            field: 'catalogTitle',
+            details: `Catalog title '${curatedDraft.catalogTitle}' mentions weight '${titleQtyMatch[0]}' mismatching resolved weight '${weightFact.value}'`,
+          });
+        }
+      } else if (sizeFact?.status === 'resolved' && sizeFact.value) {
+        if (!normalizeVal(curatedDraft.catalogTitle).includes(normalizeVal(sizeFact.value))) {
+          checks.push({
+            checkName: 'catalog_title_size_alignment',
+            passed: false,
+            severity: 'blocking',
+            field: 'catalogTitle',
+            details: `Catalog title '${curatedDraft.catalogTitle}' mentions size '${titleQtyMatch[0]}' mismatching resolved size '${sizeFact.value}'`,
+          });
+        }
+      }
+    }
+
+    // Name tokens alignment
+    if (titleFact?.status === 'resolved' && titleFact.value) {
+      const nameTokens = normalizeVal(titleFact.value)
+        .split(/[\s,&/\\-]+/)
+        .filter((w) => w.length >= 4 && !['with', 'from', 'organic', 'food', 'product'].includes(w));
+      const hasNameMatch = nameTokens.some((tok) => normalizeVal(curatedDraft.catalogTitle).includes(tok));
+      if (nameTokens.length > 0 && !hasNameMatch) {
         checks.push({
-          checkName: 'catalog_title_weight_alignment',
+          checkName: 'catalog_title_name_alignment',
           passed: false,
           severity: 'blocking',
           field: 'catalogTitle',
-          details: `Catalog title '${curatedDraft.catalogTitle}' mentions weight '${weightMatch[0]}' mismatching resolved weight '${weightFact.value}'`,
+          details: `Catalog title '${curatedDraft.catalogTitle}' does not align with resolved title '${titleFact.value}'`,
         });
+      }
+    }
+  }
+
+  // Subtitle Quality and Alignment
+  if (curatedDraft.subtitle) {
+    const subtitleNorm = normalizeVal(curatedDraft.subtitle);
+    if (brandFact?.status === 'resolved' && brandFact.value) {
+      if (!subtitleNorm.includes(normalizeVal(brandFact.value))) {
+        checks.push({
+          checkName: 'subtitle_brand_mismatch',
+          passed: false,
+          severity: 'blocking',
+          field: 'subtitle',
+          details: `Subtitle '${curatedDraft.subtitle}' is missing resolved brand '${brandFact.value}'`,
+        });
+      }
+    }
+
+    const subQtyMatch = /\b\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|lb|lbs|kg|g|ml|l)\b/i.exec(curatedDraft.subtitle);
+    if (subQtyMatch) {
+      if (weightFact?.status === 'resolved' && weightFact.value) {
+        if (!subtitleNorm.includes(normalizeVal(weightFact.value))) {
+          checks.push({
+            checkName: 'subtitle_quantity_mismatch',
+            passed: false,
+            severity: 'blocking',
+            field: 'subtitle',
+            details: `Subtitle '${curatedDraft.subtitle}' mentions quantity '${subQtyMatch[0]}' mismatching resolved weight '${weightFact.value}'`,
+          });
+        }
+      } else if (sizeFact?.status === 'resolved' && sizeFact.value) {
+        if (!subtitleNorm.includes(normalizeVal(sizeFact.value))) {
+          checks.push({
+            checkName: 'subtitle_quantity_mismatch',
+            passed: false,
+            severity: 'blocking',
+            field: 'subtitle',
+            details: `Subtitle '${curatedDraft.subtitle}' mentions quantity '${subQtyMatch[0]}' mismatching resolved size '${sizeFact.value}'`,
+          });
+        }
       }
     }
   }
@@ -391,7 +462,7 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 5. Strict Per-Fact Grounding Evidence Isolation
+  // 5. Strict Per-Fact Grounding Evidence Isolation & Fact Existence
   for (const groundingEntry of curatedDraft.grounding) {
     const citedFields = groundingEntry.supportingFactFields;
     if (citedFields.length === 0) {
@@ -403,6 +474,20 @@ export function verifyCuratedDraft(
         details: `Grounding entry for '${groundingEntry.field}' specifies no supporting fact fields`,
       });
       continue;
+    }
+
+    // Verify EVERY supportingFactField corresponds to a REAL resolved fact in resolvedFacts
+    for (const citedField of citedFields) {
+      const fact = resolvedFacts.facts.find((f) => f.field === citedField);
+      if (!fact || fact.status !== 'resolved') {
+        checks.push({
+          checkName: 'grounding_unresolved_fact_reference',
+          passed: false,
+          severity: 'blocking',
+          field: groundingEntry.field,
+          details: `Grounding for '${groundingEntry.field}' declares supporting fact '${citedField}' which is not a resolved fact (status: ${fact?.status ?? 'missing'})`,
+        });
+      }
     }
 
     // Collect all valid evidence IDs belonging EXCLUSIVELY to the cited fact fields
@@ -419,13 +504,14 @@ export function verifyCuratedDraft(
     for (const evId of groundingEntry.evidenceIds) {
       if (evId.startsWith('resolved_fact:')) {
         const factField = evId.slice('resolved_fact:'.length);
-        if (!citedFields.includes(factField)) {
+        const resolvedFact = resolvedFacts.facts.find((f) => f.field === factField);
+        if (!citedFields.includes(factField) || !resolvedFact || resolvedFact.status !== 'resolved') {
           checks.push({
             checkName: 'grounding_evidence_misassociation',
             passed: false,
             severity: 'blocking',
             field: groundingEntry.field,
-            details: `Grounding for '${groundingEntry.field}' cites synthetic fact '${evId}' not declared in supportingFactFields (${citedFields.join(', ')})`,
+            details: `Grounding for '${groundingEntry.field}' cites synthetic fact '${evId}' that is not a declared resolved fact`,
           });
         }
       } else if (!validEvidenceIdsForEntry.has(evId)) {
@@ -447,7 +533,25 @@ export function verifyCuratedDraft(
 
     for (const line of lines) {
       const bulletMatch = /^\s*(?:-|\*)\s*([^:]+):\s*(.+)$/.exec(line);
-      if (!bulletMatch) continue;
+      if (!bulletMatch) {
+        // Free prose line: check for ungrounded quantity claims
+        const freeQtyMatch = /\b\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|lb|lbs|kg|g|ml|l)\b/i.exec(line);
+        if (freeQtyMatch) {
+          const qty = freeQtyMatch[0];
+          const hasWeightMatch = weightFact?.status === 'resolved' && weightFact.value && normalizeVal(qty) === normalizeVal(weightFact.value);
+          const hasSizeMatch = sizeFact?.status === 'resolved' && sizeFact.value && normalizeVal(qty) === normalizeVal(sizeFact.value);
+          if (!hasWeightMatch && !hasSizeMatch) {
+            checks.push({
+              checkName: 'unsupported_description_claim',
+              passed: false,
+              severity: 'blocking',
+              field: 'description',
+              details: `Description free prose contains ungrounded quantity '${qty}'`,
+            });
+          }
+        }
+        continue;
+      }
 
       const rawLabel = bulletMatch[1].trim();
       const rawClaimValue = bulletMatch[2].trim();
@@ -537,10 +641,16 @@ export function verifyCuratedDraft(
         c.checkName === 'attribute_value_fidelity' ||
         c.checkName === 'brand_fidelity' ||
         c.checkName === 'catalog_title_brand_alignment' ||
+        c.checkName === 'catalog_title_weight_alignment' ||
+        c.checkName === 'catalog_title_size_alignment' ||
+        c.checkName === 'catalog_title_name_alignment' ||
+        c.checkName === 'subtitle_brand_mismatch' ||
+        c.checkName === 'subtitle_quantity_mismatch' ||
         c.checkName === 'missing_attribute_grounding' ||
         c.checkName === 'missing_title_grounding' ||
         c.checkName === 'missing_description_grounding' ||
         c.checkName === 'missing_subtitle_grounding' ||
+        c.checkName === 'grounding_unresolved_fact_reference' ||
         c.checkName === 'grounding_evidence_misassociation' ||
         c.checkName === 'unsupported_description_claim' ||
         c.checkName === 'description_claim_mismatch',
