@@ -367,30 +367,103 @@ describe('Verifier specialist (#55)', () => {
     expect(report.identityDecision).toBe('fail');
   });
 
-  it('catches unapproved primary image and triggers retry_curator', () => {
+  it('catches 14-digit GTIN on draft even when expectedIdentity is explicitly case-scoped', () => {
     const draft = sampleDraft({
+      gtin: '10012345678908', // Corrupted draft containing case GTIN in consumer gtin field
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet({ expectedIdentity: { gtin: '10012345678908', gtinScope: 'case' } }),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.checks.some((c) => c.checkName === 'case_gtin_assigned_to_consumer_unit' && !c.passed)).toBe(true);
+    expect(report.identityDecision).toBe('fail');
+  });
+
+  it('catches unapproved image or unknown rights status with fail-closed QA', () => {
+    const draftUnknownRights = sampleDraft({
       images: [
         {
           url: 'https://acme.example/images/unapproved.jpg',
           role: 'primary',
           rightsStatus: 'unknown',
-          commerceApproved: false, // Not approved!
+          commerceApproved: true,
           identityMatch: 'exact',
           sourceUrl: null,
         },
       ],
     });
 
-    const report = verifyCuratedDraft({
+    const reportUnknown = verifyCuratedDraft({
       schemaVersion: '1.0.0',
       productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
       resolvedFacts: sampleFactSet(),
-      curatedDraft: draft,
+      curatedDraft: draftUnknownRights,
       classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
     });
 
-    expect(report.verdict).toBe('retry_curator');
-    expect(report.checks.some((c) => c.checkName === 'primary_image_commerce_approval' && !c.passed)).toBe(true);
+    expect(reportUnknown.verdict).toBe('retry_curator');
+    expect(reportUnknown.checks.some((c) => c.checkName === 'image_rights_compliance' && !c.passed)).toBe(true);
+
+    const draftUnverifiedIdentity = sampleDraft({
+      images: [
+        {
+          url: 'https://acme.example/images/test.jpg',
+          role: 'primary',
+          rightsStatus: 'approved',
+          commerceApproved: true,
+          identityMatch: 'unverified',
+          sourceUrl: null,
+        },
+      ],
+    });
+
+    const reportUnverified = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draftUnverifiedIdentity,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(reportUnverified.verdict).toBe('retry_curator');
+    expect(reportUnverified.checks.some((c) => c.checkName === 'image_variant_compliance' && !c.passed)).toBe(true);
+
+    const draftSecondaryUnapproved = sampleDraft({
+      images: [
+        {
+          url: 'https://acme.example/images/primary.jpg',
+          role: 'primary',
+          rightsStatus: 'approved',
+          commerceApproved: true,
+          identityMatch: 'exact',
+          sourceUrl: null,
+        },
+        {
+          url: 'https://acme.example/images/secondary.jpg',
+          role: 'gallery',
+          rightsStatus: 'approved',
+          commerceApproved: false, // Secondary image not commerce approved
+          identityMatch: 'exact',
+          sourceUrl: null,
+        },
+      ],
+    });
+
+    const reportSecondary = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draftSecondaryUnapproved,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(reportSecondary.verdict).toBe('retry_curator');
+    expect(reportSecondary.checks.some((c) => c.checkName === 'image_commerce_approval' && !c.passed)).toBe(true);
   });
 
   it('catches fail-closed arbitrary non-bullet free prose and triggers retry_curator', () => {

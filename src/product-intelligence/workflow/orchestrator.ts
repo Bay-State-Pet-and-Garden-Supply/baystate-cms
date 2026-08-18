@@ -41,8 +41,8 @@
  *   - 14-digit GTINs are strictly case-scoped and never promoted as consumer GTINs.
  *   - Caller identifiers are normalized once and passed canonically across all phases.
  *   - Profile Engineer proposals require governance/manual review before activation.
- *   - Profile synthesis uses concurrency-safe workflow locks with real observed evidence.
- *   - Every exit path persists and returns a comprehensive workflow state record.
+ *   - Profile synthesis uses concurrency-safe workflow locks with real observed title evidence.
+ *   - Every phase transition and route is durably persisted with full invocation and artifact provenance.
  */
 
 import { z } from 'zod';
@@ -80,7 +80,7 @@ import type {
   ExtractionEvidenceBundle,
   ExtractionProfileBinding,
 } from '../extraction/evidence';
-import type { SpecialistContext, SpecialistResult } from '../specialists/contracts';
+import type { SpecialistContext, SpecialistResult, SpecialistUsage } from '../specialists/contracts';
 import {
   captureSpecialistCodeCommit,
   type SpecialistArtifactEnvelope,
@@ -90,6 +90,7 @@ import {
 
 export const OrchestratorTerminalStatusSchema = z.enum([
   'completed',
+  'in_progress',
   'needs_review',
   'abstained',
   'budget_exceeded',
@@ -139,8 +140,18 @@ export interface WorkflowUsageLedger {
     dispatches: number;
     toolCalls: number;
     modelCalls: number;
+    inputTokens: number;
+    outputTokens: number;
+    estimatedCostUsd: number;
     durationMs: number;
   }>;
+}
+
+export interface RouteRecord {
+  fromPhase: string;
+  toPhase: string;
+  reason?: string;
+  timestamp: string;
 }
 
 export interface WorkflowStateSnapshot {
@@ -151,6 +162,9 @@ export interface WorkflowStateSnapshot {
   retriesCount: number;
   totalDispatches: number;
   invocations: Record<string, number>;
+  capabilityInvocationIds: Record<string, string[]>;
+  extractionArtifactRefs: string[];
+  routeRecords: RouteRecord[];
   usage: WorkflowUsageLedger;
   artifactIds: string[];
   totalDurationMs: number;
@@ -161,12 +175,16 @@ export interface SpecialistWorkflowRecord {
   workflowId: string;
   runId: string;
   workspaceId: string;
+  workflowVersion: string;
   productSeed: ProductSeed;
   status: OrchestratorTerminalStatus;
   currentPhase: string;
   retriesCount: number;
   totalDispatches: number;
   invocations: Record<string, number>;
+  capabilityInvocationIds: Record<string, string[]>;
+  extractionArtifactRefs: string[];
+  routeRecords: RouteRecord[];
   usage: WorkflowUsageLedger;
   stepEvents: OrchestratorStepEvent[];
   artifactIds: string[];
@@ -232,7 +250,7 @@ export interface SpecialistOrchestratorOptions {
   now?: () => string;
 }
 
-// ── In-Memory Concurrency Lock for Profile Engineer ─────────────────────────
+// ── In-Memory Concurrency Lock for Profile Engineer (Test Only) ───────────────
 
 export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock {
   private readonly activeLocks = new Set<string>();
@@ -256,6 +274,19 @@ export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock 
     if (domain) this.activeLocks.delete(domain);
     return { applied: true };
   }
+}
+
+export function resolveDefaultProfileLock(): ProfileEngineerWorkflowLock {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const repo = require('../../db/repositories/profile-engineer-workflow-repo');
+    if (typeof repo.profileEngineerWorkflowLock === 'function') {
+      return repo.profileEngineerWorkflowLock();
+    }
+  } catch {
+    // In test runners or environments without bun:sqlite, fallback to in-memory lock
+  }
+  return new InMemoryProfileWorkflowLock();
 }
 
 // ── Normalized Identifier Helper ─────────────────────────────────────────────
@@ -322,7 +353,6 @@ export class SpecialistOrchestrator {
   private readonly extractionConcurrency: number;
   private readonly dependencies: SpecialistOrchestratorDependencies;
   private readonly now: () => string;
-  private readonly defaultProfileLock: InMemoryProfileWorkflowLock;
 
   public constructor(options: SpecialistOrchestratorOptions = {}) {
     this.maxRetries = options.maxRetries ?? 3;
@@ -330,7 +360,6 @@ export class SpecialistOrchestrator {
     this.extractionConcurrency = Math.max(1, Math.min(8, options.extractionConcurrency ?? 3));
     this.dependencies = options.dependencies ?? {};
     this.now = options.now ?? (() => new Date().toISOString());
-    this.defaultProfileLock = new InMemoryProfileWorkflowLock();
   }
 
   public async runWorkflow(
@@ -341,6 +370,17 @@ export class SpecialistOrchestrator {
   ): Promise<SpecialistWorkflowResult> {
     const startedAt = Date.now();
     const events: OrchestratorStepEvent[] = [];
+    const routeRecords: RouteRecord[] = [];
+    const capabilityInvocationIds: Record<string, string[]> = {
+      discovery: [],
+      extraction: [],
+      profile_engineer: [],
+      resolver: [],
+      curator: [],
+      verifier: [],
+    };
+    const extractionArtifactRefs = new Set<string>();
+
     let eventSeq = 0;
     let totalDispatches = 0;
     let retriesCount = 0;
@@ -376,6 +416,48 @@ export class SpecialistOrchestrator {
     let curatorArtifact: SpecialistArtifactEnvelope | undefined;
     let verifierArtifact: SpecialistArtifactEnvelope | undefined;
 
+    const recordUsage = (specialist: string, usage?: SpecialistUsage | null, durationMs = 0): void => {
+      if (!usageLedger.bySpecialist[specialist]) {
+        usageLedger.bySpecialist[specialist] = {
+          dispatches: 0,
+          toolCalls: 0,
+          modelCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostUsd: 0,
+          durationMs: 0,
+        };
+      }
+      const entry = usageLedger.bySpecialist[specialist];
+      entry.durationMs += durationMs;
+
+      if (usage) {
+        entry.toolCalls += usage.toolCalls;
+        entry.modelCalls += usage.modelCalls;
+        entry.inputTokens += usage.inputTokens;
+        entry.outputTokens += usage.outputTokens;
+        entry.estimatedCostUsd += usage.estimatedCostUsd;
+
+        usageLedger.totalToolCalls += usage.toolCalls;
+        usageLedger.totalModelCalls += usage.modelCalls;
+        usageLedger.totalInputTokens += usage.inputTokens;
+        usageLedger.totalOutputTokens += usage.outputTokens;
+        usageLedger.estimatedCostUsd += usage.estimatedCostUsd;
+      }
+    };
+
+    const checkPolicyBudgets = (_specialist?: string): { exceeded: boolean; reason?: string } => {
+      const maxTools = context.policy.maxToolCalls;
+      if (typeof maxTools === 'number' && maxTools > 0 && usageLedger.totalToolCalls >= maxTools) {
+        return { exceeded: true, reason: `Policy maxToolCalls limit (${maxTools}) reached` };
+      }
+      const maxCost = context.policy.maxCostUsd;
+      if (typeof maxCost === 'number' && maxCost > 0 && usageLedger.estimatedCostUsd >= maxCost) {
+        return { exceeded: true, reason: `Policy maxCostUsd limit ($${maxCost}) reached` };
+      }
+      return { exceeded: false };
+    };
+
     const makeSnapshot = (
       status: OrchestratorTerminalStatus,
       currentPhase: string,
@@ -398,6 +480,9 @@ export class SpecialistOrchestrator {
         retriesCount,
         totalDispatches,
         invocations: { ...invocations },
+        capabilityInvocationIds: { ...capabilityInvocationIds },
+        extractionArtifactRefs: Array.from(extractionArtifactRefs),
+        routeRecords: [...routeRecords],
         usage: { ...usageLedger },
         artifactIds,
         totalDurationMs: Date.now() - startedAt,
@@ -417,12 +502,16 @@ export class SpecialistOrchestrator {
             workflowId: `wf:${context.runId}`,
             runId: context.runId,
             workspaceId: context.workspaceId,
+            workflowVersion: '1.0.0',
             productSeed,
             status,
             currentPhase,
             retriesCount,
             totalDispatches,
             invocations: { ...invocations },
+            capabilityInvocationIds: { ...capabilityInvocationIds },
+            extractionArtifactRefs: Array.from(extractionArtifactRefs),
+            routeRecords: [...routeRecords],
             usage: { ...usageLedger },
             stepEvents: [...events],
             artifactIds: snapshot.artifactIds,
@@ -431,7 +520,7 @@ export class SpecialistOrchestrator {
             error,
           });
         } catch {
-          // Persistence failure should not crash workflow
+          // Persistence failure should not throw
         }
       }
       return snapshot;
@@ -456,9 +545,16 @@ export class SpecialistOrchestrator {
       });
 
       if (!usageLedger.bySpecialist[specialist]) {
-        usageLedger.bySpecialist[specialist] = { dispatches: 0, toolCalls: 0, modelCalls: 0, durationMs: 0 };
+        usageLedger.bySpecialist[specialist] = {
+          dispatches: 0,
+          toolCalls: 0,
+          modelCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostUsd: 0,
+          durationMs: 0,
+        };
       }
-      usageLedger.bySpecialist[specialist].durationMs += durationMs;
     };
 
     const reserveDispatch = (specialist: string, count = 1): boolean => {
@@ -468,7 +564,15 @@ export class SpecialistOrchestrator {
       totalDispatches += count;
       usageLedger.totalDispatches = totalDispatches;
       if (!usageLedger.bySpecialist[specialist]) {
-        usageLedger.bySpecialist[specialist] = { dispatches: 0, toolCalls: 0, modelCalls: 0, durationMs: 0 };
+        usageLedger.bySpecialist[specialist] = {
+          dispatches: 0,
+          toolCalls: 0,
+          modelCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostUsd: 0,
+          durationMs: 0,
+        };
       }
       usageLedger.bySpecialist[specialist].dispatches += count;
       return true;
@@ -504,10 +608,13 @@ export class SpecialistOrchestrator {
       };
     }
 
+    // Default production profile lock is database-backed profileEngineerWorkflowLock
+    const effectiveProfileLock: ProfileEngineerWorkflowLock = this.dependencies.profileEngineerWorkflowLock
+      ?? resolveDefaultProfileLock();
+
     const discovery = this.dependencies.discovery ?? new DiscoverySpecialist({}, { codeCommit: captureSpecialistCodeCommit() });
-    const profileLock = this.dependencies.profileEngineerWorkflowLock ?? this.defaultProfileLock;
     const profileEngineer = this.dependencies.profileEngineer ?? new ProfileEngineerSpecialist(
-      { workflow: profileLock },
+      { workflow: effectiveProfileLock },
       { codeCommit: captureSpecialistCodeCommit() },
     );
     const resolver = this.dependencies.resolver ?? new ResolverSpecialist({ now: this.now });
@@ -579,6 +686,35 @@ export class SpecialistOrchestrator {
         };
       }
 
+      // Check policy tool / cost budgets
+      const budgetCheck = checkPolicyBudgets('orchestrator');
+      if (budgetCheck.exceeded) {
+        recordEvent('orchestrator', 'budget_check', 'failed', 0, budgetCheck.reason);
+        const state = await persistState('budget_exceeded', targetPhase, budgetCheck.reason);
+        return {
+          runId: context.runId,
+          status: 'budget_exceeded',
+          productSeed,
+          discoveryOutput,
+          discoveryArtifact,
+          profileOutput,
+          profileArtifact,
+          extractionBundles,
+          resolverOutput,
+          resolverArtifact,
+          curatorOutput,
+          curatorArtifact,
+          verifierOutput,
+          verifierArtifact,
+          events,
+          retriesCount,
+          totalDispatches,
+          totalDurationMs: Date.now() - startedAt,
+          workflowState: state,
+          error: budgetCheck.reason,
+        };
+      }
+
       switch (targetPhase) {
         case 'discovery': {
           if (invocations.discovery >= this.limits.maxDiscoveryInvocations || !reserveDispatch('discovery', 1)) {
@@ -599,8 +735,12 @@ export class SpecialistOrchestrator {
           }
 
           invocations.discovery += 1;
+          const invocationId = `inv:discovery:${invocations.discovery}`;
+          capabilityInvocationIds.discovery.push(invocationId);
+
           const stepStart = Date.now();
           recordEvent('discovery', 'discover_candidates', 'started', 0);
+          await persistState('in_progress', 'discovery');
 
           const discResult: SpecialistResult = await discovery.execute(
             {
@@ -614,6 +754,8 @@ export class SpecialistOrchestrator {
           );
 
           const discDuration = Date.now() - stepStart;
+          recordUsage('discovery', discResult.usage, discDuration);
+
           if (discResult.outcome !== 'succeeded' || !discResult.output) {
             if (discResult.outcome === 'abstained') {
               recordEvent('discovery', 'discover_candidates', 'succeeded', discDuration, 'Discovery abstained (no candidates)');
@@ -675,13 +817,22 @@ export class SpecialistOrchestrator {
             discDuration,
             `Found ${discoveryOutput.candidates.length} candidates`,
           );
+
+          routeRecords.push({
+            fromPhase: 'discovery',
+            toPhase: 'extraction',
+            reason: `Discovered ${discoveryOutput.candidates.length} candidates`,
+            timestamp: this.now(),
+          });
           targetPhase = 'extraction';
+          await persistState('in_progress', 'transition_to_extraction');
           break;
         }
 
         case 'extraction': {
           const stepStart = Date.now();
           recordEvent('extraction_runner', 'extract_evidence', 'started', 0);
+          await persistState('in_progress', 'extraction');
 
           const candidates = discoveryOutput?.candidates ?? [];
           const candidateUrls = candidates
@@ -733,6 +884,9 @@ export class SpecialistOrchestrator {
                 };
               }
 
+              const extInvId = `inv:extraction:${invocations.extraction}`;
+              capabilityInvocationIds.extraction.push(extInvId);
+
               const domain = (() => {
                 try { return new URL(url).hostname; } catch { return 'unknown'; }
               })();
@@ -756,10 +910,15 @@ export class SpecialistOrchestrator {
                 bundle = detBundle;
               }
 
+              for (const ref of bundle.artifactRefs) {
+                extractionArtifactRefs.add(ref);
+              }
+
               // Check if profile is needed or failed
               const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed' || f.code === 'profile_missing');
               if (needsProfile && !synthesizedDomainsInPhase.has(domain) && invocations.profile < this.limits.maxProfileInvocations) {
                 synthesizedDomainsInPhase.add(domain);
+
                 // Find independent candidate URLs on this domain for profile synthesis
                 const domainCandidates = candidates.filter((c: DiscoveryCandidate) => {
                   try {
@@ -777,7 +936,7 @@ export class SpecialistOrchestrator {
                   const sample1Url = sample1.finalUrl ?? sample1.source.url;
                   const sample2Url = sample2.finalUrl ?? sample2.source.url;
 
-                  // Check if real retained artifact IDs exist
+                  // Retained artifact IDs
                   const sample1Artifacts = [...new Set(sample1.extracted.identifiers
                     .map((i) => i.sourceArtifactId)
                     .filter((id) => Boolean(id)))];
@@ -785,15 +944,17 @@ export class SpecialistOrchestrator {
                     .map((i) => i.sourceArtifactId)
                     .filter((id) => Boolean(id)))];
 
-                  // Extract real observed title selector hints if observed
-                  const sample1TitleHint = sample1.extracted.identifiers.find((i) => i.kind === 'gtin' || i.kind === 'sku')?.sourcePath ?? null;
-                  const sample2TitleHint = sample2.extracted.identifiers.find((i) => i.kind === 'gtin' || i.kind === 'sku')?.sourcePath ?? null;
+                  // Genuine title selector hints (strictly from title/product_name field observations)
+                  const sample1TitleHint = bundle.observations.find((o) => o.field === 'title' || o.field === 'product_name')?.sourcePath ?? null;
+                  const sample2TitleHint = bundle.observations.find((o) => o.field === 'title' || o.field === 'product_name')?.sourcePath ?? null;
 
-                  // Check if real evidence is present (do NOT synthesize from fabricated evidence)
                   const hasRealEvidence = sample1Artifacts.length > 0 && sample2Artifacts.length > 0;
 
                   if (hasRealEvidence && reserveDispatch('profile_engineer', 1)) {
                     invocations.profile += 1;
+                    const profInvId = `inv:profile_engineer:${invocations.profile}`;
+                    capabilityInvocationIds.profile_engineer.push(profInvId);
+
                     recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
 
                     const sample1Obs: Record<string, string> = {};
@@ -861,12 +1022,13 @@ export class SpecialistOrchestrator {
                       context,
                     );
 
+                    recordUsage('profile_engineer', profResult.usage, 0);
+
                     if (profResult.outcome === 'succeeded' && profResult.output) {
                       const profEnv = profResult.output as SpecialistArtifactEnvelope;
                       profileArtifact = profEnv;
                       profileOutput = profEnv.payload as ProfileEngineerProposal;
 
-                      // Per ADR 0023/ADR 0028: Profile proposals are proposal_only with manual_review_required.
                       recordEvent(
                         'profile_engineer',
                         'synthesize_profile',
@@ -921,7 +1083,14 @@ export class SpecialistOrchestrator {
             };
           }
 
+          routeRecords.push({
+            fromPhase: 'extraction',
+            toPhase: 'resolver',
+            reason: `Extracted ${extractionBundles.length} evidence bundle(s)`,
+            timestamp: this.now(),
+          });
           targetPhase = 'resolver';
+          await persistState('in_progress', 'transition_to_resolver');
           break;
         }
 
@@ -946,8 +1115,12 @@ export class SpecialistOrchestrator {
           }
 
           invocations.resolver += 1;
+          const resInvId = `inv:resolver:${invocations.resolver}`;
+          capabilityInvocationIds.resolver.push(resInvId);
+
           const stepStart = Date.now();
           recordEvent('resolver', 'reconcile_facts', 'started', 0);
+          await persistState('in_progress', 'resolver');
 
           const trustedCandidateGtin = (() => {
             const trusted = discoveryOutput?.candidates.find(
@@ -980,6 +1153,8 @@ export class SpecialistOrchestrator {
           );
 
           const resDuration = Date.now() - stepStart;
+          recordUsage('resolver', resResult.usage, resDuration);
+
           if (resResult.outcome !== 'succeeded' || !resResult.output) {
             recordEvent('resolver', 'reconcile_facts', 'failed', resDuration, resResult.failure?.message);
             const state = await persistState('failed', 'resolver', resResult.failure?.message);
@@ -1010,7 +1185,15 @@ export class SpecialistOrchestrator {
             resDuration,
             `Resolved identity: ${resolverOutput.identity.status}, facts: ${resolverOutput.fieldCompleteness.resolved}/${resolverOutput.fieldCompleteness.total}`,
           );
+
+          routeRecords.push({
+            fromPhase: 'resolver',
+            toPhase: 'curator',
+            reason: `Reconciled ${resolverOutput.fieldCompleteness.resolved} facts`,
+            timestamp: this.now(),
+          });
           targetPhase = 'curator';
+          await persistState('in_progress', 'transition_to_curator');
           break;
         }
 
@@ -1037,8 +1220,12 @@ export class SpecialistOrchestrator {
           }
 
           invocations.curator += 1;
+          const curInvId = `inv:curator:${invocations.curator}`;
+          capabilityInvocationIds.curator.push(curInvId);
+
           const stepStart = Date.now();
           recordEvent('curator', 'synthesize_draft', 'started', 0);
+          await persistState('in_progress', 'curator');
 
           if (!resolverOutput) {
             recordEvent('curator', 'synthesize_draft', 'failed', 0, 'Missing resolved facts');
@@ -1070,6 +1257,8 @@ export class SpecialistOrchestrator {
           );
 
           const curDuration = Date.now() - stepStart;
+          recordUsage('curator', curResult.usage, curDuration);
+
           if (curResult.outcome !== 'succeeded' || !curResult.output) {
             recordEvent('curator', 'synthesize_draft', 'failed', curDuration, curResult.failure?.message);
             const state = await persistState('failed', 'curator', curResult.failure?.message);
@@ -1102,7 +1291,15 @@ export class SpecialistOrchestrator {
             curDuration,
             `Draft title: '${curatorOutput.catalogTitle}'`,
           );
+
+          routeRecords.push({
+            fromPhase: 'curator',
+            toPhase: 'verifier',
+            reason: `Curated draft '${curatorOutput.catalogTitle}'`,
+            timestamp: this.now(),
+          });
           targetPhase = 'verifier';
+          await persistState('in_progress', 'transition_to_verifier');
           break;
         }
 
@@ -1131,8 +1328,12 @@ export class SpecialistOrchestrator {
           }
 
           invocations.verifier += 1;
+          const verInvId = `inv:verifier:${invocations.verifier}`;
+          capabilityInvocationIds.verifier.push(verInvId);
+
           const stepStart = Date.now();
           recordEvent('verifier', 'verify_quality', 'started', 0);
+          await persistState('in_progress', 'verifier');
 
           if (!resolverOutput || !curatorOutput) {
             recordEvent('verifier', 'verify_quality', 'failed', 0, 'Missing facts or draft for verification');
@@ -1169,6 +1370,8 @@ export class SpecialistOrchestrator {
           );
 
           const verDuration = Date.now() - stepStart;
+          recordUsage('verifier', verResult.usage, verDuration);
+
           if (verResult.outcome !== 'succeeded' || !verResult.output) {
             recordEvent('verifier', 'verify_quality', 'failed', verDuration, verResult.failure?.message);
             const state = await persistState('failed', 'verifier', verResult.failure?.message);
@@ -1269,13 +1472,34 @@ export class SpecialistOrchestrator {
 
           if (retry?.targetSpecialist === 'curator') {
             recordEvent('orchestrator', 'route_retry', 'retrying', 0, `Retrying curator: ${retry.reason}`);
+            routeRecords.push({
+              fromPhase: 'verifier',
+              toPhase: 'curator',
+              reason: retry.reason,
+              timestamp: this.now(),
+            });
             targetPhase = 'curator';
+            await persistState('in_progress', 'retry_curator');
           } else if (retry?.targetSpecialist === 'resolver') {
             recordEvent('orchestrator', 'route_retry', 'retrying', 0, `Retrying resolver: ${retry.reason}`);
+            routeRecords.push({
+              fromPhase: 'verifier',
+              toPhase: 'resolver',
+              reason: retry.reason,
+              timestamp: this.now(),
+            });
             targetPhase = 'resolver';
+            await persistState('in_progress', 'retry_resolver');
           } else if (retry?.targetSpecialist === 'discovery') {
             recordEvent('orchestrator', 'route_retry', 'retrying', 0, `Retrying discovery: ${retry.reason}`);
+            routeRecords.push({
+              fromPhase: 'verifier',
+              toPhase: 'discovery',
+              reason: retry.reason,
+              timestamp: this.now(),
+            });
             targetPhase = 'discovery';
+            await persistState('in_progress', 'retry_discovery');
           } else {
             // Unhandled or human_review verdict
             recordEvent('orchestrator', 'human_review_hold', 'succeeded', 0, 'Holding for human review');

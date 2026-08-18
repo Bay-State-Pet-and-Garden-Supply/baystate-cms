@@ -143,6 +143,15 @@ export type SpecialistAbstention = z.infer<typeof SpecialistAbstentionSchema>;
 export const SpecialistOutcomeSchema = z.enum(['succeeded', 'failed', 'abstained']);
 export type SpecialistOutcome = z.infer<typeof SpecialistOutcomeSchema>;
 
+export const SpecialistUsageSchema = z.object({
+  toolCalls: z.number().int().nonnegative().default(0),
+  modelCalls: z.number().int().nonnegative().default(0),
+  inputTokens: z.number().int().nonnegative().default(0),
+  outputTokens: z.number().int().nonnegative().default(0),
+  estimatedCostUsd: z.number().nonnegative().default(0),
+});
+export type SpecialistUsage = z.infer<typeof SpecialistUsageSchema>;
+
 /**
  * The bounded result contract. `output` — when present — must be a typed
  * artifact envelope (or a non-empty array of them): schema-validated,
@@ -157,6 +166,7 @@ export const SpecialistResultSchema = z.object({
   abstention: SpecialistAbstentionSchema.nullish(),
   failure: SpecialistFailureSchema.nullish(),
   durationMs: z.number().int().nonnegative().default(0),
+  usage: SpecialistUsageSchema.nullish(),
 });
 export type SpecialistResult = z.infer<typeof SpecialistResultSchema>;
 

@@ -224,8 +224,8 @@ describe('Agent Lab Training Interface (PI-7 Reshaped)', () => {
       );
     });
 
-    expect(container.textContent).toContain('UPC / GTIN');
-    expect(container.textContent).toContain('Register Name');
+    expect(container.textContent).toContain('GTIN/UPC');
+    expect(container.textContent).toContain('Product Name');
     expect(container.textContent).toContain('Target Agent Version');
     expect(container.textContent).toContain('Run Workbench Research');
     expect(container.textContent).toContain('v1.1 (Active Baseline)');

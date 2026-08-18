@@ -272,11 +272,12 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.workflowState).toBeDefined();
     expect(result.workflowState.status).toBe('completed');
     expect(result.workflowState.currentPhase).toBe('completed');
-    expect(savedRecords.length).toBeGreaterThan(0);
+    expect(savedRecords.length).toBeGreaterThanOrEqual(4);
     expect(savedRecords[savedRecords.length - 1].status).toBe('completed');
+    expect(result.workflowState.routeRecords.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('routes to Profile Engineer and holds for manual review when extraction reports profile_failed with real evidence', async () => {
+  it('routes to Profile Engineer and holds for manual review when extraction reports profile_failed with real title evidence', async () => {
     let profileCalls = 0;
     let capturedInput: any = null;
 
@@ -349,7 +350,23 @@ describe('Specialist Orchestrator (#56)', () => {
         artifactRefs: ['art-1'],
         profile: null,
         extractionPath: [],
-        observations: [],
+        observations: [
+          {
+            id: 'obs:title',
+            field: 'title',
+            value: 'Organic Chicken Broth',
+            method: 'json_ld',
+            sourcePath: 'h1.product-title',
+            sourceUrl: url,
+            finalUrl: url,
+            contentHash: sha256Hex('title'),
+            artifactId: 'art-1',
+            profileId: null,
+            profileVersion: null,
+            variantRef: null,
+            provenanceQuality: 'exact_path',
+          },
+        ],
         images: [],
         variant: null,
         identityStatus: 'insufficient_evidence',
@@ -390,6 +407,7 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.events.some((e) => e.action === 'profile_review_hold')).toBe(true);
 
     expect(capturedInput.samples[0].observedFields.product_name).toBeDefined();
+    expect(capturedInput.samples[0].selectorHints.titleSelector).toBe('h1.product-title');
     expect(capturedInput.samples[0].artifactRefs).toEqual(['art-1']);
   });
 
@@ -782,5 +800,99 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toContain('Serper rate limit');
     expect(result.workflowState.status).toBe('failed');
+  });
+
+  it('enforces policy maxToolCalls as active budget stop', async () => {
+    const mockDiscovery = {
+      execute: async (): Promise<SpecialistResult> => ({
+        specialist: 'discovery',
+        outcome: 'succeeded',
+        output: {
+          artifactType: 'discovery_candidates',
+          schemaVersion: '1.0.0',
+          payload: { candidates: [createDiscoveryCandidate()] },
+          lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+          provenance: {
+            specialist: 'discovery',
+            specialistVersion: '1.0.0',
+            codeCommit: 'commit-56',
+            invokedBy: 'orchestrator',
+            durationMs: 10,
+            createdAt: FIXED_NOW,
+          },
+          contentHash: sha256Hex('disc-1'),
+        },
+        usage: { toolCalls: 10, modelCalls: 2, inputTokens: 500, outputTokens: 200, estimatedCostUsd: 0.05 },
+        durationMs: 10,
+      }),
+    } as any;
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: { discovery: mockDiscovery },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({
+          configId: 'budget-policy',
+          maxToolCalls: 5, // Budget is 5, but discovery spent 10
+        }),
+      },
+    );
+
+    expect(result.status).toBe('budget_exceeded');
+    expect(result.workflowState.usage.totalToolCalls).toBe(10);
+    expect(result.workflowState.status).toBe('budget_exceeded');
+  });
+
+  it('enforces policy maxCostUsd as active budget stop', async () => {
+    const mockDiscovery = {
+      execute: async (): Promise<SpecialistResult> => ({
+        specialist: 'discovery',
+        outcome: 'succeeded',
+        output: {
+          artifactType: 'discovery_candidates',
+          schemaVersion: '1.0.0',
+          payload: { candidates: [createDiscoveryCandidate()] },
+          lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+          provenance: {
+            specialist: 'discovery',
+            specialistVersion: '1.0.0',
+            codeCommit: 'commit-56',
+            invokedBy: 'orchestrator',
+            durationMs: 10,
+            createdAt: FIXED_NOW,
+          },
+          contentHash: sha256Hex('disc-1'),
+        },
+        usage: { toolCalls: 2, modelCalls: 2, inputTokens: 500, outputTokens: 200, estimatedCostUsd: 2.50 },
+        durationMs: 10,
+      }),
+    } as any;
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: { discovery: mockDiscovery },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({
+          configId: 'cost-policy',
+          maxCostUsd: 1.00, // Budget is $1.00, but discovery spent $2.50
+        }),
+      },
+    );
+
+    expect(result.status).toBe('budget_exceeded');
+    expect(result.workflowState.usage.estimatedCostUsd).toBe(2.50);
+    expect(result.workflowState.status).toBe('budget_exceeded');
   });
 });

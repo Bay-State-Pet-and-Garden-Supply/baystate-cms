@@ -254,17 +254,17 @@ export function verifyCuratedDraft(
     }
   }
 
-  // Case-pack GTIN protection: ensure 14-digit GTINs are never promoted as consumer units
+  // Case-pack GTIN protection: ensure 14-digit GTINs or case-scoped identifiers are never assigned as consumer unit GTINs
   if (curatedDraft.gtin) {
     const draftGtinDigits = extractDigits(curatedDraft.gtin);
-    if (draftGtinDigits.length === 14 && resolvedFacts.expectedIdentity?.gtinScope !== 'case') {
+    if (draftGtinDigits.length === 14 || resolvedFacts.expectedIdentity?.gtinScope === 'case') {
       checks.push({
         checkName: 'case_gtin_assigned_to_consumer_unit',
         category: 'identity',
         passed: false,
         severity: 'blocking',
         field: 'gtin',
-        details: `14-digit case GTIN '${curatedDraft.gtin}' was improperly assigned as a consumer unit GTIN`,
+        details: `Case GTIN / case-scoped identifier '${curatedDraft.gtin}' was improperly assigned as a consumer unit draft GTIN (must be null on consumer product draft)`,
       });
     }
   }
@@ -644,38 +644,43 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 7. Image Variant & Rights QA
+  // 7. Image Variant & Rights QA (Fail-Closed Allowlists)
+  const ALLOWED_IMAGE_RIGHTS = new Set(['approved', 'commercial', 'licensed', 'public_domain']);
+  const ALLOWED_IMAGE_IDENTITY = new Set(['exact', 'verified', 'exact_match']);
+
   for (const image of curatedDraft.images) {
-    if (image.role === 'primary' && !image.commerceApproved) {
+    if (!image.commerceApproved) {
       checks.push({
-        checkName: 'primary_image_commerce_approval',
+        checkName: 'image_commerce_approval',
         category: 'image_rights',
         passed: false,
         severity: 'blocking',
         field: 'images',
-        details: `Primary image '${image.url}' is not commerce approved`,
+        details: `Selected image '${image.url}' is not commerce approved`,
       });
     }
 
-    if (image.rightsStatus === 'denied') {
+    const normalizedRights = (image.rightsStatus ?? '').toLowerCase().trim();
+    if (!ALLOWED_IMAGE_RIGHTS.has(normalizedRights)) {
       checks.push({
         checkName: 'image_rights_compliance',
         category: 'image_rights',
         passed: false,
         severity: 'blocking',
         field: 'images',
-        details: `Image '${image.url}' has rightsStatus 'denied'`,
+        details: `Image '${image.url}' has non-compliant rights status '${image.rightsStatus}' (must be approved/commercial/licensed/public_domain)`,
       });
     }
 
-    if (image.identityMatch === 'wrong_variant' || image.identityMatch === 'parent_product_only') {
+    const normalizedIdentity = (image.identityMatch ?? '').toLowerCase().trim();
+    if (!ALLOWED_IMAGE_IDENTITY.has(normalizedIdentity)) {
       checks.push({
         checkName: 'image_variant_compliance',
         category: 'image_rights',
         passed: false,
         severity: 'blocking',
         field: 'images',
-        details: `Image '${image.url}' matches '${image.identityMatch}' rather than exact variant`,
+        details: `Image '${image.url}' has non-exact identity match '${image.identityMatch}' (must be exact/verified)`,
       });
     }
   }
@@ -779,6 +784,7 @@ export function verifyCuratedDraft(
         c.checkName === 'grounding_evidence_misassociation' ||
         c.checkName === 'unsupported_description_claim' ||
         c.checkName === 'description_claim_mismatch' ||
+        c.checkName === 'image_commerce_approval' ||
         c.checkName === 'primary_image_commerce_approval' ||
         c.checkName === 'image_rights_compliance' ||
         c.checkName === 'image_variant_compliance',
