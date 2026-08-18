@@ -93,17 +93,27 @@ export function findProfileEngineerWorkflow(workspaceId: string, domain: string)
   return row ? map(row) : null;
 }
 
-/** Atomically claim one workflow per workspace/domain. */
+export interface ClaimWorkflowOptions {
+  leaseMs?: number;
+  needsRepair?: boolean;
+  forceNew?: boolean;
+}
+
+/** Atomically claim one workflow per workspace/domain/version need. */
 export function claimProfileEngineerWorkflow(
   workspaceId: string,
   domain: string,
   runId: string,
-  leaseMs = 120_000,
+  options: number | ClaimWorkflowOptions = 120_000,
 ): { acquired: boolean; workflow: ProfileEngineerWorkflow; reason?: string } {
   ensureTable();
   const db = getDb();
   const normalizedDomain = normalizeDomain(domain);
   if (!workspaceId.trim() || !normalizedDomain || !runId.trim()) throw new Error('workspaceId, domain and runId are required');
+
+  const leaseMs = typeof options === 'number' ? options : options.leaseMs ?? 120_000;
+  const allowReclaim = typeof options === 'object' && (options.needsRepair || options.forceNew);
+
   const now = new Date().toISOString();
   const expires = new Date(Date.now() + Math.max(1_000, leaseMs)).toISOString();
   let outcome: { acquired: boolean; workflow: ProfileEngineerWorkflow; reason?: string } | null = null;
@@ -124,13 +134,13 @@ export function claimProfileEngineerWorkflow(
       outcome = { acquired: false, workflow: map(existing), reason: 'domain_workflow_in_progress' };
       return;
     }
-    if (existing.status === 'completed') {
+    if (existing.status === 'completed' && !allowReclaim) {
       outcome = { acquired: false, workflow: map(existing), reason: 'domain_workflow_already_completed' };
       return;
     }
     db.query(`UPDATE profile_engineer_domain_workflows
       SET status = 'running', run_id = ?, lease_expires_at = ?, error_message = NULL, updated_at = ?
-      WHERE id = ? AND (status = 'failed' OR lease_expires_at IS NULL OR lease_expires_at <= ?)`)
+      WHERE id = ? AND (status = 'failed' OR status = 'completed' OR lease_expires_at IS NULL OR lease_expires_at <= ?)`)
       .run(runId, expires, now, existing.id, now);
     const retried = db.query('SELECT * FROM profile_engineer_domain_workflows WHERE id = ?').get(existing.id) as DbWorkflow;
     outcome = retried.status === 'running' && retried.run_id === runId

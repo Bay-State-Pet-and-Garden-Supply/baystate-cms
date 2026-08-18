@@ -69,8 +69,9 @@ export const VerifierSpecialistInputSchema = z.object({
     availableCategories: [],
     attributeProfiles: [],
   }),
+  extractionBundles: z.array(z.any()).optional().default([]),
 }).strict();
-export type VerifierSpecialistInput = z.infer<typeof VerifierSpecialistInputSchema>;
+export type VerifierSpecialistInput = z.input<typeof VerifierSpecialistInputSchema>;
 
 // ── Output Schema ────────────────────────────────────────────────────────────
 
@@ -165,9 +166,10 @@ export interface VerifyDraftOptions {
 }
 
 export function verifyCuratedDraft(
-  input: VerifierSpecialistInput,
+  rawInput: VerifierSpecialistInput,
   options: VerifyDraftOptions = {},
 ): VerificationReport {
+  const input = VerifierSpecialistInputSchema.parse(rawInput);
   const { resolvedFacts, curatedDraft, classificationContext } = input;
   const now = options.now ?? (() => new Date().toISOString());
 
@@ -377,6 +379,35 @@ export function verifyCuratedDraft(
     // Name tokens alignment: require at least 50% substantive token match
     if (titleFact?.status === 'resolved' && titleFact.value) {
       const cleanTitleFact = normalizeVal(titleFact.value);
+      const PROTEIN_FLAVOR_TOKENS = [
+        'chicken', 'beef', 'turkey', 'duck', 'salmon', 'tuna', 'lamb', 'pork', 'venison', 'rabbit',
+        'fish', 'vegetable', 'liver', 'bacon', 'cheese', 'veggie', 'poultry', 'seafood',
+      ];
+      const draftTitleLower = normalizeVal(curatedDraft.catalogTitle);
+      const resolvedTitleLower = normalizeVal(titleFact.value);
+
+      for (const flavor of PROTEIN_FLAVOR_TOKENS) {
+        if (resolvedTitleLower.includes(flavor) && !draftTitleLower.includes(flavor)) {
+          checks.push({
+            checkName: 'catalog_title_variant_alignment',
+            category: 'product_data',
+            passed: false,
+            severity: 'blocking',
+            field: 'catalogTitle',
+            details: `Catalog title '${curatedDraft.catalogTitle}' is missing essential variant/flavor token '${flavor}' from resolved title '${titleFact.value}'`,
+          });
+        } else if (!resolvedTitleLower.includes(flavor) && draftTitleLower.includes(flavor)) {
+          checks.push({
+            checkName: 'catalog_title_variant_alignment',
+            category: 'product_data',
+            passed: false,
+            severity: 'blocking',
+            field: 'catalogTitle',
+            details: `Catalog title '${curatedDraft.catalogTitle}' introduces contradictory variant/flavor token '${flavor}' not present in resolved title '${titleFact.value}'`,
+          });
+        }
+      }
+
       const nameTokens = cleanTitleFact
         .split(/[\s,&/\\-]+/)
         .filter((w) => w.length >= 3 && !['with', 'from', 'the', 'and', 'for', 'organic', 'product'].includes(w));
@@ -384,14 +415,14 @@ export function verifyCuratedDraft(
       if (nameTokens.length > 0) {
         const matchedCount = nameTokens.filter((tok) => normalizeVal(curatedDraft.catalogTitle).includes(tok)).length;
         const matchRatio = matchedCount / nameTokens.length;
-        if (matchRatio < 0.5) {
+        if (matchRatio < 0.75) {
           checks.push({
             checkName: 'catalog_title_name_alignment',
             category: 'product_data',
             passed: false,
             severity: 'blocking',
             field: 'catalogTitle',
-            details: `Catalog title '${curatedDraft.catalogTitle}' matches only ${Math.round(matchRatio * 100)}% of substantive name tokens from resolved title '${titleFact.value}'`,
+            details: `Catalog title '${curatedDraft.catalogTitle}' matches only ${Math.round(matchRatio * 100)}% of substantive name tokens from resolved title '${titleFact.value}' (minimum 75% required)`,
           });
         }
       }
@@ -644,9 +675,11 @@ export function verifyCuratedDraft(
     }
   }
 
-  // 7. Image Variant & Rights QA (Fail-Closed Allowlists)
+  // 7. Image Variant & Rights QA (Fail-Closed Allowlists & Provenance)
   const ALLOWED_IMAGE_RIGHTS = new Set(['approved', 'commercial', 'licensed', 'public_domain']);
   const ALLOWED_IMAGE_IDENTITY = new Set(['exact', 'verified', 'exact_match']);
+
+  const extractedImageCandidates = ((input as any).extractionBundles ?? []).flatMap((b: any) => b.images ?? []);
 
   for (const image of curatedDraft.images) {
     if (!image.commerceApproved) {
@@ -682,6 +715,20 @@ export function verifyCuratedDraft(
         field: 'images',
         details: `Image '${image.url}' has non-exact identity match '${image.identityMatch}' (must be exact/verified)`,
       });
+    }
+
+    if (extractedImageCandidates.length > 0) {
+      const match = extractedImageCandidates.find((ext: any) => ext.url === image.url);
+      if (!match) {
+        checks.push({
+          checkName: 'image_evidence_provenance',
+          category: 'image_rights',
+          passed: false,
+          severity: 'blocking',
+          field: 'images',
+          details: `Draft image '${image.url}' has no verified candidate provenance in extraction bundles`,
+        });
+      }
     }
   }
 
@@ -774,6 +821,7 @@ export function verifyCuratedDraft(
         c.checkName === 'catalog_title_weight_alignment' ||
         c.checkName === 'catalog_title_size_alignment' ||
         c.checkName === 'catalog_title_name_alignment' ||
+        c.checkName === 'catalog_title_variant_alignment' ||
         c.checkName === 'subtitle_brand_mismatch' ||
         c.checkName === 'subtitle_quantity_mismatch' ||
         c.checkName === 'missing_attribute_grounding' ||
@@ -787,7 +835,8 @@ export function verifyCuratedDraft(
         c.checkName === 'image_commerce_approval' ||
         c.checkName === 'primary_image_commerce_approval' ||
         c.checkName === 'image_rights_compliance' ||
-        c.checkName === 'image_variant_compliance',
+        c.checkName === 'image_variant_compliance' ||
+        c.checkName === 'image_evidence_provenance',
     )
   ) {
     verdict = 'retry_curator';

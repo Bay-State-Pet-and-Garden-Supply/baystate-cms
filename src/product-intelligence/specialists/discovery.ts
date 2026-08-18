@@ -550,6 +550,7 @@ export class DiscoverySpecialist {
       budget,
     };
     const durationMs = Date.now() - startedAt;
+    const totalToolCalls = searchRequestsUsed + verificationRequestsUsed;
     const artifact = finalizeSpecialistArtifact({
       artifactType: DISCOVERY_OUTPUT_ARTIFACT_TYPE,
       payload: output,
@@ -567,7 +568,19 @@ export class DiscoverySpecialist {
         durationMs,
       },
     });
-    const result: SpecialistResult = { specialist: DISCOVERY_SPECIALIST_NAME, outcome: 'succeeded', output: artifact, durationMs };
+    const result: SpecialistResult = {
+      specialist: DISCOVERY_SPECIALIST_NAME,
+      outcome: 'succeeded',
+      output: artifact,
+      durationMs,
+      usage: {
+        toolCalls: totalToolCalls,
+        modelCalls: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostUsd: Number((searchRequestsUsed * 0.005).toFixed(4)),
+      },
+    };
     return { output, artifact, result: SpecialistResultSchema.parse(result) };
   }
 }

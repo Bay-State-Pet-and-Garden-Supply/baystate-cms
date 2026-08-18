@@ -41,7 +41,7 @@
  *   - 14-digit GTINs are strictly case-scoped and never promoted as consumer GTINs.
  *   - Caller identifiers are normalized once and passed canonically across all phases.
  *   - Profile Engineer proposals require governance/manual review before activation.
- *   - Profile synthesis uses concurrency-safe workflow locks with real observed title evidence.
+ *   - Profile synthesis uses concurrency-safe workflow locks with real per-page selector evidence.
  *   - Every phase transition and route is durably persisted with full invocation and artifact provenance.
  */
 
@@ -519,8 +519,9 @@ export class SpecialistOrchestrator {
             updatedAt: this.now(),
             error,
           });
-        } catch {
-          // Persistence failure should not throw
+        } catch (err) {
+          const persistErr = err instanceof Error ? err.message : String(err);
+          snapshot.error = snapshot.error ? `${snapshot.error} (persistence_warning: ${persistErr})` : `persistence_warning: ${persistErr}`;
         }
       }
       return snapshot;
@@ -608,7 +609,6 @@ export class SpecialistOrchestrator {
       };
     }
 
-    // Default production profile lock is database-backed profileEngineerWorkflowLock
     const effectiveProfileLock: ProfileEngineerWorkflowLock = this.dependencies.profileEngineerWorkflowLock
       ?? resolveDefaultProfileLock();
 
@@ -832,12 +832,17 @@ export class SpecialistOrchestrator {
         case 'extraction': {
           const stepStart = Date.now();
           recordEvent('extraction_runner', 'extract_evidence', 'started', 0);
-          await persistState('in_progress', 'extraction');
 
           const candidates = discoveryOutput?.candidates ?? [];
           const candidateUrls = candidates
             .slice(0, 3)
             .map((c) => c.finalUrl ?? c.source.url);
+
+          // Pre-allocate invocation IDs for planned extraction runs
+          for (let i = 0; i < candidateUrls.length; i++) {
+            capabilityInvocationIds.extraction.push(`inv:extraction:${invocations.extraction + i + 1}`);
+          }
+          await persistState('in_progress', 'extraction');
 
           // Promote GTIN strictly from verified PDP candidate with consumer unit GTIN provenance
           const trustedCandidateGtin = (() => {
@@ -857,6 +862,7 @@ export class SpecialistOrchestrator {
 
           let requiresProfileHold = false;
           const synthesizedDomainsInPhase = new Set<string>();
+          const bundlesByUrl = new Map<string, ExtractionEvidenceBundle>();
 
           // Bounded parallel extraction
           extractionBundles = await boundedMap(
@@ -884,13 +890,6 @@ export class SpecialistOrchestrator {
                 };
               }
 
-              const extInvId = `inv:extraction:${invocations.extraction}`;
-              capabilityInvocationIds.extraction.push(extInvId);
-
-              const domain = (() => {
-                try { return new URL(url).hostname; } catch { return 'unknown'; }
-              })();
-
               // Run extraction
               let bundle: ExtractionEvidenceBundle;
               if (this.dependencies.extractionRunner) {
@@ -910,143 +909,175 @@ export class SpecialistOrchestrator {
                 bundle = detBundle;
               }
 
+              recordUsage('extraction', {
+                toolCalls: 1,
+                modelCalls: 0,
+                inputTokens: 0,
+                outputTokens: 0,
+                estimatedCostUsd: 0,
+              });
+
               for (const ref of bundle.artifactRefs) {
                 extractionArtifactRefs.add(ref);
               }
-
-              // Check if profile is needed or failed
-              const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed' || f.code === 'profile_missing');
-              if (needsProfile && !synthesizedDomainsInPhase.has(domain) && invocations.profile < this.limits.maxProfileInvocations) {
-                synthesizedDomainsInPhase.add(domain);
-
-                // Find independent candidate URLs on this domain for profile synthesis
-                const domainCandidates = candidates.filter((c: DiscoveryCandidate) => {
-                  try {
-                    const cUrl = c.finalUrl ?? c.source.url;
-                    return new URL(cUrl).hostname === domain;
-                  } catch {
-                    return false;
-                  }
-                });
-
-                // Profile Engineer strictly requires 2 independent sample pages with REAL extraction evidence
-                if (domainCandidates.length >= 2) {
-                  const sample1 = domainCandidates[0];
-                  const sample2 = domainCandidates[1];
-                  const sample1Url = sample1.finalUrl ?? sample1.source.url;
-                  const sample2Url = sample2.finalUrl ?? sample2.source.url;
-
-                  // Retained artifact IDs
-                  const sample1Artifacts = [...new Set(sample1.extracted.identifiers
-                    .map((i) => i.sourceArtifactId)
-                    .filter((id) => Boolean(id)))];
-                  const sample2Artifacts = [...new Set(sample2.extracted.identifiers
-                    .map((i) => i.sourceArtifactId)
-                    .filter((id) => Boolean(id)))];
-
-                  // Genuine title selector hints (strictly from title/product_name field observations)
-                  const sample1TitleHint = bundle.observations.find((o) => o.field === 'title' || o.field === 'product_name')?.sourcePath ?? null;
-                  const sample2TitleHint = bundle.observations.find((o) => o.field === 'title' || o.field === 'product_name')?.sourcePath ?? null;
-
-                  const hasRealEvidence = sample1Artifacts.length > 0 && sample2Artifacts.length > 0;
-
-                  if (hasRealEvidence && reserveDispatch('profile_engineer', 1)) {
-                    invocations.profile += 1;
-                    const profInvId = `inv:profile_engineer:${invocations.profile}`;
-                    capabilityInvocationIds.profile_engineer.push(profInvId);
-
-                    recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
-
-                    const sample1Obs: Record<string, string> = {};
-                    if (sample1.extracted.brand) sample1Obs.brand = sample1.extracted.brand;
-                    if (sample1.extracted.productName) sample1Obs.product_name = sample1.extracted.productName;
-                    if (sample1.extracted.size) sample1Obs.size = sample1.extracted.size;
-                    if (sample1.extracted.sku) sample1Obs.sku = sample1.extracted.sku;
-                    if (sample1.extracted.gtins.length > 0) sample1Obs.gtin = sample1.extracted.gtins[0];
-
-                    const sample2Obs: Record<string, string> = {};
-                    if (sample2.extracted.brand) sample2Obs.brand = sample2.extracted.brand;
-                    if (sample2.extracted.productName) sample2Obs.product_name = sample2.extracted.productName;
-                    if (sample2.extracted.size) sample2Obs.size = sample2.extracted.size;
-                    if (sample2.extracted.sku) sample2Obs.sku = sample2.extracted.sku;
-                    if (sample2.extracted.gtins.length > 0) sample2Obs.gtin = sample2.extracted.gtins[0];
-
-                    const sample1Hints: Record<string, string> = {};
-                    if (sample1TitleHint) sample1Hints.titleSelector = sample1TitleHint;
-                    const sample2Hints: Record<string, string> = {};
-                    if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
-
-                    const profResult = await profileEngineer.execute(
-                      {
-                        schemaVersion: 1,
-                        domain,
-                        activeProfile: null,
-                        samples: [
-                          {
-                            url: sample1Url,
-                            artifactRefs: sample1Artifacts,
-                            expectedName: productSeed.name,
-                            expectedGtin: effectiveExtractionGtin ?? undefined,
-                            signals: {
-                              jsonLd: sample1.extracted.identifiers.some((i) => i.method === 'json_ld'),
-                              shopify: sample1.signals.some((s) => s.value.toLowerCase().includes('shopify')),
-                              woocommerce: sample1.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
-                              embeddedState: false,
-                              selectorOnly: false,
-                              changedMarkup: false,
-                              wrongVariant: sample1.pageKind === 'wrong_variant',
-                            },
-                            selectorHints: sample1Hints,
-                            observedFields: sample1Obs,
-                          },
-                          {
-                            url: sample2Url,
-                            artifactRefs: sample2Artifacts,
-                            expectedName: productSeed.name,
-                            expectedGtin: effectiveExtractionGtin ?? undefined,
-                            signals: {
-                              jsonLd: sample2.extracted.identifiers.some((i) => i.method === 'json_ld'),
-                              shopify: sample2.signals.some((s) => s.value.toLowerCase().includes('shopify')),
-                              woocommerce: sample2.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
-                              embeddedState: false,
-                              selectorOnly: false,
-                              changedMarkup: false,
-                              wrongVariant: sample2.pageKind === 'wrong_variant',
-                            },
-                            selectorHints: sample2Hints,
-                            observedFields: sample2Obs,
-                          },
-                        ],
-                        requiredFields: ['titleSelector'],
-                      },
-                      context,
-                    );
-
-                    recordUsage('profile_engineer', profResult.usage, 0);
-
-                    if (profResult.outcome === 'succeeded' && profResult.output) {
-                      const profEnv = profResult.output as SpecialistArtifactEnvelope;
-                      profileArtifact = profEnv;
-                      profileOutput = profEnv.payload as ProfileEngineerProposal;
-
-                      recordEvent(
-                        'profile_engineer',
-                        'synthesize_profile',
-                        'succeeded',
-                        0,
-                        `Proposed profile for ${domain}; held for manual review/activation`,
-                      );
-                      requiresProfileHold = true;
-                    }
-                  } else if (!hasRealEvidence) {
-                    recordEvent('profile_engineer', 'insufficient_evidence', 'skipped', 0, `Abstained profile synthesis for ${domain}: missing retained page artifact evidence`);
-                  }
-                }
-              }
+              bundlesByUrl.set(url, bundle);
+              if (bundle.finalUrl) bundlesByUrl.set(bundle.finalUrl, bundle);
 
               return bundle;
             },
           );
+
+          // After extraction bundles are keyed by URL, check if profile synthesis is needed
+          for (const bundle of extractionBundles) {
+            const url = bundle.finalUrl ?? bundle.requestedUrl;
+            const domain = (() => {
+              try { return new URL(url).hostname; } catch { return 'unknown'; }
+            })();
+
+            const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed' || f.code === 'profile_missing');
+            if (needsProfile && !synthesizedDomainsInPhase.has(domain) && invocations.profile < this.limits.maxProfileInvocations) {
+              synthesizedDomainsInPhase.add(domain);
+
+              const domainCandidates = candidates.filter((c: DiscoveryCandidate) => {
+                try {
+                  const cUrl = c.finalUrl ?? c.source.url;
+                  return new URL(cUrl).hostname === domain;
+                } catch {
+                  return false;
+                }
+              });
+
+              if (domainCandidates.length >= 2) {
+                const sample1 = domainCandidates[0];
+                const sample2 = domainCandidates[1];
+                const sample1Url = sample1.finalUrl ?? sample1.source.url;
+                const sample2Url = sample2.finalUrl ?? sample2.source.url;
+
+                const bundle1 = bundlesByUrl.get(sample1Url) ?? bundlesByUrl.get(sample1.source.url);
+                const bundle2 = bundlesByUrl.get(sample2Url) ?? bundlesByUrl.get(sample2.source.url);
+
+                const sample1Artifacts = [...new Set(sample1.extracted.identifiers
+                  .map((i) => i.sourceArtifactId)
+                  .concat(bundle1?.artifactRefs ?? [])
+                  .filter((id) => Boolean(id)))];
+                const sample2Artifacts = [...new Set(sample2.extracted.identifiers
+                  .map((i) => i.sourceArtifactId)
+                  .concat(bundle2?.artifactRefs ?? [])
+                  .filter((id) => Boolean(id)))];
+
+                // Genuine title selector candidate hints (derived strictly from that page's own extraction observations)
+                const isSelectorCandidate = (path: string | null | undefined): boolean => {
+                  if (!path) return false;
+                  return path.startsWith('h1') || path.startsWith('.') || path.startsWith('#') || path.startsWith('[');
+                };
+
+                const sample1TitleHint = bundle1?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isSelectorCandidate(o.sourcePath))?.sourcePath ?? null;
+                const sample2TitleHint = bundle2?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isSelectorCandidate(o.sourcePath))?.sourcePath ?? null;
+
+                const hasRealEvidence = sample1Artifacts.length > 0 && sample2Artifacts.length > 0;
+
+                if (hasRealEvidence && reserveDispatch('profile_engineer', 1)) {
+                  invocations.profile += 1;
+                  const profInvId = `inv:profile_engineer:${invocations.profile}`;
+                  capabilityInvocationIds.profile_engineer.push(profInvId);
+
+                  routeRecords.push({
+                    fromPhase: 'extraction',
+                    toPhase: 'profile_engineer',
+                    reason: `Synthesizing profile proposal for domain: ${domain}`,
+                    timestamp: this.now(),
+                  });
+                  await persistState('in_progress', 'profile_engineer_synthesis');
+
+                  recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
+
+                  const sample1Obs: Record<string, string> = {};
+                  if (sample1.extracted.brand) sample1Obs.brand = sample1.extracted.brand;
+                  if (sample1.extracted.productName) sample1Obs.product_name = sample1.extracted.productName;
+                  if (sample1.extracted.size) sample1Obs.size = sample1.extracted.size;
+                  if (sample1.extracted.sku) sample1Obs.sku = sample1.extracted.sku;
+                  if (sample1.extracted.gtins.length > 0) sample1Obs.gtin = sample1.extracted.gtins[0];
+
+                  const sample2Obs: Record<string, string> = {};
+                  if (sample2.extracted.brand) sample2Obs.brand = sample2.extracted.brand;
+                  if (sample2.extracted.productName) sample2Obs.product_name = sample2.extracted.productName;
+                  if (sample2.extracted.size) sample2Obs.size = sample2.extracted.size;
+                  if (sample2.extracted.sku) sample2Obs.sku = sample2.extracted.sku;
+                  if (sample2.extracted.gtins.length > 0) sample2Obs.gtin = sample2.extracted.gtins[0];
+
+                  const sample1Hints: Record<string, string> = {};
+                  if (sample1TitleHint) sample1Hints.titleSelector = sample1TitleHint;
+                  const sample2Hints: Record<string, string> = {};
+                  if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
+
+                  const profResult = await profileEngineer.execute(
+                    {
+                      schemaVersion: 1,
+                      domain,
+                      activeProfile: null,
+                      samples: [
+                        {
+                          url: sample1Url,
+                          artifactRefs: sample1Artifacts,
+                          expectedName: productSeed.name,
+                          expectedGtin: effectiveExtractionGtin ?? undefined,
+                          signals: {
+                            jsonLd: sample1.extracted.identifiers.some((i) => i.method === 'json_ld'),
+                            shopify: sample1.signals.some((s) => s.value.toLowerCase().includes('shopify')),
+                            woocommerce: sample1.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
+                            embeddedState: false,
+                            selectorOnly: false,
+                            changedMarkup: false,
+                            wrongVariant: sample1.pageKind === 'wrong_variant',
+                          },
+                          selectorHints: sample1Hints,
+                          observedFields: sample1Obs,
+                        },
+                        {
+                          url: sample2Url,
+                          artifactRefs: sample2Artifacts,
+                          expectedName: productSeed.name,
+                          expectedGtin: effectiveExtractionGtin ?? undefined,
+                          signals: {
+                            jsonLd: sample2.extracted.identifiers.some((i) => i.method === 'json_ld'),
+                            shopify: sample2.signals.some((s) => s.value.toLowerCase().includes('shopify')),
+                            woocommerce: sample2.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
+                            embeddedState: false,
+                            selectorOnly: false,
+                            changedMarkup: false,
+                            wrongVariant: sample2.pageKind === 'wrong_variant',
+                          },
+                          selectorHints: sample2Hints,
+                          observedFields: sample2Obs,
+                        },
+                      ],
+                      requiredFields: ['titleSelector'],
+                    },
+                    context,
+                  );
+
+                  recordUsage('profile_engineer', profResult.usage, 0);
+
+                  if (profResult.outcome === 'succeeded' && profResult.output) {
+                    const profEnv = profResult.output as SpecialistArtifactEnvelope;
+                    profileArtifact = profEnv;
+                    profileOutput = profEnv.payload as ProfileEngineerProposal;
+
+                    recordEvent(
+                      'profile_engineer',
+                      'synthesize_profile',
+                      'succeeded',
+                      0,
+                      `Proposed profile for ${domain}; held for manual review/activation`,
+                    );
+                    requiresProfileHold = true;
+                  }
+                } else if (!hasRealEvidence) {
+                  recordEvent('profile_engineer', 'insufficient_evidence', 'skipped', 0, `Abstained profile synthesis for ${domain}: missing retained page artifact evidence`);
+                }
+              }
+            }
+          }
 
           const extractDuration = Date.now() - stepStart;
           recordEvent(
@@ -1365,6 +1396,7 @@ export class SpecialistOrchestrator {
               resolvedFacts: resolverOutput,
               curatedDraft: curatorOutput,
               classificationContext,
+              extractionBundles,
             },
             context,
           );

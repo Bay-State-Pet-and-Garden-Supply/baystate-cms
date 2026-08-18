@@ -340,27 +340,30 @@ describe('Specialist Orchestrator (#56)', () => {
     } as any;
 
     const mockExtractionRunner = async (url: string): Promise<ExtractionEvidenceBundle> => {
+      const isBeef = url.includes('beef');
+      const selector = isBeef ? 'h1.product-title-beef' : 'h1.product-title';
+      const artId = isBeef ? 'art-2' : 'art-1';
       return {
         schemaVersion: 1,
         runnerVersion: '1.0.0',
         requestedUrl: url,
         finalUrl: url,
         retrievedAt: FIXED_NOW,
-        contentHash: sha256Hex('fail-1'),
-        artifactRefs: ['art-1'],
+        contentHash: sha256Hex(url),
+        artifactRefs: [artId],
         profile: null,
         extractionPath: [],
         observations: [
           {
             id: 'obs:title',
             field: 'title',
-            value: 'Organic Chicken Broth',
-            method: 'json_ld',
-            sourcePath: 'h1.product-title',
+            value: isBeef ? 'Organic Beef Broth' : 'Organic Chicken Broth',
+            method: 'selector',
+            sourcePath: selector,
             sourceUrl: url,
             finalUrl: url,
             contentHash: sha256Hex('title'),
-            artifactId: 'art-1',
+            artifactId: artId,
             profileId: null,
             profileVersion: null,
             variantRef: null,
@@ -406,9 +409,18 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.profileOutput?.authority).toBe('proposal_only');
     expect(result.events.some((e) => e.action === 'profile_review_hold')).toBe(true);
 
-    expect(capturedInput.samples[0].observedFields.product_name).toBeDefined();
-    expect(capturedInput.samples[0].selectorHints.titleSelector).toBe('h1.product-title');
-    expect(capturedInput.samples[0].artifactRefs).toEqual(['art-1']);
+    const sampleChicken = capturedInput.samples.find((s: any) => s.url.includes('chicken'));
+    const sampleBeef = capturedInput.samples.find((s: any) => s.url.includes('beef'));
+
+    expect(sampleChicken).toBeDefined();
+    expect(sampleChicken.observedFields.product_name).toBeDefined();
+    expect(sampleChicken.selectorHints.titleSelector).toBe('h1.product-title');
+    expect(sampleChicken.artifactRefs).toContain('art-1');
+
+    expect(sampleBeef).toBeDefined();
+    expect(sampleBeef.observedFields.product_name).toBeDefined();
+    expect(sampleBeef.selectorHints.titleSelector).toBe('h1.product-title-beef');
+    expect(sampleBeef.artifactRefs).toContain('art-2');
   });
 
   it('rejects 14-digit GTIN without case scope and runs through resolver with null expected consumer GTIN', async () => {

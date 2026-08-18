@@ -466,6 +466,79 @@ describe('Verifier specialist (#55)', () => {
     expect(reportSecondary.checks.some((c) => c.checkName === 'image_commerce_approval' && !c.passed)).toBe(true);
   });
 
+  it('catches wrong-flavor catalog title (e.g. Beef Broth instead of Chicken Broth) and triggers retry_curator', () => {
+    const draft = sampleDraft({
+      catalogTitle: 'ACME Organic Beef Broth 16 fl oz', // Contradictory flavor token "Beef" vs resolved "Chicken"
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'catalog_title_variant_alignment' && !c.passed)).toBe(true);
+    expect(report.retryRequest?.conflictingFields).toContain('catalogTitle');
+  });
+
+  it('catches image missing from extraction bundles provenance', () => {
+    const draft = sampleDraft({
+      images: [
+        {
+          url: 'https://unverified.example/fabricated.jpg',
+          role: 'primary',
+          rightsStatus: 'approved',
+          commerceApproved: true,
+          identityMatch: 'exact',
+          sourceUrl: null,
+        },
+      ],
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [
+        {
+          schemaVersion: 1,
+          runnerVersion: '1.0.0',
+          requestedUrl: 'https://acme.example/products/broth',
+          finalUrl: 'https://acme.example/products/broth',
+          retrievedAt: FIXED_NOW,
+          contentHash: 'hash-1',
+          artifactRefs: [],
+          profile: null,
+          extractionPath: [],
+          observations: [],
+          images: [
+            {
+              url: 'https://acme.example/images/real.jpg',
+              role: 'primary',
+              rightsStatus: 'approved',
+              commerceApproved: true,
+              identityMatch: 'exact',
+              sourceUrl: 'https://acme.example/products/broth',
+            },
+          ],
+          variant: null,
+          identityStatus: 'exact_match',
+          identityReasons: [],
+          failures: [],
+          deterministicOnly: true,
+        },
+      ],
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'image_evidence_provenance' && !c.passed)).toBe(true);
+  });
+
   it('catches fail-closed arbitrary non-bullet free prose and triggers retry_curator', () => {
     const draft = sampleDraft({
       description: '**ACME Organic Chicken Broth 16 fl oz**\n\nSupports healthy digestion and promotes vibrant energy.\n\n### Product Details\n- Brand: ACME\n- Net Weight: 16 fl oz',
