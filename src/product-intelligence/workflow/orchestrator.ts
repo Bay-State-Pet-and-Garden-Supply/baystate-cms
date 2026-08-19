@@ -1853,6 +1853,31 @@ export class SpecialistOrchestrator {
             };
           }
 
+          if (verResult.outcome === 'abstained') {
+            const isBudget = Boolean(verResult.abstention?.reason?.includes('budget') || verResult.abstention?.reason?.includes('cost'));
+            const termStatus = isBudget ? 'budget_exceeded' : 'abstained';
+            recordEvent('verifier', 'verify_quality', isBudget ? 'failed' : 'succeeded', verDuration, verResult.abstention?.reason);
+            const state = await persistState(termStatus, 'verifier', isBudget ? verResult.abstention?.reason : undefined);
+            return {
+              runId: context.runId,
+              status: termStatus,
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              resolverOutput,
+              resolverArtifact,
+              curatorOutput,
+              curatorArtifact,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+              error: isBudget ? verResult.abstention?.reason : undefined,
+            };
+          }
+
           if (verResult.outcome !== 'succeeded' || !verResult.output) {
             recordEvent('verifier', 'verify_quality', 'failed', verDuration, verResult.failure?.message);
             const state = await persistState('failed', 'verifier', verResult.failure?.message);

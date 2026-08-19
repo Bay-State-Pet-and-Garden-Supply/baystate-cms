@@ -368,7 +368,11 @@ export class DiscoverySpecialist {
     const startedAt = Date.now();
     const input = parsed.data;
     const policyAllowed = Math.max(0, context.runtimeAllowance?.remainingToolCalls ?? context.policy.maxToolCalls);
-    const searchAllowed = Math.min(this.options.maxSearchRequests, policyAllowed);
+    const searchCost = 0.005;
+    const costAllowed = typeof context.runtimeAllowance?.remainingCostUsd === 'number'
+      ? Math.floor(context.runtimeAllowance.remainingCostUsd / searchCost)
+      : (typeof context.policy.maxCostUsd === 'number' ? Math.floor(context.policy.maxCostUsd / searchCost) : Number.POSITIVE_INFINITY);
+    const searchAllowed = Math.min(this.options.maxSearchRequests, policyAllowed, Math.max(0, costAllowed));
     let searchRequestsUsed = 0;
     let verificationRequestsUsed = 0;
     let sources = [...input.sourceCandidates];

@@ -1030,10 +1030,24 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.workflowState.usage.totalToolCalls).toBe(5);
   });
 
-  it('halts with budget_exceeded even when Verifier returns pass if usage exceeded budget', async () => {
+  it('halts with budget_exceeded and blocks verifier execution when planned cost exceeds budget', async () => {
     let verifierExecuted = false;
     const mockVerifierOverBudget = {
-      execute: async (): Promise<SpecialistResult> => {
+      execute: async (_input: unknown, ctx: SpecialistContext): Promise<SpecialistResult> => {
+        const requiredCost = 5.00;
+        if (typeof ctx.runtimeAllowance?.remainingCostUsd === 'number' && ctx.runtimeAllowance.remainingCostUsd < requiredCost) {
+          return {
+            specialist: 'verifier',
+            outcome: 'abstained',
+            abstention: {
+              reason: `cost_budget_insufficient: $${ctx.runtimeAllowance.remainingCostUsd} remaining < $${requiredCost} required`,
+              actionableNextStep: 'Increase maxCostUsd policy budget.',
+              targets: [],
+            },
+            durationMs: 0,
+            usage: { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
+          };
+        }
         verifierExecuted = true;
         return {
           specialist: 'verifier',
@@ -1060,7 +1074,7 @@ describe('Specialist Orchestrator (#56)', () => {
             },
             contentHash: sha256Hex('ver-pass'),
           },
-          usage: { toolCalls: 0, modelCalls: 5, inputTokens: 5000, outputTokens: 2000, estimatedCostUsd: 5.00 }, // Over cost budget of $1.00
+          usage: { toolCalls: 0, modelCalls: 5, inputTokens: 5000, outputTokens: 2000, estimatedCostUsd: 5.00 },
           durationMs: 10,
         };
       },
@@ -1093,7 +1107,7 @@ describe('Specialist Orchestrator (#56)', () => {
       },
     );
 
-    expect(verifierExecuted).toBe(true);
+    expect(verifierExecuted).toBe(false);
     expect(result.status).toBe('budget_exceeded');
     expect(result.workflowState.status).toBe('budget_exceeded');
   });

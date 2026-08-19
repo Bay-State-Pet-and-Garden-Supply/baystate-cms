@@ -126,4 +126,36 @@ describe('Profile Engineer domain workflow lease (#51)', () => {
     expect(v3Repair.acquired).toBe(true);
     expect(v3Repair.workflow.targetVersion).toBe(3);
   });
+
+  it('preserves sourceProfileVersion and distinguishes repair needs across timestamp profile versions without collapsing into v2', () => {
+    // 1. Timestamp A fails -> repair claims target v2 and completes
+    const repairA = claimProfileEngineerWorkflow('workspace-ts', 'timestamp.example', 'run-ts-a', {
+      needsRepair: true,
+      targetVersion: 2,
+      sourceProfileVersion: '2026-08-19T01:00:00.000Z',
+    });
+    expect(repairA.acquired).toBe(true);
+    expect(repairA.workflow.sourceProfileVersion).toBe('2026-08-19T01:00:00.000Z');
+    expect(completeProfileEngineerWorkflow(repairA.workflow.id, 'run-ts-a', '{"repairedA":true}').applied).toBe(true);
+
+    // 2. Timestamp A fails again -> deduplicated and reused (already repaired)
+    const reuseA = claimProfileEngineerWorkflow('workspace-ts', 'timestamp.example', 'run-ts-a2', {
+      needsRepair: true,
+      targetVersion: 2,
+      sourceProfileVersion: '2026-08-19T01:00:00.000Z',
+    });
+    expect(reuseA.acquired).toBe(false);
+    expect(reuseA.reason).toBe('domain_workflow_already_completed');
+    expect(reuseA.workflow.sourceProfileVersion).toBe('2026-08-19T01:00:00.000Z');
+
+    // 3. Timestamp B (genuinely newer profile timestamp) fails -> ACQUIRES A NEW REPAIR LEASE with next generation!
+    const repairB = claimProfileEngineerWorkflow('workspace-ts', 'timestamp.example', 'run-ts-b', {
+      needsRepair: true,
+      targetVersion: 2,
+      sourceProfileVersion: '2026-08-19T04:00:00.000Z',
+    });
+    expect(repairB.acquired).toBe(true);
+    expect(repairB.workflow.sourceProfileVersion).toBe('2026-08-19T04:00:00.000Z');
+    expect(repairB.workflow.targetVersion).toBe(3); // Next generation (v3)!
+  });
 });

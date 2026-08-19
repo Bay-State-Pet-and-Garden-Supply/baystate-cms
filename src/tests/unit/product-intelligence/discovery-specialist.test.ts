@@ -219,4 +219,34 @@ describe('Discovery / Identity specialist (#49)', () => {
     const schemas = registerDiscoverySpecialistSchemas(new SpecialistArtifactSchemaRegistry());
     expect(schemas.validatePayload(DISCOVERY_OUTPUT_ARTIFACT_TYPE, '1.0.0', result.output).valid).toBe(true);
   });
+
+  it('does not invoke search callback when remainingCostUsd ($0.003) is below search cost ($0.005)', async () => {
+    let searchInvoked = false;
+    const specialistInstance = new DiscoverySpecialist({
+      search: async () => {
+        searchInvoked = true;
+        return { candidates: [source('https://brand.example/products/broth')] };
+      },
+    });
+
+    const result = await specialistInstance.discover(
+      { productSeed: seed },
+      {
+        ...context,
+        runtimeAllowance: {
+          remainingToolCalls: 5,
+          remainingModelCalls: 5,
+          remainingInputTokens: 5000,
+          remainingOutputTokens: 2000,
+          remainingCostUsd: 0.003, // Less than $0.005 search cost
+        },
+      },
+    );
+
+    expect(searchInvoked).toBe(false);
+    expect('outcome' in result && result.outcome).toBe('abstained');
+    if ('outcome' in result && result.usage) {
+      expect(result.usage.estimatedCostUsd).toBe(0);
+    }
+  });
 });

@@ -85,15 +85,16 @@ export const ProfileEngineerInputSchema = z.object({
   /** Existing profile is supplied for compatibility checking, never modified. */
   activeProfile: z.object({
     profileId: z.string().nullish(),
-    version: z.union([z.number().int().positive(), z.string().transform((v) => parseInt(v, 10))]).default(1),
+    version: z.union([z.number().int(), z.string()]).default(1),
     selectors: boundedRecord(z.string().nullable()).default({}),
     runtime: z.enum(['static', 'rendered']).default('rendered'),
   }).nullable().default(null),
   /** Explicit failed profile binding to repair (vN+1 repair workflow). */
   repairOf: z.object({
     profileId: z.string().nullish(),
+    sourceProfileVersion: z.string().nullish(),
     targetVersion: z.number().int().positive().optional(),
-    version: z.union([z.number().int().positive(), z.string().transform((v) => parseInt(v, 10))]).nullish(),
+    version: z.union([z.number().int(), z.string()]).nullish(),
     runtime: z.enum(['static', 'rendered']).nullish(),
   }).nullish(),
   // Two independent pages are the minimum evidence needed to distinguish a
@@ -183,6 +184,7 @@ export interface ClaimProfileLockOptions {
   needsRepair?: boolean;
   forceNew?: boolean;
   targetVersion?: number;
+  sourceProfileVersion?: string | null;
 }
 
 export interface ProfileEngineerWorkflowLock {
@@ -191,7 +193,7 @@ export interface ProfileEngineerWorkflowLock {
     runId: string,
     workspaceId: string,
     options?: ClaimProfileLockOptions,
-  ): Promise<{ acquired: boolean; workflowId: string; reason?: string }> | { acquired: boolean; workflowId: string; reason?: string };
+  ): Promise<{ acquired: boolean; workflowId: string; targetVersion?: number; workflow?: { targetVersion: number }; reason?: string }> | { acquired: boolean; workflowId: string; targetVersion?: number; workflow?: { targetVersion: number }; reason?: string };
   complete?(workflowId: string, runId: string, artifactJson?: string): Promise<ProfileEngineerWorkflowMutation> | ProfileEngineerWorkflowMutation;
   fail?(workflowId: string, runId: string, reason: string): Promise<ProfileEngineerWorkflowMutation> | ProfileEngineerWorkflowMutation;
 }
@@ -382,7 +384,7 @@ export function createProfileEngineerExtractionSeam(extraction: PageExtractionCo
   };
 }
 
-function buildProposal(input: ProfileEngineerInput, minimumSamples: number): ProfileEngineerProposal {
+function buildProposal(input: ProfileEngineerInput, minimumSamples: number, overrideVersion?: number): ProfileEngineerProposal {
   const selectors = repeatedSelectors(input.samples);
   const validation = input.samples.map((sample) => validateSample(input, sample, selectors));
   const byField: ProfileEngineerProposal['validationSummary']['byField'] = {};
@@ -404,7 +406,7 @@ function buildProposal(input: ProfileEngineerInput, minimumSamples: number): Pro
     validationArtifacts: validation.flatMap((row) => row.artifactRefs),
   };
   if (strategy === 'shopify') metadata.shopifyJSONPath = true;
-  const derivedProposedVersion = (() => {
+  const derivedProposedVersion = overrideVersion ?? (() => {
     if (input.repairOf?.targetVersion && input.repairOf.targetVersion > 0) {
       return input.repairOf.targetVersion;
     }
@@ -514,17 +516,22 @@ export class ProfileEngineerSpecialist {
       return 1;
     })();
 
-    let lock: { acquired: boolean; workflowId: string; reason?: string } | null = null;
+    const sourceProfileVersion = input.repairOf?.sourceProfileVersion
+      ?? (input.repairOf?.version != null ? String(input.repairOf.version) : null)
+      ?? (input.activeProfile?.version != null ? String(input.activeProfile.version) : null);
+
+    let lock: { acquired: boolean; workflowId: string; targetVersion?: number; workflow?: { targetVersion: number }; reason?: string } | null = null;
     if (this.dependencies.workflow) {
       const claimOptions: ClaimProfileLockOptions = repairTarget
-        ? { needsRepair: true, targetVersion: derivedProposedVersion }
-        : { targetVersion: 1 };
+        ? { needsRepair: true, targetVersion: derivedProposedVersion, sourceProfileVersion }
+        : { targetVersion: 1, sourceProfileVersion: null };
       lock = await this.dependencies.workflow.claim(input.domain, context.runId, context.workspaceId, claimOptions);
       if (!lock.acquired) return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'abstained', abstention: { reason: lock.reason ?? 'domain_workflow_already_running', actionableNextStep: 'Reuse the existing domain workflow result or wait for its validation.', targets: [input.domain] }, durationMs: Date.now() - startedAt };
     }
 
     try {
-      const proposal = buildProposal(input, this.options.minimumRepresentativeSamples);
+      const finalProposedVersion = (lock as any)?.workflow?.targetVersion ?? (lock as any)?.targetVersion ?? derivedProposedVersion;
+      const proposal = buildProposal(input, this.options.minimumRepresentativeSamples, finalProposedVersion);
       const durationMs = Date.now() - startedAt;
       const artifact = finalizeSpecialistArtifact({
         artifactType: PROFILE_ENGINEER_OUTPUT_ARTIFACT_TYPE,

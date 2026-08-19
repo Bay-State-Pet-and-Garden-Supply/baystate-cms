@@ -11,6 +11,7 @@ export interface ProfileEngineerWorkflow {
   workspaceId: string;
   domain: string;
   targetVersion: number;
+  sourceProfileVersion?: string | null;
   status: ProfileEngineerWorkflowStatus;
   runId: string;
   leaseExpiresAt: string | null;
@@ -34,6 +35,7 @@ interface DbWorkflow {
   workspace_id: string;
   domain: string;
   target_version?: number;
+  source_profile_version?: string | null;
   status: string;
   run_id: string;
   lease_expires_at: string | null;
@@ -55,6 +57,7 @@ function map(row: DbWorkflow): ProfileEngineerWorkflow {
     workspaceId: row.workspace_id,
     domain: row.domain,
     targetVersion: row.target_version ?? 1,
+    sourceProfileVersion: row.source_profile_version ?? null,
     status: row.status as ProfileEngineerWorkflowStatus,
     runId: row.run_id,
     leaseExpiresAt: row.lease_expires_at,
@@ -75,6 +78,7 @@ function ensureTable(): void {
       workspace_id TEXT NOT NULL,
       domain TEXT NOT NULL,
       target_version INTEGER NOT NULL DEFAULT 1,
+      source_profile_version TEXT,
       status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
       run_id TEXT NOT NULL,
       lease_expires_at TEXT,
@@ -94,6 +98,11 @@ function ensureTable(): void {
   } catch {
     // Column already exists
   }
+  try {
+    db.run('ALTER TABLE profile_engineer_domain_workflows ADD COLUMN source_profile_version TEXT');
+  } catch {
+    // Column already exists
+  }
 }
 
 export function findProfileEngineerWorkflow(workspaceId: string, domain: string): ProfileEngineerWorkflow | null {
@@ -108,6 +117,7 @@ export interface ClaimWorkflowOptions {
   needsRepair?: boolean;
   forceNew?: boolean;
   targetVersion?: number;
+  sourceProfileVersion?: string | null;
 }
 
 /** Atomically claim one workflow per workspace/domain/version need. */
@@ -124,6 +134,9 @@ export function claimProfileEngineerWorkflow(
 
   const leaseMs = typeof options === 'number' ? options : options.leaseMs ?? 120_000;
   const targetVersion = typeof options === 'object' ? options.targetVersion ?? 1 : 1;
+  const sourceProfileVersion = typeof options === 'object' && options.sourceProfileVersion != null
+    ? String(options.sourceProfileVersion).trim()
+    : null;
 
   const now = new Date().toISOString();
   const expires = new Date(Date.now() + Math.max(1_000, leaseMs)).toISOString();
@@ -135,14 +148,19 @@ export function claimProfileEngineerWorkflow(
     if (!existing) {
       const id = randomUUID();
       db.query(`INSERT INTO profile_engineer_domain_workflows
-        (id, workspace_id, domain, target_version, status, run_id, lease_expires_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`).run(id, workspaceId, normalizedDomain, targetVersion, runId, expires, now, now);
+        (id, workspace_id, domain, target_version, source_profile_version, status, run_id, lease_expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`).run(id, workspaceId, normalizedDomain, targetVersion, sourceProfileVersion, runId, expires, now, now);
       outcome = { acquired: true, workflow: map(db.query('SELECT * FROM profile_engineer_domain_workflows WHERE id = ?').get(id) as DbWorkflow) };
       return;
     }
     const isHigherVersion = targetVersion > (existing.target_version ?? 1);
+    const isDifferentSourceVersion = Boolean(
+      sourceProfileVersion &&
+      existing.source_profile_version &&
+      sourceProfileVersion !== existing.source_profile_version,
+    );
     const isForced = Boolean(typeof options === 'object' && options.forceNew);
-    const allowReclaim = isHigherVersion || isForced;
+    const allowReclaim = isHigherVersion || isDifferentSourceVersion || isForced;
     const liveLease = existing.status === 'running' && !!existing.lease_expires_at && existing.lease_expires_at > now;
     if (liveLease) {
       outcome = { acquired: false, workflow: map(existing), reason: 'domain_workflow_in_progress' };
@@ -152,10 +170,15 @@ export function claimProfileEngineerWorkflow(
       outcome = { acquired: false, workflow: map(existing), reason: 'domain_workflow_already_completed' };
       return;
     }
+    const effectiveTargetVersion = isDifferentSourceVersion
+      ? Math.max(targetVersion, (existing.target_version ?? 1) + 1)
+      : targetVersion;
+    const effectiveSourceVersion = sourceProfileVersion ?? existing.source_profile_version ?? null;
+
     db.query(`UPDATE profile_engineer_domain_workflows
-      SET status = 'running', target_version = ?, run_id = ?, lease_expires_at = ?, error_message = NULL, updated_at = ?
+      SET status = 'running', target_version = ?, source_profile_version = ?, run_id = ?, lease_expires_at = ?, error_message = NULL, updated_at = ?
       WHERE id = ? AND (status = 'failed' OR status = 'completed' OR lease_expires_at IS NULL OR lease_expires_at <= ?)`)
-      .run(targetVersion, runId, expires, now, existing.id, now);
+      .run(effectiveTargetVersion, effectiveSourceVersion, runId, expires, now, existing.id, now);
     const retried = db.query('SELECT * FROM profile_engineer_domain_workflows WHERE id = ?').get(existing.id) as DbWorkflow;
     outcome = retried.status === 'running' && retried.run_id === runId
       ? { acquired: true, workflow: map(retried) }
