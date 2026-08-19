@@ -565,29 +565,99 @@ export class WorkflowBudgetBroker {
     return { exceeded: false };
   }
 
+  private handleSpendState = new Map<string, {
+    consumed: SpecialistUsage;
+    activeHolds: { costUsd: number; modelCalls: number; toolCalls: number; inputTokens: number; outputTokens: number };
+  }>();
+
   public createSpendGateway(handle: BudgetReservationHandle): SpecialistSpendGateway {
+    const getHandleRemaining = () => {
+      const state = this.handleSpendState.get(handle.id);
+      const consumed = state?.consumed ?? { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 };
+      const holds = state?.activeHolds ?? { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
+
+      return {
+        remainingCostUsd: Math.max(0, Number((handle.costUsd - (consumed.estimatedCostUsd + holds.costUsd)).toFixed(4))),
+        remainingModelCalls: Math.max(0, handle.modelCalls - (consumed.modelCalls + holds.modelCalls)),
+        remainingToolCalls: Math.max(0, handle.toolCalls - (consumed.toolCalls + holds.toolCalls)),
+        remainingInputTokens: Math.max(0, handle.inputTokens - (consumed.inputTokens + holds.inputTokens)),
+        remainingOutputTokens: Math.max(0, handle.outputTokens - (consumed.outputTokens + holds.outputTokens)),
+      };
+    };
+
     return {
       canSpend: (requested: { toolCalls?: number; modelCalls?: number; inputTokens?: number; outputTokens?: number; costUsd?: number }) => {
         if (this.deadlineAt && Date.now() > this.deadlineAt) return false;
+        if (this.unreservedOverspend) return false;
         const cost = requested.costUsd ?? 0;
         const models = requested.modelCalls ?? 0;
         const tools = requested.toolCalls ?? 0;
         const inTokens = requested.inputTokens ?? 0;
         const outTokens = requested.outputTokens ?? 0;
 
-        if (this.getRemainingCostUsd() < cost) return false;
-        if (this.getRemainingModelCalls() < models) return false;
-        if (this.getRemainingToolCalls() < tools) return false;
-        if (this.getRemainingInputTokens() < inTokens) return false;
-        if (this.getRemainingOutputTokens() < outTokens) return false;
+        const remaining = getHandleRemaining();
+
+        if (cost > remaining.remainingCostUsd + 0.0001) return false;
+        if (models > remaining.remainingModelCalls) return false;
+        if (tools > remaining.remainingToolCalls) return false;
+        if (inTokens > remaining.remainingInputTokens) return false;
+        if (outTokens > remaining.remainingOutputTokens) return false;
+
         return true;
       },
-      executeWithSpend: async <T>(spend: { toolCalls?: number; modelCalls?: number; inputTokens?: number; outputTokens?: number; costUsd?: number }, action: () => Promise<T> | T): Promise<T> => {
-        const allowed = this.createSpendGateway(handle).canSpend(spend);
-        if (!allowed) {
-          throw new Error(`Spend gateway rejected execution: budget ceiling exceeded for requested spend (cost: $${spend.costUsd ?? 0}, models: ${spend.modelCalls ?? 0})`);
+      executeWithSpend: async <T>(
+        spend: { toolCalls?: number; modelCalls?: number; inputTokens?: number; outputTokens?: number; costUsd?: number },
+        action: () => Promise<T> | T,
+      ): Promise<T> => {
+        if (!this.createSpendGateway(handle).canSpend(spend)) {
+          const remaining = getHandleRemaining();
+          throw new Error(
+            `Spend gateway rejected execution: handle limit exceeded for requested spend ` +
+            `(cost: $${spend.costUsd ?? 0} vs remaining $${remaining.remainingCostUsd}, ` +
+            `models: ${spend.modelCalls ?? 0} vs remaining ${remaining.remainingModelCalls}, ` +
+            `tools: ${spend.toolCalls ?? 0} vs remaining ${remaining.remainingToolCalls})`,
+          );
         }
-        return await action();
+
+        const cost = spend.costUsd ?? 0;
+        const models = spend.modelCalls ?? 0;
+        const tools = spend.toolCalls ?? 0;
+        const inTokens = spend.inputTokens ?? 0;
+        const outTokens = spend.outputTokens ?? 0;
+
+        let state = this.handleSpendState.get(handle.id);
+        if (!state) {
+          state = {
+            consumed: { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
+            activeHolds: { costUsd: 0, modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0 },
+          };
+          this.handleSpendState.set(handle.id, state);
+        }
+
+        // Atomically debit active hold against the parent handle
+        state.activeHolds.costUsd = Number((state.activeHolds.costUsd + cost).toFixed(4));
+        state.activeHolds.modelCalls += models;
+        state.activeHolds.toolCalls += tools;
+        state.activeHolds.inputTokens += inTokens;
+        state.activeHolds.outputTokens += outTokens;
+
+        try {
+          const result = await action();
+          // On successful execution, record spend as consumed
+          state.consumed.estimatedCostUsd = Number((state.consumed.estimatedCostUsd + cost).toFixed(4));
+          state.consumed.modelCalls += models;
+          state.consumed.toolCalls += tools;
+          state.consumed.inputTokens += inTokens;
+          state.consumed.outputTokens += outTokens;
+          return result;
+        } finally {
+          // Release active hold
+          state.activeHolds.costUsd = Math.max(0, Number((state.activeHolds.costUsd - cost).toFixed(4)));
+          state.activeHolds.modelCalls = Math.max(0, state.activeHolds.modelCalls - models);
+          state.activeHolds.toolCalls = Math.max(0, state.activeHolds.toolCalls - tools);
+          state.activeHolds.inputTokens = Math.max(0, state.activeHolds.inputTokens - inTokens);
+          state.activeHolds.outputTokens = Math.max(0, state.activeHolds.outputTokens - outTokens);
+        }
       },
     };
   }
@@ -974,7 +1044,7 @@ export class SpecialistOrchestrator {
 
     const discovery = this.dependencies.discovery ?? new DiscoverySpecialist({}, { codeCommit: captureSpecialistCodeCommit() });
     const profileEngineer = this.dependencies.profileEngineer ?? new ProfileEngineerSpecialist(
-      { workflow: effectiveProfileLock },
+      {},
       { codeCommit: captureSpecialistCodeCommit() },
     );
     const resolver = this.dependencies.resolver ?? new ResolverSpecialist({ now: this.now });
@@ -1402,7 +1472,6 @@ export class SpecialistOrchestrator {
                 profileHoldReason = `Profile Engineer attempt limit reached for domain ${domain}`;
                 continue;
               }
-              profileAttemptsByDomainVersion.set(domainKey, domainAttempts + 1);
 
               const domainCandidates = candidates.filter((c: any) => {
                 try {
@@ -1444,13 +1513,6 @@ export class SpecialistOrchestrator {
                     costUsd: 0.05,
                   });
                   if (profReservation.allowed) {
-                    invocations.profile += 1;
-                    capabilityInvocationIds.profile_engineer.push(`inv:profile_engineer:${invocations.profile}`);
-                    
-                    routeRecords.push({ fromPhase: 'extraction', toPhase: 'profile_engineer', reason: `Synthesizing profile proposal for domain: ${domain}`, timestamp: this.now() });
-                    await persistState('in_progress', 'profile_engineer_synthesis');
-                    recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
-
                     // Orchestrator-owned domain lease claim
                     const claimOptions: ClaimProfileLockOptions = failedProfile
                       ? { needsRepair: true, targetVersion: failedProfile.targetVersion, sourceProfileVersion: failedProfile.sourceProfileVersion }
@@ -1465,100 +1527,125 @@ export class SpecialistOrchestrator {
                       continue;
                     }
 
-                    const sample1Obs: Record<string, string> = {};
-                    if ((sample1 as any).extracted?.brand) sample1Obs.brand = (sample1 as any).extracted.brand;
-                    if ((sample1 as any).extracted?.productName) sample1Obs.product_name = (sample1 as any).extracted.productName;
-                    if ((sample1 as any).extracted?.size) sample1Obs.size = (sample1 as any).extracted.size;
-                    if ((sample1 as any).extracted?.sku) sample1Obs.sku = (sample1 as any).extracted.sku;
-                    if ((sample1 as any).extracted?.gtins?.length > 0) sample1Obs.gtin = (sample1 as any).extracted.gtins[0];
+                    // Increment attempt count at the actual invocation boundary
+                    invocations.profile += 1;
+                    capabilityInvocationIds.profile_engineer.push(`inv:profile_engineer:${invocations.profile}`);
+                    profileAttemptsByDomainVersion.set(domainKey, domainAttempts + 1);
 
-                    const sample2Obs: Record<string, string> = {};
-                    if ((sample2 as any).extracted?.brand) sample2Obs.brand = (sample2 as any).extracted.brand;
-                    if ((sample2 as any).extracted?.productName) sample2Obs.product_name = (sample2 as any).extracted.productName;
-                    if ((sample2 as any).extracted?.size) sample2Obs.size = (sample2 as any).extracted.size;
-                    if ((sample2 as any).extracted?.sku) sample2Obs.sku = (sample2 as any).extracted.sku;
-                    if ((sample2 as any).extracted?.gtins?.length > 0) sample2Obs.gtin = (sample2 as any).extracted.gtins[0];
+                    routeRecords.push({ fromPhase: 'extraction', toPhase: 'profile_engineer', reason: `Synthesizing profile proposal for domain: ${domain}`, timestamp: this.now() });
+                    await persistState('in_progress', 'profile_engineer_synthesis');
+                    recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
 
-                    const sample1Hints: Record<string, string> = {};
-                    if (sample1TitleHint) sample1Hints.titleSelector = sample1TitleHint;
-                    const sample2Hints: Record<string, string> = {};
-                    if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
+                    let lockHandled = false;
+                    try {
+                      const sample1Obs: Record<string, string> = {};
+                      if ((sample1 as any).extracted?.brand) sample1Obs.brand = (sample1 as any).extracted.brand;
+                      if ((sample1 as any).extracted?.productName) sample1Obs.product_name = (sample1 as any).extracted.productName;
+                      if ((sample1 as any).extracted?.size) sample1Obs.size = (sample1 as any).extracted.size;
+                      if ((sample1 as any).extracted?.sku) sample1Obs.sku = (sample1 as any).extracted.sku;
+                      if ((sample1 as any).extracted?.gtins?.length > 0) sample1Obs.gtin = (sample1 as any).extracted.gtins[0];
 
-                    const effectiveTargetVersion = (lock as any)?.workflow?.targetVersion ?? lock.targetVersion ?? failedProfile?.targetVersion ?? 1;
+                      const sample2Obs: Record<string, string> = {};
+                      if ((sample2 as any).extracted?.brand) sample2Obs.brand = (sample2 as any).extracted.brand;
+                      if ((sample2 as any).extracted?.productName) sample2Obs.product_name = (sample2 as any).extracted.productName;
+                      if ((sample2 as any).extracted?.size) sample2Obs.size = (sample2 as any).extracted.size;
+                      if ((sample2 as any).extracted?.sku) sample2Obs.sku = (sample2 as any).extracted.sku;
+                      if ((sample2 as any).extracted?.gtins?.length > 0) sample2Obs.gtin = (sample2 as any).extracted.gtins[0];
 
-                    const profContext = getDynamicSpecialistContext(profReservation.handle);
-                    const profResult = await profileEngineer.execute(
-                      {
-                        schemaVersion: 1,
-                        domain,
-                        repairOf: failedProfile ? { ...failedProfile, targetVersion: effectiveTargetVersion } : null,
-                        samples: [
-                          {
-                            url: sample1Url,
-                            artifactRefs: sample1Artifacts,
-                            expectedName: (sample1 as any).extracted?.productName ?? productSeed.name,
-                            expectedGtin: (sample1 as any).extracted?.gtins?.[0] ?? effectiveExtractionGtin ?? undefined,
-                            signals: {
-                              jsonLd: (sample1 as any).extracted?.identifiers?.some((i: any) => i.method === 'json_ld') ?? false,
-                              shopify: (sample1 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('shopify')) ?? false,
-                              woocommerce: (sample1 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('woocommerce')) ?? false,
-                              embeddedState: false,
-                              selectorOnly: false,
-                              changedMarkup: false,
-                              wrongVariant: (sample1 as any).pageKind === 'wrong_variant',
+                      const sample1Hints: Record<string, string> = {};
+                      if (sample1TitleHint) sample1Hints.titleSelector = sample1TitleHint;
+                      const sample2Hints: Record<string, string> = {};
+                      if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
+
+                      const effectiveTargetVersion = (lock as any)?.workflow?.targetVersion ?? lock.targetVersion ?? failedProfile?.targetVersion ?? 1;
+
+                      const profContext = getDynamicSpecialistContext(profReservation.handle);
+                      const profResult = await profileEngineer.execute(
+                        {
+                          schemaVersion: 1,
+                          domain,
+                          repairOf: failedProfile ? { ...failedProfile, targetVersion: effectiveTargetVersion } : null,
+                          samples: [
+                            {
+                              url: sample1Url,
+                              artifactRefs: sample1Artifacts,
+                              expectedName: (sample1 as any).extracted?.productName ?? productSeed.name,
+                              expectedGtin: (sample1 as any).extracted?.gtins?.[0] ?? effectiveExtractionGtin ?? undefined,
+                              signals: {
+                                jsonLd: (sample1 as any).extracted?.identifiers?.some((i: any) => i.method === 'json_ld') ?? false,
+                                shopify: (sample1 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('shopify')) ?? false,
+                                woocommerce: (sample1 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('woocommerce')) ?? false,
+                                embeddedState: false,
+                                selectorOnly: false,
+                                changedMarkup: false,
+                                wrongVariant: (sample1 as any).pageKind === 'wrong_variant',
+                              },
+                              selectorHints: sample1Hints,
+                              observedFields: sample1Obs,
                             },
-                            selectorHints: sample1Hints,
-                            observedFields: sample1Obs,
-                          },
-                          {
-                            url: sample2Url,
-                            artifactRefs: sample2Artifacts,
-                            expectedName: (sample2 as any).extracted?.productName ?? productSeed.name,
-                            expectedGtin: (sample2 as any).extracted?.gtins?.[0] ?? effectiveExtractionGtin ?? undefined,
-                            signals: {
-                              jsonLd: (sample2 as any).extracted?.identifiers?.some((i: any) => i.method === 'json_ld') ?? false,
-                              shopify: (sample2 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('shopify')) ?? false,
-                              woocommerce: (sample2 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('woocommerce')) ?? false,
-                              embeddedState: false,
-                              selectorOnly: false,
-                              changedMarkup: false,
-                              wrongVariant: (sample2 as any).pageKind === 'wrong_variant',
+                            {
+                              url: sample2Url,
+                              artifactRefs: sample2Artifacts,
+                              expectedName: (sample2 as any).extracted?.productName ?? productSeed.name,
+                              expectedGtin: (sample2 as any).extracted?.gtins?.[0] ?? effectiveExtractionGtin ?? undefined,
+                              signals: {
+                                jsonLd: (sample2 as any).extracted?.identifiers?.some((i: any) => i.method === 'json_ld') ?? false,
+                                shopify: (sample2 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('shopify')) ?? false,
+                                woocommerce: (sample2 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('woocommerce')) ?? false,
+                                embeddedState: false,
+                                selectorOnly: false,
+                                changedMarkup: false,
+                                wrongVariant: (sample2 as any).pageKind === 'wrong_variant',
+                              },
+                              selectorHints: sample2Hints,
+                              observedFields: sample2Obs,
                             },
-                            selectorHints: sample2Hints,
-                            observedFields: sample2Obs,
-                          },
-                        ],
-                        requiredFields: ['titleSelector'],
-                      },
-                      profContext,
-                    );
+                          ],
+                          requiredFields: ['titleSelector'],
+                        },
+                        profContext,
+                      );
 
-                    budgetBroker.commit(profReservation.handle!, profResult.usage, 0);
+                      budgetBroker.commit(profReservation.handle!, profResult.usage, 0);
 
-                    if (profResult.outcome === 'succeeded' && profResult.output) {
-                      const profEnv = Array.isArray(profResult.output) ? profResult.output[0] : (profResult.output as SpecialistArtifactEnvelope);
-                      if (effectiveProfileLock.complete && profEnv) {
-                        await effectiveProfileLock.complete(lock.workflowId, context.runId, serializeSpecialistArtifact(profEnv));
+                      if (profResult.outcome === 'succeeded' && profResult.output) {
+                        const profEnv = Array.isArray(profResult.output) ? profResult.output[0] : (profResult.output as SpecialistArtifactEnvelope);
+                        if (effectiveProfileLock.complete && profEnv) {
+                          await effectiveProfileLock.complete(lock.workflowId, context.runId, serializeSpecialistArtifact(profEnv));
+                        }
+                        lockHandled = true;
+                        profileArtifact = profEnv;
+                        profileOutput = profEnv?.payload as ProfileEngineerProposal;
+                        recordEvent('profile_engineer', 'synthesize_profile', 'succeeded', 0, `Proposed profile for ${domain}; held for manual review/activation`);
+                        requiresProfileHold = true;
+                        profileHoldReason = `Profile proposed for domain '${domain}' requiring manual review and activation in Profile Builder`;
+                      } else if (profResult.outcome === 'abstained') {
+                        if (effectiveProfileLock.fail) {
+                          await effectiveProfileLock.fail(lock.workflowId, context.runId, profResult.abstention?.reason ?? 'profile_unavailable');
+                        }
+                        lockHandled = true;
+                        requiresProfileHold = true;
+                        profileHoldReason = `Profile synthesis for ${domain} abstained: ${profResult.abstention?.reason ?? 'profile_unavailable'}`;
+                        recordEvent('profile_engineer', 'synthesize_profile', 'skipped', 0, profileHoldReason);
+                      } else if (profResult.outcome === 'failed') {
+                        if (effectiveProfileLock.fail) {
+                          await effectiveProfileLock.fail(lock.workflowId, context.runId, profResult.failure?.message ?? 'profile_failed');
+                        }
+                        lockHandled = true;
+                        requiresProfileHold = true;
+                        profileHoldReason = `Profile synthesis for ${domain} failed: ${profResult.failure?.message ?? 'profile_failed'}`;
+                        recordEvent('profile_engineer', 'synthesize_profile', 'failed', 0, profileHoldReason);
                       }
-                      profileArtifact = profEnv;
-                      profileOutput = profEnv?.payload as ProfileEngineerProposal;
-                      recordEvent('profile_engineer', 'synthesize_profile', 'succeeded', 0, `Proposed profile for ${domain}; held for manual review/activation`);
-                      requiresProfileHold = true;
-                      profileHoldReason = `Profile proposed for domain '${domain}' requiring manual review and activation in Profile Builder`;
-                    } else if (profResult.outcome === 'abstained') {
-                      if (effectiveProfileLock.fail) {
-                        await effectiveProfileLock.fail(lock.workflowId, context.runId, profResult.abstention?.reason ?? 'profile_unavailable');
+                    } catch (error) {
+                      if (!lockHandled && effectiveProfileLock.fail) {
+                        const errMsg = error instanceof Error ? error.message : String(error);
+                        try {
+                          await effectiveProfileLock.fail(lock.workflowId, context.runId, errMsg);
+                        } catch {
+                          // ignore lock release error
+                        }
                       }
-                      requiresProfileHold = true;
-                      profileHoldReason = `Profile synthesis for ${domain} abstained: ${profResult.abstention?.reason ?? 'profile_unavailable'}`;
-                      recordEvent('profile_engineer', 'synthesize_profile', 'skipped', 0, profileHoldReason);
-                    } else if (profResult.outcome === 'failed') {
-                      if (effectiveProfileLock.fail) {
-                        await effectiveProfileLock.fail(lock.workflowId, context.runId, profResult.failure?.message ?? 'profile_failed');
-                      }
-                      requiresProfileHold = true;
-                      profileHoldReason = `Profile synthesis for ${domain} failed: ${profResult.failure?.message ?? 'profile_failed'}`;
-                      recordEvent('profile_engineer', 'synthesize_profile', 'failed', 0, profileHoldReason);
+                      throw error;
                     }
                   }
                 } else if (!hasRealEvidence) {

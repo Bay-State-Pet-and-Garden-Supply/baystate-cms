@@ -395,7 +395,10 @@ export class DiscoverySpecialist {
       }
       searchRequestsUsed += 1;
       try {
-        const searched = await this.dependencies.search({ productSeed: input.productSeed, discoveredGtin: input.discoveredGtin ?? null, batchContext: input.batchContext ?? null }, context);
+        const runSearch = () => this.dependencies.search!({ productSeed: input.productSeed, discoveredGtin: input.discoveredGtin ?? null, batchContext: input.batchContext ?? null }, context);
+        const searched = context.spendGateway
+          ? await context.spendGateway.executeWithSpend({ toolCalls: 1, costUsd: searchCost }, runSearch)
+          : await runSearch();
         sources = searched.candidates;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -467,12 +470,15 @@ export class DiscoverySpecialist {
       if (this.dependencies.extraction && verificationRequestsUsed < verificationAllowed) {
         verificationRequestsUsed += 1;
         try {
-          page = await this.dependencies.extraction.extract({
+          const runExtract = () => this.dependencies.extraction!.extract({
             url: source.url,
             expected: { gtin: input.discoveredGtin ?? undefined, name: input.productSeed.name },
             signal: context.signal ?? new AbortController().signal,
             timeoutMs: Math.max(1, context.deadlineAt ? Math.max(1, context.deadlineAt - Date.now()) : context.policy.deadlineMs),
           });
+          page = context.spendGateway
+            ? await context.spendGateway.executeWithSpend({ toolCalls: 1 }, runExtract)
+            : await runExtract();
           extractionStatus = page.fields.length || page.gtins.length || page.productName ? 'verified' : 'no_result';
         } catch {
           extractionStatus = 'error';
