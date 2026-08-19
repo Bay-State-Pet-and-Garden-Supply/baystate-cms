@@ -472,12 +472,15 @@ export async function runExtractionLadder(
   for (const profile of options.profiles ?? []) {
     if (!profile.matches(finalUrl)) continue;
     profileMatched = true;
+    const matchedProfileBinding: LadderRun['profile'] = profile.id && profile.version !== undefined
+      ? { id: profile.id, version: profile.version, runtime: profile.runtime }
+      : null;
     layersUsed.push('profile_selector');
     fetchModes.push('profile_selector');
     try {
       const out = await profile.extract(finalUrl, signal, timeoutMs, expected);
       if (out) {
-        selectedProfile = out.profile ?? (profile.id && profile.version !== undefined ? { id: profile.id, version: profile.version, runtime: profile.runtime } : null);
+        selectedProfile = out.profile ?? matchedProfileBinding;
         const profileSource: SourceMetadata = {
           artifactId: out.profile?.artifactId ?? null,
           contentHash: out.profile?.contentHash ?? null,
@@ -508,6 +511,7 @@ export async function runExtractionLadder(
         }
       }
     } catch {
+      selectedProfile = matchedProfileBinding;
       layersUsed.push('profile_failed');
     }
   }

@@ -13,7 +13,7 @@ import {
   DiscoverySpecialist,
   type DiscoverySourceCandidate,
 } from '../../../product-intelligence/specialists/discovery';
-import { ProfileEngineerSpecialist } from '../../../product-intelligence/specialists/profile-engineer';
+import { ProfileEngineerSpecialist, type ProfileEngineerWorkflowLock } from '../../../product-intelligence/specialists/profile-engineer';
 import { VerifierSpecialist } from '../../../product-intelligence/specialists/verifier';
 import { ProductIntelligencePolicySchema } from '../../../product-intelligence/contracts';
 import type { SpecialistContext, SpecialistResult } from '../../../product-intelligence/specialists/contracts';
@@ -1090,5 +1090,185 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(verifierExecuted).toBe(true);
     expect(result.status).toBe('budget_exceeded');
     expect(result.workflowState.status).toBe('budget_exceeded');
+  });
+
+  it('blocks specialist execution before dispatch when remaining budget is exhausted', async () => {
+    let verifierExecuted = false;
+    const mockDiscovery = {
+      execute: async (): Promise<SpecialistResult> => ({
+        specialist: 'discovery',
+        outcome: 'succeeded',
+        output: {
+          artifactType: 'discovery_candidates',
+          schemaVersion: '1.0.0',
+          payload: { candidates: [createDiscoveryCandidate()] },
+          lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+          provenance: {
+            specialist: 'discovery',
+            specialistVersion: '1.0.0',
+            codeCommit: 'commit-56',
+            invokedBy: 'orchestrator',
+            durationMs: 10,
+            createdAt: FIXED_NOW,
+          },
+          contentHash: sha256Hex('disc-exhausted'),
+        },
+        usage: { toolCalls: 2, modelCalls: 2, inputTokens: 500, outputTokens: 200, estimatedCostUsd: 1.00 }, // Completely consumes $1.00 budget
+        durationMs: 10,
+      }),
+    } as any;
+
+    const mockVerifier = {
+      execute: async (): Promise<SpecialistResult> => {
+        verifierExecuted = true;
+        return {
+          specialist: 'verifier',
+          outcome: 'succeeded',
+          durationMs: 10,
+        };
+      },
+    } as any;
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: mockDiscovery,
+        verifier: mockVerifier,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({
+          configId: 'cost-exhausted-policy',
+          maxCostUsd: 1.00,
+        }),
+      },
+    );
+
+    expect(verifierExecuted).toBe(false); // Verifier is NEVER executed because budget was already exhausted!
+    expect(result.status).toBe('budget_exceeded');
+  });
+
+  it('propagates remaining deadline timeout to deterministic extraction runner', async () => {
+    let receivedTimeoutMs: number | undefined;
+    const mockExtractionRunner = async (
+      _url: string,
+      execContext: SpecialistContext,
+    ): Promise<ExtractionEvidenceBundle> => {
+      receivedTimeoutMs = execContext.deadlineAt ? execContext.deadlineAt - Date.now() : undefined;
+      return createMockExtractionBundle('https://acme.example/products/broth');
+    };
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        extractionRunner: mockExtractionRunner,
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const targetDeadline = Date.now() + 5000;
+    await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      {
+        ...context,
+        deadlineAt: targetDeadline,
+      },
+    );
+
+    expect(receivedTimeoutMs).toBeDefined();
+    expect(receivedTimeoutMs!).toBeGreaterThan(0);
+    expect(receivedTimeoutMs!).toBeLessThanOrEqual(5000);
+  });
+
+  it('halts with budget_exceeded when hard maxTotalSteps ceiling is reached', async () => {
+    const orchestrator = new SpecialistOrchestrator({
+      limits: {
+        maxTotalSteps: 2, // Hard step ceiling is 2
+      },
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      context,
+    );
+
+    expect(result.status).toBe('budget_exceeded');
+    expect(result.error).toContain('Total step ceiling');
+  });
+
+  it('triggers vN+1 repair of failed active profile and holds for review', async () => {
+    let claimedRepairVersion: number | undefined;
+    const lock: ProfileEngineerWorkflowLock = {
+      claim: (_domain: string, _runId: string, _ws: string, opts?: any) => {
+        claimedRepairVersion = opts?.targetVersion;
+        return { acquired: true, workflowId: 'wf:repair-test' };
+      },
+      complete: () => ({ applied: true }),
+      fail: () => ({ applied: true }),
+    };
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({
+              candidates: [
+                createDiscoveryCandidate('https://acme.example/pdp1'),
+                createDiscoveryCandidate('https://acme.example/pdp2'),
+              ],
+            }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        profileEngineerWorkflowLock: lock,
+        extractionRunner: async (url) => {
+          const bundle = createMockExtractionBundle(url);
+          bundle.profile = { id: 'prof-acme', version: 2, runtime: 'rendered' };
+          bundle.failures = [{
+            code: 'profile_failed',
+            stage: 'profile_selector',
+            message: 'active v2 selector failed',
+            retryable: true,
+          }];
+          return bundle;
+        },
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      context,
+    );
+
+    expect(result.status).toBe('needs_review');
+    expect(claimedRepairVersion).toBe(3); // Requested targetVersion 3 (repair of v2!)
   });
 });

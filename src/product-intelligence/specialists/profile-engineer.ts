@@ -84,10 +84,17 @@ export const ProfileEngineerInputSchema = z.object({
   domain: z.string().trim().min(1).max(256),
   /** Existing profile is supplied for compatibility checking, never modified. */
   activeProfile: z.object({
-    version: z.number().int().positive().default(1),
+    profileId: z.string().nullish(),
+    version: z.union([z.number().int().positive(), z.string().transform((v) => parseInt(v, 10))]).default(1),
     selectors: boundedRecord(z.string().nullable()).default({}),
     runtime: z.enum(['static', 'rendered']).default('rendered'),
   }).nullable().default(null),
+  /** Explicit failed profile binding to repair (vN+1 repair workflow). */
+  repairOf: z.object({
+    profileId: z.string().nullish(),
+    version: z.union([z.number().int().positive(), z.string().transform((v) => parseInt(v, 10))]).default(1),
+    runtime: z.enum(['static', 'rendered']).nullish(),
+  }).nullish(),
   // Two independent pages are the minimum evidence needed to distinguish a
   // working profile from a selector that only happens to match one fixture.
   samples: z.array(ProfileEngineerSampleSchema).min(2).max(MAX_SAMPLES),
@@ -443,7 +450,13 @@ export class ProfileEngineerSpecialist {
     }
     const input = { ...parsed.data, domain: normalizeDomain(parsed.data.domain) };
 
-    if (input.activeProfile) {
+    const repairTarget = input.repairOf ?? (input.activeProfile ? {
+      profileId: (input.activeProfile as any).profileId ?? null,
+      version: input.activeProfile.version,
+      runtime: input.activeProfile.runtime,
+    } : null);
+
+    if (input.activeProfile && !input.repairOf) {
       const health = this.dependencies.checkProfile
         ? await this.dependencies.checkProfile(input.activeProfile, input, context)
         : this.dependencies.extraction
@@ -460,12 +473,12 @@ export class ProfileEngineerSpecialist {
 
     let lock: { acquired: boolean; workflowId: string; reason?: string } | null = null;
     if (this.dependencies.workflow) {
-      const activeVer = input.activeProfile
-        ? (typeof input.activeProfile.version === 'number'
-            ? input.activeProfile.version
-            : parseInt(String(input.activeProfile.version), 10) || 1)
+      const activeVer = repairTarget
+        ? (typeof repairTarget.version === 'number'
+            ? repairTarget.version
+            : parseInt(String(repairTarget.version), 10) || 1)
         : null;
-      const claimOptions: ClaimProfileLockOptions = input.activeProfile
+      const claimOptions: ClaimProfileLockOptions = repairTarget
         ? { needsRepair: true, targetVersion: (activeVer ?? 1) + 1 }
         : { targetVersion: 1 };
       lock = await this.dependencies.workflow.claim(input.domain, context.runId, context.workspaceId, claimOptions);

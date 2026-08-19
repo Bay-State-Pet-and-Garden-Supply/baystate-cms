@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import { sha256Hex } from '../../shared/stable-id';
 import type { ExtractedImageCandidate, ExtractedIdentifierEvidence, ExtractedFieldEvidence, PageExtractionResult } from '../tools/contract';
+export type { PageExtractionResult };
 
 export const EXTRACTION_EVIDENCE_BUNDLE_SCHEMA_VERSION = 1 as const;
 export const EXTRACTION_EVIDENCE_RUNNER_VERSION = '1.0.0';
@@ -227,11 +228,11 @@ export function createExtractionProvenanceAdapter(context: ProvenanceAdapterCont
           method: image.sourcePath?.startsWith('profile:') ? 'profile_selector' : 'image_candidate',
           artifactId: image.sourceArtifactId ?? (image.sourceContentHash && validContentHash(image.sourceContentHash) === validContentHash(result.contentHash) ? context.artifactId ?? null : null),
           contentHash: validContentHash(image.sourceContentHash ?? null),
-          rightsStatus: (image as any).rightsStatus ?? 'approved',
-          commerceApproved: (image as any).commerceApproved ?? true,
-          rightsBasis: (image as any).rightsBasis ?? 'official_site_extraction',
-          sourceTier: (image as any).sourceTier ?? 'official',
-          identityMatch: (image as any).identityMatch ?? 'exact',
+          rightsStatus: (image as any).rightsStatus ?? 'unverified',
+          commerceApproved: (image as any).commerceApproved ?? false,
+          rightsBasis: (image as any).rightsBasis ?? null,
+          sourceTier: (image as any).sourceTier ?? null,
+          identityMatch: (image as any).identityMatch ?? 'unverified',
         };
       }).filter((image) => !!image.contentHash || !!image.artifactId);
       const imageObservations = images.map((image) => ({

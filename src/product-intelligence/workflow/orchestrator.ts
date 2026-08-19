@@ -37,10 +37,10 @@
  *   - Specialists NEVER invoke each other; ONLY the orchestrator dispatches work.
  *   - All inter-specialist data flows are schema-validated typed artifacts.
  *   - Loops stop deterministically at configured retry/dispatch/budget/step limits.
- *   - Whole-workflow absolute deadline derived at start (startedAt + deadlineMs).
+ *   - Whole-workflow absolute deadline derived at start (startedAt + deadlineMs) and propagated.
+ *   - Hard pre-spend budget reservations and reconciliation for tools, models, tokens, and cost.
  *   - Cancellation via AbortSignal immediately aborts execution and sets CANCELLED.
  *   - Policy snapshot is strictly immutable; runtime allowances are passed separately.
- *   - Atomic dispatch & tool/cost/model/token reservations enforce hard aggregate policy limits.
  *   - 14-digit GTINs are strictly case-scoped and never promoted as consumer GTINs.
  *   - Caller identifiers are normalized once and passed canonically across all phases.
  *   - Profile Engineer proposals require governance/manual review before activation.
@@ -349,6 +349,13 @@ export class WorkflowBudgetBroker {
   public readonly deadlineAt: number | null;
   public readonly usage: WorkflowUsageLedger;
 
+  // Active reservations awaiting reconciliation
+  private reservedToolCalls = 0;
+  private reservedModelCalls = 0;
+  private reservedInputTokens = 0;
+  private reservedOutputTokens = 0;
+  private reservedCostUsd = 0;
+
   public constructor(context: SpecialistContext, maxDispatches: number, maxSteps: number, startedAt: number) {
     this.maxToolCalls = typeof context.policy.maxToolCalls === 'number' && context.policy.maxToolCalls > 0
       ? context.policy.maxToolCalls
@@ -382,24 +389,25 @@ export class WorkflowBudgetBroker {
   }
 
   public getRemainingToolCalls(): number {
-    return Math.max(0, this.maxToolCalls - this.usage.totalToolCalls);
+    return Math.max(0, this.maxToolCalls - (this.usage.totalToolCalls + this.reservedToolCalls));
   }
 
   public getRemainingModelCalls(): number {
-    return Math.max(0, this.maxModelCalls - this.usage.totalModelCalls);
+    return Math.max(0, this.maxModelCalls - (this.usage.totalModelCalls + this.reservedModelCalls));
   }
 
   public getRemainingInputTokens(): number {
-    return Math.max(0, this.maxInputTokens - this.usage.totalInputTokens);
+    return Math.max(0, this.maxInputTokens - (this.usage.totalInputTokens + this.reservedInputTokens));
   }
 
   public getRemainingOutputTokens(): number {
-    return Math.max(0, this.maxOutputTokens - this.usage.totalOutputTokens);
+    return Math.max(0, this.maxOutputTokens - (this.usage.totalOutputTokens + this.reservedOutputTokens));
   }
 
   public getRemainingCostUsd(): number {
     if (!Number.isFinite(this.maxCostUsd)) return Number.POSITIVE_INFINITY;
-    return Math.max(0, Number((this.maxCostUsd - this.usage.estimatedCostUsd).toFixed(4)));
+    const committedAndReserved = this.usage.estimatedCostUsd + this.reservedCostUsd;
+    return Math.max(0, Number((this.maxCostUsd - committedAndReserved).toFixed(4)));
   }
 
   public getRuntimeAllowance(): SpecialistRuntimeAllowance {
@@ -445,45 +453,57 @@ export class WorkflowBudgetBroker {
     if (this.usage.totalDispatches + count > this.maxDispatches) {
       return { allowed: false, reason: `Total dispatch ceiling (${this.maxDispatches}) reached` };
     }
-    if (this.usage.totalToolCalls >= this.maxToolCalls) {
+    if (this.getRemainingToolCalls() <= 0 && this.maxToolCalls !== Number.POSITIVE_INFINITY) {
       return { allowed: false, reason: `Tool call budget ceiling (${this.maxToolCalls}) reached` };
     }
-    if (this.usage.totalModelCalls >= this.maxModelCalls) {
+    if (this.getRemainingModelCalls() <= 0 && this.maxModelCalls !== Number.POSITIVE_INFINITY) {
       return { allowed: false, reason: `Model call budget ceiling (${this.maxModelCalls}) reached` };
     }
-    if (this.usage.totalInputTokens >= this.maxInputTokens) {
+    if (this.getRemainingInputTokens() <= 0 && this.maxInputTokens !== Number.POSITIVE_INFINITY) {
       return { allowed: false, reason: `Input token budget ceiling (${this.maxInputTokens}) reached` };
     }
-    if (this.usage.totalOutputTokens >= this.maxOutputTokens) {
+    if (this.getRemainingOutputTokens() <= 0 && this.maxOutputTokens !== Number.POSITIVE_INFINITY) {
       return { allowed: false, reason: `Output token budget ceiling (${this.maxOutputTokens}) reached` };
     }
-    if (this.usage.estimatedCostUsd >= this.maxCostUsd) {
+    if (this.getRemainingCostUsd() <= 0 && this.maxCostUsd !== Number.POSITIVE_INFINITY) {
       return { allowed: false, reason: `Cost budget ceiling ($${this.maxCostUsd}) reached` };
     }
     return { allowed: true };
   }
 
   public reserveToolCalls(count: number): { allowed: boolean; reason?: string } {
-    if (this.usage.totalToolCalls + count > this.maxToolCalls) {
+    if (this.getRemainingToolCalls() < count) {
       return { allowed: false, reason: `Tool call reservation of ${count} exceeds limit (${this.maxToolCalls})` };
     }
-    this.usage.totalToolCalls += count;
+    this.reservedToolCalls += count;
     return { allowed: true };
   }
 
   public reserveModelCalls(count: number): { allowed: boolean; reason?: string } {
-    if (this.usage.totalModelCalls + count > this.maxModelCalls) {
+    if (this.getRemainingModelCalls() < count) {
       return { allowed: false, reason: `Model call reservation of ${count} exceeds limit (${this.maxModelCalls})` };
     }
-    this.usage.totalModelCalls += count;
+    this.reservedModelCalls += count;
+    return { allowed: true };
+  }
+
+  public reserveTokens(inputTokens: number, outputTokens: number): { allowed: boolean; reason?: string } {
+    if (this.getRemainingInputTokens() < inputTokens) {
+      return { allowed: false, reason: `Input token reservation (${inputTokens}) exceeds limit (${this.maxInputTokens})` };
+    }
+    if (this.getRemainingOutputTokens() < outputTokens) {
+      return { allowed: false, reason: `Output token reservation (${outputTokens}) exceeds limit (${this.maxOutputTokens})` };
+    }
+    this.reservedInputTokens += inputTokens;
+    this.reservedOutputTokens += outputTokens;
     return { allowed: true };
   }
 
   public reserveCostUsd(amount: number): { allowed: boolean; reason?: string } {
-    if (this.usage.estimatedCostUsd + amount > this.maxCostUsd) {
+    if (this.getRemainingCostUsd() < amount) {
       return { allowed: false, reason: `Cost reservation of $${amount} exceeds limit ($${this.maxCostUsd})` };
     }
-    this.usage.estimatedCostUsd = Number((this.usage.estimatedCostUsd + amount).toFixed(4));
+    this.reservedCostUsd = Number((this.reservedCostUsd + amount).toFixed(4));
     return { allowed: true };
   }
 
@@ -502,6 +522,13 @@ export class WorkflowBudgetBroker {
     const entry = this.usage.bySpecialist[specialist];
     entry.durationMs += durationMs;
 
+    // Reset uncommitted reservations and record actual usage
+    this.reservedToolCalls = 0;
+    this.reservedModelCalls = 0;
+    this.reservedInputTokens = 0;
+    this.reservedOutputTokens = 0;
+    this.reservedCostUsd = 0;
+
     if (usage) {
       entry.toolCalls += usage.toolCalls;
       entry.modelCalls += usage.modelCalls;
@@ -509,10 +536,7 @@ export class WorkflowBudgetBroker {
       entry.outputTokens += usage.outputTokens;
       entry.estimatedCostUsd = Number((entry.estimatedCostUsd + usage.estimatedCostUsd).toFixed(4));
 
-      // Tool calls reserved upfront are already tracked; add unreserved difference
-      if (specialist !== 'extraction') {
-        this.usage.totalToolCalls += usage.toolCalls;
-      }
+      this.usage.totalToolCalls += usage.toolCalls;
       this.usage.totalModelCalls += usage.modelCalls;
       this.usage.totalInputTokens += usage.inputTokens;
       this.usage.totalOutputTokens += usage.outputTokens;
@@ -542,7 +566,6 @@ export function normalizeScopedIdentifier(
 
   const d = extractDigits(rawGtin);
   if (d.length === 14) {
-    // 14-digit GTIN is strictly case-scoped; if caller did not specify 'case', reject from consumer unit
     if (requestedScope === 'case') {
       return { gtin: rawGtin.trim(), scope: 'case' };
     }
@@ -581,19 +604,16 @@ async function boundedMap<T, R>(
 
 function isGenuineCssSelectorObservation(o: ExtractionObservation | undefined): string | null {
   if (!o) return null;
-  // Observation method MUST be selector or profile_selector
   if (o.method !== 'selector' && o.method !== 'profile_selector') return null;
   const path = o.sourcePath;
   if (!path || typeof path !== 'string') return null;
   const trimmed = path.trim();
   if (!trimmed) return null;
 
-  // Reject JSON path expressions (e.g. `[0].name`, `items[0]`, `product.name`, `/items/0`)
   if (/^\[\d+\]/.test(trimmed) || /^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$/.test(trimmed) || trimmed.startsWith('/')) {
     return null;
   }
 
-  // Accept CSS selector patterns: ID, class, tag, attribute selector, child combinator
   const isCss = trimmed.startsWith('#') ||
     trimmed.startsWith('.') ||
     /^h[1-6](\.[a-zA-Z0-9_-]+|#[a-zA-Z0-9_-]+|\[.*\])?/i.test(trimmed) ||
@@ -651,6 +671,7 @@ export class SpecialistOrchestrator {
     const cumulativePersistenceWarnings: string[] = [];
 
     let eventSeq = 0;
+    let workflowStepCount = 0;
     let retriesCount = 0;
 
     const invocations = {
@@ -756,7 +777,7 @@ export class SpecialistOrchestrator {
       status: OrchestratorStepEvent['status'],
       durationMs: number,
       details?: string,
-    ): boolean => {
+    ): void => {
       eventSeq += 1;
       events.push({
         step: eventSeq,
@@ -767,11 +788,6 @@ export class SpecialistOrchestrator {
         timestamp: this.now(),
         details,
       });
-
-      if (eventSeq > this.limits.maxTotalSteps) {
-        return false; // Step ceiling reached
-      }
-      return true;
     };
 
     const reserveDispatch = (specialist: string, count = 1): boolean => {
@@ -804,8 +820,6 @@ export class SpecialistOrchestrator {
         return false;
       }
       if (!reserveDispatch('extraction', 1)) {
-        // Rollback tool reservation if dispatch rejected
-        budgetBroker.usage.totalToolCalls -= 1;
         return false;
       }
       invocations.extraction += 1;
@@ -891,7 +905,8 @@ export class SpecialistOrchestrator {
         };
       }
 
-      if (eventSeq >= this.limits.maxTotalSteps) {
+      workflowStepCount += 1;
+      if (workflowStepCount > this.limits.maxTotalSteps) {
         recordEvent('orchestrator', 'step_limit_check', 'failed', 0, `Total step ceiling (${this.limits.maxTotalSteps}) reached`);
         const state = await persistState('budget_exceeded', targetPhase, `Total step ceiling (${this.limits.maxTotalSteps}) reached`);
         return {
@@ -989,7 +1004,6 @@ export class SpecialistOrchestrator {
           const discDuration = Date.now() - stepStart;
           budgetBroker.recordUsage('discovery', discResult.usage, discDuration);
 
-          // Post-execution budget ceiling check
           const discBudgetOver = budgetBroker.isOverBudget();
           if (discBudgetOver.exceeded) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, discBudgetOver.reason);
@@ -1086,6 +1100,30 @@ export class SpecialistOrchestrator {
           recordEvent('extraction_runner', 'extract_evidence', 'started', 0);
           await persistState('in_progress', 'extraction');
 
+          const nowMs = Date.now();
+          if (budgetBroker.deadlineAt && nowMs >= budgetBroker.deadlineAt) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Execution deadline exceeded before extraction');
+            const state = await persistState('budget_exceeded', 'extraction', 'Execution deadline exceeded');
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+              error: 'Execution deadline exceeded',
+            };
+          }
+
+          const remainingTimeoutMs = budgetBroker.deadlineAt
+            ? Math.max(1, budgetBroker.deadlineAt - nowMs)
+            : (context.policy.deadlineMs ?? 30_000);
+
           const candidates = discoveryOutput?.candidates ?? [];
           const candidateUrls = candidates
             .slice(0, 3)
@@ -1108,6 +1146,7 @@ export class SpecialistOrchestrator {
           const effectiveExtractionGtin = canonicalIdentifier.gtin ?? trustedCandidateGtin ?? null;
 
           let requiresProfileHold = false;
+          let profileHoldReason = 'Holding workflow for manual review and activation of proposed profile in Profile Builder';
           const synthesizedDomainsInPhase = new Set<string>();
           const bundlesByUrl = new Map<string, ExtractionEvidenceBundle>();
 
@@ -1130,7 +1169,8 @@ export class SpecialistOrchestrator {
             };
           }
 
-          // Bounded parallel extraction
+          // Bounded parallel extraction with absolute timeout propagation
+          const extractionDynContext = getDynamicSpecialistContext();
           extractionBundles = await boundedMap(
             candidateUrls,
             this.extractionConcurrency,
@@ -1158,7 +1198,7 @@ export class SpecialistOrchestrator {
 
               let bundle: ExtractionEvidenceBundle;
               if (this.dependencies.extractionRunner) {
-                bundle = await this.dependencies.extractionRunner(url, context, null);
+                bundle = await this.dependencies.extractionRunner(url, extractionDynContext, null);
               } else {
                 const { bundle: detBundle } = await runDeterministicExtraction(
                   {
@@ -1168,6 +1208,7 @@ export class SpecialistOrchestrator {
                       name: productSeed.name,
                     },
                     signal: context.signal,
+                    timeoutMs: remainingTimeoutMs,
                   },
                   this.dependencies.extractionRunnerOptions ?? { now: this.now },
                 );
@@ -1296,7 +1337,7 @@ export class SpecialistOrchestrator {
                     ? {
                       profileId: bundle.profile.id,
                       version: bundle.profile.version,
-                      runtime: bundle.profile.runtime,
+                      runtime: bundle.profile.runtime ?? 'rendered',
                     }
                     : null;
 
@@ -1305,7 +1346,7 @@ export class SpecialistOrchestrator {
                     {
                       schemaVersion: 1,
                       domain,
-                      activeProfile: failedProfile,
+                      repairOf: failedProfile,
                       samples: [
                         {
                           url: sample1Url,
@@ -1362,6 +1403,15 @@ export class SpecialistOrchestrator {
                       `Proposed profile for ${domain}; held for manual review/activation`,
                     );
                     requiresProfileHold = true;
+                    profileHoldReason = `Profile proposed for domain '${domain}' requiring manual review and activation in Profile Builder`;
+                  } else if (profResult.outcome === 'abstained') {
+                    requiresProfileHold = true;
+                    profileHoldReason = `Profile synthesis for ${domain} abstained: ${profResult.abstention?.reason ?? 'profile_unavailable'}`;
+                    recordEvent('profile_engineer', 'synthesize_profile', 'skipped', 0, profileHoldReason);
+                  } else if (profResult.outcome === 'failed') {
+                    requiresProfileHold = true;
+                    profileHoldReason = `Profile synthesis for ${domain} failed: ${profResult.failure?.message ?? 'profile_failed'}`;
+                    recordEvent('profile_engineer', 'synthesize_profile', 'failed', 0, profileHoldReason);
                   }
                 } else if (!hasRealEvidence) {
                   recordEvent('profile_engineer', 'insufficient_evidence', 'skipped', 0, `Abstained profile synthesis for ${domain}: missing retained page artifact evidence`);
@@ -1385,7 +1435,7 @@ export class SpecialistOrchestrator {
               'profile_review_hold',
               'succeeded',
               0,
-              'Holding workflow for manual review and activation of proposed profile in Profile Builder',
+              profileHoldReason,
             );
             const state = await persistState('needs_review', 'extraction_profile_hold');
             return {

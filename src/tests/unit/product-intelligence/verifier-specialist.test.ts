@@ -23,6 +23,7 @@ import {
 import { ProductIntelligencePolicySchema } from '../../../product-intelligence/contracts';
 import type { ResolvedFactSet } from '../../../product-intelligence/specialists/resolver';
 import type { CuratedProductDraft } from '../../../product-intelligence/specialists/curator';
+import { toExtractionEvidenceBundle, type PageExtractionResult } from '../../../product-intelligence/extraction/evidence';
 import { sha256Hex } from '../../../shared/stable-id';
 
 const FIXED_NOW = '2026-08-18T12:00:00.000Z';
@@ -1271,5 +1272,80 @@ describe('Verifier specialist (#55)', () => {
     const registry = registerVerifierSchemas(new SpecialistArtifactSchemaRegistry());
     expect(registry.has(VERIFIER_INPUT_ARTIFACT_TYPE)).toBe(true);
     expect(registry.has(VERIFIER_OUTPUT_ARTIFACT_TYPE)).toBe(true);
+  });
+
+  it('fails closed when ordinary PageExtractionResult passes through provenance adapter with no upstream rights authority', () => {
+    // 1. Raw extraction result with ordinary image candidate (no rights/commerce fields)
+    const rawResult: PageExtractionResult = {
+      requestedUrl: 'https://example.com/item-1',
+      finalUrl: 'https://example.com/item-1',
+      fetchModes: ['http_detailed'],
+      contentHash: sha256Hex('raw-html-page'),
+      artifactRef: 'art-raw-page',
+      identityStatus: 'exact_match',
+      identityReasons: [],
+      fields: [
+        { field: 'brand', value: 'Acme', method: 'selector', sourcePath: 'h1', sourceArtifactId: 'art-raw-page', sourceContentHash: sha256Hex('raw-html-page') },
+        { field: 'product_name', value: 'Broth', method: 'selector', sourcePath: 'h2', sourceArtifactId: 'art-raw-page', sourceContentHash: sha256Hex('raw-html-page') },
+      ],
+      gtins: [],
+      sku: 'SUP-55',
+      brand: 'Acme',
+      productName: 'Broth',
+      variant: null,
+      size: null,
+      packCount: null,
+      images: [
+        {
+          url: 'https://example.com/images/broth.jpg',
+          sourcePath: 'img.pdp-main',
+          sourceArtifactId: 'art-raw-page',
+          sourceContentHash: sha256Hex('raw-html-page'),
+        },
+      ],
+      conflicts: [],
+      deterministicOnly: true,
+    };
+
+    // 2. Pass through real production provenance adapter
+    const bundle = toExtractionEvidenceBundle(rawResult, {
+      profile: null,
+      artifactId: 'art-raw-page',
+      retrievedAt: FIXED_NOW,
+    });
+
+    // Verify adapter defaulted to unverified/false rather than inventing approval
+    expect(bundle.images[0]?.rightsStatus).toBe('unverified');
+    expect(bundle.images[0]?.commerceApproved).toBe(false);
+    expect(bundle.images[0]?.identityMatch).toBe('unverified');
+
+    // 3. Draft claims this image is approved
+    const draft = sampleDraft({
+      images: [
+        {
+          url: 'https://example.com/images/broth.jpg',
+          role: 'primary',
+          rightsStatus: 'approved',
+          commerceApproved: true,
+          identityMatch: 'exact',
+          sourceUrl: 'https://example.com/item-1',
+        },
+      ],
+    });
+
+    // 4. Verifier independently checks bundle and strictly rejects
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [bundle],
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'image_rights_compliance' && !c.passed)).toBe(true);
+    expect(report.checks.some((c) => c.checkName === 'image_commerce_approval' && !c.passed)).toBe(true);
+    expect(report.checks.some((c) => c.checkName === 'image_variant_compliance' && !c.passed)).toBe(true);
   });
 });
