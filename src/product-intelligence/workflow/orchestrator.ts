@@ -642,15 +642,14 @@ export class WorkflowBudgetBroker {
         state.activeHolds.outputTokens += outTokens;
 
         try {
-          const result = await action();
-          // On successful execution, record spend as consumed
+          return await action();
+        } finally {
+          // Conservatively consume: once dispatched, spend is billable even if provider rejects
           state.consumed.estimatedCostUsd = Number((state.consumed.estimatedCostUsd + cost).toFixed(4));
           state.consumed.modelCalls += models;
           state.consumed.toolCalls += tools;
           state.consumed.inputTokens += inTokens;
           state.consumed.outputTokens += outTokens;
-          return result;
-        } finally {
           // Release active hold
           state.activeHolds.costUsd = Math.max(0, Number((state.activeHolds.costUsd - cost).toFixed(4)));
           state.activeHolds.modelCalls = Math.max(0, state.activeHolds.modelCalls - models);
@@ -725,6 +724,25 @@ export class WorkflowBudgetBroker {
   ): void {
     // Release this specific handle from active reservations
     this.activeReservations.delete(handle.id);
+    const gatewayState = this.handleSpendState.get(handle.id);
+    const gatewayConsumed = gatewayState?.consumed;
+    if (gatewayState) this.handleSpendState.delete(handle.id);
+
+    // Reconcile: gateway is authoritative — never allow specialist reporting to erase it
+    let effectiveUsage: SpecialistUsage | null = null;
+    if (gatewayConsumed && actualUsage) {
+      effectiveUsage = {
+        toolCalls: Math.max(gatewayConsumed.toolCalls, actualUsage.toolCalls),
+        modelCalls: Math.max(gatewayConsumed.modelCalls, actualUsage.modelCalls),
+        inputTokens: Math.max(gatewayConsumed.inputTokens, actualUsage.inputTokens),
+        outputTokens: Math.max(gatewayConsumed.outputTokens, actualUsage.outputTokens),
+        estimatedCostUsd: Number(Math.max(gatewayConsumed.estimatedCostUsd, actualUsage.estimatedCostUsd).toFixed(4)),
+      };
+    } else if (gatewayConsumed) {
+      effectiveUsage = { ...gatewayConsumed };
+    } else if (actualUsage) {
+      effectiveUsage = { ...actualUsage };
+    }
 
     const specialist = handle.specialist;
     if (!this.usage.bySpecialist[specialist]) {
@@ -743,36 +761,37 @@ export class WorkflowBudgetBroker {
     entry.durationMs += durationMs;
     this.usage.totalDispatches += handle.dispatches;
 
-    if (actualUsage) {
-      const costExceeded = actualUsage.estimatedCostUsd > handle.costUsd + 0.0001;
-      const modelCallsExceeded = actualUsage.modelCalls > handle.modelCalls;
-      const toolCallsExceeded = actualUsage.toolCalls > handle.toolCalls;
-      const inputTokensExceeded = actualUsage.inputTokens > handle.inputTokens;
-      const outputTokensExceeded = actualUsage.outputTokens > handle.outputTokens;
+    if (effectiveUsage) {
+      const costExceeded = effectiveUsage.estimatedCostUsd > handle.costUsd + 0.0001;
+      const modelCallsExceeded = effectiveUsage.modelCalls > handle.modelCalls;
+      const toolCallsExceeded = effectiveUsage.toolCalls > handle.toolCalls;
+      const inputTokensExceeded = effectiveUsage.inputTokens > handle.inputTokens;
+      const outputTokensExceeded = effectiveUsage.outputTokens > handle.outputTokens;
 
       if (costExceeded || modelCallsExceeded || toolCallsExceeded || inputTokensExceeded || outputTokensExceeded) {
         this.unreservedOverspend = {
           specialist,
-          reason: `Unreserved spend violation: specialist '${specialist}' attempted to commit spend exceeding reservation (cost: $${actualUsage.estimatedCostUsd} vs reserved $${handle.costUsd}, models: ${actualUsage.modelCalls} vs reserved ${handle.modelCalls}, tools: ${actualUsage.toolCalls} vs reserved ${handle.toolCalls})`,
+          reason: `Unreserved spend violation: specialist '${specialist}' attempted to commit spend exceeding reservation (cost: $${effectiveUsage.estimatedCostUsd} vs reserved $${handle.costUsd}, models: ${effectiveUsage.modelCalls} vs reserved ${handle.modelCalls}, tools: ${effectiveUsage.toolCalls} vs reserved ${handle.toolCalls})`,
         };
       }
 
-      entry.toolCalls += actualUsage.toolCalls;
-      entry.modelCalls += actualUsage.modelCalls;
-      entry.inputTokens += actualUsage.inputTokens;
-      entry.outputTokens += actualUsage.outputTokens;
-      entry.estimatedCostUsd = Number((entry.estimatedCostUsd + actualUsage.estimatedCostUsd).toFixed(4));
+      entry.toolCalls += effectiveUsage.toolCalls;
+      entry.modelCalls += effectiveUsage.modelCalls;
+      entry.inputTokens += effectiveUsage.inputTokens;
+      entry.outputTokens += effectiveUsage.outputTokens;
+      entry.estimatedCostUsd = Number((entry.estimatedCostUsd + effectiveUsage.estimatedCostUsd).toFixed(4));
 
-      this.usage.totalToolCalls += actualUsage.toolCalls;
-      this.usage.totalModelCalls += actualUsage.modelCalls;
-      this.usage.totalInputTokens += actualUsage.inputTokens;
-      this.usage.totalOutputTokens += actualUsage.outputTokens;
-      this.usage.estimatedCostUsd = Number((this.usage.estimatedCostUsd + actualUsage.estimatedCostUsd).toFixed(4));
+      this.usage.totalToolCalls += effectiveUsage.toolCalls;
+      this.usage.totalModelCalls += effectiveUsage.modelCalls;
+      this.usage.totalInputTokens += effectiveUsage.inputTokens;
+      this.usage.totalOutputTokens += effectiveUsage.outputTokens;
+      this.usage.estimatedCostUsd = Number((this.usage.estimatedCostUsd + effectiveUsage.estimatedCostUsd).toFixed(4));
     }
   }
 
   public release(handle: BudgetReservationHandle): void {
     this.activeReservations.delete(handle.id);
+    this.handleSpendState.delete(handle.id);
   }
 }
 
@@ -1071,7 +1090,8 @@ export class SpecialistOrchestrator {
       };
     };
 
-    while (budgetBroker.usage.totalDispatches < this.limits.maxTotalDispatches) {
+    try {
+      while (budgetBroker.usage.totalDispatches < this.limits.maxTotalDispatches) {
       if (isAborted()) {
         recordEvent('orchestrator', 'cancellation_check', 'failed', 0, 'Workflow cancelled by caller');
         const state = await persistState('cancelled', targetPhase, 'Workflow cancelled by caller');
@@ -1610,15 +1630,26 @@ export class SpecialistOrchestrator {
 
                       if (profResult.outcome === 'succeeded' && profResult.output) {
                         const profEnv = Array.isArray(profResult.output) ? profResult.output[0] : (profResult.output as SpecialistArtifactEnvelope);
+                        let leaseApplied = true;
+                        let leaseReason: string | undefined;
                         if (effectiveProfileLock.complete && profEnv) {
-                          await effectiveProfileLock.complete(lock.workflowId, context.runId, serializeSpecialistArtifact(profEnv));
+                          const completion = await effectiveProfileLock.complete(lock.workflowId, context.runId, serializeSpecialistArtifact(profEnv));
+                          leaseApplied = (completion as any)?.applied !== false;
+                          leaseReason = (completion as any)?.reason;
                         }
-                        lockHandled = true;
-                        profileArtifact = profEnv;
-                        profileOutput = profEnv?.payload as ProfileEngineerProposal;
-                        recordEvent('profile_engineer', 'synthesize_profile', 'succeeded', 0, `Proposed profile for ${domain}; held for manual review/activation`);
-                        requiresProfileHold = true;
-                        profileHoldReason = `Profile proposed for domain '${domain}' requiring manual review and activation in Profile Builder`;
+                        if (!leaseApplied) {
+                          lockHandled = true;
+                          requiresProfileHold = true;
+                          profileHoldReason = `Profile synthesis lease lost for ${domain}: ${leaseReason ?? 'workflow_lease_lost'}`;
+                          recordEvent('profile_engineer', 'synthesize_profile', 'failed', 0, profileHoldReason);
+                        } else {
+                          lockHandled = true;
+                          profileArtifact = profEnv;
+                          profileOutput = profEnv?.payload as ProfileEngineerProposal;
+                          recordEvent('profile_engineer', 'synthesize_profile', 'succeeded', 0, `Proposed profile for ${domain}; held for manual review/activation`);
+                          requiresProfileHold = true;
+                          profileHoldReason = `Profile proposed for domain '${domain}' requiring manual review and activation in Profile Builder`;
+                        }
                       } else if (profResult.outcome === 'abstained') {
                         if (effectiveProfileLock.fail) {
                           await effectiveProfileLock.fail(lock.workflowId, context.runId, profResult.abstention?.reason ?? 'profile_unavailable');
@@ -1637,15 +1668,38 @@ export class SpecialistOrchestrator {
                         recordEvent('profile_engineer', 'synthesize_profile', 'failed', 0, profileHoldReason);
                       }
                     } catch (error) {
+                      const errMsg = error instanceof Error ? error.message : String(error);
+                      try {
+                        budgetBroker.commit(profReservation.handle!, null, 0);
+                      } catch {
+                        // ignore commit error
+                      }
                       if (!lockHandled && effectiveProfileLock.fail) {
-                        const errMsg = error instanceof Error ? error.message : String(error);
                         try {
                           await effectiveProfileLock.fail(lock.workflowId, context.runId, errMsg);
                         } catch {
                           // ignore lock release error
                         }
                       }
-                      throw error;
+                      lockHandled = true;
+                      recordEvent('profile_engineer', 'synthesize_profile', 'failed', 0, errMsg);
+                      const state = await persistState('failed', 'profile_engineer', errMsg);
+                      return {
+                        runId: context.runId,
+                        status: 'failed',
+                        productSeed,
+                        discoveryOutput,
+                        discoveryArtifact,
+                        profileOutput,
+                        profileArtifact,
+                        extractionBundles,
+                        events,
+                        retriesCount,
+                        totalDispatches: budgetBroker.usage.totalDispatches,
+                        totalDurationMs: Date.now() - startedAt,
+                        workflowState: state,
+                        error: errMsg,
+                      };
                     }
                   }
                 } else if (!hasRealEvidence) {
@@ -2347,5 +2401,42 @@ export class SpecialistOrchestrator {
       workflowState: state,
       error: 'Exceeded max total dispatches',
     };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      try {
+        const active = (budgetBroker as any).activeReservations as Map<string, BudgetReservationHandle>;
+        if (active) {
+          for (const h of Array.from(active.values())) {
+            try {
+              budgetBroker.commit(h, null, 0);
+            } catch {}
+          }
+        }
+      } catch {}
+      recordEvent('orchestrator', 'unhandled_exception', 'failed', 0, errMsg);
+      const state = await persistState('failed', 'orchestrator', errMsg);
+      return {
+        runId: context.runId,
+        status: 'failed',
+        productSeed,
+        discoveryOutput,
+        discoveryArtifact,
+        profileOutput,
+        profileArtifact,
+        extractionBundles,
+        resolverOutput,
+        resolverArtifact,
+        curatorOutput,
+        curatorArtifact,
+        verifierOutput,
+        verifierArtifact,
+        events,
+        retriesCount,
+        totalDispatches: budgetBroker.usage.totalDispatches,
+        totalDurationMs: Date.now() - startedAt,
+        workflowState: state,
+        error: errMsg,
+      };
+    }
   }
 }

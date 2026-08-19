@@ -1354,6 +1354,88 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.status).toBe('completed');
   });
 
+  it('Spend Gateway: authoritative ledger records gateway spend even when specialist reports zero and blocks reuse', async () => {
+    const broker = new WorkflowBudgetBroker(
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({ configId: 'authoritative-ledger', maxCostUsd: 0.05 }),
+      },
+      20,
+      20,
+      Date.now(),
+    );
+    const res = broker.reserve('verifier', { dispatches: 1, costUsd: 0.05, modelCalls: 1 });
+    expect(res.allowed).toBe(true);
+    const gateway = broker.createSpendGateway(res.handle!);
+    await gateway.executeWithSpend({ costUsd: 0.05, modelCalls: 1 }, async () => 'provider_ok');
+    broker.commit(res.handle!, { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 }, 10);
+    expect(broker.usage.estimatedCostUsd).toBeCloseTo(0.05);
+    expect(broker.usage.bySpecialist['verifier'].estimatedCostUsd).toBeCloseTo(0.05);
+    expect((broker as any).handleSpendState.size).toBe(0);
+    const res2 = broker.reserve('curator', { dispatches: 1, costUsd: 0.01 });
+    expect(res2.allowed).toBe(false);
+    expect(res2.reason).toContain('Cost budget ceiling');
+  });
+
+  it('Spend Gateway: failed provider callback still consumes its allocation', async () => {
+    const broker = new WorkflowBudgetBroker(
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({ configId: 'failed-spend', maxCostUsd: 1.0 }),
+      },
+      20,
+      20,
+      Date.now(),
+    );
+    const res = broker.reserve('verifier', { dispatches: 1, costUsd: 0.05, modelCalls: 1 });
+    expect(res.allowed).toBe(true);
+    const gateway = broker.createSpendGateway(res.handle!);
+    try {
+      await gateway.executeWithSpend({ costUsd: 0.05, modelCalls: 1 }, async () => {
+        throw new Error('provider network error');
+      });
+    } catch {}
+    broker.commit(res.handle!, null, 0);
+    expect(broker.usage.estimatedCostUsd).toBeCloseTo(0.05);
+    expect(broker.usage.bySpecialist['verifier'].modelCalls).toBe(1);
+    expect((broker as any).handleSpendState.size).toBe(0);
+    expect(broker.getRemainingCostUsd()).toBeCloseTo(0.95);
+  });
+
+  it('Spend Gateway: orchestrator workflow ledger is authoritative over specialist zero-report', async () => {
+    const mockVerifierZeroReport = {
+      execute: async (_input: unknown, ctx: SpecialistContext): Promise<SpecialistResult> => {
+        await ctx.spendGateway?.executeWithSpend({ costUsd: 0.05, modelCalls: 1 }, async () => 'provider spend');
+        return {
+          specialist: 'verifier',
+          outcome: 'succeeded',
+          output: {
+            artifactType: 'verification_report',
+            schemaVersion: '1.0.0',
+            payload: { verdict: 'pass', score: 0.95, identityStatus: 'verified', identityDecision: 'pass', dataScore: 0.95, checks: [] },
+            lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+            provenance: { specialist: 'verifier', specialistVersion: '1.0.0', codeCommit: 'commit-56', invokedBy: 'orchestrator', durationMs: 10, createdAt: FIXED_NOW },
+            contentHash: sha256Hex('ver-zero-report'),
+          },
+          usage: { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
+          durationMs: 10,
+        };
+      },
+    } as any;
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: new DiscoverySpecialist({ search: async () => ({ candidates: [createDiscoveryCandidate()] }), extraction: mockExtractionSeam }, { codeCommit: 'commit-56' }),
+        verifier: mockVerifierZeroReport,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+    expect(result.status).toBe('completed');
+    expect(result.workflowState.usage.estimatedCostUsd).toBeCloseTo(0.05);
+    expect(result.workflowState.usage.bySpecialist['verifier'].estimatedCostUsd).toBeCloseTo(0.05);
+  });
+
   it('rejects unreserved overspend on broker commit when a specialist exceeds its handle reservation', async () => {
     const mockVerifierUnreservedSpend = {
       execute: async (): Promise<SpecialistResult> => {
@@ -1497,8 +1579,50 @@ describe('Specialist Orchestrator (#56)', () => {
       now: () => FIXED_NOW,
     });
 
-    await expect(orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context)).rejects.toThrow('Fatal network explosion');
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('Fatal network explosion');
+    expect(result.workflowState.status).toBe('failed');
     expect(leaseFailed).toBe(true);
+    const persisted = await orchestrator.getWorkflowState(context.runId);
+    expect(persisted?.status).toBe('failed');
+    expect(persisted?.error).toContain('Fatal network explosion');
+  });
+
+  it('profile lease completion failure is not advertised as success', async () => {
+    const customLock: ProfileEngineerWorkflowLock = {
+      claim: () => ({ acquired: true, workflowId: 'wf:lease-lost:run-1', targetVersion: 2 }),
+      complete: () => ({ applied: false, reason: 'workflow_lease_lost' }),
+      fail: () => ({ applied: true }),
+    };
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({
+              candidates: [
+                createDiscoveryCandidate('https://brand.example/p1'),
+                createDiscoveryCandidate('https://brand.example/p2'),
+              ],
+            }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        profileEngineerWorkflowLock: customLock,
+        extractionRunner: async (url) => ({
+          ...createMockExtractionBundle(url),
+          failures: [{ code: 'profile_failed', stage: 'profile_selector', message: 'Stale profile', retryable: false }],
+          profile: { id: 'prof-stale', version: 1, runtime: 'rendered' },
+        }),
+      },
+      now: () => FIXED_NOW,
+    });
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+    expect(result.status).toBe('needs_review');
+    expect(result.profileOutput).toBeUndefined();
+    expect(result.profileArtifact).toBeUndefined();
+    expect(result.workflowState.status).toBe('needs_review');
   });
 
   it('enforces orchestrator-owned domain lease on injected lockless ProfileEngineer specialist', async () => {
@@ -1634,10 +1758,13 @@ describe('Specialist Orchestrator (#56)', () => {
 
     const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
 
-    // Round 1 invoked profileEngineer for brand.example:2 (profileSynthesizerCalls = 1).
-    // Workflow reaches extraction for brand.example:2 again.
-    // The keyed cap (brand.example:2 = 1) prevents the second invocation from ever starting!
+    // Profile synthesis immediately holds workflow for manual review at extraction, before verifier.
+    // This verifies the keyed counter is incremented at the correct invocation boundary (1 synthesis)
+    // and that the workflow correctly terminates needs_review without reaching verifier — the multi-round
+    // cap itself is validated by the counter, with a true second extraction round requiring a non-holding
+    // first round (e.g., no profile need) which is covered by the dedicated cross-round unit test below.
     expect(profileSynthesizerCalls).toBe(1);
+    expect(verifierCalls).toBe(0);
     expect(result.status).toBe('needs_review');
   });
 
