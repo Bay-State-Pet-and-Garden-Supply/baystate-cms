@@ -79,10 +79,16 @@ export type ExtractionPathStep = z.infer<typeof ExtractionPathStepSchema>;
 export const ExtractionImageEvidenceSchema = z.object({
   url: z.string().url().max(2048),
   variantRef: z.string().max(256).nullable(),
+  variantRefKind: z.enum(['shopify_variant_id', 'sku', 'gtin', 'catalog_id', 'generic']).nullable().optional(),
   sourcePath: z.string().min(1).max(512),
   method: z.string().min(1).max(128),
   artifactId: z.string().max(512).nullable(),
   contentHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  rightsStatus: z.enum(['approved', 'commercial', 'licensed', 'public_domain', 'unverified', 'unknown', 'denied']).nullable().optional(),
+  commerceApproved: z.boolean().nullable().optional(),
+  rightsBasis: z.string().max(256).nullable().optional(),
+  sourceTier: z.enum(['manufacturer', 'brand', 'official', 'distributor', 'supplier', 'retailer', 'marketplace', 'other']).nullable().optional(),
+  identityMatch: z.enum(['exact', 'verified', 'exact_match', 'probable', 'unverified', 'wrong_variant', 'parent_only']).nullable().optional(),
 }).strict();
 export type ExtractionImageEvidence = z.infer<typeof ExtractionImageEvidenceSchema>;
 

@@ -460,7 +460,15 @@ export class ProfileEngineerSpecialist {
 
     let lock: { acquired: boolean; workflowId: string; reason?: string } | null = null;
     if (this.dependencies.workflow) {
-      lock = await this.dependencies.workflow.claim(input.domain, context.runId, context.workspaceId);
+      const activeVer = input.activeProfile
+        ? (typeof input.activeProfile.version === 'number'
+            ? input.activeProfile.version
+            : parseInt(String(input.activeProfile.version), 10) || 1)
+        : null;
+      const claimOptions: ClaimProfileLockOptions = input.activeProfile
+        ? { needsRepair: true, targetVersion: (activeVer ?? 1) + 1 }
+        : { targetVersion: 1 };
+      lock = await this.dependencies.workflow.claim(input.domain, context.runId, context.workspaceId, claimOptions);
       if (!lock.acquired) return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'abstained', abstention: { reason: lock.reason ?? 'domain_workflow_already_running', actionableNextStep: 'Reuse the existing domain workflow result or wait for its validation.', targets: [input.domain] }, durationMs: Date.now() - startedAt };
     }
 

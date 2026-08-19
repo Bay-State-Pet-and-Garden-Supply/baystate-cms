@@ -154,6 +154,12 @@ export const ProductIntelligencePolicySchema = z.object({
   modelRoute: ModelRouteSchema.nullable().default(null),
   /** Hard cap on tool calls per run. */
   maxToolCalls: z.number().int().positive().max(1000).default(100),
+  /** Hard cap on model invocations per run (issue #56). */
+  maxModelCalls: z.number().int().positive().max(1000).nullish(),
+  /** Hard cap on input tokens per run (issue #56). */
+  maxInputTokens: z.number().int().positive().nullish(),
+  /** Hard cap on output tokens per run (issue #56). */
+  maxOutputTokens: z.number().int().positive().nullish(),
   /** Optional hard cap on model cost (USD). Enforced by the runtime (PI-5). */
   maxCostUsd: z.number().positive().nullish(),
   /** Hard wall-clock deadline for the whole run, in milliseconds. */

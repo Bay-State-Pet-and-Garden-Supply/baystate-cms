@@ -584,6 +584,124 @@ describe('Verifier specialist (#55)', () => {
     expect(report.checks.some((c) => c.checkName === 'image_evidence_provenance' && !c.passed)).toBe(true);
   });
 
+  it('permits Shopify variant ID reference on image without falsely rejecting against GTIN', () => {
+    const draft = sampleDraft({
+      images: [
+        {
+          url: 'https://cdn.shopify.com/products/chicken-broth.jpg',
+          role: 'primary',
+          rightsStatus: 'approved',
+          commerceApproved: true,
+          identityMatch: 'exact',
+          sourceUrl: 'https://acme.example/products/chicken-broth',
+        },
+      ],
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet({
+        expectedIdentity: { gtin: '012345678901', gtinScope: 'consumer_unit' },
+      }),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [
+        {
+          schemaVersion: 1,
+          runnerVersion: '1.0.0',
+          requestedUrl: 'https://acme.example/products/chicken-broth',
+          finalUrl: 'https://acme.example/products/chicken-broth',
+          retrievedAt: FIXED_NOW,
+          contentHash: sha256Hex('shopify-bundle'),
+          artifactRefs: ['art-shopify'],
+          profile: null,
+          extractionPath: [],
+          observations: [],
+          images: [
+            {
+              url: 'https://cdn.shopify.com/products/chicken-broth.jpg',
+              variantRef: '4451234567890', // Shopify variant ID matching resolved variant ID
+              variantRefKind: 'shopify_variant_id',
+              sourcePath: 'img.shopify-primary',
+              method: 'selector',
+              artifactId: 'art-shopify',
+              contentHash: sha256Hex('shopify-img'),
+              rightsStatus: 'approved',
+              commerceApproved: true,
+              identityMatch: 'exact',
+            },
+          ],
+          variant: { id: '4451234567890', name: '16 fl oz', sku: 'SUP-55', references: ['4451234567890'] },
+          identityStatus: 'exact_match',
+          identityReasons: [],
+          failures: [],
+          deterministicOnly: true as const,
+        },
+      ],
+    });
+
+    expect(report.verdict).toBe('pass');
+    expect(report.checks.some((c) => c.checkName === 'image_variant_compliance' && !c.passed)).toBe(false);
+  });
+
+  it('fails closed when extraction candidate evidence explicitly marks rights status unverified or denied', () => {
+    const draft = sampleDraft({
+      images: [
+        {
+          url: 'https://acme.example/images/broth.jpg',
+          role: 'primary',
+          rightsStatus: 'approved', // Curator claimed approved
+          commerceApproved: true,
+          identityMatch: 'exact',
+          sourceUrl: 'https://acme.example/products/broth',
+        },
+      ],
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [
+        {
+          schemaVersion: 1,
+          runnerVersion: '1.0.0',
+          requestedUrl: 'https://acme.example/products/broth',
+          finalUrl: 'https://acme.example/products/broth',
+          retrievedAt: FIXED_NOW,
+          contentHash: sha256Hex('denied-bundle'),
+          artifactRefs: ['art-denied'],
+          profile: null,
+          extractionPath: [],
+          observations: [],
+          images: [
+            {
+              url: 'https://acme.example/images/broth.jpg',
+              variantRef: null,
+              sourcePath: 'img.primary',
+              method: 'selector',
+              artifactId: 'art-denied',
+              contentHash: sha256Hex('denied-img'),
+              rightsStatus: 'denied', // Extraction evidence independently shows rights denied!
+              commerceApproved: false,
+            },
+          ],
+          variant: null,
+          identityStatus: 'exact_match',
+          identityReasons: [],
+          failures: [],
+          deterministicOnly: true as const,
+        },
+      ],
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'image_rights_compliance' && !c.passed)).toBe(true);
+  });
+
   it('fails closed when draft contains images but extractionBundles is empty', () => {
     const draft = sampleDraft({
       images: [

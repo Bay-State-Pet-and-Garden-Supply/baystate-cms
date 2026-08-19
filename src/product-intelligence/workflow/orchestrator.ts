@@ -26,7 +26,8 @@
  *       ▼
  *   [Verifier Specialist #55]
  *       │
- *       ├── 'pass' ───────────────────────► Terminal: COMPLETED
+ *       ├── 'pass' (under budget) ────────► Terminal: COMPLETED
+ *       ├── 'pass' (over budget) ─────────► Terminal: BUDGET_EXCEEDED
  *       ├── 'retry_curator' (retries < max) ──► Re-run Curator → Verifier
  *       ├── 'retry_resolver' (retries < max) ─► Re-run Resolver → Curator → Verifier
  *       ├── 'retry_discovery' (retries < max) ► Re-run Discovery → Pipeline
@@ -37,7 +38,7 @@
  *   - All inter-specialist data flows are schema-validated typed artifacts.
  *   - Loops stop deterministically at configured retry/dispatch/budget limits.
  *   - Cancellation via AbortSignal immediately aborts execution and sets CANCELLED.
- *   - Atomic dispatch & tool/cost ledger reservations enforce hard aggregate policy limits.
+ *   - Atomic dispatch & tool/cost/model/token reservations enforce hard aggregate policy limits.
  *   - 14-digit GTINs are strictly case-scoped and never promoted as consumer GTINs.
  *   - Caller identifiers are normalized once and passed canonically across all phases.
  *   - Profile Engineer proposals require governance/manual review before activation.
@@ -51,7 +52,6 @@ import type { ProductSeed } from '../product-seed';
 import {
   DiscoverySpecialist,
   type DiscoverySpecialistOutput,
-  type DiscoveryCandidate,
 } from '../specialists/discovery';
 import {
   ProfileEngineerSpecialist,
@@ -80,6 +80,7 @@ import {
 import type {
   ExtractionEvidenceBundle,
   ExtractionProfileBinding,
+  ExtractionObservation,
 } from '../extraction/evidence';
 import type { SpecialistContext, SpecialistResult, SpecialistUsage } from '../specialists/contracts';
 import {
@@ -190,6 +191,7 @@ export interface SpecialistWorkflowRecord {
   usage: WorkflowUsageLedger;
   stepEvents: OrchestratorStepEvent[];
   artifactIds: string[];
+  persistenceWarnings?: string[];
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -324,15 +326,27 @@ export function resolveDefaultWorkflowPersistence(): SpecialistWorkflowPersisten
 // ── Aggregate Budget Broker ──────────────────────────────────────────────────
 
 export class WorkflowBudgetBroker {
-  private readonly maxToolCalls: number;
-  private readonly maxCostUsd: number;
-  private readonly maxDispatches: number;
-  private readonly deadlineAt: number | null;
+  public readonly maxToolCalls: number;
+  public readonly maxModelCalls: number;
+  public readonly maxInputTokens: number;
+  public readonly maxOutputTokens: number;
+  public readonly maxCostUsd: number;
+  public readonly maxDispatches: number;
+  public readonly deadlineAt: number | null;
   public readonly usage: WorkflowUsageLedger;
 
   public constructor(context: SpecialistContext, maxDispatches: number) {
     this.maxToolCalls = typeof context.policy.maxToolCalls === 'number' && context.policy.maxToolCalls > 0
       ? context.policy.maxToolCalls
+      : Number.POSITIVE_INFINITY;
+    this.maxModelCalls = typeof (context.policy as any).maxModelCalls === 'number' && (context.policy as any).maxModelCalls > 0
+      ? (context.policy as any).maxModelCalls
+      : Number.POSITIVE_INFINITY;
+    this.maxInputTokens = typeof (context.policy as any).maxInputTokens === 'number' && (context.policy as any).maxInputTokens > 0
+      ? (context.policy as any).maxInputTokens
+      : Number.POSITIVE_INFINITY;
+    this.maxOutputTokens = typeof (context.policy as any).maxOutputTokens === 'number' && (context.policy as any).maxOutputTokens > 0
+      ? (context.policy as any).maxOutputTokens
       : Number.POSITIVE_INFINITY;
     this.maxCostUsd = typeof context.policy.maxCostUsd === 'number' && context.policy.maxCostUsd > 0
       ? context.policy.maxCostUsd
@@ -351,6 +365,40 @@ export class WorkflowBudgetBroker {
     };
   }
 
+  public getRemainingToolCalls(): number {
+    return Math.max(0, this.maxToolCalls - this.usage.totalToolCalls);
+  }
+
+  public getRemainingCostUsd(): number | undefined {
+    if (!Number.isFinite(this.maxCostUsd)) return undefined;
+    return Math.max(0, Number((this.maxCostUsd - this.usage.estimatedCostUsd).toFixed(4)));
+  }
+
+  public isOverBudget(): { exceeded: boolean; reason?: string } {
+    if (this.deadlineAt && Date.now() > this.deadlineAt) {
+      return { exceeded: true, reason: 'Execution deadline exceeded' };
+    }
+    if (this.usage.totalDispatches > this.maxDispatches) {
+      return { exceeded: true, reason: `Total dispatch ceiling (${this.maxDispatches}) exceeded` };
+    }
+    if (this.usage.totalToolCalls > this.maxToolCalls) {
+      return { exceeded: true, reason: `Tool call budget ceiling (${this.maxToolCalls}) exceeded` };
+    }
+    if (this.usage.totalModelCalls > this.maxModelCalls) {
+      return { exceeded: true, reason: `Model call budget ceiling (${this.maxModelCalls}) exceeded` };
+    }
+    if (this.usage.totalInputTokens > this.maxInputTokens) {
+      return { exceeded: true, reason: `Input token budget ceiling (${this.maxInputTokens}) exceeded` };
+    }
+    if (this.usage.totalOutputTokens > this.maxOutputTokens) {
+      return { exceeded: true, reason: `Output token budget ceiling (${this.maxOutputTokens}) exceeded` };
+    }
+    if (this.usage.estimatedCostUsd > this.maxCostUsd) {
+      return { exceeded: true, reason: `Cost budget ceiling ($${this.maxCostUsd}) exceeded` };
+    }
+    return { exceeded: false };
+  }
+
   public canDispatch(count = 1): { allowed: boolean; reason?: string } {
     if (this.deadlineAt && Date.now() > this.deadlineAt) {
       return { allowed: false, reason: 'Execution deadline exceeded' };
@@ -360,6 +408,9 @@ export class WorkflowBudgetBroker {
     }
     if (this.usage.totalToolCalls >= this.maxToolCalls) {
       return { allowed: false, reason: `Tool call budget ceiling (${this.maxToolCalls}) reached` };
+    }
+    if (this.usage.totalModelCalls >= this.maxModelCalls) {
+      return { allowed: false, reason: `Model call budget ceiling (${this.maxModelCalls}) reached` };
     }
     if (this.usage.estimatedCostUsd >= this.maxCostUsd) {
       return { allowed: false, reason: `Cost budget ceiling ($${this.maxCostUsd}) reached` };
@@ -397,14 +448,14 @@ export class WorkflowBudgetBroker {
       entry.outputTokens += usage.outputTokens;
       entry.estimatedCostUsd += usage.estimatedCostUsd;
 
-      // Tool calls reserved upfront are tracked; add unreserved difference
+      // Tool calls reserved upfront are already tracked; add unreserved difference
       if (specialist !== 'extraction') {
         this.usage.totalToolCalls += usage.toolCalls;
       }
       this.usage.totalModelCalls += usage.modelCalls;
       this.usage.totalInputTokens += usage.inputTokens;
       this.usage.totalOutputTokens += usage.outputTokens;
-      this.usage.estimatedCostUsd += usage.estimatedCostUsd;
+      this.usage.estimatedCostUsd = Number((this.usage.estimatedCostUsd + usage.estimatedCostUsd).toFixed(4));
     }
   }
 }
@@ -467,18 +518,22 @@ async function boundedMap<T, R>(
 
 // ── Selector Validation Helper ───────────────────────────────────────────────
 
-function isGenuineCssSelector(path: string | null | undefined): boolean {
-  if (!path || typeof path !== 'string') return false;
+function isGenuineCssSelectorObservation(o: ExtractionObservation | undefined): string | null {
+  if (!o) return null;
+  // Observation method MUST be selector or profile_selector
+  if (o.method !== 'selector' && o.method !== 'profile_selector') return null;
+  const path = o.sourcePath;
+  if (!path || typeof path !== 'string') return null;
   const trimmed = path.trim();
-  if (!trimmed) return false;
+  if (!trimmed) return null;
 
   // Reject JSON path expressions (e.g. `[0].name`, `items[0]`, `product.name`, `/items/0`)
   if (/^\[\d+\]/.test(trimmed) || /^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$/.test(trimmed) || trimmed.startsWith('/')) {
-    return false;
+    return null;
   }
 
   // Accept CSS selector patterns: ID, class, tag, attribute selector, child combinator
-  return trimmed.startsWith('#') ||
+  const isCss = trimmed.startsWith('#') ||
     trimmed.startsWith('.') ||
     /^h[1-6](\.[a-zA-Z0-9_-]+|#[a-zA-Z0-9_-]+|\[.*\])?/i.test(trimmed) ||
     /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+|#[a-zA-Z0-9_-]+|\[.*\])/.test(trimmed) ||
@@ -487,6 +542,8 @@ function isGenuineCssSelector(path: string | null | undefined): boolean {
     trimmed.startsWith('[class') ||
     trimmed.includes(' > ') ||
     trimmed.includes(' ');
+
+  return isCss ? trimmed : null;
 }
 
 // ── Orchestrator Implementation ─────────────────────────────────────────────
@@ -496,6 +553,7 @@ export class SpecialistOrchestrator {
   private readonly limits: CapabilityLimits;
   private readonly extractionConcurrency: number;
   private readonly dependencies: SpecialistOrchestratorDependencies;
+  private readonly persistenceRepo: SpecialistWorkflowPersistenceRepository;
   private readonly now: () => string;
 
   public constructor(options: SpecialistOrchestratorOptions = {}) {
@@ -503,12 +561,12 @@ export class SpecialistOrchestrator {
     this.limits = { ...DEFAULT_CAPABILITY_LIMITS, ...options.limits };
     this.extractionConcurrency = Math.max(1, Math.min(8, options.extractionConcurrency ?? 3));
     this.dependencies = options.dependencies ?? {};
+    this.persistenceRepo = options.dependencies?.workflowPersistence ?? resolveDefaultWorkflowPersistence();
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
   public async getWorkflowState(runId: string): Promise<SpecialistWorkflowRecord | null> {
-    const persistence = this.dependencies.workflowPersistence ?? resolveDefaultWorkflowPersistence();
-    return persistence.get(runId);
+    return this.persistenceRepo.get(runId);
   }
 
   public async runWorkflow(
@@ -557,9 +615,6 @@ export class SpecialistOrchestrator {
     let curatorArtifact: SpecialistArtifactEnvelope | undefined;
     let verifierArtifact: SpecialistArtifactEnvelope | undefined;
 
-    const persistenceRepo: SpecialistWorkflowPersistenceRepository = this.dependencies.workflowPersistence
-      ?? resolveDefaultWorkflowPersistence();
-
     const makeSnapshot = (
       status: OrchestratorTerminalStatus,
       currentPhase: string,
@@ -598,7 +653,7 @@ export class SpecialistOrchestrator {
     ): Promise<WorkflowStateSnapshot> => {
       const snapshot = makeSnapshot(status, currentPhase, error);
       try {
-        await persistenceRepo.save({
+        await this.persistenceRepo.save({
           workflowId: `wf:${context.runId}`,
           runId: context.runId,
           workspaceId: context.workspaceId,
@@ -615,6 +670,7 @@ export class SpecialistOrchestrator {
           usage: { ...budgetBroker.usage },
           stepEvents: [...events],
           artifactIds: snapshot.artifactIds,
+          persistenceWarnings: cumulativePersistenceWarnings.length > 0 ? [...cumulativePersistenceWarnings] : undefined,
           createdAt: new Date(startedAt).toISOString(),
           updatedAt: this.now(),
           error,
@@ -682,7 +738,6 @@ export class SpecialistOrchestrator {
         return false;
       }
       invocations.extraction += 1;
-      // Allocate capability invocation ID atomically with successful reservation
       capabilityInvocationIds.extraction.push(`inv:extraction:${invocations.extraction}`);
       return true;
     };
@@ -726,6 +781,19 @@ export class SpecialistOrchestrator {
     let verifierOutput: VerificationReport | undefined;
 
     let targetPhase: 'discovery' | 'extraction' | 'resolver' | 'curator' | 'verifier' = 'discovery';
+
+    const getDynamicSpecialistContext = (): SpecialistContext => {
+      const remainingTools = budgetBroker.getRemainingToolCalls();
+      const remainingCost = budgetBroker.getRemainingCostUsd();
+      return {
+        ...context,
+        policy: {
+          ...context.policy,
+          maxToolCalls: remainingTools,
+          maxCostUsd: remainingCost,
+        },
+      };
+    };
 
     while (budgetBroker.usage.totalDispatches < this.limits.maxTotalDispatches) {
       if (isAborted()) {
@@ -811,6 +879,7 @@ export class SpecialistOrchestrator {
           recordEvent('discovery', 'discover_candidates', 'started', 0);
           await persistState('in_progress', 'discovery');
 
+          const discContext = getDynamicSpecialistContext();
           const discResult: SpecialistResult = await discovery.execute(
             {
               schemaVersion: 1,
@@ -819,11 +888,30 @@ export class SpecialistOrchestrator {
               batchContext: null,
               sourceCandidates: [],
             },
-            context,
+            discContext,
           );
 
           const discDuration = Date.now() - stepStart;
           budgetBroker.recordUsage('discovery', discResult.usage, discDuration);
+
+          // Post-execution budget ceiling check
+          const discBudgetOver = budgetBroker.isOverBudget();
+          if (discBudgetOver.exceeded) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, discBudgetOver.reason);
+            const state = await persistState('budget_exceeded', 'discovery', discBudgetOver.reason);
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              extractionBundles,
+              workflowState: state,
+              error: discBudgetOver.reason,
+            };
+          }
 
           if (discResult.outcome !== 'succeeded' || !discResult.output) {
             if (discResult.outcome === 'abstained') {
@@ -906,9 +994,9 @@ export class SpecialistOrchestrator {
           const candidates = discoveryOutput?.candidates ?? [];
           const candidateUrls = candidates
             .slice(0, 3)
-            .map((c) => c.finalUrl ?? c.source.url);
+            .map((c) => (c as any).finalUrl ?? (c as any).source?.url ?? (c as any).url)
+            .filter((u): u is string => typeof u === 'string' && Boolean(u.trim()));
 
-          // Promote GTIN strictly from verified PDP candidate with consumer unit GTIN provenance
           const trustedCandidateGtin = (() => {
             const trusted = candidates.find(
               (c) => (c.pageKind === 'exact_pdp' || c.pageKind === 'probable_pdp') &&
@@ -927,6 +1015,25 @@ export class SpecialistOrchestrator {
           let requiresProfileHold = false;
           const synthesizedDomainsInPhase = new Set<string>();
           const bundlesByUrl = new Map<string, ExtractionEvidenceBundle>();
+
+          if (candidateUrls.length > 0 && budgetBroker.getRemainingToolCalls() <= 0) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Tool call budget ceiling reached before extraction');
+            const state = await persistState('budget_exceeded', 'extraction', 'Tool call budget ceiling reached');
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+              error: 'Tool call budget ceiling reached',
+            };
+          }
 
           // Bounded parallel extraction
           extractionBundles = await boundedMap(
@@ -990,6 +1097,25 @@ export class SpecialistOrchestrator {
             },
           );
 
+          if (extractionBundles.length > 0 && extractionBundles.every((b) => b.identityReasons.includes('Dispatch or budget limit reached'))) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Extraction dispatches blocked by budget limit');
+            const state = await persistState('budget_exceeded', 'extraction', 'Extraction dispatches blocked by budget limit');
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+              error: 'Extraction dispatches blocked by budget limit',
+            };
+          }
+
           // After extraction bundles are keyed by URL, check if profile synthesis is needed
           for (const bundle of extractionBundles) {
             const url = bundle.finalUrl ?? bundle.requestedUrl;
@@ -1001,10 +1127,10 @@ export class SpecialistOrchestrator {
             if (needsProfile && !synthesizedDomainsInPhase.has(domain) && invocations.profile < this.limits.maxProfileInvocations) {
               synthesizedDomainsInPhase.add(domain);
 
-              const domainCandidates = candidates.filter((c: DiscoveryCandidate) => {
+              const domainCandidates = candidates.filter((c: any) => {
                 try {
-                  const cUrl = c.finalUrl ?? c.source.url;
-                  return new URL(cUrl).hostname === domain;
+                  const cUrl = c.finalUrl ?? c.source?.url ?? c.url;
+                  return typeof cUrl === 'string' && new URL(cUrl).hostname === domain;
                 } catch {
                   return false;
                 }
@@ -1013,11 +1139,11 @@ export class SpecialistOrchestrator {
               if (domainCandidates.length >= 2) {
                 const sample1 = domainCandidates[0];
                 const sample2 = domainCandidates[1];
-                const sample1Url = sample1.finalUrl ?? sample1.source.url;
-                const sample2Url = sample2.finalUrl ?? sample2.source.url;
+                const sample1Url = (sample1 as any).finalUrl ?? (sample1 as any).source?.url ?? (sample1 as any).url;
+                const sample2Url = (sample2 as any).finalUrl ?? (sample2 as any).source?.url ?? (sample2 as any).url;
 
-                const bundle1 = bundlesByUrl.get(sample1Url) ?? bundlesByUrl.get(sample1.source.url);
-                const bundle2 = bundlesByUrl.get(sample2Url) ?? bundlesByUrl.get(sample2.source.url);
+                const bundle1 = bundlesByUrl.get(sample1Url) ?? (sample1.source?.url ? bundlesByUrl.get(sample1.source.url) : undefined);
+                const bundle2 = bundlesByUrl.get(sample2Url) ?? (sample2.source?.url ? bundlesByUrl.get(sample2.source.url) : undefined);
 
                 const sample1Artifacts = [...new Set(sample1.extracted.identifiers
                   .map((i) => i.sourceArtifactId)
@@ -1028,9 +1154,11 @@ export class SpecialistOrchestrator {
                   .concat(bundle2?.artifactRefs ?? [])
                   .filter((id) => Boolean(id)))];
 
-                // Genuine title selector candidate hints (derived strictly from that page's own extraction observations)
-                const sample1TitleHint = bundle1?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isGenuineCssSelector(o.sourcePath))?.sourcePath ?? null;
-                const sample2TitleHint = bundle2?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isGenuineCssSelector(o.sourcePath))?.sourcePath ?? null;
+                // Genuine title selector candidate hints (derived strictly from that page's own selector observations)
+                const sample1TitleObs = bundle1?.observations.find((o) => o.field === 'title' || o.field === 'product_name');
+                const sample2TitleObs = bundle2?.observations.find((o) => o.field === 'title' || o.field === 'product_name');
+                const sample1TitleHint = isGenuineCssSelectorObservation(sample1TitleObs);
+                const sample2TitleHint = isGenuineCssSelectorObservation(sample2TitleObs);
 
                 const hasRealEvidence = sample1Artifacts.length > 0 && sample2Artifacts.length > 0;
 
@@ -1068,6 +1196,7 @@ export class SpecialistOrchestrator {
                   const sample2Hints: Record<string, string> = {};
                   if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
 
+                  const profContext = getDynamicSpecialistContext();
                   const profResult = await profileEngineer.execute(
                     {
                       schemaVersion: 1,
@@ -1111,7 +1240,7 @@ export class SpecialistOrchestrator {
                       ],
                       requiredFields: ['titleSelector'],
                     },
-                    context,
+                    profContext,
                   );
 
                   budgetBroker.recordUsage('profile_engineer', profResult.usage, 0);
@@ -1227,6 +1356,7 @@ export class SpecialistOrchestrator {
           const effectiveResolverGtin = canonicalIdentifier.gtin ?? trustedCandidateGtin ?? null;
           const effectiveResolverScope = canonicalIdentifier.gtin ? canonicalIdentifier.scope : (effectiveResolverGtin && extractDigits(effectiveResolverGtin).length === 14 ? 'case' : 'consumer_unit');
 
+          const resContext = getDynamicSpecialistContext();
           const resResult: SpecialistResult = await resolver.execute(
             {
               schemaVersion: '1.0.0',
@@ -1238,11 +1368,31 @@ export class SpecialistOrchestrator {
               discoveryCandidates: discoveryOutput?.candidates ?? [],
               extractionBundles,
             },
-            context,
+            resContext,
           );
 
           const resDuration = Date.now() - stepStart;
           budgetBroker.recordUsage('resolver', resResult.usage, resDuration);
+
+          const resBudgetOver = budgetBroker.isOverBudget();
+          if (resBudgetOver.exceeded) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, resBudgetOver.reason);
+            const state = await persistState('budget_exceeded', 'resolver', resBudgetOver.reason);
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+              error: resBudgetOver.reason,
+            };
+          }
 
           if (resResult.outcome !== 'succeeded' || !resResult.output) {
             recordEvent('resolver', 'reconcile_facts', 'failed', resDuration, resResult.failure?.message);
@@ -1335,6 +1485,7 @@ export class SpecialistOrchestrator {
             };
           }
 
+          const curContext = getDynamicSpecialistContext();
           const curResult: SpecialistResult = await curator.execute(
             {
               schemaVersion: '1.0.0',
@@ -1342,11 +1493,33 @@ export class SpecialistOrchestrator {
               resolvedFacts: resolverOutput,
               classificationContext,
             },
-            context,
+            curContext,
           );
 
           const curDuration = Date.now() - stepStart;
           budgetBroker.recordUsage('curator', curResult.usage, curDuration);
+
+          const curBudgetOver = budgetBroker.isOverBudget();
+          if (curBudgetOver.exceeded) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, curBudgetOver.reason);
+            const state = await persistState('budget_exceeded', 'curator', curBudgetOver.reason);
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles,
+              resolverOutput,
+              resolverArtifact,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+              error: curBudgetOver.reason,
+            };
+          }
 
           if (curResult.outcome !== 'succeeded' || !curResult.output) {
             recordEvent('curator', 'synthesize_draft', 'failed', curDuration, curResult.failure?.message);
@@ -1447,6 +1620,7 @@ export class SpecialistOrchestrator {
             };
           }
 
+          const verContext = getDynamicSpecialistContext();
           const verResult: SpecialistResult = await verifier.execute(
             {
               schemaVersion: '1.0.0',
@@ -1456,11 +1630,37 @@ export class SpecialistOrchestrator {
               classificationContext,
               extractionBundles,
             },
-            context,
+            verContext,
           );
 
           const verDuration = Date.now() - stepStart;
           budgetBroker.recordUsage('verifier', verResult.usage, verDuration);
+
+          const verBudgetOver = budgetBroker.isOverBudget();
+          if (verBudgetOver.exceeded) {
+            recordEvent('orchestrator', 'budget_check', 'failed', 0, verBudgetOver.reason);
+            const state = await persistState('budget_exceeded', 'verifier', verBudgetOver.reason);
+            return {
+              runId: context.runId,
+              status: 'budget_exceeded',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              profileOutput,
+              profileArtifact,
+              extractionBundles,
+              resolverOutput,
+              resolverArtifact,
+              curatorOutput,
+              curatorArtifact,
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+              error: verBudgetOver.reason,
+            };
+          }
 
           if (verResult.outcome !== 'succeeded' || !verResult.output) {
             recordEvent('verifier', 'verify_quality', 'failed', verDuration, verResult.failure?.message);

@@ -13,6 +13,7 @@ import {
   DiscoverySpecialist,
   type DiscoverySourceCandidate,
 } from '../../../product-intelligence/specialists/discovery';
+import { ProfileEngineerSpecialist } from '../../../product-intelligence/specialists/profile-engineer';
 import { VerifierSpecialist } from '../../../product-intelligence/specialists/verifier';
 import { ProductIntelligencePolicySchema } from '../../../product-intelligence/contracts';
 import type { SpecialistContext, SpecialistResult } from '../../../product-intelligence/specialists/contracts';
@@ -279,71 +280,9 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.workflowState.routeRecords.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('routes to Profile Engineer and holds for manual review when extraction reports profile_failed with real title evidence', async () => {
-    let profileCalls = 0;
-    let capturedInput: any = null;
-
-    const mockProfileEngineer = {
-      execute: async (input: any): Promise<SpecialistResult> => {
-        profileCalls += 1;
-        capturedInput = input;
-        return {
-          specialist: 'profile_engineer',
-          outcome: 'succeeded',
-          output: {
-            artifactType: 'profile_engineer_result',
-            schemaVersion: '1.0.0',
-            payload: {
-              domain: 'acme.example',
-              proposedVersion: 1,
-              strategy: 'json_ld',
-              selectors: { titleSelector: 'h1.product-title' },
-              runtime: 'rendered',
-              metadata: {},
-              validation: [
-                {
-                  url: 'https://acme.example/products/chicken-broth-16oz',
-                  artifactRefs: ['art-1'],
-                  identityStatus: 'exact',
-                  fields: {},
-                  overall: 'pass',
-                },
-                {
-                  url: 'https://acme.example/products/beef-broth-16oz',
-                  artifactRefs: ['art-2'],
-                  identityStatus: 'exact',
-                  fields: {},
-                  overall: 'pass',
-                },
-              ],
-              validationSummary: {
-                sampleCount: 2,
-                passingSamples: 2,
-                failingSamples: 0,
-                byField: {},
-              },
-              authority: 'proposal_only',
-              activation: 'manual_review_required',
-            },
-            lineage: { inputArtifactIds: [], parentArtifactIds: [] },
-            provenance: {
-              specialist: 'profile_engineer',
-              specialistVersion: '1.0.0',
-              codeCommit: 'commit-56',
-              invokedBy: 'orchestrator',
-              durationMs: 10,
-              createdAt: FIXED_NOW,
-            },
-            contentHash: sha256Hex('profile-1'),
-          },
-          durationMs: 10,
-        };
-      },
-    } as any;
-
+  it('routes to real Profile Engineer and produces usable title selector proposal validated on retained samples', async () => {
     const mockExtractionRunner = async (url: string): Promise<ExtractionEvidenceBundle> => {
       const isBeef = url.includes('beef');
-      const selector = isBeef ? 'h1.product-title-beef' : 'h1.product-title';
       const artId = isBeef ? 'art-2' : 'art-1';
       return {
         schemaVersion: 1,
@@ -361,7 +300,7 @@ describe('Specialist Orchestrator (#56)', () => {
             field: 'title',
             value: isBeef ? 'Organic Beef Broth' : 'Organic Chicken Broth',
             method: 'selector',
-            sourcePath: selector,
+            sourcePath: 'h1.product-title', // Identical valid CSS selector on both pages
             sourceUrl: url,
             finalUrl: url,
             contentHash: sha256Hex('title'),
@@ -394,10 +333,12 @@ describe('Specialist Orchestrator (#56)', () => {
       { codeCommit: 'commit-56' },
     );
 
+    const realProfileEngineer = new ProfileEngineerSpecialist({}, { codeCommit: 'commit-56' });
+
     const orchestrator = new SpecialistOrchestrator({
       dependencies: {
         discovery,
-        profileEngineer: mockProfileEngineer,
+        profileEngineer: realProfileEngineer,
         extractionRunner: mockExtractionRunner,
       },
       now: () => FIXED_NOW,
@@ -406,23 +347,84 @@ describe('Specialist Orchestrator (#56)', () => {
     const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
 
     expect(result.status).toBe('needs_review');
-    expect(profileCalls).toBe(1);
     expect(result.profileOutput).toBeDefined();
+    expect(result.profileOutput?.domain).toBe('acme.example');
+    expect(result.profileOutput?.selectors.titleSelector).toBe('h1.product-title');
     expect(result.profileOutput?.authority).toBe('proposal_only');
+    expect(result.profileOutput?.activation).toBe('manual_review_required');
     expect(result.events.some((e) => e.action === 'profile_review_hold')).toBe(true);
+  });
 
-    const sampleChicken = capturedInput.samples.find((s: any) => s.url.includes('chicken'));
-    const sampleBeef = capturedInput.samples.find((s: any) => s.url.includes('beef'));
+  it('rejects JSON-LD paths and differing selectors from being promoted by Profile Engineer', async () => {
+    const mockExtractionRunner = async (url: string): Promise<ExtractionEvidenceBundle> => {
+      const isBeef = url.includes('beef');
+      const artId = isBeef ? 'art-2' : 'art-1';
+      return {
+        schemaVersion: 1,
+        runnerVersion: '1.0.0',
+        requestedUrl: url,
+        finalUrl: url,
+        retrievedAt: FIXED_NOW,
+        contentHash: sha256Hex(url),
+        artifactRefs: [artId],
+        profile: null,
+        extractionPath: [],
+        observations: [
+          {
+            id: 'obs:title',
+            field: 'title',
+            value: isBeef ? 'Organic Beef Broth' : 'Organic Chicken Broth',
+            method: isBeef ? 'json_ld' : 'selector', // Sample 2 uses json_ld method!
+            sourcePath: isBeef ? 'product.name' : 'h1.product-title',
+            sourceUrl: url,
+            finalUrl: url,
+            contentHash: sha256Hex('title'),
+            artifactId: artId,
+            profileId: null,
+            profileVersion: null,
+            variantRef: null,
+            provenanceQuality: 'exact_path',
+          },
+        ],
+        images: [],
+        variant: null,
+        identityStatus: 'insufficient_evidence',
+        identityReasons: ['Profile required'],
+        failures: [{ code: 'profile_failed', stage: 'profile_selector', message: 'Selector extraction failed', retryable: true }],
+        deterministicOnly: true,
+      };
+    };
 
-    expect(sampleChicken).toBeDefined();
-    expect(sampleChicken.observedFields.product_name).toBeDefined();
-    expect(sampleChicken.selectorHints.titleSelector).toBe('h1.product-title');
-    expect(sampleChicken.artifactRefs).toContain('art-1');
+    const discovery = new DiscoverySpecialist(
+      {
+        search: async () => ({
+          candidates: [
+            createDiscoveryCandidate('https://acme.example/products/chicken-broth-16oz'),
+            createDiscoveryCandidate('https://acme.example/products/beef-broth-16oz'),
+          ],
+        }),
+        extraction: mockExtractionSeam,
+      },
+      { codeCommit: 'commit-56' },
+    );
 
-    expect(sampleBeef).toBeDefined();
-    expect(sampleBeef.observedFields.product_name).toBeDefined();
-    expect(sampleBeef.selectorHints.titleSelector).toBe('h1.product-title-beef');
-    expect(sampleBeef.artifactRefs).toContain('art-2');
+    const realProfileEngineer = new ProfileEngineerSpecialist({}, { codeCommit: 'commit-56' });
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery,
+        profileEngineer: realProfileEngineer,
+        extractionRunner: mockExtractionRunner,
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+
+    expect(result.status).toBe('needs_review');
+    expect(result.profileOutput).toBeDefined();
+    // JSON-LD path is not promoted as titleSelector
+    expect(result.profileOutput?.selectors.titleSelector).toBeNull();
   });
 
   it('rejects 14-digit GTIN without case scope and runs through resolver with null expected consumer GTIN', async () => {
@@ -941,5 +943,152 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(rehydrated?.capabilityInvocationIds.discovery.length).toBe(1);
     expect(rehydrated?.capabilityInvocationIds.extraction.length).toBe(1);
     expect(rehydrated?.routeRecords.length).toBeGreaterThan(0);
+  });
+
+  it('enforces dynamic remaining tool allowance on retry discovery and halts before exceeding limit', async () => {
+    let discoveryCalls = 0;
+    const mockDiscovery = new DiscoverySpecialist(
+      {
+        search: async () => {
+          discoveryCalls += 1;
+          return { candidates: [createDiscoveryCandidate()] };
+        },
+        extraction: mockExtractionSeam,
+      },
+      { codeCommit: 'commit-56' },
+    );
+
+    let verifierCalls = 0;
+    const mockVerifier = {
+      execute: async (): Promise<SpecialistResult> => {
+        verifierCalls += 1;
+        // First verifier call requests retry_discovery
+        return {
+          specialist: 'verifier',
+          outcome: 'succeeded',
+          output: {
+            artifactType: 'verification_report',
+            schemaVersion: '1.0.0',
+            payload: {
+              verdict: verifierCalls === 1 ? 'retry_discovery' : 'pass',
+              score: 0.8,
+              identityStatus: 'verified',
+              identityDecision: 'pass',
+              dataScore: 0.8,
+              checks: [],
+              retryRequest: verifierCalls === 1 ? { targetSpecialist: 'discovery', reason: 'need more candidates' } : null,
+            },
+            lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+            provenance: {
+              specialist: 'verifier',
+              specialistVersion: '1.0.0',
+              codeCommit: 'commit-56',
+              invokedBy: 'orchestrator',
+              durationMs: 10,
+              createdAt: FIXED_NOW,
+            },
+            contentHash: sha256Hex(`ver-${verifierCalls}`),
+          },
+          usage: { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
+          durationMs: 10,
+        };
+      },
+    } as any;
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: mockDiscovery,
+        verifier: mockVerifier,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({
+          configId: 'budget-retry-policy',
+          maxToolCalls: 5, // Budget limit is 5
+        }),
+      },
+    );
+
+    // First pass spent 3 tools in discovery + 1 in extraction = 4 tools total.
+    // When retry_discovery runs, remainingToolCalls was 1. Discovery spent 1 and hit 5 total.
+    // Next extraction attempts to reserve tool 6 -> halted with budget_exceeded!
+    expect(discoveryCalls).toBeGreaterThan(0);
+    expect(result.status).toBe('budget_exceeded');
+    expect(result.workflowState.usage.totalToolCalls).toBe(5);
+  });
+
+  it('halts with budget_exceeded even when Verifier returns pass if usage exceeded budget', async () => {
+    let verifierExecuted = false;
+    const mockVerifierOverBudget = {
+      execute: async (): Promise<SpecialistResult> => {
+        verifierExecuted = true;
+        return {
+          specialist: 'verifier',
+          outcome: 'succeeded',
+          output: {
+            artifactType: 'verification_report',
+            schemaVersion: '1.0.0',
+            payload: {
+              verdict: 'pass',
+              score: 0.95,
+              identityStatus: 'verified',
+              identityDecision: 'pass',
+              dataScore: 0.95,
+              checks: [],
+            },
+            lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+            provenance: {
+              specialist: 'verifier',
+              specialistVersion: '1.0.0',
+              codeCommit: 'commit-56',
+              invokedBy: 'orchestrator',
+              durationMs: 10,
+              createdAt: FIXED_NOW,
+            },
+            contentHash: sha256Hex('ver-pass'),
+          },
+          usage: { toolCalls: 0, modelCalls: 5, inputTokens: 5000, outputTokens: 2000, estimatedCostUsd: 5.00 }, // Over cost budget of $1.00
+          durationMs: 10,
+        };
+      },
+    } as any;
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        verifier: mockVerifierOverBudget,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({
+          configId: 'cost-strict-policy',
+          maxCostUsd: 1.00,
+        }),
+      },
+    );
+
+    expect(verifierExecuted).toBe(true);
+    expect(result.status).toBe('budget_exceeded');
+    expect(result.workflowState.status).toBe('budget_exceeded');
   });
 });

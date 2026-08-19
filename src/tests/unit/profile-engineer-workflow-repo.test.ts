@@ -77,4 +77,36 @@ describe('Profile Engineer domain workflow lease (#51)', () => {
     expect(completeProfileEngineerWorkflow(reclaimed.workflow.id, 'run-new', '{"fresh":true}').applied).toBe(true);
     expect(findProfileEngineerWorkflow('workspace-stale', 'stale.example')?.runId).toBe('run-new');
   });
+
+  it('permits v2 repair claim when v1 is completed and deduplicates concurrent v2 claims', () => {
+    // 1. Initial v1 workflow completes
+    const v1 = claimProfileEngineerWorkflow('workspace-v2', 'repair.example', 'run-v1', { targetVersion: 1 });
+    expect(v1.acquired).toBe(true);
+    expect(completeProfileEngineerWorkflow(v1.workflow.id, 'run-v1', '{"v1":true}').applied).toBe(true);
+
+    // 2. Normal un-versioned claim is rejected because completed
+    const normal = claimProfileEngineerWorkflow('workspace-v2', 'repair.example', 'run-v1-again');
+    expect(normal.acquired).toBe(false);
+    expect(normal.reason).toBe('domain_workflow_already_completed');
+
+    // 3. Stale/incompatible profile triggers v2 repair claim with needsRepair: true & targetVersion: 2
+    const v2Repair = claimProfileEngineerWorkflow('workspace-v2', 'repair.example', 'run-v2', {
+      needsRepair: true,
+      targetVersion: 2,
+    });
+    expect(v2Repair.acquired).toBe(true);
+    expect(v2Repair.workflow.targetVersion).toBe(2);
+
+    // 4. Concurrent attempt to claim v2 repair while v2 is running is deduplicated
+    const concurrentV2 = claimProfileEngineerWorkflow('workspace-v2', 'repair.example', 'run-v2-concurrent', {
+      needsRepair: true,
+      targetVersion: 2,
+    });
+    expect(concurrentV2.acquired).toBe(false);
+    expect(concurrentV2.reason).toBe('domain_workflow_in_progress');
+
+    // 5. Complete v2
+    expect(completeProfileEngineerWorkflow(v2Repair.workflow.id, 'run-v2', '{"v2":true}').applied).toBe(true);
+    expect(findProfileEngineerWorkflow('workspace-v2', 'repair.example')?.targetVersion).toBe(2);
+  });
 });

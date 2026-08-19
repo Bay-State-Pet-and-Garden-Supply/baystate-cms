@@ -740,15 +740,65 @@ export function verifyCuratedDraft(
           details: `Draft image '${image.url}' is missing required source artifact/path provenance in extraction evidence`,
         });
       }
-      if (match.variantRef && resolvedFacts.expectedIdentity?.gtin && match.variantRef !== resolvedFacts.expectedIdentity.gtin) {
+
+      // Independent rights verification: check extraction evidence directly
+      if (match.rightsStatus && !ALLOWED_IMAGE_RIGHTS.has(match.rightsStatus.toLowerCase().trim())) {
+        checks.push({
+          checkName: 'image_rights_compliance',
+          category: 'image_rights',
+          passed: false,
+          severity: 'blocking',
+          field: 'images',
+          details: `Extraction evidence for '${image.url}' indicates non-compliant rights status '${match.rightsStatus}'`,
+        });
+      }
+      if (match.commerceApproved === false) {
+        checks.push({
+          checkName: 'image_commerce_approval',
+          category: 'image_rights',
+          passed: false,
+          severity: 'blocking',
+          field: 'images',
+          details: `Extraction evidence for '${image.url}' indicates commerce approval is false`,
+        });
+      }
+
+      // Typed variant-identity comparison
+      if (match.identityMatch && (match.identityMatch === 'wrong_variant' || match.identityMatch === 'parent_only')) {
         checks.push({
           checkName: 'image_variant_compliance',
           category: 'image_rights',
           passed: false,
           severity: 'blocking',
           field: 'images',
-          details: `Draft image '${image.url}' references variant '${match.variantRef}' conflicting with resolved GTIN '${resolvedFacts.expectedIdentity.gtin}'`,
+          details: `Extraction evidence for '${image.url}' indicates identity match '${match.identityMatch}' (must not be wrong_variant/parent_only)`,
         });
+      }
+
+      if (match.variantRef) {
+        const refKind = match.variantRefKind ?? (
+          /^\d{8}$|^\d{12,14}$/.test(match.variantRef) ? 'gtin' : 'generic'
+        );
+
+        if (refKind === 'gtin' && resolvedFacts.expectedIdentity?.gtin && match.variantRef !== resolvedFacts.expectedIdentity.gtin) {
+          checks.push({
+            checkName: 'image_variant_compliance',
+            category: 'image_rights',
+            passed: false,
+            severity: 'blocking',
+            field: 'images',
+            details: `Draft image '${image.url}' references GTIN '${match.variantRef}' conflicting with resolved GTIN '${resolvedFacts.expectedIdentity.gtin}'`,
+          });
+        } else if (refKind === 'sku' && (input.productSeed as any)?.sku && match.variantRef !== (input.productSeed as any).sku) {
+          checks.push({
+            checkName: 'image_variant_compliance',
+            category: 'image_rights',
+            passed: false,
+            severity: 'blocking',
+            field: 'images',
+            details: `Draft image '${image.url}' references SKU '${match.variantRef}' conflicting with seed SKU '${(input.productSeed as any).sku}'`,
+          });
+        }
       }
     }
   }

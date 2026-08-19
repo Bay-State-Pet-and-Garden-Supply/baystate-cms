@@ -31,6 +31,7 @@ function ensureTable(): void {
       usage_json TEXT NOT NULL,
       step_events_json TEXT NOT NULL,
       artifact_ids_json TEXT NOT NULL,
+      persistence_warnings_json TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       error TEXT
@@ -38,6 +39,11 @@ function ensureTable(): void {
     CREATE INDEX IF NOT EXISTS idx_pi_specialist_workflows_workspace
       ON product_intelligence_specialist_workflows(workspace_id, status, updated_at);
   `);
+  try {
+    db.run('ALTER TABLE product_intelligence_specialist_workflows ADD COLUMN persistence_warnings_json TEXT');
+  } catch {
+    // Column already exists
+  }
 }
 
 export class SqliteSpecialistWorkflowRepository implements SpecialistWorkflowPersistenceRepository {
@@ -53,8 +59,9 @@ export class SqliteSpecialistWorkflowRepository implements SpecialistWorkflowPer
         run_id, workflow_id, workspace_id, workflow_version, status, current_phase,
         retries_count, total_dispatches, product_seed_json, invocations_json,
         capability_invocations_json, extraction_artifact_refs_json, route_records_json,
-        usage_json, step_events_json, artifact_ids_json, created_at, updated_at, error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        usage_json, step_events_json, artifact_ids_json, persistence_warnings_json,
+        created_at, updated_at, error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run_id) DO UPDATE SET
         status = excluded.status,
         current_phase = excluded.current_phase,
@@ -68,6 +75,7 @@ export class SqliteSpecialistWorkflowRepository implements SpecialistWorkflowPer
         usage_json = excluded.usage_json,
         step_events_json = excluded.step_events_json,
         artifact_ids_json = excluded.artifact_ids_json,
+        persistence_warnings_json = excluded.persistence_warnings_json,
         updated_at = excluded.updated_at,
         error = excluded.error
     `).run(
@@ -87,6 +95,7 @@ export class SqliteSpecialistWorkflowRepository implements SpecialistWorkflowPer
       JSON.stringify(record.usage),
       JSON.stringify(record.stepEvents),
       JSON.stringify(record.artifactIds),
+      JSON.stringify(record.persistenceWarnings ?? []),
       record.createdAt,
       record.updatedAt,
       record.error ?? null,
@@ -116,6 +125,7 @@ export class SqliteSpecialistWorkflowRepository implements SpecialistWorkflowPer
       usage: JSON.parse(row.usage_json),
       stepEvents: JSON.parse(row.step_events_json),
       artifactIds: JSON.parse(row.artifact_ids_json),
+      persistenceWarnings: row.persistence_warnings_json ? JSON.parse(row.persistence_warnings_json) : undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       error: row.error ?? undefined,
