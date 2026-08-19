@@ -1030,24 +1030,14 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.workflowState.usage.totalToolCalls).toBe(5);
   });
 
-  it('halts with budget_exceeded and blocks verifier execution when planned cost exceeds budget', async () => {
+  it('halts with budget_exceeded and blocks non-cooperative specialist before execution when planned cost exceeds budget', async () => {
     let verifierExecuted = false;
     const mockVerifierOverBudget = {
-      execute: async (_input: unknown, ctx: SpecialistContext): Promise<SpecialistResult> => {
-        const requiredCost = 5.00;
-        if (typeof ctx.runtimeAllowance?.remainingCostUsd === 'number' && ctx.runtimeAllowance.remainingCostUsd < requiredCost) {
-          return {
-            specialist: 'verifier',
-            outcome: 'abstained',
-            abstention: {
-              reason: `cost_budget_insufficient: $${ctx.runtimeAllowance.remainingCostUsd} remaining < $${requiredCost} required`,
-              actionableNextStep: 'Increase maxCostUsd policy budget.',
-              targets: [],
-            },
-            durationMs: 0,
-            usage: { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
-          };
-        }
+      plannedCostUsd: 5.00,
+      plannedModelCalls: 5,
+      execute: async (): Promise<SpecialistResult> => {
+        // Deliberately non-cooperative specialist: does NOT voluntarily check runtimeAllowance.
+        // Orchestrator-owned broker pre-spend reservation MUST block this callback from ever running.
         verifierExecuted = true;
         return {
           specialist: 'verifier',

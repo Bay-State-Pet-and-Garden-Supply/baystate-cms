@@ -275,23 +275,61 @@ export class InMemoryWorkflowPersistenceRepository implements SpecialistWorkflow
 
 export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock {
   private readonly activeLocks = new Set<string>();
+  private readonly completedRecords = new Map<string, { targetVersion: number; sourceProfileVersion: string | null }>();
 
   public claim(
     domain: string,
     runId: string,
     _workspaceId: string,
-    _options?: ClaimProfileLockOptions,
-  ): { acquired: boolean; workflowId: string; reason?: string } {
+    options?: ClaimProfileLockOptions,
+  ): { acquired: boolean; workflowId: string; targetVersion?: number; workflow?: { targetVersion: number; sourceProfileVersion?: string | null }; reason?: string } {
     if (this.activeLocks.has(domain)) {
       return { acquired: false, workflowId: `wf:${domain}:${runId}`, reason: `Domain ${domain} profile is actively being synthesized` };
     }
+
+    const existing = this.completedRecords.get(domain);
+    const targetVersion = options?.targetVersion ?? 1;
+    const sourceProfileVersion = options?.sourceProfileVersion ?? null;
+
+    if (existing) {
+      const isHigher = targetVersion > existing.targetVersion;
+      const isDifferentSource = Boolean(sourceProfileVersion && existing.sourceProfileVersion && sourceProfileVersion !== existing.sourceProfileVersion);
+      const isForced = Boolean(options?.forceNew);
+      if (!isHigher && !isDifferentSource && !isForced) {
+        return {
+          acquired: false,
+          workflowId: `wf:${domain}:${runId}`,
+          targetVersion: existing.targetVersion,
+          workflow: { targetVersion: existing.targetVersion, sourceProfileVersion: existing.sourceProfileVersion },
+          reason: 'domain_workflow_already_completed',
+        };
+      }
+      const newTargetVersion = isDifferentSource ? Math.max(targetVersion, existing.targetVersion + 1) : targetVersion;
+      this.activeLocks.add(domain);
+      return {
+        acquired: true,
+        workflowId: `wf:${domain}:${runId}`,
+        targetVersion: newTargetVersion,
+        workflow: { targetVersion: newTargetVersion, sourceProfileVersion },
+      };
+    }
+
     this.activeLocks.add(domain);
-    return { acquired: true, workflowId: `wf:${domain}:${runId}` };
+    return {
+      acquired: true,
+      workflowId: `wf:${domain}:${runId}`,
+      targetVersion,
+      workflow: { targetVersion, sourceProfileVersion },
+    };
   }
 
   public complete(workflowId: string, _runId: string): { applied: boolean } {
     const domain = workflowId.split(':')[1];
-    if (domain) this.activeLocks.delete(domain);
+    if (domain) {
+      this.activeLocks.delete(domain);
+      const prev = this.completedRecords.get(domain)?.targetVersion ?? 1;
+      this.completedRecords.set(domain, { targetVersion: prev, sourceProfileVersion: null });
+    }
     return { applied: true };
   }
 
@@ -921,7 +959,7 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const reservation = budgetBroker.reserve('discovery', { dispatches: 1, toolCalls: 1, costUsd: 0.001 });
+          const reservation = budgetBroker.reserve('discovery', { dispatches: 1, toolCalls: 1, costUsd: 0.005 });
           if (!reservation.allowed) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, reservation.reason);
             const state = await persistState('budget_exceeded', 'discovery', reservation.reason);
@@ -1305,6 +1343,7 @@ export class SpecialistOrchestrator {
                         profileId: bundle.profile.id,
                         targetVersion: typeof bundle.profile.version === 'number' ? bundle.profile.version + 1 : 2,
                         version: bundle.profile.version,
+                        sourceProfileVersion: bundle.profile.version != null ? String(bundle.profile.version) : null,
                         runtime: bundle.profile.runtime ?? 'rendered',
                       }
                       : null;
@@ -1601,7 +1640,17 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const reservation = budgetBroker.reserve('curator', { dispatches: 1, costUsd: 0.001 });
+          const curCost = (curator as any).plannedCostUsd ?? 0.005;
+          const curModels = (curator as any).plannedModelCalls ?? 0;
+          const curInTokens = (curator as any).plannedInputTokens ?? 0;
+          const curOutTokens = (curator as any).plannedOutputTokens ?? 0;
+          const reservation = budgetBroker.reserve('curator', {
+            dispatches: 1,
+            modelCalls: curModels,
+            inputTokens: curInTokens,
+            outputTokens: curOutTokens,
+            costUsd: curCost,
+          });
           if (!reservation.allowed) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, reservation.reason);
             const state = await persistState('budget_exceeded', 'curator', reservation.reason);
@@ -1754,7 +1803,17 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const reservation = budgetBroker.reserve('verifier', { dispatches: 1, costUsd: 0.001 });
+          const verCost = (verifier as any).plannedCostUsd ?? 0.005;
+          const verModels = (verifier as any).plannedModelCalls ?? 0;
+          const verInTokens = (verifier as any).plannedInputTokens ?? 0;
+          const verOutTokens = (verifier as any).plannedOutputTokens ?? 0;
+          const reservation = budgetBroker.reserve('verifier', {
+            dispatches: 1,
+            modelCalls: verModels,
+            inputTokens: verInTokens,
+            outputTokens: verOutTokens,
+            costUsd: verCost,
+          });
           if (!reservation.allowed) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, reservation.reason);
             const state = await persistState('budget_exceeded', 'verifier', reservation.reason);

@@ -8,7 +8,9 @@ import {
   completeProfileEngineerWorkflowWithProposal,
   failProfileEngineerWorkflow,
   findProfileEngineerWorkflow,
+  profileEngineerWorkflowLock,
 } from '../../db/repositories/profile-engineer-workflow-repo';
+import { ProfileEngineerSpecialist } from '../../product-intelligence/specialists/profile-engineer';
 
 const dbPath = 'src/tests/unit/profile-engineer-workflow-test.db';
 
@@ -157,5 +159,103 @@ describe('Profile Engineer domain workflow lease (#51)', () => {
     expect(repairB.acquired).toBe(true);
     expect(repairB.workflow.sourceProfileVersion).toBe('2026-08-19T04:00:00.000Z');
     expect(repairB.workflow.targetVersion).toBe(3); // Next generation (v3)!
+  });
+
+  it('forwards sourceProfileVersion through production lock adapter and aligns ProfileEngineer proposal generation', async () => {
+    const lock = profileEngineerWorkflowLock();
+    const specialist = new ProfileEngineerSpecialist({ workflow: lock });
+
+    const sample1 = {
+      url: 'https://adapter.example/p1',
+      artifactRefs: ['art-1'],
+      expectedName: 'ACME Dog Food 10lb',
+      signals: { jsonLd: false, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
+      selectorHints: { titleSelector: 'h1.product-title' },
+      observedFields: { product_name: 'ACME Dog Food 10lb' },
+    };
+    const sample2 = {
+      url: 'https://adapter.example/p2',
+      artifactRefs: ['art-2'],
+      expectedName: 'ACME Cat Food 5lb',
+      signals: { jsonLd: false, shopify: false, woocommerce: false, embeddedState: false, selectorOnly: false, changedMarkup: false, wrongVariant: false },
+      selectorHints: { titleSelector: 'h1.product-title' },
+      observedFields: { product_name: 'ACME Cat Food 5lb' },
+    };
+
+    const context = {
+      runId: 'run-adapter-1',
+      workspaceId: 'workspace-adapter',
+      workspacePath: '/tmp/test',
+      seq: 1,
+      policy: {
+        configId: 'policy-adapter',
+        deadlineMs: 30_000,
+        maxToolCalls: 10,
+        maxCostUsd: 1.0,
+      } as any,
+    };
+
+    // 1. Repair timestamp A -> claims target v2 and emits proposal v2
+    const resA = await specialist.execute(
+      {
+        schemaVersion: 1,
+        domain: 'adapter.example',
+        repairOf: {
+          profileId: 'prof-a',
+          version: '2026-08-19T01:00:00.000Z',
+          sourceProfileVersion: '2026-08-19T01:00:00.000Z',
+          targetVersion: 2,
+        },
+        samples: [sample1, sample2],
+        requiredFields: ['titleSelector'],
+      },
+      context,
+    );
+
+    expect(resA.outcome).toBe('succeeded');
+    if (resA.outcome !== 'succeeded' || !resA.output) throw new Error('expected proposal A');
+    expect((resA.output as any).payload.proposedVersion).toBe(2);
+
+    // 2. Timestamp A fails again -> adapter returns already completed -> specialist abstains
+    const resA2 = await specialist.execute(
+      {
+        schemaVersion: 1,
+        domain: 'adapter.example',
+        repairOf: {
+          profileId: 'prof-a',
+          version: '2026-08-19T01:00:00.000Z',
+          sourceProfileVersion: '2026-08-19T01:00:00.000Z',
+          targetVersion: 2,
+        },
+        samples: [sample1, sample2],
+        requiredFields: ['titleSelector'],
+      },
+      { ...context, runId: 'run-adapter-2' },
+    );
+    expect(resA2.outcome).toBe('abstained');
+    if (resA2.outcome === 'abstained') {
+      expect(resA2.abstention?.reason).toBe('domain_workflow_already_completed');
+    }
+
+    // 3. Timestamp B (new failure need) -> adapter claims v3 -> proposal generation is dynamically aligned to v3!
+    const resB = await specialist.execute(
+      {
+        schemaVersion: 1,
+        domain: 'adapter.example',
+        repairOf: {
+          profileId: 'prof-b',
+          version: '2026-08-19T04:00:00.000Z',
+          sourceProfileVersion: '2026-08-19T04:00:00.000Z',
+          targetVersion: 2,
+        },
+        samples: [sample1, sample2],
+        requiredFields: ['titleSelector'],
+      },
+      { ...context, runId: 'run-adapter-3' },
+    );
+
+    expect(resB.outcome).toBe('succeeded');
+    if (resB.outcome !== 'succeeded' || !resB.output) throw new Error('expected proposal B');
+    expect((resB.output as any).payload.proposedVersion).toBe(3); // Accurately bumped to v3 through adapter!
   });
 });
