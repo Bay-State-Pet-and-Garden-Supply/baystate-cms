@@ -955,7 +955,6 @@ describe('Specialist Orchestrator (#56)', () => {
           return {
             candidates: [
               createDiscoveryCandidate('https://acme.example/p1'),
-              createDiscoveryCandidate('https://acme.example/p2'),
             ],
           };
         },
@@ -1030,15 +1029,28 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.workflowState.usage.totalToolCalls).toBe(5);
   });
 
-  it('halts with budget_exceeded and blocks non-cooperative specialist before execution when planned cost exceeds budget', async () => {
-    let verifierExecuted = false;
+  it('halts with budget_exceeded and blocks expensive provider callback at the spend gateway boundary even without declared plannedCost', async () => {
+    let expensiveProviderCallExecuted = false;
     const mockVerifierOverBudget = {
-      plannedCostUsd: 5.00,
-      plannedModelCalls: 5,
-      execute: async (): Promise<SpecialistResult> => {
-        // Deliberately non-cooperative specialist: does NOT voluntarily check runtimeAllowance.
-        // Orchestrator-owned broker pre-spend reservation MUST block this callback from ever running.
-        verifierExecuted = true;
+      // Deliberately omits plannedCostUsd and plannedModelCalls!
+      execute: async (_input: unknown, ctx: SpecialistContext): Promise<SpecialistResult> => {
+        try {
+          await ctx.spendGateway?.executeWithSpend({ costUsd: 5.00, modelCalls: 1 }, async () => {
+            expensiveProviderCallExecuted = true;
+          });
+        } catch {
+          return {
+            specialist: 'verifier',
+            outcome: 'abstained',
+            abstention: {
+              reason: 'cost_budget_ceiling_exceeded',
+              actionableNextStep: 'Increase maxCostUsd policy budget.',
+              targets: [],
+            },
+            durationMs: 0,
+            usage: { toolCalls: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
+          };
+        }
         return {
           specialist: 'verifier',
           outcome: 'succeeded',
@@ -1064,7 +1076,7 @@ describe('Specialist Orchestrator (#56)', () => {
             },
             contentHash: sha256Hex('ver-pass'),
           },
-          usage: { toolCalls: 0, modelCalls: 5, inputTokens: 5000, outputTokens: 2000, estimatedCostUsd: 5.00 },
+          usage: { toolCalls: 0, modelCalls: 1, inputTokens: 1000, outputTokens: 500, estimatedCostUsd: 5.00 },
           durationMs: 10,
         };
       },
@@ -1097,9 +1109,175 @@ describe('Specialist Orchestrator (#56)', () => {
       },
     );
 
-    expect(verifierExecuted).toBe(false);
+    expect(expensiveProviderCallExecuted).toBe(false);
     expect(result.status).toBe('budget_exceeded');
     expect(result.workflowState.status).toBe('budget_exceeded');
+  });
+
+  it('rejects unreserved overspend on broker commit when a specialist exceeds its handle reservation', async () => {
+    const mockVerifierUnreservedSpend = {
+      execute: async (): Promise<SpecialistResult> => {
+        // Specialist ignores spend gateway and returns $5.00 spend on a $0.05 handle reservation
+        return {
+          specialist: 'verifier',
+          outcome: 'succeeded',
+          output: {
+            artifactType: 'verification_report',
+            schemaVersion: '1.0.0',
+            payload: {
+              verdict: 'pass',
+              score: 0.95,
+              identityStatus: 'verified',
+              identityDecision: 'pass',
+              dataScore: 0.95,
+              checks: [],
+            },
+            lineage: { inputArtifactIds: [], parentArtifactIds: [] },
+            provenance: {
+              specialist: 'verifier',
+              specialistVersion: '1.0.0',
+              codeCommit: 'commit-56',
+              invokedBy: 'orchestrator',
+              durationMs: 10,
+              createdAt: FIXED_NOW,
+            },
+            contentHash: sha256Hex('ver-pass'),
+          },
+          usage: { toolCalls: 0, modelCalls: 5, inputTokens: 5000, outputTokens: 2000, estimatedCostUsd: 5.00 }, // Violates handle reservation
+          durationMs: 10,
+        };
+      },
+    } as any;
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({ candidates: [createDiscoveryCandidate()] }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        verifier: mockVerifierUnreservedSpend,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(
+      sampleSeed,
+      sampleClassificationContext,
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({
+          configId: 'cost-policy-lenient',
+          maxCostUsd: 10.00, // Policy ceiling has enough room, but handle reservation was $0.05
+        }),
+      },
+    );
+
+    expect(result.status).toBe('budget_exceeded');
+    expect(result.workflowState.status).toBe('budget_exceeded');
+    expect(result.error).toContain('Unreserved spend violation');
+  });
+
+  it('enforces orchestrator-owned domain lease on injected lockless ProfileEngineer specialist', async () => {
+    let lockClaimed = false;
+    let lockCompleted = false;
+
+    const customLock: ProfileEngineerWorkflowLock = {
+      claim: () => {
+        lockClaimed = true;
+        return { acquired: true, workflowId: 'wf:lock-injected:run-1', targetVersion: 2 };
+      },
+      complete: () => {
+        lockCompleted = true;
+        return { applied: true };
+      },
+    };
+
+    // Specialist has NO workflow lock attached (lockless specialist!)
+    const locklessSpecialist = new ProfileEngineerSpecialist({});
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({
+              candidates: [
+                createDiscoveryCandidate('https://brand.example/p1'),
+                createDiscoveryCandidate('https://brand.example/p2'),
+              ],
+            }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        profileEngineer: locklessSpecialist,
+        profileEngineerWorkflowLock: customLock,
+        extractionRunner: async (url) => ({
+          ...createMockExtractionBundle(url),
+          failures: [{ code: 'profile_failed', stage: 'profile_selector', message: 'Stale profile', retryable: false }],
+          profile: { id: 'prof-stale', version: 1, runtime: 'rendered' },
+        }),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+
+    expect(lockClaimed).toBe(true);
+    expect(lockCompleted).toBe(true);
+    expect(result.profileOutput).toBeDefined();
+    expect(result.profileOutput?.proposedVersion).toBe(2);
+  });
+
+  it('enforces max Profile Engineer attempts per (domain, version) need (#56)', async () => {
+    let profileSynthesizerCalls = 0;
+    const mockProfileSpecialist = {
+      execute: async (): Promise<SpecialistResult> => {
+        profileSynthesizerCalls += 1;
+        return {
+          specialist: 'profile_engineer',
+          outcome: 'failed',
+          failure: { code: 'unknown', message: 'Failed proposal synthesis' },
+          durationMs: 10,
+        };
+      },
+    } as any;
+
+    const orchestrator = new SpecialistOrchestrator({
+      limits: {
+        maxProfileAttemptsPerDomainVersion: 1, // Only 1 attempt per domain/version need
+      },
+      dependencies: {
+        discovery: new DiscoverySpecialist(
+          {
+            search: async () => ({
+              candidates: [
+                createDiscoveryCandidate('https://brand.example/p1'),
+                createDiscoveryCandidate('https://brand.example/p2'),
+              ],
+            }),
+            extraction: mockExtractionSeam,
+          },
+          { codeCommit: 'commit-56' },
+        ),
+        profileEngineer: mockProfileSpecialist,
+        extractionRunner: async (url) => ({
+          ...createMockExtractionBundle(url),
+          failures: [{ code: 'profile_failed', stage: 'profile_selector', message: 'Stale profile', retryable: false }],
+          profile: { id: 'prof-stale', version: 1, runtime: 'rendered' },
+        }),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+
+    // Only 1 attempt was made for brand.example:2
+    expect(profileSynthesizerCalls).toBe(1);
+    expect(result.status).toBe('needs_review');
   });
 
   it('blocks specialist execution before dispatch when remaining budget is exhausted', async () => {

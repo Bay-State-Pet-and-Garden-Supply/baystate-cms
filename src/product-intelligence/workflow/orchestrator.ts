@@ -85,9 +85,10 @@ import type {
   ExtractionProfileBinding,
   ExtractionObservation,
 } from '../extraction/evidence';
-import type { SpecialistContext, SpecialistResult, SpecialistUsage, SpecialistRuntimeAllowance } from '../specialists/contracts';
+import type { SpecialistContext, SpecialistResult, SpecialistUsage, SpecialistRuntimeAllowance, SpecialistSpendGateway } from '../specialists/contracts';
 import {
   captureSpecialistCodeCommit,
+  serializeSpecialistArtifact,
   type SpecialistArtifactEnvelope,
 } from '../specialists/artifacts';
 
@@ -118,6 +119,7 @@ export interface CapabilityLimits {
   maxDiscoveryInvocations: number;
   maxExtractionInvocations: number;
   maxProfileInvocations: number;
+  maxProfileAttemptsPerDomainVersion: number;
   maxResolverInvocations: number;
   maxCuratorInvocations: number;
   maxVerifierInvocations: number;
@@ -129,6 +131,7 @@ export const DEFAULT_CAPABILITY_LIMITS: CapabilityLimits = {
   maxDiscoveryInvocations: 2,
   maxExtractionInvocations: 12,
   maxProfileInvocations: 4,
+  maxProfileAttemptsPerDomainVersion: 2,
   maxResolverInvocations: 4,
   maxCuratorInvocations: 4,
   maxVerifierInvocations: 4,
@@ -275,6 +278,7 @@ export class InMemoryWorkflowPersistenceRepository implements SpecialistWorkflow
 
 export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock {
   private readonly activeLocks = new Set<string>();
+  private readonly activeClaims = new Map<string, { domain: string; targetVersion: number; sourceProfileVersion: string | null }>();
   private readonly completedRecords = new Map<string, { targetVersion: number; sourceProfileVersion: string | null }>();
 
   public claim(
@@ -305,36 +309,46 @@ export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock 
         };
       }
       const newTargetVersion = isDifferentSource ? Math.max(targetVersion, existing.targetVersion + 1) : targetVersion;
+      const workflowId = `wf:${domain}:${runId}`;
       this.activeLocks.add(domain);
+      this.activeClaims.set(workflowId, { domain, targetVersion: newTargetVersion, sourceProfileVersion });
       return {
         acquired: true,
-        workflowId: `wf:${domain}:${runId}`,
+        workflowId,
         targetVersion: newTargetVersion,
         workflow: { targetVersion: newTargetVersion, sourceProfileVersion },
       };
     }
 
+    const workflowId = `wf:${domain}:${runId}`;
     this.activeLocks.add(domain);
+    this.activeClaims.set(workflowId, { domain, targetVersion, sourceProfileVersion });
     return {
       acquired: true,
-      workflowId: `wf:${domain}:${runId}`,
+      workflowId,
       targetVersion,
       workflow: { targetVersion, sourceProfileVersion },
     };
   }
 
   public complete(workflowId: string, _runId: string): { applied: boolean } {
-    const domain = workflowId.split(':')[1];
-    if (domain) {
-      this.activeLocks.delete(domain);
+    const claim = this.activeClaims.get(workflowId);
+    const domain = claim ? claim.domain : workflowId.split(':')[1];
+    if (claim) {
+      this.completedRecords.set(claim.domain, { targetVersion: claim.targetVersion, sourceProfileVersion: claim.sourceProfileVersion });
+      this.activeClaims.delete(workflowId);
+    } else if (domain) {
       const prev = this.completedRecords.get(domain)?.targetVersion ?? 1;
       this.completedRecords.set(domain, { targetVersion: prev, sourceProfileVersion: null });
     }
+    if (domain) this.activeLocks.delete(domain);
     return { applied: true };
   }
 
   public fail(workflowId: string, _runId: string, _reason: string): { applied: boolean } {
-    const domain = workflowId.split(':')[1];
+    const claim = this.activeClaims.get(workflowId);
+    const domain = claim ? claim.domain : workflowId.split(':')[1];
+    if (claim) this.activeClaims.delete(workflowId);
     if (domain) this.activeLocks.delete(domain);
     return { applied: true };
   }
@@ -433,7 +447,7 @@ export class WorkflowBudgetBroker {
     };
   }
 
-  private getReservedTotals() {
+  private getReservedTotals(excludeHandleId?: string): Omit<BudgetReservationHandle, 'id' | 'specialist'> {
     let toolCalls = 0;
     let modelCalls = 0;
     let inputTokens = 0;
@@ -441,16 +455,17 @@ export class WorkflowBudgetBroker {
     let costUsd = 0;
     let dispatches = 0;
 
-    for (const h of this.activeReservations.values()) {
-      toolCalls += h.toolCalls;
-      modelCalls += h.modelCalls;
-      inputTokens += h.inputTokens;
-      outputTokens += h.outputTokens;
-      costUsd += h.costUsd;
-      dispatches += h.dispatches;
+    for (const res of this.activeReservations.values()) {
+      if (excludeHandleId && res.id === excludeHandleId) continue;
+      toolCalls += res.toolCalls;
+      modelCalls += res.modelCalls;
+      inputTokens += res.inputTokens;
+      outputTokens += res.outputTokens;
+      costUsd += res.costUsd;
+      dispatches += res.dispatches;
     }
 
-    return { toolCalls, modelCalls, inputTokens, outputTokens, costUsd, dispatches };
+    return { toolCalls, modelCalls, inputTokens, outputTokens, costUsd: Number(costUsd.toFixed(4)), dispatches };
   }
 
   public getRemainingToolCalls(): number {
@@ -480,18 +495,49 @@ export class WorkflowBudgetBroker {
     return Math.max(0, Number((this.maxCostUsd - committedAndReserved).toFixed(4)));
   }
 
-  public getRuntimeAllowance(): SpecialistRuntimeAllowance {
+  public getRuntimeAllowance(handle?: BudgetReservationHandle): SpecialistRuntimeAllowance {
+    const reservedOther = this.getReservedTotals(handle?.id);
+    const remainingToolCalls = Math.max(
+      0,
+      handle ? handle.toolCalls : this.maxToolCalls - (this.usage.totalToolCalls + reservedOther.toolCalls),
+    );
+    const remainingModelCalls = Math.max(
+      0,
+      handle ? handle.modelCalls : this.maxModelCalls - (this.usage.totalModelCalls + reservedOther.modelCalls),
+    );
+    const remainingInputTokens = Math.max(
+      0,
+      handle ? handle.inputTokens : this.maxInputTokens - (this.usage.totalInputTokens + reservedOther.inputTokens),
+    );
+    const remainingOutputTokens = Math.max(
+      0,
+      handle ? handle.outputTokens : this.maxOutputTokens - (this.usage.totalOutputTokens + reservedOther.outputTokens),
+    );
+    const remainingCostUsd = Number.isFinite(this.maxCostUsd)
+      ? Math.max(
+          0,
+          handle && handle.costUsd > 0
+            ? handle.costUsd
+            : Number((this.maxCostUsd - (this.usage.estimatedCostUsd + reservedOther.costUsd)).toFixed(4)),
+        )
+      : undefined;
+
     return {
-      remainingToolCalls: this.getRemainingToolCalls(),
-      remainingModelCalls: this.getRemainingModelCalls(),
-      remainingInputTokens: this.getRemainingInputTokens(),
-      remainingOutputTokens: this.getRemainingOutputTokens(),
-      remainingCostUsd: Number.isFinite(this.maxCostUsd) ? this.getRemainingCostUsd() : undefined,
+      remainingToolCalls,
+      remainingModelCalls,
+      remainingInputTokens,
+      remainingOutputTokens,
+      remainingCostUsd,
       deadlineAt: this.deadlineAt,
     };
   }
 
+  private unreservedOverspend?: { specialist: string; reason: string };
+
   public isOverBudget(): { exceeded: boolean; reason?: string } {
+    if (this.unreservedOverspend) {
+      return { exceeded: true, reason: this.unreservedOverspend.reason };
+    }
     if (this.deadlineAt && Date.now() > this.deadlineAt) {
       return { exceeded: true, reason: 'Execution deadline exceeded' };
     }
@@ -517,6 +563,33 @@ export class WorkflowBudgetBroker {
       return { exceeded: true, reason: `Cost budget ceiling ($${this.maxCostUsd}) exceeded` };
     }
     return { exceeded: false };
+  }
+
+  public createSpendGateway(handle: BudgetReservationHandle): SpecialistSpendGateway {
+    return {
+      canSpend: (requested: { toolCalls?: number; modelCalls?: number; inputTokens?: number; outputTokens?: number; costUsd?: number }) => {
+        if (this.deadlineAt && Date.now() > this.deadlineAt) return false;
+        const cost = requested.costUsd ?? 0;
+        const models = requested.modelCalls ?? 0;
+        const tools = requested.toolCalls ?? 0;
+        const inTokens = requested.inputTokens ?? 0;
+        const outTokens = requested.outputTokens ?? 0;
+
+        if (this.getRemainingCostUsd() < cost) return false;
+        if (this.getRemainingModelCalls() < models) return false;
+        if (this.getRemainingToolCalls() < tools) return false;
+        if (this.getRemainingInputTokens() < inTokens) return false;
+        if (this.getRemainingOutputTokens() < outTokens) return false;
+        return true;
+      },
+      executeWithSpend: async <T>(spend: { toolCalls?: number; modelCalls?: number; inputTokens?: number; outputTokens?: number; costUsd?: number }, action: () => Promise<T> | T): Promise<T> => {
+        const allowed = this.createSpendGateway(handle).canSpend(spend);
+        if (!allowed) {
+          throw new Error(`Spend gateway rejected execution: budget ceiling exceeded for requested spend (cost: $${spend.costUsd ?? 0}, models: ${spend.modelCalls ?? 0})`);
+        }
+        return await action();
+      },
+    };
   }
 
   public reserve(
@@ -601,6 +674,19 @@ export class WorkflowBudgetBroker {
     this.usage.totalDispatches += handle.dispatches;
 
     if (actualUsage) {
+      const costExceeded = actualUsage.estimatedCostUsd > handle.costUsd + 0.0001;
+      const modelCallsExceeded = actualUsage.modelCalls > handle.modelCalls;
+      const toolCallsExceeded = actualUsage.toolCalls > handle.toolCalls;
+      const inputTokensExceeded = actualUsage.inputTokens > handle.inputTokens;
+      const outputTokensExceeded = actualUsage.outputTokens > handle.outputTokens;
+
+      if (costExceeded || modelCallsExceeded || toolCallsExceeded || inputTokensExceeded || outputTokensExceeded) {
+        this.unreservedOverspend = {
+          specialist,
+          reason: `Unreserved spend violation: specialist '${specialist}' attempted to commit spend exceeding reservation (cost: $${actualUsage.estimatedCostUsd} vs reserved $${handle.costUsd}, models: ${actualUsage.modelCalls} vs reserved ${handle.modelCalls}, tools: ${actualUsage.toolCalls} vs reserved ${handle.toolCalls})`,
+        };
+      }
+
       entry.toolCalls += actualUsage.toolCalls;
       entry.modelCalls += actualUsage.modelCalls;
       entry.inputTokens += actualUsage.inputTokens;
@@ -904,10 +990,13 @@ export class SpecialistOrchestrator {
 
     let targetPhase: 'discovery' | 'extraction' | 'resolver' | 'curator' | 'verifier' = 'discovery';
 
-    const getDynamicSpecialistContext = (): SpecialistContext => {
+    const profileAttemptsByDomainVersion = new Map<string, number>();
+
+    const getDynamicSpecialistContext = (reservationHandle?: BudgetReservationHandle): SpecialistContext => {
       return {
         ...context,
-        runtimeAllowance: budgetBroker.getRuntimeAllowance(),
+        runtimeAllowance: budgetBroker.getRuntimeAllowance(reservationHandle),
+        spendGateway: reservationHandle ? budgetBroker.createSpendGateway(reservationHandle) : undefined,
         deadlineAt: budgetBroker.deadlineAt ?? undefined,
       };
     };
@@ -959,7 +1048,9 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const reservation = budgetBroker.reserve('discovery', { dispatches: 1, toolCalls: 1, costUsd: 0.005 });
+          const discTools = (discovery as any).plannedToolCalls ?? Math.min(5, Math.max(1, budgetBroker.getRemainingToolCalls()));
+          const discCost = (discovery as any).plannedCostUsd ?? Math.min(0.05, Math.max(0.005, budgetBroker.getRemainingCostUsd()));
+          const reservation = budgetBroker.reserve('discovery', { dispatches: 1, toolCalls: discTools, costUsd: discCost });
           if (!reservation.allowed) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, reservation.reason);
             const state = await persistState('budget_exceeded', 'discovery', reservation.reason);
@@ -978,14 +1069,14 @@ export class SpecialistOrchestrator {
           }
 
           invocations.discovery += 1;
-          const invocationId = `inv:discovery:${invocations.discovery}`;
-          capabilityInvocationIds.discovery.push(invocationId);
+          const discInvId = `inv:discovery:${invocations.discovery}`;
+          capabilityInvocationIds.discovery.push(discInvId);
 
           const stepStart = Date.now();
           recordEvent('discovery', 'discover_candidates', 'started', 0);
           await persistState('in_progress', 'discovery');
 
-          const discContext = getDynamicSpecialistContext();
+          const discContext = getDynamicSpecialistContext(reservation.handle);
           const discResult: SpecialistResult = await discovery.execute(
             {
               schemaVersion: 1,
@@ -1012,7 +1103,7 @@ export class SpecialistOrchestrator {
               retriesCount,
               totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
-              extractionBundles,
+              extractionBundles: [],
               workflowState: state,
               error: discBudgetOver.reason,
             };
@@ -1020,17 +1111,17 @@ export class SpecialistOrchestrator {
 
           if (discResult.outcome !== 'succeeded' || !discResult.output) {
             if (discResult.outcome === 'abstained') {
-              recordEvent('discovery', 'discover_candidates', 'succeeded', discDuration, 'Discovery abstained (no candidates)');
-              const state = await persistState('abstained', 'discovery');
+              recordEvent('discovery', 'discover_candidates', 'succeeded', discDuration, discResult.abstention?.reason ?? 'Discovery abstained (no candidates)');
+              const state = await persistState('abstained', 'discovery', discResult.abstention?.reason);
               return {
                 runId: context.runId,
                 status: 'abstained',
                 productSeed,
-                extractionBundles,
                 events,
                 retriesCount,
                 totalDispatches: budgetBroker.usage.totalDispatches,
                 totalDurationMs: Date.now() - startedAt,
+                extractionBundles: [],
                 workflowState: state,
               };
             }
@@ -1040,11 +1131,11 @@ export class SpecialistOrchestrator {
               runId: context.runId,
               status: 'failed',
               productSeed,
-              extractionBundles,
               events,
               retriesCount,
               totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
+              extractionBundles: [],
               workflowState: state,
               error: discResult.failure?.message ?? 'Discovery failed',
             };
@@ -1077,7 +1168,7 @@ export class SpecialistOrchestrator {
             'discover_candidates',
             'succeeded',
             discDuration,
-            `Found ${discoveryOutput.candidates.length} candidates`,
+            `Found ${discoveryOutput.candidates.length} candidate(s)`,
           );
 
           routeRecords.push({
@@ -1104,9 +1195,9 @@ export class SpecialistOrchestrator {
 
           const trustedCandidateGtin = (() => {
             const trusted = candidates.find(
-              (c) => (c.pageKind === 'exact_pdp' || c.pageKind === 'probable_pdp') &&
-                c.extracted.identifiers.some((i) => i.kind === 'gtin' && Boolean(i.sourceArtifactId) && i.evidenceIds.length > 0),
-            )?.extracted.identifiers.find((i) => i.kind === 'gtin')?.value ?? null;
+              (c: any) => (c.pageKind === 'exact_pdp' || c.pageKind === 'probable_pdp') &&
+                c.extracted?.identifiers?.some((i: any) => i.kind === 'gtin' && Boolean(i.sourceArtifactId) && (i.evidenceIds?.length ?? 0) > 0),
+            )?.extracted?.identifiers?.find((i: any) => i.kind === 'gtin')?.value ?? null;
             if (!trusted) return null;
             const d = extractDigits(trusted);
             if (d.length === 14 && canonicalIdentifier.scope !== 'case') {
@@ -1117,12 +1208,25 @@ export class SpecialistOrchestrator {
 
           const effectiveExtractionGtin = canonicalIdentifier.gtin ?? trustedCandidateGtin ?? null;
 
-          let requiresProfileHold = false;
-          let profileHoldReason = 'Holding workflow for manual review and activation of proposed profile in Profile Builder';
-          const synthesizedDomainsInPhase = new Set<string>();
-          const bundlesByUrl = new Map<string, ExtractionEvidenceBundle>();
+          if (candidateUrls.length === 0) {
+            recordEvent('extraction_runner', 'extract_evidence', 'skipped', 0, 'No candidate URLs to extract');
+            const state = await persistState('abstained', 'extraction', 'No candidates to extract');
+            return {
+              runId: context.runId,
+              status: 'abstained',
+              productSeed,
+              discoveryOutput,
+              discoveryArtifact,
+              extractionBundles: [],
+              events,
+              retriesCount,
+              totalDispatches: budgetBroker.usage.totalDispatches,
+              totalDurationMs: Date.now() - startedAt,
+              workflowState: state,
+            };
+          }
 
-          if (candidateUrls.length > 0 && budgetBroker.getRemainingToolCalls() <= 0) {
+          if (budgetBroker.getRemainingToolCalls() <= 0) {
             recordEvent('orchestrator', 'budget_check', 'failed', 0, 'Tool call budget ceiling reached before extraction');
             const state = await persistState('budget_exceeded', 'extraction', 'Tool call budget ceiling reached');
             return {
@@ -1141,7 +1245,11 @@ export class SpecialistOrchestrator {
             };
           }
 
-          // Bounded parallel extraction with per-worker relative deadline calculation
+          let requiresProfileHold = false;
+          let profileHoldReason = 'Holding workflow for manual review and activation of proposed profile in Profile Builder';
+          const synthesizedDomainsInPhase = new Set<string>();
+          const bundlesByUrl = new Map<string, ExtractionEvidenceBundle>();
+
           extractionBundles = await boundedMap(
             candidateUrls,
             this.extractionConcurrency,
@@ -1192,17 +1300,29 @@ export class SpecialistOrchestrator {
               invocations.extraction += 1;
               capabilityInvocationIds.extraction.push(`inv:extraction:${invocations.extraction}`);
 
-              // Calculate fresh relative deadline immediately before worker execution
               const workerNow = Date.now();
               const workerTimeoutMs = budgetBroker.deadlineAt
                 ? Math.max(1, budgetBroker.deadlineAt - workerNow)
-                : (context.policy.deadlineMs ?? 30_000);
+                : (context.policy.deadlineMs ?? 30000);
+
+              const workerDynContext = getDynamicSpecialistContext(workerReservation.handle);
+              const workerContext: SpecialistContext = {
+                ...workerDynContext,
+                policy: {
+                  ...workerDynContext.policy,
+                  deadlineMs: workerTimeoutMs,
+                },
+                runtimeAllowance: {
+                  ...workerDynContext.runtimeAllowance!,
+                  deadlineAt: Date.now() + workerTimeoutMs,
+                },
+              };
+
+              const candidate = candidates.find((c: any) => ((c as any).finalUrl ?? (c as any).source?.url ?? (c as any).url) === url);
 
               let bundle: ExtractionEvidenceBundle;
-              const workerDynContext = getDynamicSpecialistContext();
-
               if (this.dependencies.extractionRunner) {
-                bundle = await this.dependencies.extractionRunner(url, workerDynContext, null);
+                bundle = await this.dependencies.extractionRunner(url, workerContext, (candidate as any)?.profile ?? null);
               } else {
                 const { bundle: detBundle } = await runDeterministicExtraction(
                   {
@@ -1256,40 +1376,54 @@ export class SpecialistOrchestrator {
             };
           }
 
-          // Profile synthesis check
           for (const bundle of extractionBundles) {
             const url = bundle.finalUrl ?? bundle.requestedUrl;
-            const domain = (() => {
-              try { return new URL(url).hostname; } catch { return 'unknown'; }
-            })();
+            const domain = (() => { try { return new URL(url).hostname; } catch { return 'unknown'; } })();
 
             const needsProfile = bundle.failures.some((f) => f.code === 'profile_failed' || f.code === 'profile_missing');
             if (needsProfile && !synthesizedDomainsInPhase.has(domain) && invocations.profile < this.limits.maxProfileInvocations) {
               synthesizedDomainsInPhase.add(domain);
 
+              const failedProfile = bundle.failures.some((f) => f.code === 'profile_failed') && bundle.profile
+                ? {
+                  profileId: bundle.profile.id,
+                  targetVersion: typeof bundle.profile.version === 'number' ? bundle.profile.version + 1 : 2,
+                  version: bundle.profile.version,
+                  sourceProfileVersion: bundle.profile.version != null ? String(bundle.profile.version) : null,
+                  runtime: bundle.profile.runtime ?? 'rendered',
+                }
+                : null;
+
+              const domainKey = `${domain}:${failedProfile?.sourceProfileVersion ?? failedProfile?.targetVersion ?? 1}`;
+              const domainAttempts = profileAttemptsByDomainVersion.get(domainKey) ?? 0;
+              if (domainAttempts >= this.limits.maxProfileAttemptsPerDomainVersion) {
+                recordEvent('orchestrator', 'budget_check', 'failed', 0, `Profile Engineer attempt limit reached for domain ${domain}`);
+                requiresProfileHold = true;
+                profileHoldReason = `Profile Engineer attempt limit reached for domain ${domain}`;
+                continue;
+              }
+              profileAttemptsByDomainVersion.set(domainKey, domainAttempts + 1);
+
               const domainCandidates = candidates.filter((c: any) => {
                 try {
                   const cUrl = c.finalUrl ?? c.source?.url ?? c.url;
                   return typeof cUrl === 'string' && new URL(cUrl).hostname === domain;
-                } catch {
-                  return false;
-                }
+                } catch { return false; }
               });
 
               if (domainCandidates.length >= 2) {
-                const sample1 = domainCandidates[0];
-                const sample2 = domainCandidates[1];
+                const [sample1, sample2] = domainCandidates;
                 const sample1Url = (sample1 as any).finalUrl ?? (sample1 as any).source?.url ?? (sample1 as any).url;
                 const sample2Url = (sample2 as any).finalUrl ?? (sample2 as any).source?.url ?? (sample2 as any).url;
 
-                const bundle1 = bundlesByUrl.get(sample1Url) ?? (sample1.source?.url ? bundlesByUrl.get(sample1.source.url) : undefined);
-                const bundle2 = bundlesByUrl.get(sample2Url) ?? (sample2.source?.url ? bundlesByUrl.get(sample2.source.url) : undefined);
+                const bundle1 = bundlesByUrl.get(sample1Url) ?? ((sample1 as any).source?.url ? bundlesByUrl.get((sample1 as any).source.url) : undefined);
+                const bundle2 = bundlesByUrl.get(sample2Url) ?? ((sample2 as any).source?.url ? bundlesByUrl.get((sample2 as any).source.url) : undefined);
 
-                const sample1Artifacts = [...new Set(sample1.extracted.identifiers
+                const sample1Artifacts = [...new Set(((sample1 as any).extracted?.identifiers ?? [])
                   .map((i: any) => i.sourceArtifactId)
                   .concat(bundle1?.artifactRefs ?? [])
                   .filter((id: any) => Boolean(id)))];
-                const sample2Artifacts = [...new Set(sample2.extracted.identifiers
+                const sample2Artifacts = [...new Set(((sample2 as any).extracted?.identifiers ?? [])
                   .map((i: any) => i.sourceArtifactId)
                   .concat(bundle2?.artifactRefs ?? [])
                   .filter((id: any) => Boolean(id)))];
@@ -1302,72 +1436,76 @@ export class SpecialistOrchestrator {
                 const hasRealEvidence = sample1Artifacts.length > 0 && sample2Artifacts.length > 0;
 
                 if (hasRealEvidence) {
-                  const profReservation = budgetBroker.reserve('profile_engineer', { dispatches: 1, costUsd: 0.001 });
+                  const profReservation = budgetBroker.reserve('profile_engineer', {
+                    dispatches: 1,
+                    modelCalls: 1,
+                    inputTokens: 4000,
+                    outputTokens: 1000,
+                    costUsd: 0.05,
+                  });
                   if (profReservation.allowed) {
                     invocations.profile += 1;
-                    const profInvId = `inv:profile_engineer:${invocations.profile}`;
-                    capabilityInvocationIds.profile_engineer.push(profInvId);
-
-                    routeRecords.push({
-                      fromPhase: 'extraction',
-                      toPhase: 'profile_engineer',
-                      reason: `Synthesizing profile proposal for domain: ${domain}`,
-                      timestamp: this.now(),
-                    });
+                    capabilityInvocationIds.profile_engineer.push(`inv:profile_engineer:${invocations.profile}`);
+                    
+                    routeRecords.push({ fromPhase: 'extraction', toPhase: 'profile_engineer', reason: `Synthesizing profile proposal for domain: ${domain}`, timestamp: this.now() });
                     await persistState('in_progress', 'profile_engineer_synthesis');
-
                     recordEvent('profile_engineer', 'synthesize_profile', 'started', 0, `Synthesizing profile proposal for domain: ${domain}`);
 
+                    // Orchestrator-owned domain lease claim
+                    const claimOptions: ClaimProfileLockOptions = failedProfile
+                      ? { needsRepair: true, targetVersion: failedProfile.targetVersion, sourceProfileVersion: failedProfile.sourceProfileVersion }
+                      : { targetVersion: 1, sourceProfileVersion: null };
+                    const lock = await effectiveProfileLock.claim(domain, context.runId, context.workspaceId, claimOptions);
+
+                    if (!lock.acquired) {
+                      budgetBroker.commit(profReservation.handle!, null, 0);
+                      requiresProfileHold = true;
+                      profileHoldReason = `Profile synthesis for ${domain} held: ${lock.reason ?? 'domain_workflow_already_running'}`;
+                      recordEvent('profile_engineer', 'synthesize_profile', 'skipped', 0, profileHoldReason);
+                      continue;
+                    }
+
                     const sample1Obs: Record<string, string> = {};
-                    if (sample1.extracted.brand) sample1Obs.brand = sample1.extracted.brand;
-                    if (sample1.extracted.productName) sample1Obs.product_name = sample1.extracted.productName;
-                    if (sample1.extracted.size) sample1Obs.size = sample1.extracted.size;
-                    if (sample1.extracted.sku) sample1Obs.sku = sample1.extracted.sku;
-                    if (sample1.extracted.gtins.length > 0) sample1Obs.gtin = sample1.extracted.gtins[0];
+                    if ((sample1 as any).extracted?.brand) sample1Obs.brand = (sample1 as any).extracted.brand;
+                    if ((sample1 as any).extracted?.productName) sample1Obs.product_name = (sample1 as any).extracted.productName;
+                    if ((sample1 as any).extracted?.size) sample1Obs.size = (sample1 as any).extracted.size;
+                    if ((sample1 as any).extracted?.sku) sample1Obs.sku = (sample1 as any).extracted.sku;
+                    if ((sample1 as any).extracted?.gtins?.length > 0) sample1Obs.gtin = (sample1 as any).extracted.gtins[0];
 
                     const sample2Obs: Record<string, string> = {};
-                    if (sample2.extracted.brand) sample2Obs.brand = sample2.extracted.brand;
-                    if (sample2.extracted.productName) sample2Obs.product_name = sample2.extracted.productName;
-                    if (sample2.extracted.size) sample2Obs.size = sample2.extracted.size;
-                    if (sample2.extracted.sku) sample2Obs.sku = sample2.extracted.sku;
-                    if (sample2.extracted.gtins.length > 0) sample2Obs.gtin = sample2.extracted.gtins[0];
+                    if ((sample2 as any).extracted?.brand) sample2Obs.brand = (sample2 as any).extracted.brand;
+                    if ((sample2 as any).extracted?.productName) sample2Obs.product_name = (sample2 as any).extracted.productName;
+                    if ((sample2 as any).extracted?.size) sample2Obs.size = (sample2 as any).extracted.size;
+                    if ((sample2 as any).extracted?.sku) sample2Obs.sku = (sample2 as any).extracted.sku;
+                    if ((sample2 as any).extracted?.gtins?.length > 0) sample2Obs.gtin = (sample2 as any).extracted.gtins[0];
 
                     const sample1Hints: Record<string, string> = {};
                     if (sample1TitleHint) sample1Hints.titleSelector = sample1TitleHint;
                     const sample2Hints: Record<string, string> = {};
                     if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
 
-                    // Distinguish missing profile (v1) from failed/stale active profile (vN+1 repair)
-                    const failedProfile = bundle.failures.some((f) => f.code === 'profile_failed') && bundle.profile
-                      ? {
-                        profileId: bundle.profile.id,
-                        targetVersion: typeof bundle.profile.version === 'number' ? bundle.profile.version + 1 : 2,
-                        version: bundle.profile.version,
-                        sourceProfileVersion: bundle.profile.version != null ? String(bundle.profile.version) : null,
-                        runtime: bundle.profile.runtime ?? 'rendered',
-                      }
-                      : null;
+                    const effectiveTargetVersion = (lock as any)?.workflow?.targetVersion ?? lock.targetVersion ?? failedProfile?.targetVersion ?? 1;
 
-                    const profContext = getDynamicSpecialistContext();
+                    const profContext = getDynamicSpecialistContext(profReservation.handle);
                     const profResult = await profileEngineer.execute(
                       {
                         schemaVersion: 1,
                         domain,
-                        repairOf: failedProfile,
+                        repairOf: failedProfile ? { ...failedProfile, targetVersion: effectiveTargetVersion } : null,
                         samples: [
                           {
                             url: sample1Url,
                             artifactRefs: sample1Artifacts,
-                            expectedName: sample1.extracted.productName ?? productSeed.name,
-                            expectedGtin: sample1.extracted.gtins[0] ?? effectiveExtractionGtin ?? undefined,
+                            expectedName: (sample1 as any).extracted?.productName ?? productSeed.name,
+                            expectedGtin: (sample1 as any).extracted?.gtins?.[0] ?? effectiveExtractionGtin ?? undefined,
                             signals: {
-                              jsonLd: sample1.extracted.identifiers.some((i: any) => i.method === 'json_ld'),
-                              shopify: sample1.signals.some((s: any) => s.value.toLowerCase().includes('shopify')),
-                              woocommerce: sample1.signals.some((s: any) => s.value.toLowerCase().includes('woocommerce')),
+                              jsonLd: (sample1 as any).extracted?.identifiers?.some((i: any) => i.method === 'json_ld') ?? false,
+                              shopify: (sample1 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('shopify')) ?? false,
+                              woocommerce: (sample1 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('woocommerce')) ?? false,
                               embeddedState: false,
                               selectorOnly: false,
                               changedMarkup: false,
-                              wrongVariant: sample1.pageKind === 'wrong_variant',
+                              wrongVariant: (sample1 as any).pageKind === 'wrong_variant',
                             },
                             selectorHints: sample1Hints,
                             observedFields: sample1Obs,
@@ -1375,16 +1513,16 @@ export class SpecialistOrchestrator {
                           {
                             url: sample2Url,
                             artifactRefs: sample2Artifacts,
-                            expectedName: sample2.extracted.productName ?? productSeed.name,
-                            expectedGtin: sample2.extracted.gtins[0] ?? effectiveExtractionGtin ?? undefined,
+                            expectedName: (sample2 as any).extracted?.productName ?? productSeed.name,
+                            expectedGtin: (sample2 as any).extracted?.gtins?.[0] ?? effectiveExtractionGtin ?? undefined,
                             signals: {
-                              jsonLd: sample2.extracted.identifiers.some((i: any) => i.method === 'json_ld'),
-                              shopify: sample2.signals.some((s: any) => s.value.toLowerCase().includes('shopify')),
-                              woocommerce: sample2.signals.some((s: any) => s.value.toLowerCase().includes('woocommerce')),
+                              jsonLd: (sample2 as any).extracted?.identifiers?.some((i: any) => i.method === 'json_ld') ?? false,
+                              shopify: (sample2 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('shopify')) ?? false,
+                              woocommerce: (sample2 as any).signals?.some((s: any) => s.value?.toLowerCase().includes('woocommerce')) ?? false,
                               embeddedState: false,
                               selectorOnly: false,
                               changedMarkup: false,
-                              wrongVariant: sample2.pageKind === 'wrong_variant',
+                              wrongVariant: (sample2 as any).pageKind === 'wrong_variant',
                             },
                             selectorHints: sample2Hints,
                             observedFields: sample2Obs,
@@ -1398,24 +1536,26 @@ export class SpecialistOrchestrator {
                     budgetBroker.commit(profReservation.handle!, profResult.usage, 0);
 
                     if (profResult.outcome === 'succeeded' && profResult.output) {
-                      const profEnv = profResult.output as SpecialistArtifactEnvelope;
+                      const profEnv = Array.isArray(profResult.output) ? profResult.output[0] : (profResult.output as SpecialistArtifactEnvelope);
+                      if (effectiveProfileLock.complete && profEnv) {
+                        await effectiveProfileLock.complete(lock.workflowId, context.runId, serializeSpecialistArtifact(profEnv));
+                      }
                       profileArtifact = profEnv;
-                      profileOutput = profEnv.payload as ProfileEngineerProposal;
-
-                      recordEvent(
-                        'profile_engineer',
-                        'synthesize_profile',
-                        'succeeded',
-                        0,
-                        `Proposed profile for ${domain}; held for manual review/activation`,
-                      );
+                      profileOutput = profEnv?.payload as ProfileEngineerProposal;
+                      recordEvent('profile_engineer', 'synthesize_profile', 'succeeded', 0, `Proposed profile for ${domain}; held for manual review/activation`);
                       requiresProfileHold = true;
                       profileHoldReason = `Profile proposed for domain '${domain}' requiring manual review and activation in Profile Builder`;
                     } else if (profResult.outcome === 'abstained') {
+                      if (effectiveProfileLock.fail) {
+                        await effectiveProfileLock.fail(lock.workflowId, context.runId, profResult.abstention?.reason ?? 'profile_unavailable');
+                      }
                       requiresProfileHold = true;
                       profileHoldReason = `Profile synthesis for ${domain} abstained: ${profResult.abstention?.reason ?? 'profile_unavailable'}`;
                       recordEvent('profile_engineer', 'synthesize_profile', 'skipped', 0, profileHoldReason);
                     } else if (profResult.outcome === 'failed') {
+                      if (effectiveProfileLock.fail) {
+                        await effectiveProfileLock.fail(lock.workflowId, context.runId, profResult.failure?.message ?? 'profile_failed');
+                      }
                       requiresProfileHold = true;
                       profileHoldReason = `Profile synthesis for ${domain} failed: ${profResult.failure?.message ?? 'profile_failed'}`;
                       recordEvent('profile_engineer', 'synthesize_profile', 'failed', 0, profileHoldReason);
@@ -1538,7 +1678,7 @@ export class SpecialistOrchestrator {
           const effectiveResolverGtin = canonicalIdentifier.gtin ?? trustedCandidateGtin ?? null;
           const effectiveResolverScope = canonicalIdentifier.gtin ? canonicalIdentifier.scope : (effectiveResolverGtin && extractDigits(effectiveResolverGtin).length === 14 ? 'case' : 'consumer_unit');
 
-          const resContext = getDynamicSpecialistContext();
+          const resContext = getDynamicSpecialistContext(reservation.handle);
           const resResult: SpecialistResult = await resolver.execute(
             {
               schemaVersion: '1.0.0',
@@ -1640,10 +1780,10 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const curCost = (curator as any).plannedCostUsd ?? 0.005;
-          const curModels = (curator as any).plannedModelCalls ?? 0;
-          const curInTokens = (curator as any).plannedInputTokens ?? 0;
-          const curOutTokens = (curator as any).plannedOutputTokens ?? 0;
+          const curCost = (curator as any).plannedCostUsd ?? 0.05;
+          const curModels = (curator as any).plannedModelCalls ?? 1;
+          const curInTokens = (curator as any).plannedInputTokens ?? 4000;
+          const curOutTokens = (curator as any).plannedOutputTokens ?? 1000;
           const reservation = budgetBroker.reserve('curator', {
             dispatches: 1,
             modelCalls: curModels,
@@ -1699,7 +1839,7 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const curContext = getDynamicSpecialistContext();
+          const curContext = getDynamicSpecialistContext(reservation.handle);
           const curResult: SpecialistResult = await curator.execute(
             {
               schemaVersion: '1.0.0',
@@ -1803,10 +1943,10 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const verCost = (verifier as any).plannedCostUsd ?? 0.005;
-          const verModels = (verifier as any).plannedModelCalls ?? 0;
-          const verInTokens = (verifier as any).plannedInputTokens ?? 0;
-          const verOutTokens = (verifier as any).plannedOutputTokens ?? 0;
+          const verCost = (verifier as any).plannedCostUsd ?? 0.05;
+          const verModels = (verifier as any).plannedModelCalls ?? 1;
+          const verInTokens = (verifier as any).plannedInputTokens ?? 4000;
+          const verOutTokens = (verifier as any).plannedOutputTokens ?? 1000;
           const reservation = budgetBroker.reserve('verifier', {
             dispatches: 1,
             modelCalls: verModels,
@@ -1870,7 +2010,7 @@ export class SpecialistOrchestrator {
             };
           }
 
-          const verContext = getDynamicSpecialistContext();
+          const verContext = getDynamicSpecialistContext(reservation.handle);
           const verResult: SpecialistResult = await verifier.execute(
             {
               schemaVersion: '1.0.0',

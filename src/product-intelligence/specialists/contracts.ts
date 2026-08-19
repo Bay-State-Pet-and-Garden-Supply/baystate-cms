@@ -98,6 +98,26 @@ export interface SpecialistRuntimeAllowance {
   deadlineAt?: number | null;
 }
 
+export interface SpecialistSpendGateway {
+  canSpend(requested: {
+    toolCalls?: number;
+    modelCalls?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    costUsd?: number;
+  }): boolean;
+  executeWithSpend<T>(
+    spend: {
+      toolCalls?: number;
+      modelCalls?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      costUsd?: number;
+    },
+    action: () => Promise<T> | T,
+  ): Promise<T>;
+}
+
 /**
  * The runtime context handed to a specialist by the orchestrator. It reuses
  * the existing Product Intelligence per-run policy snapshot (PI-5) so every
@@ -114,6 +134,8 @@ export interface SpecialistContext {
   seq: number;
   /** Runtime allowance for dynamic broker tracking without mutating policy. */
   runtimeAllowance?: SpecialistRuntimeAllowance;
+  /** Broker-owned spend gateway for provider transports and specialist callbacks. */
+  spendGateway?: SpecialistSpendGateway;
   /** Runtime-only extension: caller cancellation signal (never serialized). */
   signal?: AbortSignal;
   /** Absolute epoch-ms deadline when the orchestrator enforces one. */
