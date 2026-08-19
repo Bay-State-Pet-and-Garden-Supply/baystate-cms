@@ -191,9 +191,6 @@ export async function runDeterministicExtraction(
       artifactId: artifact?.artifactId ?? request.artifactId ?? result.artifactRef,
       retrievedAt: artifact?.retrievedAt ?? now(),
     });
-    // The ladder records selector failures as layer markers rather than
-    // throwing. Promote that marker into a routable bundle failure while
-    // preserving any other accepted observations.
     if (layersUsed.includes('profile_failed')) {
       bundle = {
         ...bundle,
@@ -201,6 +198,17 @@ export async function runDeterministicExtraction(
           code: 'profile_failed',
           stage: 'profile_selector',
           message: 'approved profile selector extraction failed',
+          retryable: true,
+        }],
+      };
+    }
+    if (layersUsed.includes('profile_miss')) {
+      bundle = {
+        ...bundle,
+        failures: [...bundle.failures, {
+          code: 'profile_missing',
+          stage: 'profile_selector',
+          message: 'no approved profile available for domain',
           retryable: true,
         }],
       };

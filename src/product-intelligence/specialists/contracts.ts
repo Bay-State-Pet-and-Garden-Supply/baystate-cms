@@ -89,6 +89,15 @@ export type SpecialistCapability = z.infer<typeof SpecialistCapabilitySchema>;
 // Runtime context
 // ---------------------------------------------------------------------------
 
+export interface SpecialistRuntimeAllowance {
+  remainingToolCalls: number;
+  remainingModelCalls: number;
+  remainingInputTokens: number;
+  remainingOutputTokens: number;
+  remainingCostUsd?: number;
+  deadlineAt?: number | null;
+}
+
 /**
  * The runtime context handed to a specialist by the orchestrator. It reuses
  * the existing Product Intelligence per-run policy snapshot (PI-5) so every
@@ -103,6 +112,8 @@ export interface SpecialistContext {
   policy: ProductIntelligencePolicy;
   /** Deterministic per-run sequence (specialist invocation order). */
   seq: number;
+  /** Runtime allowance for dynamic broker tracking without mutating policy. */
+  runtimeAllowance?: SpecialistRuntimeAllowance;
   /** Runtime-only extension: caller cancellation signal (never serialized). */
   signal?: AbortSignal;
   /** Absolute epoch-ms deadline when the orchestrator enforces one. */

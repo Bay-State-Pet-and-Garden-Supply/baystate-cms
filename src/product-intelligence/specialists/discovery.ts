@@ -367,7 +367,7 @@ export class DiscoverySpecialist {
     }
     const startedAt = Date.now();
     const input = parsed.data;
-    const policyAllowed = Math.max(0, context.policy.maxToolCalls);
+    const policyAllowed = Math.max(0, context.runtimeAllowance?.remainingToolCalls ?? context.policy.maxToolCalls);
     const searchAllowed = Math.min(this.options.maxSearchRequests, policyAllowed);
     let searchRequestsUsed = 0;
     let verificationRequestsUsed = 0;

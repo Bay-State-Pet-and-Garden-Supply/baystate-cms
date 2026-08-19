@@ -140,7 +140,9 @@ export function claimProfileEngineerWorkflow(
       outcome = { acquired: true, workflow: map(db.query('SELECT * FROM profile_engineer_domain_workflows WHERE id = ?').get(id) as DbWorkflow) };
       return;
     }
-    const allowReclaim = typeof options === 'object' && (options.needsRepair || options.forceNew || targetVersion > (existing.target_version ?? 1));
+    const isHigherVersion = targetVersion > (existing.target_version ?? 1);
+    const isForced = Boolean(typeof options === 'object' && options.forceNew);
+    const allowReclaim = isHigherVersion || isForced;
     const liveLease = existing.status === 'running' && !!existing.lease_expires_at && existing.lease_expires_at > now;
     if (liveLease) {
       outcome = { acquired: false, workflow: map(existing), reason: 'domain_workflow_in_progress' };

@@ -36,13 +36,16 @@
  * INVARIANTS:
  *   - Specialists NEVER invoke each other; ONLY the orchestrator dispatches work.
  *   - All inter-specialist data flows are schema-validated typed artifacts.
- *   - Loops stop deterministically at configured retry/dispatch/budget limits.
+ *   - Loops stop deterministically at configured retry/dispatch/budget/step limits.
+ *   - Whole-workflow absolute deadline derived at start (startedAt + deadlineMs).
  *   - Cancellation via AbortSignal immediately aborts execution and sets CANCELLED.
+ *   - Policy snapshot is strictly immutable; runtime allowances are passed separately.
  *   - Atomic dispatch & tool/cost/model/token reservations enforce hard aggregate policy limits.
  *   - 14-digit GTINs are strictly case-scoped and never promoted as consumer GTINs.
  *   - Caller identifiers are normalized once and passed canonically across all phases.
  *   - Profile Engineer proposals require governance/manual review before activation.
  *   - Profile synthesis uses concurrency-safe workflow locks with real per-page selector evidence.
+ *   - Missing and incompatible/stale profiles are reliably differentiated (v1 vs vN+1 repair).
  *   - Every phase transition and route is durably persisted with full invocation and artifact provenance.
  */
 
@@ -82,7 +85,7 @@ import type {
   ExtractionProfileBinding,
   ExtractionObservation,
 } from '../extraction/evidence';
-import type { SpecialistContext, SpecialistResult, SpecialistUsage } from '../specialists/contracts';
+import type { SpecialistContext, SpecialistResult, SpecialistUsage, SpecialistRuntimeAllowance } from '../specialists/contracts';
 import {
   captureSpecialistCodeCommit,
   type SpecialistArtifactEnvelope,
@@ -119,6 +122,7 @@ export interface CapabilityLimits {
   maxCuratorInvocations: number;
   maxVerifierInvocations: number;
   maxTotalDispatches: number;
+  maxTotalSteps: number;
 }
 
 export const DEFAULT_CAPABILITY_LIMITS: CapabilityLimits = {
@@ -129,6 +133,7 @@ export const DEFAULT_CAPABILITY_LIMITS: CapabilityLimits = {
   maxCuratorInvocations: 4,
   maxVerifierInvocations: 4,
   maxTotalDispatches: 20,
+  maxTotalSteps: 20,
 };
 
 export interface WorkflowUsageLedger {
@@ -297,28 +302,36 @@ export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock 
   }
 }
 
-export function resolveDefaultProfileLock(): ProfileEngineerWorkflowLock {
+export function resolveDefaultProfileLock(options?: { allowInMemoryFallback?: boolean }): ProfileEngineerWorkflowLock {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const repo = require('../../db/repositories/profile-engineer-workflow-repo');
     if (typeof repo.profileEngineerWorkflowLock === 'function') {
       return repo.profileEngineerWorkflowLock();
     }
-  } catch {
-    // In test runners or environments without bun:sqlite, fallback to in-memory lock
+  } catch (err) {
+    const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST) || options?.allowInMemoryFallback;
+    if (isTest) {
+      return new InMemoryProfileWorkflowLock();
+    }
+    throw new Error(`Failed to initialize production profile workflow lock repository: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
   }
   return new InMemoryProfileWorkflowLock();
 }
 
-export function resolveDefaultWorkflowPersistence(): SpecialistWorkflowPersistenceRepository {
+export function resolveDefaultWorkflowPersistence(options?: { allowInMemoryFallback?: boolean }): SpecialistWorkflowPersistenceRepository {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const repo = require('../../db/repositories/specialist-workflow-repo');
     if (typeof repo.specialistWorkflowPersistence === 'function') {
       return repo.specialistWorkflowPersistence();
     }
-  } catch {
-    // In test runners or environments without bun:sqlite, fallback to in-memory persistence
+  } catch (err) {
+    const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST) || options?.allowInMemoryFallback;
+    if (isTest) {
+      return new InMemoryWorkflowPersistenceRepository();
+    }
+    throw new Error(`Failed to initialize production workflow persistence repository: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
   }
   return new InMemoryWorkflowPersistenceRepository();
 }
@@ -332,10 +345,11 @@ export class WorkflowBudgetBroker {
   public readonly maxOutputTokens: number;
   public readonly maxCostUsd: number;
   public readonly maxDispatches: number;
+  public readonly maxSteps: number;
   public readonly deadlineAt: number | null;
   public readonly usage: WorkflowUsageLedger;
 
-  public constructor(context: SpecialistContext, maxDispatches: number) {
+  public constructor(context: SpecialistContext, maxDispatches: number, maxSteps: number, startedAt: number) {
     this.maxToolCalls = typeof context.policy.maxToolCalls === 'number' && context.policy.maxToolCalls > 0
       ? context.policy.maxToolCalls
       : Number.POSITIVE_INFINITY;
@@ -352,7 +366,9 @@ export class WorkflowBudgetBroker {
       ? context.policy.maxCostUsd
       : Number.POSITIVE_INFINITY;
     this.maxDispatches = maxDispatches;
-    this.deadlineAt = context.deadlineAt ?? null;
+    this.maxSteps = maxSteps;
+    // Whole-workflow absolute deadline derived from context.deadlineAt OR startedAt + deadlineMs
+    this.deadlineAt = context.deadlineAt ?? (context.policy.deadlineMs ? startedAt + context.policy.deadlineMs : null);
 
     this.usage = {
       totalDispatches: 0,
@@ -369,9 +385,32 @@ export class WorkflowBudgetBroker {
     return Math.max(0, this.maxToolCalls - this.usage.totalToolCalls);
   }
 
-  public getRemainingCostUsd(): number | undefined {
-    if (!Number.isFinite(this.maxCostUsd)) return undefined;
+  public getRemainingModelCalls(): number {
+    return Math.max(0, this.maxModelCalls - this.usage.totalModelCalls);
+  }
+
+  public getRemainingInputTokens(): number {
+    return Math.max(0, this.maxInputTokens - this.usage.totalInputTokens);
+  }
+
+  public getRemainingOutputTokens(): number {
+    return Math.max(0, this.maxOutputTokens - this.usage.totalOutputTokens);
+  }
+
+  public getRemainingCostUsd(): number {
+    if (!Number.isFinite(this.maxCostUsd)) return Number.POSITIVE_INFINITY;
     return Math.max(0, Number((this.maxCostUsd - this.usage.estimatedCostUsd).toFixed(4)));
+  }
+
+  public getRuntimeAllowance(): SpecialistRuntimeAllowance {
+    return {
+      remainingToolCalls: this.getRemainingToolCalls(),
+      remainingModelCalls: this.getRemainingModelCalls(),
+      remainingInputTokens: this.getRemainingInputTokens(),
+      remainingOutputTokens: this.getRemainingOutputTokens(),
+      remainingCostUsd: Number.isFinite(this.maxCostUsd) ? this.getRemainingCostUsd() : undefined,
+      deadlineAt: this.deadlineAt,
+    };
   }
 
   public isOverBudget(): { exceeded: boolean; reason?: string } {
@@ -412,6 +451,12 @@ export class WorkflowBudgetBroker {
     if (this.usage.totalModelCalls >= this.maxModelCalls) {
       return { allowed: false, reason: `Model call budget ceiling (${this.maxModelCalls}) reached` };
     }
+    if (this.usage.totalInputTokens >= this.maxInputTokens) {
+      return { allowed: false, reason: `Input token budget ceiling (${this.maxInputTokens}) reached` };
+    }
+    if (this.usage.totalOutputTokens >= this.maxOutputTokens) {
+      return { allowed: false, reason: `Output token budget ceiling (${this.maxOutputTokens}) reached` };
+    }
     if (this.usage.estimatedCostUsd >= this.maxCostUsd) {
       return { allowed: false, reason: `Cost budget ceiling ($${this.maxCostUsd}) reached` };
     }
@@ -423,6 +468,22 @@ export class WorkflowBudgetBroker {
       return { allowed: false, reason: `Tool call reservation of ${count} exceeds limit (${this.maxToolCalls})` };
     }
     this.usage.totalToolCalls += count;
+    return { allowed: true };
+  }
+
+  public reserveModelCalls(count: number): { allowed: boolean; reason?: string } {
+    if (this.usage.totalModelCalls + count > this.maxModelCalls) {
+      return { allowed: false, reason: `Model call reservation of ${count} exceeds limit (${this.maxModelCalls})` };
+    }
+    this.usage.totalModelCalls += count;
+    return { allowed: true };
+  }
+
+  public reserveCostUsd(amount: number): { allowed: boolean; reason?: string } {
+    if (this.usage.estimatedCostUsd + amount > this.maxCostUsd) {
+      return { allowed: false, reason: `Cost reservation of $${amount} exceeds limit ($${this.maxCostUsd})` };
+    }
+    this.usage.estimatedCostUsd = Number((this.usage.estimatedCostUsd + amount).toFixed(4));
     return { allowed: true };
   }
 
@@ -446,7 +507,7 @@ export class WorkflowBudgetBroker {
       entry.modelCalls += usage.modelCalls;
       entry.inputTokens += usage.inputTokens;
       entry.outputTokens += usage.outputTokens;
-      entry.estimatedCostUsd += usage.estimatedCostUsd;
+      entry.estimatedCostUsd = Number((entry.estimatedCostUsd + usage.estimatedCostUsd).toFixed(4));
 
       // Tool calls reserved upfront are already tracked; add unreserved difference
       if (specialist !== 'extraction') {
@@ -601,7 +662,12 @@ export class SpecialistOrchestrator {
       verifier: 0,
     };
 
-    const budgetBroker = new WorkflowBudgetBroker(context, this.limits.maxTotalDispatches);
+    const budgetBroker = new WorkflowBudgetBroker(
+      context,
+      this.limits.maxTotalDispatches,
+      this.limits.maxTotalSteps,
+      startedAt,
+    );
 
     // Normalize caller-provided identifier ONCE at workflow start
     const canonicalIdentifier = normalizeScopedIdentifier(
@@ -690,7 +756,7 @@ export class SpecialistOrchestrator {
       status: OrchestratorStepEvent['status'],
       durationMs: number,
       details?: string,
-    ): void => {
+    ): boolean => {
       eventSeq += 1;
       events.push({
         step: eventSeq,
@@ -701,6 +767,11 @@ export class SpecialistOrchestrator {
         timestamp: this.now(),
         details,
       });
+
+      if (eventSeq > this.limits.maxTotalSteps) {
+        return false; // Step ceiling reached
+      }
+      return true;
     };
 
     const reserveDispatch = (specialist: string, count = 1): boolean => {
@@ -783,15 +854,12 @@ export class SpecialistOrchestrator {
     let targetPhase: 'discovery' | 'extraction' | 'resolver' | 'curator' | 'verifier' = 'discovery';
 
     const getDynamicSpecialistContext = (): SpecialistContext => {
-      const remainingTools = budgetBroker.getRemainingToolCalls();
-      const remainingCost = budgetBroker.getRemainingCostUsd();
+      // Policy snapshot remains strictly immutable with original configId.
+      // Runtime allowances are passed separately.
       return {
         ...context,
-        policy: {
-          ...context.policy,
-          maxToolCalls: remainingTools,
-          maxCostUsd: remainingCost,
-        },
+        runtimeAllowance: budgetBroker.getRuntimeAllowance(),
+        deadlineAt: budgetBroker.deadlineAt ?? undefined,
       };
     };
 
@@ -820,6 +888,33 @@ export class SpecialistOrchestrator {
           totalDurationMs: Date.now() - startedAt,
           workflowState: state,
           error: 'Execution cancelled',
+        };
+      }
+
+      if (eventSeq >= this.limits.maxTotalSteps) {
+        recordEvent('orchestrator', 'step_limit_check', 'failed', 0, `Total step ceiling (${this.limits.maxTotalSteps}) reached`);
+        const state = await persistState('budget_exceeded', targetPhase, `Total step ceiling (${this.limits.maxTotalSteps}) reached`);
+        return {
+          runId: context.runId,
+          status: 'budget_exceeded',
+          productSeed,
+          discoveryOutput,
+          discoveryArtifact,
+          profileOutput,
+          profileArtifact,
+          extractionBundles,
+          resolverOutput,
+          resolverArtifact,
+          curatorOutput,
+          curatorArtifact,
+          verifierOutput,
+          verifierArtifact,
+          events,
+          retriesCount,
+          totalDispatches: budgetBroker.usage.totalDispatches,
+          totalDurationMs: Date.now() - startedAt,
+          workflowState: state,
+          error: `Total step ceiling (${this.limits.maxTotalSteps}) reached`,
         };
       }
 
@@ -1146,13 +1241,13 @@ export class SpecialistOrchestrator {
                 const bundle2 = bundlesByUrl.get(sample2Url) ?? (sample2.source?.url ? bundlesByUrl.get(sample2.source.url) : undefined);
 
                 const sample1Artifacts = [...new Set(sample1.extracted.identifiers
-                  .map((i) => i.sourceArtifactId)
+                  .map((i: any) => i.sourceArtifactId)
                   .concat(bundle1?.artifactRefs ?? [])
-                  .filter((id) => Boolean(id)))];
+                  .filter((id: any) => Boolean(id)))];
                 const sample2Artifacts = [...new Set(sample2.extracted.identifiers
-                  .map((i) => i.sourceArtifactId)
+                  .map((i: any) => i.sourceArtifactId)
                   .concat(bundle2?.artifactRefs ?? [])
-                  .filter((id) => Boolean(id)))];
+                  .filter((id: any) => Boolean(id)))];
 
                 // Genuine title selector candidate hints (derived strictly from that page's own selector observations)
                 const sample1TitleObs = bundle1?.observations.find((o) => o.field === 'title' || o.field === 'product_name');
@@ -1196,12 +1291,21 @@ export class SpecialistOrchestrator {
                   const sample2Hints: Record<string, string> = {};
                   if (sample2TitleHint) sample2Hints.titleSelector = sample2TitleHint;
 
+                  // Distinguish missing profile (v1) from failed/stale active profile (vN+1 repair)
+                  const failedProfile = bundle.failures.some((f) => f.code === 'profile_failed') && bundle.profile
+                    ? {
+                      profileId: bundle.profile.id,
+                      version: bundle.profile.version,
+                      runtime: bundle.profile.runtime,
+                    }
+                    : null;
+
                   const profContext = getDynamicSpecialistContext();
                   const profResult = await profileEngineer.execute(
                     {
                       schemaVersion: 1,
                       domain,
-                      activeProfile: null,
+                      activeProfile: failedProfile,
                       samples: [
                         {
                           url: sample1Url,
@@ -1209,9 +1313,9 @@ export class SpecialistOrchestrator {
                           expectedName: sample1.extracted.productName ?? productSeed.name,
                           expectedGtin: sample1.extracted.gtins[0] ?? effectiveExtractionGtin ?? undefined,
                           signals: {
-                            jsonLd: sample1.extracted.identifiers.some((i) => i.method === 'json_ld'),
-                            shopify: sample1.signals.some((s) => s.value.toLowerCase().includes('shopify')),
-                            woocommerce: sample1.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
+                            jsonLd: sample1.extracted.identifiers.some((i: any) => i.method === 'json_ld'),
+                            shopify: sample1.signals.some((s: any) => s.value.toLowerCase().includes('shopify')),
+                            woocommerce: sample1.signals.some((s: any) => s.value.toLowerCase().includes('woocommerce')),
                             embeddedState: false,
                             selectorOnly: false,
                             changedMarkup: false,
@@ -1226,9 +1330,9 @@ export class SpecialistOrchestrator {
                           expectedName: sample2.extracted.productName ?? productSeed.name,
                           expectedGtin: sample2.extracted.gtins[0] ?? effectiveExtractionGtin ?? undefined,
                           signals: {
-                            jsonLd: sample2.extracted.identifiers.some((i) => i.method === 'json_ld'),
-                            shopify: sample2.signals.some((s) => s.value.toLowerCase().includes('shopify')),
-                            woocommerce: sample2.signals.some((s) => s.value.toLowerCase().includes('woocommerce')),
+                            jsonLd: sample2.extracted.identifiers.some((i: any) => i.method === 'json_ld'),
+                            shopify: sample2.signals.some((s: any) => s.value.toLowerCase().includes('shopify')),
+                            woocommerce: sample2.signals.some((s: any) => s.value.toLowerCase().includes('woocommerce')),
                             embeddedState: false,
                             selectorOnly: false,
                             changedMarkup: false,

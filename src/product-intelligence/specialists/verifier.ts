@@ -741,46 +741,65 @@ export function verifyCuratedDraft(
         });
       }
 
-      // Independent rights verification: check extraction evidence directly
-      if (match.rightsStatus && !ALLOWED_IMAGE_RIGHTS.has(match.rightsStatus.toLowerCase().trim())) {
+      // Independent rights verification: check extraction evidence directly (fail-closed)
+      const extRights = match.rightsStatus ? match.rightsStatus.toLowerCase().trim() : null;
+      if (!extRights || !ALLOWED_IMAGE_RIGHTS.has(extRights)) {
         checks.push({
           checkName: 'image_rights_compliance',
           category: 'image_rights',
           passed: false,
           severity: 'blocking',
           field: 'images',
-          details: `Extraction evidence for '${image.url}' indicates non-compliant rights status '${match.rightsStatus}'`,
+          details: `Extraction evidence for '${image.url}' lacks verified compliant rights status (found: '${match.rightsStatus ?? 'unverified'}')`,
         });
       }
-      if (match.commerceApproved === false) {
+      if (match.commerceApproved !== true) {
         checks.push({
           checkName: 'image_commerce_approval',
           category: 'image_rights',
           passed: false,
           severity: 'blocking',
           field: 'images',
-          details: `Extraction evidence for '${image.url}' indicates commerce approval is false`,
+          details: `Extraction evidence for '${image.url}' lacks independent commerce approval (found: ${match.commerceApproved})`,
         });
       }
 
-      // Typed variant-identity comparison
-      if (match.identityMatch && (match.identityMatch === 'wrong_variant' || match.identityMatch === 'parent_only')) {
+      // Independent identity verification (fail-closed)
+      const extIdentity = match.identityMatch ? match.identityMatch.toLowerCase().trim() : null;
+      if (!extIdentity || !ALLOWED_IMAGE_IDENTITY.has(extIdentity)) {
         checks.push({
           checkName: 'image_variant_compliance',
           category: 'image_rights',
           passed: false,
           severity: 'blocking',
           field: 'images',
-          details: `Extraction evidence for '${image.url}' indicates identity match '${match.identityMatch}' (must not be wrong_variant/parent_only)`,
+          details: `Extraction evidence for '${image.url}' lacks exact/verified identity match (found: '${match.identityMatch ?? 'unverified'}')`,
         });
       }
 
       if (match.variantRef) {
-        const refKind = match.variantRefKind ?? (
-          /^\d{8}$|^\d{12,14}$/.test(match.variantRef) ? 'gtin' : 'generic'
-        );
+        const resolvedVariantId = (resolvedFacts as any).variantId ?? (resolvedFacts as any).variant?.id ?? (input.extractionBundles ?? []).find((b) => b.variant?.id)?.variant?.id ?? null;
+        const isShopifyId = match.variantRefKind === 'shopify_variant_id' ||
+          Boolean(resolvedVariantId && match.variantRef === resolvedVariantId);
 
-        if (refKind === 'gtin' && resolvedFacts.expectedIdentity?.gtin && match.variantRef !== resolvedFacts.expectedIdentity.gtin) {
+        const isSeedSku = match.variantRefKind === 'sku' ||
+          Boolean((input.productSeed as any)?.sku && match.variantRef === (input.productSeed as any).sku);
+
+        const isGtin = match.variantRefKind === 'gtin' ||
+          (!isShopifyId && !isSeedSku && /^\d{8}$|^\d{12,14}$/.test(match.variantRef));
+
+        if (isShopifyId) {
+          if (resolvedVariantId && match.variantRef !== resolvedVariantId) {
+            checks.push({
+              checkName: 'image_variant_compliance',
+              category: 'image_rights',
+              passed: false,
+              severity: 'blocking',
+              field: 'images',
+              details: `Draft image '${image.url}' references Shopify variant '${match.variantRef}' conflicting with resolved variant ID '${resolvedVariantId}'`,
+            });
+          }
+        } else if (isGtin && resolvedFacts.expectedIdentity?.gtin && match.variantRef !== resolvedFacts.expectedIdentity.gtin) {
           checks.push({
             checkName: 'image_variant_compliance',
             category: 'image_rights',
@@ -789,7 +808,7 @@ export function verifyCuratedDraft(
             field: 'images',
             details: `Draft image '${image.url}' references GTIN '${match.variantRef}' conflicting with resolved GTIN '${resolvedFacts.expectedIdentity.gtin}'`,
           });
-        } else if (refKind === 'sku' && (input.productSeed as any)?.sku && match.variantRef !== (input.productSeed as any).sku) {
+        } else if (isSeedSku && (input.productSeed as any)?.sku && match.variantRef !== (input.productSeed as any).sku) {
           checks.push({
             checkName: 'image_variant_compliance',
             category: 'image_rights',

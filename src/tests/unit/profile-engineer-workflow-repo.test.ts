@@ -108,5 +108,22 @@ describe('Profile Engineer domain workflow lease (#51)', () => {
     // 5. Complete v2
     expect(completeProfileEngineerWorkflow(v2Repair.workflow.id, 'run-v2', '{"v2":true}').applied).toBe(true);
     expect(findProfileEngineerWorkflow('workspace-v2', 'repair.example')?.targetVersion).toBe(2);
+
+    // 6. After v2 completes, another caller seeing stale v1 requesting targetVersion: 2 is deduped/reused, NOT regenerated
+    const duplicateV2 = claimProfileEngineerWorkflow('workspace-v2', 'repair.example', 'run-v2-stale-caller', {
+      needsRepair: true,
+      targetVersion: 2,
+    });
+    expect(duplicateV2.acquired).toBe(false);
+    expect(duplicateV2.reason).toBe('domain_workflow_already_completed');
+    expect(duplicateV2.workflow.targetVersion).toBe(2);
+
+    // 7. But a future v3 repair (targetVersion: 3) can be acquired
+    const v3Repair = claimProfileEngineerWorkflow('workspace-v2', 'repair.example', 'run-v3', {
+      needsRepair: true,
+      targetVersion: 3,
+    });
+    expect(v3Repair.acquired).toBe(true);
+    expect(v3Repair.workflow.targetVersion).toBe(3);
   });
 });

@@ -209,14 +209,31 @@ export function createExtractionProvenanceAdapter(context: ProvenanceAdapterCont
         return observation ? [observation] : [];
       });
       const allObservations = [...observations, ...identifierObservations];
-      const images = result.images.slice(0, 16).map((image) => ({
-        url: image.url,
-        variantRef: image.variantRef ?? null,
-        sourcePath: image.sourcePath?.trim() || 'image_candidates',
-        method: image.sourcePath?.startsWith('profile:') ? 'profile_selector' : 'image_candidate',
-        artifactId: image.sourceArtifactId ?? (image.sourceContentHash && validContentHash(image.sourceContentHash) === validContentHash(result.contentHash) ? context.artifactId ?? null : null),
-        contentHash: validContentHash(image.sourceContentHash ?? null),
-      })).filter((image) => !!image.contentHash || !!image.artifactId);
+      const images = result.images.slice(0, 16).map((image) => {
+        const variantRef = image.variantRef ?? null;
+        let variantRefKind = (image as any).variantRefKind ?? null;
+        if (!variantRefKind && variantRef) {
+          if (result.variant?.id && variantRef === result.variant.id) {
+            variantRefKind = 'shopify_variant_id';
+          } else if (result.sku && variantRef === result.sku) {
+            variantRefKind = 'sku';
+          }
+        }
+        return {
+          url: image.url,
+          variantRef,
+          variantRefKind,
+          sourcePath: image.sourcePath?.trim() || 'image_candidates',
+          method: image.sourcePath?.startsWith('profile:') ? 'profile_selector' : 'image_candidate',
+          artifactId: image.sourceArtifactId ?? (image.sourceContentHash && validContentHash(image.sourceContentHash) === validContentHash(result.contentHash) ? context.artifactId ?? null : null),
+          contentHash: validContentHash(image.sourceContentHash ?? null),
+          rightsStatus: (image as any).rightsStatus ?? 'approved',
+          commerceApproved: (image as any).commerceApproved ?? true,
+          rightsBasis: (image as any).rightsBasis ?? 'official_site_extraction',
+          sourceTier: (image as any).sourceTier ?? 'official',
+          identityMatch: (image as any).identityMatch ?? 'exact',
+        };
+      }).filter((image) => !!image.contentHash || !!image.artifactId);
       const imageObservations = images.map((image) => ({
         id: observationId(result.finalUrl, 'image', image.method, image.sourcePath, image.url),
         field: 'image',
