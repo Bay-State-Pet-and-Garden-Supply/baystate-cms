@@ -92,7 +92,8 @@ export const ProfileEngineerInputSchema = z.object({
   /** Explicit failed profile binding to repair (vN+1 repair workflow). */
   repairOf: z.object({
     profileId: z.string().nullish(),
-    version: z.union([z.number().int().positive(), z.string().transform((v) => parseInt(v, 10))]).default(1),
+    targetVersion: z.number().int().positive().optional(),
+    version: z.union([z.number().int().positive(), z.string().transform((v) => parseInt(v, 10))]).nullish(),
     runtime: z.enum(['static', 'rendered']).nullish(),
   }).nullish(),
   // Two independent pages are the minimum evidence needed to distinguish a
@@ -403,12 +404,38 @@ function buildProposal(input: ProfileEngineerInput, minimumSamples: number): Pro
     validationArtifacts: validation.flatMap((row) => row.artifactRefs),
   };
   if (strategy === 'shopify') metadata.shopifyJSONPath = true;
+  const derivedProposedVersion = (() => {
+    if (input.repairOf?.targetVersion && input.repairOf.targetVersion > 0) {
+      return input.repairOf.targetVersion;
+    }
+    if (input.repairOf?.version) {
+      const verNum = typeof input.repairOf.version === 'number'
+        ? input.repairOf.version
+        : parseInt(String(input.repairOf.version).replace(/\D/g, ''), 10);
+      if (Number.isFinite(verNum) && verNum > 0 && verNum < 100_000) {
+        return verNum + 1;
+      }
+      return 2;
+    }
+    if (input.activeProfile?.version) {
+      const verNum = typeof input.activeProfile.version === 'number'
+        ? input.activeProfile.version
+        : parseInt(String(input.activeProfile.version).replace(/\D/g, ''), 10);
+      if (Number.isFinite(verNum) && verNum > 0 && verNum < 100_000) {
+        return verNum + 1;
+      }
+      return 2;
+    }
+    return 1;
+  })();
+  const derivedRuntime = input.repairOf?.runtime ?? input.activeProfile?.runtime ?? 'rendered';
+
   return {
     domain: normalizeDomain(input.domain),
-    proposedVersion: (input.activeProfile?.version ?? 0) + 1,
+    proposedVersion: derivedProposedVersion,
     strategy,
     selectors,
-    runtime: input.activeProfile?.runtime ?? 'rendered',
+    runtime: derivedRuntime,
     metadata,
     validation,
     validationSummary: { sampleCount: input.samples.length, passingSamples, failingSamples, byField },
@@ -471,15 +498,26 @@ export class ProfileEngineerSpecialist {
       if (health.healthy) return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'abstained', abstention: { reason: 'healthy_profile_reused', actionableNextStep: null, targets: [input.domain] }, durationMs: Date.now() - startedAt };
     }
 
+    const derivedProposedVersion = (() => {
+      if (input.repairOf?.targetVersion && input.repairOf.targetVersion > 0) {
+        return input.repairOf.targetVersion;
+      }
+      if (repairTarget?.version) {
+        const verNum = typeof repairTarget.version === 'number'
+          ? repairTarget.version
+          : parseInt(String(repairTarget.version).replace(/\D/g, ''), 10);
+        if (Number.isFinite(verNum) && verNum > 0 && verNum < 100_000) {
+          return verNum + 1;
+        }
+        return 2;
+      }
+      return 1;
+    })();
+
     let lock: { acquired: boolean; workflowId: string; reason?: string } | null = null;
     if (this.dependencies.workflow) {
-      const activeVer = repairTarget
-        ? (typeof repairTarget.version === 'number'
-            ? repairTarget.version
-            : parseInt(String(repairTarget.version), 10) || 1)
-        : null;
       const claimOptions: ClaimProfileLockOptions = repairTarget
-        ? { needsRepair: true, targetVersion: (activeVer ?? 1) + 1 }
+        ? { needsRepair: true, targetVersion: derivedProposedVersion }
         : { targetVersion: 1 };
       lock = await this.dependencies.workflow.claim(input.domain, context.runId, context.workspaceId, claimOptions);
       if (!lock.acquired) return { specialist: PROFILE_ENGINEER_SPECIALIST_NAME, outcome: 'abstained', abstention: { reason: lock.reason ?? 'domain_workflow_already_running', actionableNextStep: 'Reuse the existing domain workflow result or wait for its validation.', targets: [input.domain] }, durationMs: Date.now() - startedAt };

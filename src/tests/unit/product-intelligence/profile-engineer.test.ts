@@ -202,6 +202,33 @@ describe('Profile Engineer specialist (#51)', () => {
     expect(result).toMatchObject({ outcome: 'abstained', abstention: { reason: 'workflow_lease_lost' } });
   });
 
+  it('emits proposedVersion 3 and runtime rendered when repairOf v2 is supplied', async () => {
+    let claimedTargetVersion: number | undefined;
+    const result = await specialist({
+      workflow: {
+        claim: (_domain, _runId, _ws, opts) => {
+          claimedTargetVersion = opts?.targetVersion;
+          return { acquired: true, workflowId: 'workflow-repair' };
+        },
+        complete: () => ({ applied: true }),
+        fail: () => ({ applied: true }),
+      },
+    }).engineer({
+      domain: 'repair.example',
+      repairOf: {
+        profileId: 'prof-1',
+        version: 2,
+        runtime: 'rendered',
+      },
+      samples: [sample('https://repair.example/p1'), sample('https://repair.example/p2')],
+    }, context);
+
+    if (!('artifact' in result)) throw new Error('expected proposal output');
+    expect(claimedTargetVersion).toBe(3);
+    expect(result.output.proposedVersion).toBe(3);
+    expect(result.output.runtime).toBe('rendered');
+  });
+
   it('registers versioned input/output payload schemas', async () => {
     const registry = registerProfileEngineerSchemas(new SpecialistArtifactSchemaRegistry());
     const result = await specialist().engineer({ domain: 'schema.example', samples: [sample('https://schema.example/p1'), sample('https://schema.example/p2')] }, context);

@@ -7,6 +7,7 @@ import {
   SpecialistOrchestrator,
   normalizeScopedIdentifier,
   InMemoryWorkflowPersistenceRepository,
+  WorkflowBudgetBroker,
   type SpecialistWorkflowRecord,
 } from '../../../product-intelligence/workflow/orchestrator';
 import {
@@ -951,7 +952,12 @@ describe('Specialist Orchestrator (#56)', () => {
       {
         search: async () => {
           discoveryCalls += 1;
-          return { candidates: [createDiscoveryCandidate()] };
+          return {
+            candidates: [
+              createDiscoveryCandidate('https://acme.example/p1'),
+              createDiscoveryCandidate('https://acme.example/p2'),
+            ],
+          };
         },
         extraction: mockExtractionSeam,
       },
@@ -1221,7 +1227,7 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.error).toContain('Total step ceiling');
   });
 
-  it('triggers vN+1 repair of failed active profile and holds for review', async () => {
+  it('triggers vN+1 repair of failed active profile, sets proposal version 3, and holds for review', async () => {
     let claimedRepairVersion: number | undefined;
     const lock: ProfileEngineerWorkflowLock = {
       claim: (_domain: string, _runId: string, _ws: string, opts?: any) => {
@@ -1270,5 +1276,56 @@ describe('Specialist Orchestrator (#56)', () => {
 
     expect(result.status).toBe('needs_review');
     expect(claimedRepairVersion).toBe(3); // Requested targetVersion 3 (repair of v2!)
+    expect(result.profileOutput?.proposedVersion).toBe(3);
+    expect(result.profileOutput?.runtime).toBe('rendered');
+  });
+
+  it('guarantees concurrency safety of individual budget reservation handles across parallel workers', () => {
+    const broker = new WorkflowBudgetBroker(
+      {
+        ...context,
+        policy: ProductIntelligencePolicySchema.parse({
+          configId: 'concurrency-policy',
+          maxToolCalls: 5,
+        }),
+      },
+      20,
+      20,
+      Date.now(),
+    );
+
+    // Initial committed usage: 3 tool calls
+    broker.usage.totalToolCalls = 3;
+    expect(broker.getRemainingToolCalls()).toBe(2);
+
+    // Worker A reserves 1 tool call
+    const resA = broker.reserve('extraction', { toolCalls: 1 });
+    expect(resA.allowed).toBe(true);
+    expect(broker.getRemainingToolCalls()).toBe(1);
+
+    // Worker B reserves 1 tool call
+    const resB = broker.reserve('extraction', { toolCalls: 1 });
+    expect(resB.allowed).toBe(true);
+    expect(broker.getRemainingToolCalls()).toBe(0);
+
+    // Worker C tries to reserve but budget is exhausted by active reservations
+    const resC = broker.reserve('extraction', { toolCalls: 1 });
+    expect(resC.allowed).toBe(false);
+
+    // Worker A finishes and commits its 1 tool call
+    broker.commit(resA.handle!, { toolCalls: 1, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 });
+    expect(broker.usage.totalToolCalls).toBe(4);
+
+    // CRITICAL: Committing worker A did NOT wipe out worker B's active reservation!
+    expect(broker.getRemainingToolCalls()).toBe(0); // 5 max - (4 committed + 1 reserved for B) = 0 remaining
+
+    // Worker C is STILL blocked because B is still live
+    const resC2 = broker.reserve('extraction', { toolCalls: 1 });
+    expect(resC2.allowed).toBe(false);
+
+    // Now worker B finishes and commits
+    broker.commit(resB.handle!, { toolCalls: 1, modelCalls: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 });
+    expect(broker.usage.totalToolCalls).toBe(5);
+    expect(broker.getRemainingToolCalls()).toBe(0);
   });
 });
