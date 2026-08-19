@@ -726,20 +726,39 @@ export class WorkflowBudgetBroker {
     this.activeReservations.delete(handle.id);
     const gatewayState = this.handleSpendState.get(handle.id);
     const gatewayConsumed = gatewayState?.consumed;
+    const gatewayHolds = gatewayState?.activeHolds;
+    // Bill in-flight holds conservatively when an outer failure settles this handle.
+    const effectiveGatewayConsumed = gatewayConsumed
+      ? {
+        toolCalls: gatewayConsumed.toolCalls + (gatewayHolds?.toolCalls ?? 0),
+        modelCalls: gatewayConsumed.modelCalls + (gatewayHolds?.modelCalls ?? 0),
+        inputTokens: gatewayConsumed.inputTokens + (gatewayHolds?.inputTokens ?? 0),
+        outputTokens: gatewayConsumed.outputTokens + (gatewayHolds?.outputTokens ?? 0),
+        estimatedCostUsd: Number((gatewayConsumed.estimatedCostUsd + (gatewayHolds?.costUsd ?? 0)).toFixed(4)),
+      }
+      : gatewayHolds && (gatewayHolds.toolCalls || gatewayHolds.modelCalls || gatewayHolds.inputTokens || gatewayHolds.outputTokens || gatewayHolds.costUsd)
+        ? {
+          toolCalls: gatewayHolds.toolCalls,
+          modelCalls: gatewayHolds.modelCalls,
+          inputTokens: gatewayHolds.inputTokens,
+          outputTokens: gatewayHolds.outputTokens,
+          estimatedCostUsd: Number(gatewayHolds.costUsd.toFixed(4)),
+        }
+        : undefined;
     if (gatewayState) this.handleSpendState.delete(handle.id);
 
     // Reconcile: gateway is authoritative — never allow specialist reporting to erase it
     let effectiveUsage: SpecialistUsage | null = null;
-    if (gatewayConsumed && actualUsage) {
+    if (effectiveGatewayConsumed && actualUsage) {
       effectiveUsage = {
-        toolCalls: Math.max(gatewayConsumed.toolCalls, actualUsage.toolCalls),
-        modelCalls: Math.max(gatewayConsumed.modelCalls, actualUsage.modelCalls),
-        inputTokens: Math.max(gatewayConsumed.inputTokens, actualUsage.inputTokens),
-        outputTokens: Math.max(gatewayConsumed.outputTokens, actualUsage.outputTokens),
-        estimatedCostUsd: Number(Math.max(gatewayConsumed.estimatedCostUsd, actualUsage.estimatedCostUsd).toFixed(4)),
+        toolCalls: Math.max(effectiveGatewayConsumed.toolCalls, actualUsage.toolCalls),
+        modelCalls: Math.max(effectiveGatewayConsumed.modelCalls, actualUsage.modelCalls),
+        inputTokens: Math.max(effectiveGatewayConsumed.inputTokens, actualUsage.inputTokens),
+        outputTokens: Math.max(effectiveGatewayConsumed.outputTokens, actualUsage.outputTokens),
+        estimatedCostUsd: Number(Math.max(effectiveGatewayConsumed.estimatedCostUsd, actualUsage.estimatedCostUsd).toFixed(4)),
       };
-    } else if (gatewayConsumed) {
-      effectiveUsage = { ...gatewayConsumed };
+    } else if (effectiveGatewayConsumed) {
+      effectiveUsage = { ...effectiveGatewayConsumed };
     } else if (actualUsage) {
       effectiveUsage = { ...actualUsage };
     }

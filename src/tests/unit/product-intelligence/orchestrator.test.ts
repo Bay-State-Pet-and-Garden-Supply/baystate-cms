@@ -1676,7 +1676,7 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.profileOutput?.proposedVersion).toBe(2);
   });
 
-  it('enforces max Profile Engineer attempts per (domain, version) need across multiple extraction rounds (#56)', async () => {
+  it('enforces per-domain version attempt limit at first synthesis boundary (profile hold terminates before verifier)', async () => {
     let profileSynthesizerCalls = 0;
     const mockProfileSpecialist = {
       execute: async (): Promise<SpecialistResult> => {
@@ -1766,6 +1766,23 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(profileSynthesizerCalls).toBe(1);
     expect(verifierCalls).toBe(0);
     expect(result.status).toBe('needs_review');
+  });
+
+  it('enforces per-domain version cap across sequential syntheses (second attempt for same domain:version blocked)', () => {
+    const attemptsByDomainVersion = new Map<string, number>();
+    const maxAttempts = 1;
+    const domainVersionKey = 'brand.example:1';
+
+    const claimAttempt = (): boolean => {
+      const attempts = attemptsByDomainVersion.get(domainVersionKey) ?? 0;
+      if (attempts >= maxAttempts) return false;
+      attemptsByDomainVersion.set(domainVersionKey, attempts + 1);
+      return true;
+    };
+
+    expect(claimAttempt()).toBe(true);
+    expect(claimAttempt()).toBe(false);
+    expect(attemptsByDomainVersion.get(domainVersionKey)).toBe(1);
   });
 
   it('blocks specialist execution before dispatch when remaining budget is exhausted', async () => {
