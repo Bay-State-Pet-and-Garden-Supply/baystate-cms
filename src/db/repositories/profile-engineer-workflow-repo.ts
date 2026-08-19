@@ -237,10 +237,16 @@ export function completeProfileEngineerWorkflowWithProposal(
 }
 
 /** Adapter for ProfileEngineerWorkflowLock; all calls are workspace-owned. */
-export function profileEngineerWorkflowLock(leaseMs = 120_000) {
+/** Adapter for ProfileEngineerWorkflowLock; all calls are workspace-owned. */
+export function profileEngineerWorkflowLock(defaultLeaseMs = 120_000) {
   return {
-    claim: (domain: string, runId: string, workspaceId: string) => {
-      const claimed = claimProfileEngineerWorkflow(workspaceId, domain, runId, leaseMs);
+    claim: (domain: string, runId: string, workspaceId: string, options?: ClaimWorkflowOptions) => {
+      const claimOptions: ClaimWorkflowOptions = {
+        leaseMs: options?.leaseMs ?? defaultLeaseMs,
+        needsRepair: options?.needsRepair,
+        forceNew: options?.forceNew,
+      };
+      const claimed = claimProfileEngineerWorkflow(workspaceId, domain, runId, claimOptions);
       return { acquired: claimed.acquired, workflowId: claimed.workflow.id, reason: claimed.reason };
     },
     complete: (workflowId: string, runId: string, artifactJson?: string) => artifactJson

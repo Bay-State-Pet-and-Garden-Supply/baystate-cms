@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 import {
   SpecialistOrchestrator,
   normalizeScopedIdentifier,
+  InMemoryWorkflowPersistenceRepository,
   type SpecialistWorkflowRecord,
 } from '../../../product-intelligence/workflow/orchestrator';
 import {
@@ -239,6 +240,7 @@ describe('Specialist Orchestrator (#56)', () => {
       save: (rec: SpecialistWorkflowRecord) => {
         savedRecords.push(rec);
       },
+      get: () => null,
     };
 
     const discovery = new DiscoverySpecialist(
@@ -906,5 +908,38 @@ describe('Specialist Orchestrator (#56)', () => {
     expect(result.status).toBe('budget_exceeded');
     expect(result.workflowState.usage.estimatedCostUsd).toBe(2.50);
     expect(result.workflowState.status).toBe('budget_exceeded');
+  });
+
+  it('rehydrates persisted workflow state from storage', async () => {
+    const memoryRepo = new InMemoryWorkflowPersistenceRepository();
+    const discovery = new DiscoverySpecialist(
+      {
+        search: async () => ({
+          candidates: [createDiscoveryCandidate('https://acme.example/products/broth')],
+        }),
+        extraction: mockExtractionSeam,
+      },
+      { codeCommit: 'commit-56' },
+    );
+
+    const orchestrator = new SpecialistOrchestrator({
+      dependencies: {
+        discovery,
+        workflowPersistence: memoryRepo,
+        extractionRunner: async (url) => createMockExtractionBundle(url),
+      },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await orchestrator.runWorkflow(sampleSeed, sampleClassificationContext, context);
+    expect(result.status).toBe('completed');
+
+    const rehydrated = await orchestrator.getWorkflowState(context.runId);
+    expect(rehydrated).not.toBeNull();
+    expect(rehydrated?.runId).toBe(context.runId);
+    expect(rehydrated?.status).toBe('completed');
+    expect(rehydrated?.capabilityInvocationIds.discovery.length).toBe(1);
+    expect(rehydrated?.capabilityInvocationIds.extraction.length).toBe(1);
+    expect(rehydrated?.routeRecords.length).toBeGreaterThan(0);
   });
 });

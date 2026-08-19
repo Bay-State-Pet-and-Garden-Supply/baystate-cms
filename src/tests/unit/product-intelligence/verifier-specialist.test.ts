@@ -23,6 +23,7 @@ import {
 import { ProductIntelligencePolicySchema } from '../../../product-intelligence/contracts';
 import type { ResolvedFactSet } from '../../../product-intelligence/specialists/resolver';
 import type { CuratedProductDraft } from '../../../product-intelligence/specialists/curator';
+import { sha256Hex } from '../../../shared/stable-id';
 
 const FIXED_NOW = '2026-08-18T12:00:00.000Z';
 
@@ -247,16 +248,7 @@ function sampleDraft(overrides: Partial<CuratedProductDraft> = {}): CuratedProdu
       packCount: '1',
       dimensions: '3 x 3 x 7 in',
     },
-    images: [
-      {
-        url: 'https://acme.example/images/broth.jpg',
-        role: 'primary',
-        rightsStatus: 'approved',
-        commerceApproved: true,
-        identityMatch: 'exact',
-        sourceUrl: 'https://acme.example/products/chicken-broth-16oz',
-      },
-    ],
+    images: [],
     grounding: [
       {
         field: 'brand',
@@ -385,6 +377,34 @@ describe('Verifier specialist (#55)', () => {
   });
 
   it('catches unapproved image or unknown rights status with fail-closed QA', () => {
+    const sampleBundle = (imageUrl: string) => ({
+      schemaVersion: 1 as const,
+      runnerVersion: '1.0.0',
+      requestedUrl: 'https://acme.example/products/broth',
+      finalUrl: 'https://acme.example/products/broth',
+      retrievedAt: FIXED_NOW,
+      contentHash: sha256Hex(imageUrl),
+      artifactRefs: ['art-1'],
+      profile: null,
+      extractionPath: [],
+      observations: [],
+      images: [
+        {
+          url: imageUrl,
+          variantRef: null,
+          sourcePath: 'img.primary',
+          method: 'selector',
+          artifactId: 'art-1',
+          contentHash: sha256Hex(imageUrl),
+        },
+      ],
+      variant: null,
+      identityStatus: 'exact_match' as const,
+      identityReasons: [],
+      failures: [],
+      deterministicOnly: true as const,
+    });
+
     const draftUnknownRights = sampleDraft({
       images: [
         {
@@ -404,6 +424,7 @@ describe('Verifier specialist (#55)', () => {
       resolvedFacts: sampleFactSet(),
       curatedDraft: draftUnknownRights,
       classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [sampleBundle('https://acme.example/images/unapproved.jpg')],
     });
 
     expect(reportUnknown.verdict).toBe('retry_curator');
@@ -428,6 +449,7 @@ describe('Verifier specialist (#55)', () => {
       resolvedFacts: sampleFactSet(),
       curatedDraft: draftUnverifiedIdentity,
       classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [sampleBundle('https://acme.example/images/test.jpg')],
     });
 
     expect(reportUnverified.verdict).toBe('retry_curator');
@@ -454,12 +476,35 @@ describe('Verifier specialist (#55)', () => {
       ],
     });
 
+    const secondaryBundle = {
+      ...sampleBundle('https://acme.example/images/primary.jpg'),
+      images: [
+        {
+          url: 'https://acme.example/images/primary.jpg',
+          variantRef: null,
+          sourcePath: 'img.primary',
+          method: 'selector',
+          artifactId: 'art-1',
+          contentHash: sha256Hex('primary'),
+        },
+        {
+          url: 'https://acme.example/images/secondary.jpg',
+          variantRef: null,
+          sourcePath: 'img.secondary',
+          method: 'selector',
+          artifactId: 'art-1',
+          contentHash: sha256Hex('secondary'),
+        },
+      ],
+    };
+
     const reportSecondary = verifyCuratedDraft({
       schemaVersion: '1.0.0',
       productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
       resolvedFacts: sampleFactSet(),
       curatedDraft: draftSecondaryUnapproved,
       classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [secondaryBundle],
     });
 
     expect(reportSecondary.verdict).toBe('retry_curator');
@@ -511,7 +556,7 @@ describe('Verifier specialist (#55)', () => {
           requestedUrl: 'https://acme.example/products/broth',
           finalUrl: 'https://acme.example/products/broth',
           retrievedAt: FIXED_NOW,
-          contentHash: 'hash-1',
+          contentHash: sha256Hex('hash-1'),
           artifactRefs: [],
           profile: null,
           extractionPath: [],
@@ -519,20 +564,47 @@ describe('Verifier specialist (#55)', () => {
           images: [
             {
               url: 'https://acme.example/images/real.jpg',
-              role: 'primary',
-              rightsStatus: 'approved',
-              commerceApproved: true,
-              identityMatch: 'exact',
-              sourceUrl: 'https://acme.example/products/broth',
+              variantRef: null,
+              sourcePath: 'img.real',
+              method: 'selector',
+              artifactId: 'art-real',
+              contentHash: sha256Hex('real-img'),
             },
           ],
           variant: null,
           identityStatus: 'exact_match',
           identityReasons: [],
           failures: [],
-          deterministicOnly: true,
+          deterministicOnly: true as const,
         },
       ],
+    });
+
+    expect(report.verdict).toBe('retry_curator');
+    expect(report.checks.some((c) => c.checkName === 'image_evidence_provenance' && !c.passed)).toBe(true);
+  });
+
+  it('fails closed when draft contains images but extractionBundles is empty', () => {
+    const draft = sampleDraft({
+      images: [
+        {
+          url: 'https://acme.example/images/unproven.jpg',
+          role: 'primary',
+          rightsStatus: 'approved',
+          commerceApproved: true,
+          identityMatch: 'exact',
+          sourceUrl: null,
+        },
+      ],
+    });
+
+    const report = verifyCuratedDraft({
+      schemaVersion: '1.0.0',
+      productSeed: { sku: 'SUP-55', name: 'ACME Broth', price: '9.99' },
+      resolvedFacts: sampleFactSet(),
+      curatedDraft: draft,
+      classificationContext: { availableProductTypes: [], availableCategories: [], attributeProfiles: [] },
+      extractionBundles: [], // Empty extraction evidence
     });
 
     expect(report.verdict).toBe('retry_curator');

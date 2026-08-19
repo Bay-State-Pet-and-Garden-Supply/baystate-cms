@@ -35,6 +35,7 @@ import {
   CuratedProductDraftSchema,
   ClassificationContextSchema,
 } from './curator';
+import { ExtractionEvidenceBundleSchema } from '../extraction/evidence';
 import {
   finalizeSpecialistArtifact,
   captureSpecialistCodeCommit,
@@ -69,7 +70,7 @@ export const VerifierSpecialistInputSchema = z.object({
     availableCategories: [],
     attributeProfiles: [],
   }),
-  extractionBundles: z.array(z.any()).optional().default([]),
+  extractionBundles: z.array(ExtractionEvidenceBundleSchema).optional().default([]),
 }).strict();
 export type VerifierSpecialistInput = z.input<typeof VerifierSpecialistInputSchema>;
 
@@ -679,7 +680,7 @@ export function verifyCuratedDraft(
   const ALLOWED_IMAGE_RIGHTS = new Set(['approved', 'commercial', 'licensed', 'public_domain']);
   const ALLOWED_IMAGE_IDENTITY = new Set(['exact', 'verified', 'exact_match']);
 
-  const extractedImageCandidates = ((input as any).extractionBundles ?? []).flatMap((b: any) => b.images ?? []);
+  const extractedImageCandidates = (input.extractionBundles ?? []).flatMap((b) => b.images ?? []);
 
   for (const image of curatedDraft.images) {
     if (!image.commerceApproved) {
@@ -717,16 +718,36 @@ export function verifyCuratedDraft(
       });
     }
 
-    if (extractedImageCandidates.length > 0) {
-      const match = extractedImageCandidates.find((ext: any) => ext.url === image.url);
-      if (!match) {
+    // Fail-closed provenance check: image MUST exist in extraction evidence candidates
+    const match = extractedImageCandidates.find((ext) => ext.url === image.url);
+    if (!match) {
+      checks.push({
+        checkName: 'image_evidence_provenance',
+        category: 'image_rights',
+        passed: false,
+        severity: 'blocking',
+        field: 'images',
+        details: `Draft image '${image.url}' has no verified candidate provenance in extraction bundles`,
+      });
+    } else {
+      if (!match.sourcePath || !match.artifactId) {
         checks.push({
           checkName: 'image_evidence_provenance',
           category: 'image_rights',
           passed: false,
           severity: 'blocking',
           field: 'images',
-          details: `Draft image '${image.url}' has no verified candidate provenance in extraction bundles`,
+          details: `Draft image '${image.url}' is missing required source artifact/path provenance in extraction evidence`,
+        });
+      }
+      if (match.variantRef && resolvedFacts.expectedIdentity?.gtin && match.variantRef !== resolvedFacts.expectedIdentity.gtin) {
+        checks.push({
+          checkName: 'image_variant_compliance',
+          category: 'image_rights',
+          passed: false,
+          severity: 'blocking',
+          field: 'images',
+          details: `Draft image '${image.url}' references variant '${match.variantRef}' conflicting with resolved GTIN '${resolvedFacts.expectedIdentity.gtin}'`,
         });
       }
     }

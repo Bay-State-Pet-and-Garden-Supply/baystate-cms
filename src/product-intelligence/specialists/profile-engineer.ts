@@ -170,8 +170,20 @@ export interface ProfileEngineerWorkflowMutation {
   revisionId?: string | null;
 }
 
+export interface ClaimProfileLockOptions {
+  leaseMs?: number;
+  needsRepair?: boolean;
+  forceNew?: boolean;
+  targetVersion?: number;
+}
+
 export interface ProfileEngineerWorkflowLock {
-  claim(domain: string, runId: string, workspaceId: string): Promise<{ acquired: boolean; workflowId: string; reason?: string }> | { acquired: boolean; workflowId: string; reason?: string };
+  claim(
+    domain: string,
+    runId: string,
+    workspaceId: string,
+    options?: ClaimProfileLockOptions,
+  ): Promise<{ acquired: boolean; workflowId: string; reason?: string }> | { acquired: boolean; workflowId: string; reason?: string };
   complete?(workflowId: string, runId: string, artifactJson?: string): Promise<ProfileEngineerWorkflowMutation> | ProfileEngineerWorkflowMutation;
   fail?(workflowId: string, runId: string, reason: string): Promise<ProfileEngineerWorkflowMutation> | ProfileEngineerWorkflowMutation;
 }

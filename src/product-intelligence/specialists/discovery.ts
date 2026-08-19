@@ -374,14 +374,46 @@ export class DiscoverySpecialist {
     let sources = [...input.sourceCandidates];
 
     if (sources.length === 0 && this.dependencies.search && searchAllowed > 0) {
-      if (context.signal?.aborted) return { specialist: DISCOVERY_SPECIALIST_NAME, outcome: 'failed', failure: { code: 'cancelled', message: 'discovery cancelled' }, durationMs: Date.now() - startedAt };
+      if (context.signal?.aborted) {
+        return {
+          specialist: DISCOVERY_SPECIALIST_NAME,
+          outcome: 'failed',
+          failure: { code: 'cancelled', message: 'discovery cancelled' },
+          durationMs: Date.now() - startedAt,
+          usage: {
+            toolCalls: searchRequestsUsed,
+            modelCalls: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            estimatedCostUsd: Number((searchRequestsUsed * 0.005).toFixed(4)),
+          },
+        };
+      }
       searchRequestsUsed += 1;
       try {
         const searched = await this.dependencies.search({ productSeed: input.productSeed, discoveredGtin: input.discoveredGtin ?? null, batchContext: input.batchContext ?? null }, context);
         sources = searched.candidates;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (sources.length === 0) return { specialist: DISCOVERY_SPECIALIST_NAME, outcome: 'abstained', abstention: { reason: `search unavailable: ${message.slice(0, 300)}`, actionableNextStep: 'Provide a cached source candidate or enable an approved search capability.', targets: [input.productSeed.sku] }, durationMs: Date.now() - startedAt };
+        if (sources.length === 0) {
+          return {
+            specialist: DISCOVERY_SPECIALIST_NAME,
+            outcome: 'abstained',
+            abstention: {
+              reason: `search unavailable: ${message.slice(0, 300)}`,
+              actionableNextStep: 'Provide a cached source candidate or enable an approved search capability.',
+              targets: [input.productSeed.sku],
+            },
+            durationMs: Date.now() - startedAt,
+            usage: {
+              toolCalls: searchRequestsUsed,
+              modelCalls: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              estimatedCostUsd: Number((searchRequestsUsed * 0.005).toFixed(4)),
+            },
+          };
+        }
       }
     }
 
@@ -390,12 +422,42 @@ export class DiscoverySpecialist {
     const verificationAllowed = Math.min(this.options.maxVerificationRequests, Math.max(0, policyAllowed - searchRequestsUsed));
     const uniqueSources = dedupeSources(sources).slice(0, this.options.maxCandidates);
     if (uniqueSources.length === 0) {
-      return { specialist: DISCOVERY_SPECIALIST_NAME, outcome: 'abstained', abstention: { reason: 'no source candidates were discovered', actionableNextStep: 'Request a targeted name, brand, or GTIN search, then retry discovery.', targets: [input.productSeed.sku] }, durationMs: Date.now() - startedAt };
+      return {
+        specialist: DISCOVERY_SPECIALIST_NAME,
+        outcome: 'abstained',
+        abstention: {
+          reason: 'no source candidates were discovered',
+          actionableNextStep: 'Request a targeted name, brand, or GTIN search, then retry discovery.',
+          targets: [input.productSeed.sku],
+        },
+        durationMs: Date.now() - startedAt,
+        usage: {
+          toolCalls: searchRequestsUsed,
+          modelCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostUsd: Number((searchRequestsUsed * 0.005).toFixed(4)),
+        },
+      };
     }
 
     const candidates: DiscoveryCandidate[] = [];
     for (const source of uniqueSources) {
-      if (context.signal?.aborted) return { specialist: DISCOVERY_SPECIALIST_NAME, outcome: 'failed', failure: { code: 'cancelled', message: 'discovery cancelled' }, durationMs: Date.now() - startedAt };
+      if (context.signal?.aborted) {
+        return {
+          specialist: DISCOVERY_SPECIALIST_NAME,
+          outcome: 'failed',
+          failure: { code: 'cancelled', message: 'discovery cancelled' },
+          durationMs: Date.now() - startedAt,
+          usage: {
+            toolCalls: searchRequestsUsed + verificationRequestsUsed,
+            modelCalls: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            estimatedCostUsd: Number((searchRequestsUsed * 0.005).toFixed(4)),
+          },
+        };
+      }
       let page: PageExtractionResult | null = null;
       let extractionStatus: DiscoveryCandidate['extractionStatus'] = 'unverified';
       if (this.dependencies.extraction && verificationRequestsUsed < verificationAllowed) {

@@ -1,6 +1,6 @@
 /**
  * Specialist Orchestrator — supervised multi-specialist lifecycle management,
- * routing state machine, retry limits, and terminal state resolution (epic #47, issue #56, ADR 0028).
+ * routing state machine, retry limits, aggregate budget broker, and terminal state resolution (epic #47, issue #56, ADR 0028).
  *
  * The orchestrator owns ALL sequencing, routing, retries, backtracking, budgets,
  * cancellation propagation, and terminal state transitions across specialists:
@@ -37,7 +37,7 @@
  *   - All inter-specialist data flows are schema-validated typed artifacts.
  *   - Loops stop deterministically at configured retry/dispatch/budget limits.
  *   - Cancellation via AbortSignal immediately aborts execution and sets CANCELLED.
- *   - Atomic dispatch & tool/cost ledger reservations enforce hard policy limits.
+ *   - Atomic dispatch & tool/cost ledger reservations enforce hard aggregate policy limits.
  *   - 14-digit GTINs are strictly case-scoped and never promoted as consumer GTINs.
  *   - Caller identifiers are normalized once and passed canonically across all phases.
  *   - Profile Engineer proposals require governance/manual review before activation.
@@ -57,6 +57,7 @@ import {
   ProfileEngineerSpecialist,
   type ProfileEngineerProposal,
   type ProfileEngineerWorkflowLock,
+  type ClaimProfileLockOptions,
 } from '../specialists/profile-engineer';
 import {
   ResolverSpecialist,
@@ -168,6 +169,7 @@ export interface WorkflowStateSnapshot {
   usage: WorkflowUsageLedger;
   artifactIds: string[];
   totalDurationMs: number;
+  persistenceWarnings?: string[];
   error?: string;
 }
 
@@ -195,7 +197,7 @@ export interface SpecialistWorkflowRecord {
 
 export interface SpecialistWorkflowPersistenceRepository {
   save(record: SpecialistWorkflowRecord): Promise<void> | void;
-  get?(runId: string): Promise<SpecialistWorkflowRecord | null> | SpecialistWorkflowRecord | null;
+  get(runId: string): Promise<SpecialistWorkflowRecord | null> | SpecialistWorkflowRecord | null;
 }
 
 export interface SpecialistWorkflowResult {
@@ -250,12 +252,29 @@ export interface SpecialistOrchestratorOptions {
   now?: () => string;
 }
 
-// ── In-Memory Concurrency Lock for Profile Engineer (Test Only) ───────────────
+// ── In-Memory Persistence & Concurrency Locks (Test Fallbacks) ────────────────
+
+export class InMemoryWorkflowPersistenceRepository implements SpecialistWorkflowPersistenceRepository {
+  private readonly records = new Map<string, SpecialistWorkflowRecord>();
+
+  public save(record: SpecialistWorkflowRecord): void {
+    this.records.set(record.runId, { ...record });
+  }
+
+  public get(runId: string): SpecialistWorkflowRecord | null {
+    return this.records.get(runId) ?? null;
+  }
+}
 
 export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock {
   private readonly activeLocks = new Set<string>();
 
-  public claim(domain: string, runId: string, _workspaceId: string): { acquired: boolean; workflowId: string; reason?: string } {
+  public claim(
+    domain: string,
+    runId: string,
+    _workspaceId: string,
+    _options?: ClaimProfileLockOptions,
+  ): { acquired: boolean; workflowId: string; reason?: string } {
     if (this.activeLocks.has(domain)) {
       return { acquired: false, workflowId: `wf:${domain}:${runId}`, reason: `Domain ${domain} profile is actively being synthesized` };
     }
@@ -287,6 +306,107 @@ export function resolveDefaultProfileLock(): ProfileEngineerWorkflowLock {
     // In test runners or environments without bun:sqlite, fallback to in-memory lock
   }
   return new InMemoryProfileWorkflowLock();
+}
+
+export function resolveDefaultWorkflowPersistence(): SpecialistWorkflowPersistenceRepository {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const repo = require('../../db/repositories/specialist-workflow-repo');
+    if (typeof repo.specialistWorkflowPersistence === 'function') {
+      return repo.specialistWorkflowPersistence();
+    }
+  } catch {
+    // In test runners or environments without bun:sqlite, fallback to in-memory persistence
+  }
+  return new InMemoryWorkflowPersistenceRepository();
+}
+
+// ── Aggregate Budget Broker ──────────────────────────────────────────────────
+
+export class WorkflowBudgetBroker {
+  private readonly maxToolCalls: number;
+  private readonly maxCostUsd: number;
+  private readonly maxDispatches: number;
+  private readonly deadlineAt: number | null;
+  public readonly usage: WorkflowUsageLedger;
+
+  public constructor(context: SpecialistContext, maxDispatches: number) {
+    this.maxToolCalls = typeof context.policy.maxToolCalls === 'number' && context.policy.maxToolCalls > 0
+      ? context.policy.maxToolCalls
+      : Number.POSITIVE_INFINITY;
+    this.maxCostUsd = typeof context.policy.maxCostUsd === 'number' && context.policy.maxCostUsd > 0
+      ? context.policy.maxCostUsd
+      : Number.POSITIVE_INFINITY;
+    this.maxDispatches = maxDispatches;
+    this.deadlineAt = context.deadlineAt ?? null;
+
+    this.usage = {
+      totalDispatches: 0,
+      totalToolCalls: 0,
+      totalModelCalls: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      estimatedCostUsd: 0,
+      bySpecialist: {},
+    };
+  }
+
+  public canDispatch(count = 1): { allowed: boolean; reason?: string } {
+    if (this.deadlineAt && Date.now() > this.deadlineAt) {
+      return { allowed: false, reason: 'Execution deadline exceeded' };
+    }
+    if (this.usage.totalDispatches + count > this.maxDispatches) {
+      return { allowed: false, reason: `Total dispatch ceiling (${this.maxDispatches}) reached` };
+    }
+    if (this.usage.totalToolCalls >= this.maxToolCalls) {
+      return { allowed: false, reason: `Tool call budget ceiling (${this.maxToolCalls}) reached` };
+    }
+    if (this.usage.estimatedCostUsd >= this.maxCostUsd) {
+      return { allowed: false, reason: `Cost budget ceiling ($${this.maxCostUsd}) reached` };
+    }
+    return { allowed: true };
+  }
+
+  public reserveToolCalls(count: number): { allowed: boolean; reason?: string } {
+    if (this.usage.totalToolCalls + count > this.maxToolCalls) {
+      return { allowed: false, reason: `Tool call reservation of ${count} exceeds limit (${this.maxToolCalls})` };
+    }
+    this.usage.totalToolCalls += count;
+    return { allowed: true };
+  }
+
+  public recordUsage(specialist: string, usage?: SpecialistUsage | null, durationMs = 0): void {
+    if (!this.usage.bySpecialist[specialist]) {
+      this.usage.bySpecialist[specialist] = {
+        dispatches: 0,
+        toolCalls: 0,
+        modelCalls: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostUsd: 0,
+        durationMs: 0,
+      };
+    }
+    const entry = this.usage.bySpecialist[specialist];
+    entry.durationMs += durationMs;
+
+    if (usage) {
+      entry.toolCalls += usage.toolCalls;
+      entry.modelCalls += usage.modelCalls;
+      entry.inputTokens += usage.inputTokens;
+      entry.outputTokens += usage.outputTokens;
+      entry.estimatedCostUsd += usage.estimatedCostUsd;
+
+      // Tool calls reserved upfront are tracked; add unreserved difference
+      if (specialist !== 'extraction') {
+        this.usage.totalToolCalls += usage.toolCalls;
+      }
+      this.usage.totalModelCalls += usage.modelCalls;
+      this.usage.totalInputTokens += usage.inputTokens;
+      this.usage.totalOutputTokens += usage.outputTokens;
+      this.usage.estimatedCostUsd += usage.estimatedCostUsd;
+    }
+  }
 }
 
 // ── Normalized Identifier Helper ─────────────────────────────────────────────
@@ -345,6 +465,30 @@ async function boundedMap<T, R>(
   return results;
 }
 
+// ── Selector Validation Helper ───────────────────────────────────────────────
+
+function isGenuineCssSelector(path: string | null | undefined): boolean {
+  if (!path || typeof path !== 'string') return false;
+  const trimmed = path.trim();
+  if (!trimmed) return false;
+
+  // Reject JSON path expressions (e.g. `[0].name`, `items[0]`, `product.name`, `/items/0`)
+  if (/^\[\d+\]/.test(trimmed) || /^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$/.test(trimmed) || trimmed.startsWith('/')) {
+    return false;
+  }
+
+  // Accept CSS selector patterns: ID, class, tag, attribute selector, child combinator
+  return trimmed.startsWith('#') ||
+    trimmed.startsWith('.') ||
+    /^h[1-6](\.[a-zA-Z0-9_-]+|#[a-zA-Z0-9_-]+|\[.*\])?/i.test(trimmed) ||
+    /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+|#[a-zA-Z0-9_-]+|\[.*\])/.test(trimmed) ||
+    trimmed.startsWith('[data-') ||
+    trimmed.startsWith('[itemprop') ||
+    trimmed.startsWith('[class') ||
+    trimmed.includes(' > ') ||
+    trimmed.includes(' ');
+}
+
 // ── Orchestrator Implementation ─────────────────────────────────────────────
 
 export class SpecialistOrchestrator {
@@ -360,6 +504,11 @@ export class SpecialistOrchestrator {
     this.extractionConcurrency = Math.max(1, Math.min(8, options.extractionConcurrency ?? 3));
     this.dependencies = options.dependencies ?? {};
     this.now = options.now ?? (() => new Date().toISOString());
+  }
+
+  public async getWorkflowState(runId: string): Promise<SpecialistWorkflowRecord | null> {
+    const persistence = this.dependencies.workflowPersistence ?? resolveDefaultWorkflowPersistence();
+    return persistence.get(runId);
   }
 
   public async runWorkflow(
@@ -380,9 +529,9 @@ export class SpecialistOrchestrator {
       verifier: [],
     };
     const extractionArtifactRefs = new Set<string>();
+    const cumulativePersistenceWarnings: string[] = [];
 
     let eventSeq = 0;
-    let totalDispatches = 0;
     let retriesCount = 0;
 
     const invocations = {
@@ -394,15 +543,7 @@ export class SpecialistOrchestrator {
       verifier: 0,
     };
 
-    const usageLedger: WorkflowUsageLedger = {
-      totalDispatches: 0,
-      totalToolCalls: 0,
-      totalModelCalls: 0,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      estimatedCostUsd: 0,
-      bySpecialist: {},
-    };
+    const budgetBroker = new WorkflowBudgetBroker(context, this.limits.maxTotalDispatches);
 
     // Normalize caller-provided identifier ONCE at workflow start
     const canonicalIdentifier = normalizeScopedIdentifier(
@@ -416,47 +557,8 @@ export class SpecialistOrchestrator {
     let curatorArtifact: SpecialistArtifactEnvelope | undefined;
     let verifierArtifact: SpecialistArtifactEnvelope | undefined;
 
-    const recordUsage = (specialist: string, usage?: SpecialistUsage | null, durationMs = 0): void => {
-      if (!usageLedger.bySpecialist[specialist]) {
-        usageLedger.bySpecialist[specialist] = {
-          dispatches: 0,
-          toolCalls: 0,
-          modelCalls: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          estimatedCostUsd: 0,
-          durationMs: 0,
-        };
-      }
-      const entry = usageLedger.bySpecialist[specialist];
-      entry.durationMs += durationMs;
-
-      if (usage) {
-        entry.toolCalls += usage.toolCalls;
-        entry.modelCalls += usage.modelCalls;
-        entry.inputTokens += usage.inputTokens;
-        entry.outputTokens += usage.outputTokens;
-        entry.estimatedCostUsd += usage.estimatedCostUsd;
-
-        usageLedger.totalToolCalls += usage.toolCalls;
-        usageLedger.totalModelCalls += usage.modelCalls;
-        usageLedger.totalInputTokens += usage.inputTokens;
-        usageLedger.totalOutputTokens += usage.outputTokens;
-        usageLedger.estimatedCostUsd += usage.estimatedCostUsd;
-      }
-    };
-
-    const checkPolicyBudgets = (_specialist?: string): { exceeded: boolean; reason?: string } => {
-      const maxTools = context.policy.maxToolCalls;
-      if (typeof maxTools === 'number' && maxTools > 0 && usageLedger.totalToolCalls >= maxTools) {
-        return { exceeded: true, reason: `Policy maxToolCalls limit (${maxTools}) reached` };
-      }
-      const maxCost = context.policy.maxCostUsd;
-      if (typeof maxCost === 'number' && maxCost > 0 && usageLedger.estimatedCostUsd >= maxCost) {
-        return { exceeded: true, reason: `Policy maxCostUsd limit ($${maxCost}) reached` };
-      }
-      return { exceeded: false };
-    };
+    const persistenceRepo: SpecialistWorkflowPersistenceRepository = this.dependencies.workflowPersistence
+      ?? resolveDefaultWorkflowPersistence();
 
     const makeSnapshot = (
       status: OrchestratorTerminalStatus,
@@ -470,22 +572,21 @@ export class SpecialistOrchestrator {
       if (curatorArtifact) artifactIds.push(`${curatorArtifact.artifactType}:${curatorArtifact.contentHash}`);
       if (verifierArtifact) artifactIds.push(`${verifierArtifact.artifactType}:${verifierArtifact.contentHash}`);
 
-      usageLedger.totalDispatches = totalDispatches;
-
       return {
         runId: context.runId,
         version: '1.0.0',
         status,
         currentPhase,
         retriesCount,
-        totalDispatches,
+        totalDispatches: budgetBroker.usage.totalDispatches,
         invocations: { ...invocations },
         capabilityInvocationIds: { ...capabilityInvocationIds },
         extractionArtifactRefs: Array.from(extractionArtifactRefs),
         routeRecords: [...routeRecords],
-        usage: { ...usageLedger },
+        usage: { ...budgetBroker.usage },
         artifactIds,
         totalDurationMs: Date.now() - startedAt,
+        persistenceWarnings: cumulativePersistenceWarnings.length > 0 ? [...cumulativePersistenceWarnings] : undefined,
         error,
       };
     };
@@ -496,33 +597,33 @@ export class SpecialistOrchestrator {
       error?: string,
     ): Promise<WorkflowStateSnapshot> => {
       const snapshot = makeSnapshot(status, currentPhase, error);
-      if (this.dependencies.workflowPersistence) {
-        try {
-          await this.dependencies.workflowPersistence.save({
-            workflowId: `wf:${context.runId}`,
-            runId: context.runId,
-            workspaceId: context.workspaceId,
-            workflowVersion: '1.0.0',
-            productSeed,
-            status,
-            currentPhase,
-            retriesCount,
-            totalDispatches,
-            invocations: { ...invocations },
-            capabilityInvocationIds: { ...capabilityInvocationIds },
-            extractionArtifactRefs: Array.from(extractionArtifactRefs),
-            routeRecords: [...routeRecords],
-            usage: { ...usageLedger },
-            stepEvents: [...events],
-            artifactIds: snapshot.artifactIds,
-            createdAt: new Date(startedAt).toISOString(),
-            updatedAt: this.now(),
-            error,
-          });
-        } catch (err) {
-          const persistErr = err instanceof Error ? err.message : String(err);
-          snapshot.error = snapshot.error ? `${snapshot.error} (persistence_warning: ${persistErr})` : `persistence_warning: ${persistErr}`;
-        }
+      try {
+        await persistenceRepo.save({
+          workflowId: `wf:${context.runId}`,
+          runId: context.runId,
+          workspaceId: context.workspaceId,
+          workflowVersion: '1.0.0',
+          productSeed,
+          status,
+          currentPhase,
+          retriesCount,
+          totalDispatches: budgetBroker.usage.totalDispatches,
+          invocations: { ...invocations },
+          capabilityInvocationIds: { ...capabilityInvocationIds },
+          extractionArtifactRefs: Array.from(extractionArtifactRefs),
+          routeRecords: [...routeRecords],
+          usage: { ...budgetBroker.usage },
+          stepEvents: [...events],
+          artifactIds: snapshot.artifactIds,
+          createdAt: new Date(startedAt).toISOString(),
+          updatedAt: this.now(),
+          error,
+        });
+      } catch (err) {
+        const persistErr = err instanceof Error ? err.message : String(err);
+        cumulativePersistenceWarnings.push(`persistence_error: ${persistErr}`);
+        snapshot.persistenceWarnings = [...cumulativePersistenceWarnings];
+        snapshot.error = snapshot.error ? `${snapshot.error} (persistence_error: ${persistErr})` : `persistence_error: ${persistErr}`;
       }
       return snapshot;
     };
@@ -544,28 +645,16 @@ export class SpecialistOrchestrator {
         timestamp: this.now(),
         details,
       });
-
-      if (!usageLedger.bySpecialist[specialist]) {
-        usageLedger.bySpecialist[specialist] = {
-          dispatches: 0,
-          toolCalls: 0,
-          modelCalls: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          estimatedCostUsd: 0,
-          durationMs: 0,
-        };
-      }
     };
 
     const reserveDispatch = (specialist: string, count = 1): boolean => {
-      if (totalDispatches + count > this.limits.maxTotalDispatches) {
+      const check = budgetBroker.canDispatch(count);
+      if (!check.allowed) {
         return false;
       }
-      totalDispatches += count;
-      usageLedger.totalDispatches = totalDispatches;
-      if (!usageLedger.bySpecialist[specialist]) {
-        usageLedger.bySpecialist[specialist] = {
+      budgetBroker.usage.totalDispatches += count;
+      if (!budgetBroker.usage.bySpecialist[specialist]) {
+        budgetBroker.usage.bySpecialist[specialist] = {
           dispatches: 0,
           toolCalls: 0,
           modelCalls: 0,
@@ -575,7 +664,7 @@ export class SpecialistOrchestrator {
           durationMs: 0,
         };
       }
-      usageLedger.bySpecialist[specialist].dispatches += count;
+      budgetBroker.usage.bySpecialist[specialist].dispatches += count;
       return true;
     };
 
@@ -583,10 +672,18 @@ export class SpecialistOrchestrator {
       if (invocations.extraction >= this.limits.maxExtractionInvocations) {
         return false;
       }
+      const toolRes = budgetBroker.reserveToolCalls(1);
+      if (!toolRes.allowed) {
+        return false;
+      }
       if (!reserveDispatch('extraction', 1)) {
+        // Rollback tool reservation if dispatch rejected
+        budgetBroker.usage.totalToolCalls -= 1;
         return false;
       }
       invocations.extraction += 1;
+      // Allocate capability invocation ID atomically with successful reservation
+      capabilityInvocationIds.extraction.push(`inv:extraction:${invocations.extraction}`);
       return true;
     };
 
@@ -630,7 +727,7 @@ export class SpecialistOrchestrator {
 
     let targetPhase: 'discovery' | 'extraction' | 'resolver' | 'curator' | 'verifier' = 'discovery';
 
-    while (totalDispatches < this.limits.maxTotalDispatches) {
+    while (budgetBroker.usage.totalDispatches < this.limits.maxTotalDispatches) {
       if (isAborted()) {
         recordEvent('orchestrator', 'cancellation_check', 'failed', 0, 'Workflow cancelled by caller');
         const state = await persistState('cancelled', targetPhase, 'Workflow cancelled by caller');
@@ -651,44 +748,16 @@ export class SpecialistOrchestrator {
           verifierArtifact,
           events,
           retriesCount,
-          totalDispatches,
+          totalDispatches: budgetBroker.usage.totalDispatches,
           totalDurationMs: Date.now() - startedAt,
           workflowState: state,
           error: 'Execution cancelled',
         };
       }
 
-      // Check wall-clock deadline
-      if (context.deadlineAt && Date.now() > context.deadlineAt) {
-        recordEvent('orchestrator', 'deadline_check', 'failed', 0, 'Execution deadline exceeded');
-        const state = await persistState('budget_exceeded', 'deadline_check', 'Execution deadline exceeded');
-        return {
-          runId: context.runId,
-          status: 'budget_exceeded',
-          productSeed,
-          discoveryOutput,
-          discoveryArtifact,
-          profileOutput,
-          profileArtifact,
-          extractionBundles,
-          resolverOutput,
-          resolverArtifact,
-          curatorOutput,
-          curatorArtifact,
-          verifierOutput,
-          verifierArtifact,
-          events,
-          retriesCount,
-          totalDispatches,
-          totalDurationMs: Date.now() - startedAt,
-          workflowState: state,
-          error: 'Execution deadline exceeded',
-        };
-      }
-
-      // Check policy tool / cost budgets
-      const budgetCheck = checkPolicyBudgets('orchestrator');
-      if (budgetCheck.exceeded) {
+      // Check pre-dispatch budget allowances
+      const budgetCheck = budgetBroker.canDispatch(1);
+      if (!budgetCheck.allowed) {
         recordEvent('orchestrator', 'budget_check', 'failed', 0, budgetCheck.reason);
         const state = await persistState('budget_exceeded', targetPhase, budgetCheck.reason);
         return {
@@ -708,7 +777,7 @@ export class SpecialistOrchestrator {
           verifierArtifact,
           events,
           retriesCount,
-          totalDispatches,
+          totalDispatches: budgetBroker.usage.totalDispatches,
           totalDurationMs: Date.now() - startedAt,
           workflowState: state,
           error: budgetCheck.reason,
@@ -726,7 +795,7 @@ export class SpecialistOrchestrator {
               productSeed,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               extractionBundles: [],
               workflowState: state,
@@ -754,7 +823,7 @@ export class SpecialistOrchestrator {
           );
 
           const discDuration = Date.now() - stepStart;
-          recordUsage('discovery', discResult.usage, discDuration);
+          budgetBroker.recordUsage('discovery', discResult.usage, discDuration);
 
           if (discResult.outcome !== 'succeeded' || !discResult.output) {
             if (discResult.outcome === 'abstained') {
@@ -767,7 +836,7 @@ export class SpecialistOrchestrator {
                 extractionBundles,
                 events,
                 retriesCount,
-                totalDispatches,
+                totalDispatches: budgetBroker.usage.totalDispatches,
                 totalDurationMs: Date.now() - startedAt,
                 workflowState: state,
               };
@@ -781,7 +850,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: discResult.failure?.message ?? 'Discovery failed',
@@ -804,7 +873,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
             };
@@ -832,17 +901,12 @@ export class SpecialistOrchestrator {
         case 'extraction': {
           const stepStart = Date.now();
           recordEvent('extraction_runner', 'extract_evidence', 'started', 0);
+          await persistState('in_progress', 'extraction');
 
           const candidates = discoveryOutput?.candidates ?? [];
           const candidateUrls = candidates
             .slice(0, 3)
             .map((c) => c.finalUrl ?? c.source.url);
-
-          // Pre-allocate invocation IDs for planned extraction runs
-          for (let i = 0; i < candidateUrls.length; i++) {
-            capabilityInvocationIds.extraction.push(`inv:extraction:${invocations.extraction + i + 1}`);
-          }
-          await persistState('in_progress', 'extraction');
 
           // Promote GTIN strictly from verified PDP candidate with consumer unit GTIN provenance
           const trustedCandidateGtin = (() => {
@@ -884,13 +948,12 @@ export class SpecialistOrchestrator {
                   images: [],
                   variant: null,
                   identityStatus: 'insufficient_evidence' as const,
-                  identityReasons: ['Extraction invocation or dispatch limit reached'],
+                  identityReasons: ['Dispatch or budget limit reached'],
                   failures: [{ code: 'extraction_failed' as const, stage: 'retrieval' as const, message: 'Dispatch limit reached', retryable: false }],
                   deterministicOnly: true,
                 };
               }
 
-              // Run extraction
               let bundle: ExtractionEvidenceBundle;
               if (this.dependencies.extractionRunner) {
                 bundle = await this.dependencies.extractionRunner(url, context, null);
@@ -909,7 +972,7 @@ export class SpecialistOrchestrator {
                 bundle = detBundle;
               }
 
-              recordUsage('extraction', {
+              budgetBroker.recordUsage('extraction', {
                 toolCalls: 1,
                 modelCalls: 0,
                 inputTokens: 0,
@@ -966,13 +1029,8 @@ export class SpecialistOrchestrator {
                   .filter((id) => Boolean(id)))];
 
                 // Genuine title selector candidate hints (derived strictly from that page's own extraction observations)
-                const isSelectorCandidate = (path: string | null | undefined): boolean => {
-                  if (!path) return false;
-                  return path.startsWith('h1') || path.startsWith('.') || path.startsWith('#') || path.startsWith('[');
-                };
-
-                const sample1TitleHint = bundle1?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isSelectorCandidate(o.sourcePath))?.sourcePath ?? null;
-                const sample2TitleHint = bundle2?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isSelectorCandidate(o.sourcePath))?.sourcePath ?? null;
+                const sample1TitleHint = bundle1?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isGenuineCssSelector(o.sourcePath))?.sourcePath ?? null;
+                const sample2TitleHint = bundle2?.observations.find((o) => (o.field === 'title' || o.field === 'product_name') && isGenuineCssSelector(o.sourcePath))?.sourcePath ?? null;
 
                 const hasRealEvidence = sample1Artifacts.length > 0 && sample2Artifacts.length > 0;
 
@@ -1019,8 +1077,8 @@ export class SpecialistOrchestrator {
                         {
                           url: sample1Url,
                           artifactRefs: sample1Artifacts,
-                          expectedName: productSeed.name,
-                          expectedGtin: effectiveExtractionGtin ?? undefined,
+                          expectedName: sample1.extracted.productName ?? productSeed.name,
+                          expectedGtin: sample1.extracted.gtins[0] ?? effectiveExtractionGtin ?? undefined,
                           signals: {
                             jsonLd: sample1.extracted.identifiers.some((i) => i.method === 'json_ld'),
                             shopify: sample1.signals.some((s) => s.value.toLowerCase().includes('shopify')),
@@ -1036,8 +1094,8 @@ export class SpecialistOrchestrator {
                         {
                           url: sample2Url,
                           artifactRefs: sample2Artifacts,
-                          expectedName: productSeed.name,
-                          expectedGtin: effectiveExtractionGtin ?? undefined,
+                          expectedName: sample2.extracted.productName ?? productSeed.name,
+                          expectedGtin: sample2.extracted.gtins[0] ?? effectiveExtractionGtin ?? undefined,
                           signals: {
                             jsonLd: sample2.extracted.identifiers.some((i) => i.method === 'json_ld'),
                             shopify: sample2.signals.some((s) => s.value.toLowerCase().includes('shopify')),
@@ -1056,7 +1114,7 @@ export class SpecialistOrchestrator {
                     context,
                   );
 
-                  recordUsage('profile_engineer', profResult.usage, 0);
+                  budgetBroker.recordUsage('profile_engineer', profResult.usage, 0);
 
                   if (profResult.outcome === 'succeeded' && profResult.output) {
                     const profEnv = profResult.output as SpecialistArtifactEnvelope;
@@ -1108,7 +1166,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
             };
@@ -1138,7 +1196,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: 'Resolver invocation or dispatch limit reached',
@@ -1184,7 +1242,7 @@ export class SpecialistOrchestrator {
           );
 
           const resDuration = Date.now() - stepStart;
-          recordUsage('resolver', resResult.usage, resDuration);
+          budgetBroker.recordUsage('resolver', resResult.usage, resDuration);
 
           if (resResult.outcome !== 'succeeded' || !resResult.output) {
             recordEvent('resolver', 'reconcile_facts', 'failed', resDuration, resResult.failure?.message);
@@ -1198,7 +1256,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: resResult.failure?.message ?? 'Resolver failed',
@@ -1243,7 +1301,7 @@ export class SpecialistOrchestrator {
               resolverArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: 'Curator invocation or dispatch limit reached',
@@ -1270,7 +1328,7 @@ export class SpecialistOrchestrator {
               extractionBundles,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: 'Missing resolved facts',
@@ -1288,7 +1346,7 @@ export class SpecialistOrchestrator {
           );
 
           const curDuration = Date.now() - stepStart;
-          recordUsage('curator', curResult.usage, curDuration);
+          budgetBroker.recordUsage('curator', curResult.usage, curDuration);
 
           if (curResult.outcome !== 'succeeded' || !curResult.output) {
             recordEvent('curator', 'synthesize_draft', 'failed', curDuration, curResult.failure?.message);
@@ -1304,7 +1362,7 @@ export class SpecialistOrchestrator {
               resolverArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: curResult.failure?.message ?? 'Curator failed',
@@ -1351,7 +1409,7 @@ export class SpecialistOrchestrator {
               curatorArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: 'Verifier invocation or dispatch limit reached',
@@ -1382,7 +1440,7 @@ export class SpecialistOrchestrator {
               curatorArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: 'Missing facts or draft',
@@ -1402,7 +1460,7 @@ export class SpecialistOrchestrator {
           );
 
           const verDuration = Date.now() - stepStart;
-          recordUsage('verifier', verResult.usage, verDuration);
+          budgetBroker.recordUsage('verifier', verResult.usage, verDuration);
 
           if (verResult.outcome !== 'succeeded' || !verResult.output) {
             recordEvent('verifier', 'verify_quality', 'failed', verDuration, verResult.failure?.message);
@@ -1420,7 +1478,7 @@ export class SpecialistOrchestrator {
               curatorArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
               error: verResult.failure?.message ?? 'Verifier failed',
@@ -1460,7 +1518,7 @@ export class SpecialistOrchestrator {
               verifierArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
             };
@@ -1492,7 +1550,7 @@ export class SpecialistOrchestrator {
               verifierArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
             };
@@ -1553,7 +1611,7 @@ export class SpecialistOrchestrator {
               verifierArtifact,
               events,
               retriesCount,
-              totalDispatches,
+              totalDispatches: budgetBroker.usage.totalDispatches,
               totalDurationMs: Date.now() - startedAt,
               workflowState: state,
             };
@@ -1582,7 +1640,7 @@ export class SpecialistOrchestrator {
       verifierArtifact,
       events,
       retriesCount,
-      totalDispatches,
+      totalDispatches: budgetBroker.usage.totalDispatches,
       totalDurationMs: Date.now() - startedAt,
       workflowState: state,
       error: 'Exceeded max total dispatches',
