@@ -508,18 +508,18 @@ export function Onboarding() {
                         {batch.executionState && (
                           <span style={{
                             fontSize: 10,
-                            padding: '2px 6px',
+                            padding: '2px 8px',
                             borderRadius: 4,
                             fontWeight: 700,
                             letterSpacing: '0.025em',
-                            background: batch.executionState === 'running' ? '#dcfce7' :
+                            background: batch.executionState === 'running' ? '#d1fae5' :
                               batch.executionState === 'paused' ? '#fef3c7' :
                               batch.executionState === 'completed' ? '#e0f2fe' : '#f3f4f6',
-                            color: batch.executionState === 'running' ? '#166534' :
-                              batch.executionState === 'paused' ? '#92400e' :
+                            color: batch.executionState === 'running' ? '#14532d' :
+                              batch.executionState === 'paused' ? '#78350f' :
                               batch.executionState === 'completed' ? '#0369a1' : '#4b5563',
                             border: `1px solid ${
-                              batch.executionState === 'running' ? '#bbf7d0' :
+                              batch.executionState === 'running' ? '#a7f3d0' :
                               batch.executionState === 'paused' ? '#fde68a' :
                               batch.executionState === 'completed' ? '#bae6fd' : '#e5e7eb'
                             }`,
@@ -534,14 +534,15 @@ export function Onboarding() {
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                         <button
                           style={{
-                            background: '#14532d',
-                            color: '#fff',
+                            background: 'var(--color-uniform-green, #14532D)',
+                            color: 'var(--color-feed-bag-cream, #FAF9F2)',
                             border: 'none',
                             borderRadius: 4,
-                            padding: '4px 8px',
+                            padding: '5px 10px',
                             cursor: 'pointer',
                             fontWeight: 600,
                             fontSize: 12,
+                            boxShadow: '0 1px 2px rgba(33,20,20,0.06)',
                           }}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -553,7 +554,14 @@ export function Onboarding() {
                           ⚡ Preflight
                         </button>
                         <button
-                          style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: 600, fontSize: 13 }}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: 'var(--color-signet-burgundy, #760C19)',
+                            cursor: 'pointer',
+                            fontWeight: 600,
+                            fontSize: 13,
+                          }}
                           onClick={(e) => handleDeleteBatch(batch.id, e)}
                         >
                           Delete
@@ -914,6 +922,10 @@ export function Onboarding() {
             batchName={selectedBatch.name}
             onBack={handleBackToBatches}
             onOpenSettings={() => setShowSettings(true)}
+            onOpenPreflight={() => {
+              setPreflightBatchId(selectedBatchId);
+              setShowPreflightModal(true);
+            }}
           />
         ) : pipelineDiagnosticsEnabled ? (
           <PipelineBoard

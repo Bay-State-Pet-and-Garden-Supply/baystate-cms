@@ -45,6 +45,8 @@ export interface BatchWorkspaceProps {
   onBack: () => void;
   /** Opens the Onboarding settings page (extractor profiles, distributors…). */
   onOpenSettings?: () => void;
+  /** Opens the Preflight & Release Review modal. */
+  onOpenPreflight?: () => void;
 }
 
 /**
@@ -58,7 +60,7 @@ export interface BatchWorkspaceProps {
  *
  * Raw pipeline stage/stage_status are secondary diagnostics only.
  */
-export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings }: BatchWorkspaceProps) {
+export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings, onOpenPreflight }: BatchWorkspaceProps) {
   const [counts, setCounts] = useState<WorkStateCounts | null>(null);
   const [countsError, setCountsError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('needs_attention');
@@ -166,25 +168,48 @@ export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings }: B
             </p>
           </div>
         </div>
-        {onOpenSettings && (
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            style={{
-              backgroundColor: 'transparent',
-              border: `1px solid ${colors.cardBorder}`,
-              borderRadius: rounded.md,
-              padding: '0.4375rem 0.75rem',
-              fontSize: '0.8125rem',
-              fontWeight: 600,
-              color: colors.mulchBrown,
-              cursor: 'pointer',
-              minHeight: 36,
-            }}
-          >
-            Settings
-          </button>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {onOpenPreflight && (
+            <button
+              type="button"
+              onClick={onOpenPreflight}
+              style={{
+                backgroundColor: colors.uniformGreen,
+                border: 'none',
+                borderRadius: rounded.md,
+                padding: '0.4375rem 0.875rem',
+                fontSize: '0.8125rem',
+                fontWeight: 600,
+                color: colors.feedBagCream,
+                cursor: 'pointer',
+                minHeight: 36,
+                boxShadow: 'var(--shadow-sm)',
+              }}
+              title="Open Preflight & Brand Resolution Review"
+            >
+              ⚡ Preflight Review
+            </button>
+          )}
+          {onOpenSettings && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              style={{
+                backgroundColor: 'transparent',
+                border: `1px solid ${colors.cardBorder}`,
+                borderRadius: rounded.md,
+                padding: '0.4375rem 0.75rem',
+                fontSize: '0.8125rem',
+                fontWeight: 600,
+                color: colors.mulchBrown,
+                cursor: 'pointer',
+                minHeight: 36,
+              }}
+            >
+              Settings
+            </button>
+          )}
+        </div>
       </div>
 
       {countsError && (
