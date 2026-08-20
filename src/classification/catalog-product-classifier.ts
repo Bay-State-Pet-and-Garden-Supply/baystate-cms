@@ -11,7 +11,7 @@ import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from './co
 import { captureVerifiedPageSnapshot, toPageSnapshotState } from './page-snapshot';
 import { redactTransportText } from './model-policy-gateway';
 import { assertClassificationReady } from './readiness';
-import { syncConfigToCache, createConfigSnapshot, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
+import { syncConfigToCache, createConfigSnapshot, getPersistedConfigSnapshotId, upsertConfigSnapshot } from '../db/repositories/classification-config-repo';
 import {
   createRun,
   completeRun,
@@ -69,9 +69,13 @@ export async function classifyCatalogProduct(
   let catalogEvidenceHash: string | null;
   if (authority.kind === 'v2') {
     const bundle = authority.bundle;
-    const persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+    let persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+    if (!persistedId) {
+      const snap = upsertConfigSnapshot(workspaceId, bundle, bundle.manifest.sourceCatalogCommit);
+      persistedId = snap.id;
+    }
     configSnapshotRef = {
-      id: persistedId ?? bundle.manifest.bundleHash,
+      id: persistedId,
       hash: bundle.manifest.bundleHash,
       sourceCommit: bundle.manifest.sourceCatalogCommit,
       createdAt: new Date().toISOString(),

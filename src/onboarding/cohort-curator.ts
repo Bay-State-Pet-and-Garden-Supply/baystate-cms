@@ -76,6 +76,7 @@ import {
   syncConfigToCache,
   createConfigSnapshot,
   getPersistedConfigSnapshotId,
+  upsertConfigSnapshot,
 } from '../db/repositories/classification-config-repo';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../classification/config-loader';
 import type { RuntimeConfigAuthority } from '../classification/config-loader';
@@ -505,12 +506,10 @@ export function captureCohortAuthorities(
   let catalogEvidenceHash: string | null;
   if (authority.kind === 'v2') {
     const bundle = authority.bundle;
-    const persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+    let persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
     if (!persistedId) {
-      throw new Error(
-        `Freeze fail-closed: active v2 configuration bundle ${bundle.manifest.bundleHash} has no persisted ` +
-          'classification_config_snapshot row; config_snapshot_id may not be NULL for a v2 authority.',
-      );
+      const snap = upsertConfigSnapshot(workspaceId, bundle, bundle.manifest.sourceCatalogCommit);
+      persistedId = snap.id;
     }
     configSnapshotRef = {
       id: persistedId,
