@@ -1,9 +1,10 @@
 // story: e06s02 — guided upstream panel showing Found on site vs You confirmed + waiver
-// story: e06-polish — P0 overload (3 preview), P1 waiver inline, Mara plain language, help ghost
+// story: e07s02 — conservative clustering + suggested reps + operator override
 import { useEffect, useState } from 'react';
 
 type Inventory = { candidateCount: number; confirmedCount: number; freshness: string | null };
-type SuiteResp = { suite: string[]; inventory: Inventory };
+type Cluster = { key: string; prefix: string; count: number; fingerprint: string; suggestedUrl: string };
+type SuiteResp = { suite: string[]; inventory: Inventory; clusters?: Cluster[]; suggested?: string[]; filtered?: { count: number; reason: string }; overrides?: unknown[] };
 
 function getDomainPath(url: string): string {
   try {
@@ -14,6 +15,15 @@ function getDomainPath(url: string): string {
   }
 }
 
+function isValidCluster(c: unknown): c is Cluster {
+  return !!c && typeof c === 'object' && 'prefix' in (c as Record<string, unknown>);
+}
+
+function hasOverride(overrides: unknown[] | undefined, key: string): boolean {
+  if (!overrides) return false;
+  return overrides.some((o) => (o as Record<string, string>).clusterKey === key);
+}
+
 export function SuitePanel({ domain }: { domain: string }) {
   const [data, setData] = useState<SuiteResp | null>(null);
   const [waiverReason, setWaiverReason] = useState('');
@@ -22,6 +32,9 @@ export function SuitePanel({ domain }: { domain: string }) {
   const [expanded, setExpanded] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [suggestedPick, setSuggestedPick] = useState<string | null>(null);
+  const [overrideInput, setOverrideInput] = useState('');
+  const [overrideMsg, setOverrideMsg] = useState<string | null>(null);
 
   const load = async () => {
     if (!domain) return;
@@ -64,6 +77,10 @@ export function SuitePanel({ domain }: { domain: string }) {
   const remaining = data.suite.length - preview.length;
   const waiverValid = waiverReason.trim().length >= 8;
 
+  const clusters = (data.clusters ?? []).filter(isValidCluster);
+  const suggested = data.suggested ?? [];
+  const filtered = data.filtered;
+
   const handleWaiver = async () => {
     if (!waiverValid || submitting) return;
     setSubmitting(true);
@@ -72,7 +89,7 @@ export function SuitePanel({ domain }: { domain: string }) {
       const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/waiver`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: waiverReason, actor: 'operator' }), // TODO: use auth actor when available
+        body: JSON.stringify({ reason: waiverReason, actor: 'operator' }),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -87,6 +104,51 @@ export function SuitePanel({ domain }: { domain: string }) {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const useSuggested = async () => {
+    const pick = suggestedPick ?? suggested[0];
+    if (!pick) return;
+    setSubmitting(true);
+    try {
+      const urls = suggested.length ? suggested : [pick];
+      const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/representative-suite`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls, actor: 'operator' }),
+      });
+      if (!res.ok) setError(await res.text());
+      else await load();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const postOverride = async (clusterKey: string, action: string) => {
+    setOverrideMsg(null);
+    try {
+      const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/cluster-overrides`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clusterKey, action, actor: 'operator' }),
+      });
+      if (!res.ok) setError(await res.text());
+      else {
+        setOverrideMsg(`${action} ${clusterKey} recorded`);
+        await load();
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const replaceSuggested = async () => {
+    if (!overrideInput.startsWith('http')) {
+      setError('Replace URL must start with http');
+      return;
+    }
+    await postOverride(overrideInput, 'replace');
+    setOverrideInput('');
   };
 
   return (
@@ -109,6 +171,7 @@ export function SuitePanel({ domain }: { domain: string }) {
         </div>
       )}
       {waiverSuccess && <div role="status" style={{ margin: 'var(--space-2) var(--space-2) 0', padding: '8px 12px', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)' }}><span style={{ background: 'var(--color-signet-burgundy)', color: 'var(--color-feed-bag-cream)', padding: '2px 6px', borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', fontWeight: 600, marginRight: 8 }}>Waiver</span>{waiverSuccess}</div>}
+      {overrideMsg && <div role="status" style={{ margin: 'var(--space-2) var(--space-2) 0', padding: '8px 12px', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-uniform-green)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.8rem' }}>{overrideMsg}</div>}
       <div style={{ padding: 'var(--space-2)' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
           <div style={{ background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '8px 10px' }}>
@@ -124,6 +187,50 @@ export function SuitePanel({ domain }: { domain: string }) {
             <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)' }}>{data.inventory.freshness ?? 'unknown'}</div>
           </div>
         </div>
+        {filtered && filtered.count > 0 && (
+          <div style={{ marginBottom: 'var(--space-2)', padding: '6px 10px', background: 'var(--color-feed-bag-cream)', border: '1px dashed var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', color: 'var(--color-mulch-brown)' }}>
+            {filtered.count} filtered as parked/404/spam{filtered.reason ? ` — ${filtered.reason}` : ''} — excluded from Suggested
+          </div>
+        )}
+        {clusters.length > 0 && (
+          <div style={{ marginBottom: 'var(--space-2)', padding: '8px 10px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)' }}>
+            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)', marginBottom: 6 }}>Clusters</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {clusters.map((c) => (
+                <span key={c.key} title={c.fingerprint} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 8px', background: hasOverride(data.overrides, c.key) ? 'var(--color-corner-gold)' : 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--color-ledger-charcoal)' }}>
+                  {c.prefix} ({c.count})
+                  <span style={{ fontSize: '0.65rem', color: 'var(--color-mulch-brown)' }} title={c.fingerprint}>• {c.fingerprint.slice(0, 18)}</span>
+                </span>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+              {clusters.length >= 2 && (
+                <button type="button" onClick={() => postOverride(clusters[1].key, 'merge')} style={{ padding: '4px 8px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.7rem', cursor: 'pointer' }}>Merge {clusters[1].prefix} → {clusters[0].prefix}</button>
+              )}
+              {clusters.map((c) => (
+                <button key={`split-${c.key}`} type="button" onClick={() => postOverride(c.key, 'split')} style={{ padding: '4px 8px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.7rem', cursor: 'pointer' }}>Split {c.prefix}</button>
+              ))}
+            </div>
+          </div>
+        )}
+        {suggested.length > 0 && (
+          <div style={{ marginBottom: 'var(--space-2)', padding: '8px 10px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)' }}>
+            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)', marginBottom: 6 }}>Suggested reps (one per cluster)</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {suggested.map((u) => (
+                <label key={u} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', background: suggestedPick === u ? 'var(--color-corner-gold)' : 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}>
+                  <input type="radio" name="suggested" checked={suggestedPick === u} onChange={() => setSuggestedPick(u)} />
+                  <span title={u} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getDomainPath(u)}</span>
+                </label>
+              ))}
+            </div>
+            <button type="button" onClick={useSuggested} disabled={submitting} style={{ marginTop: 8, padding: '6px 12px', background: 'var(--color-uniform-green)', color: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-uniform-green)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, cursor: submitting ? 'not-allowed' : 'pointer' }}>Use suggested</button>
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <input placeholder="https://... replace suggestedUrl" value={overrideInput} onChange={(e) => setOverrideInput(e.target.value)} style={{ flex: 1, border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '6px 8px', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }} />
+              <button type="button" onClick={replaceSuggested} style={{ padding: '6px 12px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', cursor: 'pointer' }}>Replace</button>
+            </div>
+          </div>
+        )}
         {needWaiver && (
           <div style={{ marginBottom: 'var(--space-2)', padding: '10px 12px', background: 'var(--color-white-surface)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-sm)', boxShadow: '0 1px 2px rgba(118,12,25,0.08)' }}>
             <p style={{ fontFamily: 'var(--font-display)', fontSize: '0.9rem', fontWeight: 700, color: 'var(--color-ledger-charcoal)', margin: 0, borderBottom: '1px dotted var(--color-corner-gold)', paddingBottom: 6 }}>Ledger entry — waiver required (&lt;3 product URLs)</p>

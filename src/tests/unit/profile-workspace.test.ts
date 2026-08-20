@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // story: e06s01
+// story: e07s02
 describe('profile workspace shell (e06s01)', () => {
   it('evidence rail placeholder and history shell exist', () => {
     const page = resolve(process.cwd(), 'src/client/components/profile-workspace/ProfileWorkspacePage.tsx');
@@ -28,5 +29,21 @@ describe('profile workspace shell (e06s01)', () => {
     const src = readFileSync(mod, 'utf8');
     expect(src).toContain('return');
     expect(src).toContain('encodeURIComponent');
+  });
+
+  it('suite panel renders clusters, suggested reps, override and waiver (e07s02)', () => {
+    const p = resolve(process.cwd(), 'src/client/components/profile-workspace/SuitePanel.tsx');
+    const src = readFileSync(p, 'utf8');
+    expect(src).toContain('Clusters');
+    expect(src).toContain('Suggested reps');
+    expect(src).toContain('Use suggested');
+    expect(src).toContain('Merge');
+    expect(src).toContain('Split');
+    expect(src).toContain('Replace');
+    expect(src).toContain('filtered as parked');
+    expect(src).toContain('cluster-overrides');
+    // waiver still present
+    expect(src).toContain('Create waiver');
+    expect(src).toContain('Reason for waiver');
   });
 });

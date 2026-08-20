@@ -487,6 +487,22 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to create profile_versions / profile_active tables:', e);
   }
 
+  // e07s02: cluster overrides (operator merge/split persistence)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS cluster_overrides (
+        domain TEXT NOT NULL,
+        clusterKey TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        at TEXT NOT NULL,
+        PRIMARY KEY (domain, clusterKey)
+      );
+    `);
+  } catch (e) {
+    console.error('[Migrations] Failed to create cluster_overrides table:', e);
+  }
+
   // e07s01 seed: legacy extractor_profiles → profile_versions v1 (idempotent, degraded)
   // story: e07s01 — do NOT set active; legacy remains Degraded until re-pass
   try {
