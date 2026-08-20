@@ -30,7 +30,7 @@ handoff:
     - CONTEXT.md
     - docs/plans/epic-47-handoff.md
     - specs/product/SCOPE_LATEST.yaml
-  next_skill: commit-message
+  next_skill: plan-work
 metrics:
   story_start: "2026-08-20T03:14:05Z"
   story_end: "2026-08-20T03:24:53Z"
