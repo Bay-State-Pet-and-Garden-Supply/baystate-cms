@@ -13,6 +13,9 @@ export default defineConfig({
     include: ['src/tests/**/*.test.ts', 'src/tests/**/*.test.tsx'],
     exclude: [
       'node_modules',
+      // Batch preflight & sourcing policy tests — use bun:sqlite, run under bun test (test:db)
+      'src/tests/unit/batch-preflight-lifecycle.test.ts',
+      'src/tests/unit/sourcing-policy.test.ts',
       // M7 scraper acceptance — bun:sqlite/bun:test, run under bun test (test:db)
       'src/tests/unit/distributor-scrapers-acceptance.test.ts',
       // M6 live-smoke DB suite — uses bun:sqlite, run under bun test instead of vitest

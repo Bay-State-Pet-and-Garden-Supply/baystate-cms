@@ -1938,6 +1938,8 @@ export function buildFrozenItem(
     retryCount: 0,
     isDuplicate: false,
     existingSku: null,
+    isHeld: liveItem.isHeld ?? false,
+    heldReason: liveItem.heldReason ?? null,
     createdAt: liveItem.createdAt,
     updatedAt: liveItem.updatedAt,
     // (b) Projection semantics — NO live spread.
@@ -1988,6 +1990,8 @@ function frozenItemFromProjection(
     sourcingDecision: member.sourcingDecision,
     stage: 'curation',
     stageStatus: 'pending',
+    isHeld: false,
+    heldReason: null,
     status: 'curated',
     errorMessage: null,
     retryCount: 0,

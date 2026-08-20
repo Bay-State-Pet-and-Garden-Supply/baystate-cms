@@ -736,6 +736,11 @@ export const BatchStatusEnum = z.enum(['active', 'archived']);
 
 export type BatchStatus = z.infer<typeof BatchStatusEnum>;
 
+/** Batch execution state controls worker claim eligibility. */
+export const BatchExecutionStateEnum = z.enum(['draft', 'ready', 'running', 'paused', 'completed']);
+
+export type BatchExecutionState = z.infer<typeof BatchExecutionStateEnum>;
+
 // ─── Stage Statuses ─────────────────────────────────────────────────────────────
 
 export const StageStatusEnum = z.enum([
@@ -845,6 +850,8 @@ export const OnboardingBatchSchema = z.object({
   fileName: z.string(),
   /** Minimal batch lifecycle: 'active' (default), 'archived' (hidden from board). */
   status: BatchStatusEnum,
+  /** Execution state: controls worker claim eligibility. */
+  executionState: BatchExecutionStateEnum.default('draft'),
   totalItems: z.number().int(),
   completedItems: z.number().int(),
   failedItems: z.number().int(),
@@ -883,6 +890,10 @@ export const OnboardingItemSchema = z.object({
   stage: PipelineStageEnum,
   /** Status within the current stage. */
   stageStatus: StageStatusEnum,
+  /** Preflight / controlled release hold flag: 1 when held from worker processing. */
+  isHeld: z.boolean().default(false),
+  /** Reason why the item is held (e.g. missing_brand, ambiguous_brand, unrouted_brand). */
+  heldReason: z.string().nullable().default(null),
   /** DEPRECATED: flat status, kept for backward compat. Use stage + stageStatus instead. */
   status: ItemStatusEnum,
   errorMessage: z.string().nullable(),
@@ -1747,3 +1758,76 @@ export const ProfileBlockedItemSchema = z.object({
   blockedAt: z.string(),
 });
 export type ProfileBlockedItem = z.infer<typeof ProfileBlockedItemSchema>;
+
+// ─── Batch Preflight & Controlled Release ─────────────────────────────────────
+
+export const PreflightBrandGroupSchema = z.object({
+  key: z.string(),
+  suggestedBrand: z.string().nullable(),
+  itemCount: z.number().int(),
+  itemIds: z.array(z.string()),
+  sampleProductNames: z.array(z.string()),
+});
+export type PreflightBrandGroup = z.infer<typeof PreflightBrandGroupSchema>;
+
+export const PreflightDomainBlockerSchema = z.object({
+  brand: z.string(),
+  itemCount: z.number().int(),
+  itemIds: z.array(z.string()),
+});
+export type PreflightDomainBlocker = z.infer<typeof PreflightDomainBlockerSchema>;
+
+export const PreflightRoutingBlockerSchema = z.object({
+  brand: z.string(),
+  itemCount: z.number().int(),
+  itemIds: z.array(z.string()),
+  preferredDistributorIds: z.array(z.string()).default(() => []),
+  sourcingPolicy: z.enum(['advisory', 'preferred_then_fallback', 'preferred_only']).default('preferred_then_fallback'),
+});
+export type PreflightRoutingBlocker = z.infer<typeof PreflightRoutingBlockerSchema>;
+
+export const BatchPreflightMetricsSchema = z.object({
+  brandResolvedCount: z.number().int(),
+  brandResolvedPercent: z.number(),
+  ambiguousBrandCount: z.number().int(),
+  missingBrandCount: z.number().int(),
+  domainMappedCount: z.number().int(),
+  domainMappedPercent: z.number(),
+  missingDomainBrandCount: z.number().int(),
+  distributorRoutedCount: z.number().int(),
+  distributorRoutedPercent: z.number(),
+  unroutedBrandCount: z.number().int(),
+});
+export type BatchPreflightMetrics = z.infer<typeof BatchPreflightMetricsSchema>;
+
+export const BatchPreflightBlockersSchema = z.object({
+  needsBrandGroups: z.array(PreflightBrandGroupSchema),
+  missingDomainBrands: z.array(PreflightDomainBlockerSchema),
+  unroutedBrands: z.array(PreflightRoutingBlockerSchema),
+});
+export type BatchPreflightBlockers = z.infer<typeof BatchPreflightBlockersSchema>;
+
+export const PreflightAvailableDistributorSchema = z.object({
+  id: z.string(),
+  distributorId: z.string(),
+  connectorType: z.string(),
+  enabled: z.boolean(),
+});
+export type PreflightAvailableDistributor = z.infer<typeof PreflightAvailableDistributorSchema>;
+
+export const BatchPreflightResponseSchema = z.object({
+  batchId: z.string(),
+  batchName: z.string(),
+  executionState: BatchExecutionStateEnum,
+  totalItems: z.number().int(),
+  readyCount: z.number().int(),
+  heldCount: z.number().int(),
+  readyItemIds: z.array(z.string()),
+  heldItemIds: z.array(z.string()),
+  metrics: BatchPreflightMetricsSchema,
+  blockers: BatchPreflightBlockersSchema,
+  availableDistributors: z.array(PreflightAvailableDistributorSchema),
+});
+export type BatchPreflightResponse = z.infer<typeof BatchPreflightResponseSchema>;
+
+export { SourcingPolicyEnum, type SourcingPolicy } from './distributor';

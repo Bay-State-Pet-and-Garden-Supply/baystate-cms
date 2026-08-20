@@ -4827,6 +4827,41 @@ export function runMigrations(): void {
     console.log('[Migrations] Brand sites mapping seed complete (version 2).');
   }
 
+  // ── Batch Preflight & Controlled Release schema ────────────────────────────
+  const batchPreflightVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('batch_preflight_schema_version') as { value: string } | undefined;
+  if (!batchPreflightVersion) {
+    db.transaction(() => {
+      // 1. onboarding_batches.execution_state
+      const batchCols = db.query('PRAGMA table_info(onboarding_batches)').all() as Array<{ name: string }>;
+      if (!batchCols.some((c) => c.name === 'execution_state')) {
+        db.exec("ALTER TABLE onboarding_batches ADD COLUMN execution_state TEXT NOT NULL DEFAULT 'draft'");
+        // Backfill existing batches: active -> running, archived -> completed
+        db.exec("UPDATE onboarding_batches SET execution_state = CASE WHEN status = 'archived' THEN 'completed' ELSE 'running' END");
+      }
+
+      // 2. onboarding_items.is_held, held_reason
+      const itemCols = db.query('PRAGMA table_info(onboarding_items)').all() as Array<{ name: string }>;
+      if (!itemCols.some((c) => c.name === 'is_held')) {
+        db.exec('ALTER TABLE onboarding_items ADD COLUMN is_held INTEGER NOT NULL DEFAULT 0');
+      }
+      if (!itemCols.some((c) => c.name === 'held_reason')) {
+        db.exec('ALTER TABLE onboarding_items ADD COLUMN held_reason TEXT');
+      }
+
+      // 3. brand_advisory_profiles.sourcing_policy
+      const brandCols = db.query('PRAGMA table_info(brand_advisory_profiles)').all() as Array<{ name: string }>;
+      if (!brandCols.some((c) => c.name === 'sourcing_policy')) {
+        db.exec("ALTER TABLE brand_advisory_profiles ADD COLUMN sourcing_policy TEXT NOT NULL DEFAULT 'advisory'");
+      }
+
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('batch_preflight_schema_version', '1')");
+      db.exec("UPDATE app_meta SET value = '1' WHERE key = 'batch_preflight_schema_version'");
+    })();
+    console.log('[Migrations] Batch preflight and controlled release migration complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

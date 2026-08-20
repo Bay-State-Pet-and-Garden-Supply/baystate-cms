@@ -15,6 +15,7 @@ import {
   deleteBatch,
   isBatchComplete,
   setBatchArchived,
+  updateBatchExecutionState,
 } from '../../db/repositories/onboarding-batch-repo';
 import {
   insertItems,
@@ -36,8 +37,14 @@ import {
   revertToOfficialDiscovery,
   reopenApprovedForReapproval,
   updateItemBrandHint,
+  releaseBatchItems,
+  holdBatchItems,
+  bulkAssignBrandToItems,
 } from '../../db/repositories/onboarding-item-repo';
-import type { PipelineStage } from '../../shared/schemas/onboarding';
+import { analyzeBatchPreflight } from '../../onboarding/preflight-service';
+import { upsertBrandAdvisoryProfile } from '../../db/repositories/distributor-repo';
+import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
+import type { PipelineStage, SourcingPolicy } from '../../shared/schemas/onboarding';
 import { ResolveSourcingRequestSchema, FallbackSourcingItemsRequestSchema } from '../../shared/schemas/onboarding';
 import { getSourcingFlags } from '../../onboarding/flags';
 import {
@@ -634,6 +641,220 @@ route.delete('/onboarding/batches/:id', async (c) => {
   }
 
   return c.json({ success: true });
+});
+
+/**
+ * GET /api/onboarding/batches/:id/preflight
+ * Analyzes batch readiness across brand resolution, official domains, and distributor routing.
+ */
+route.get('/onboarding/batches/:id/preflight', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  try {
+    const preflight = analyzeBatchPreflight(workspace.id, batchId);
+    return c.json(preflight);
+  } catch (err) {
+    console.error('[OnboardingRoutes] Preflight analysis failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * POST /api/onboarding/batches/:id/start
+ * Starts batch execution (controlled release).
+ * Body: { mode?: 'ready_only' | 'all' }
+ */
+route.post('/onboarding/batches/:id/start', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  let body: { mode?: string } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    // default body
+  }
+
+  const mode = body.mode === 'all' ? 'all' : 'ready_only';
+
+  if (mode === 'all') {
+    // Release all items in the batch
+    releaseBatchItems(batchId);
+  } else {
+    // Ready only: compute preflight and release ready items, hold unready items
+    const preflight = analyzeBatchPreflight(workspace.id, batchId);
+    if (preflight.readyItemIds.length > 0) {
+      releaseBatchItems(batchId, preflight.readyItemIds);
+    }
+    if (preflight.heldItemIds.length > 0) {
+      holdBatchItems(batchId, preflight.heldItemIds, 'unresolved_brand');
+    }
+  }
+
+  updateBatchExecutionState(batchId, 'running');
+
+  // Trigger worker poll loop
+  try {
+    getWorker(workspace.id, workspace.workspacePath).poll();
+  } catch (err) {
+    console.error('[OnboardingRoutes] Worker poll trigger failed on batch start:', err);
+  }
+
+  onboardingEvents.emit({
+    type: 'batch:progress',
+    batchId,
+    data: { executionState: 'running' },
+  });
+
+  const updatedPreflight = analyzeBatchPreflight(workspace.id, batchId);
+  return c.json({ success: true, executionState: 'running', preflight: updatedPreflight });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/pause
+ * Pauses batch execution.
+ */
+route.post('/onboarding/batches/:id/pause', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  updateBatchExecutionState(batchId, 'paused');
+
+  onboardingEvents.emit({
+    type: 'batch:progress',
+    batchId,
+    data: { executionState: 'paused' },
+  });
+
+  return c.json({ success: true, executionState: 'paused' });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/resume
+ * Resumes paused batch execution.
+ */
+route.post('/onboarding/batches/:id/resume', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  updateBatchExecutionState(batchId, 'running');
+
+  // Trigger worker poll loop
+  try {
+    getWorker(workspace.id, workspace.workspacePath).poll();
+  } catch (err) {
+    console.error('[OnboardingRoutes] Worker poll trigger failed on batch resume:', err);
+  }
+
+  onboardingEvents.emit({
+    type: 'batch:progress',
+    batchId,
+    data: { executionState: 'running' },
+  });
+
+  return c.json({ success: true, executionState: 'running' });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/assign-brand-group
+ * Bulk assigns a brand to a list of items and releases them if held.
+ */
+route.post('/onboarding/batches/:id/assign-brand-group', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  const { itemIds, brand } = await c.req.json();
+  if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0 || !brand?.trim()) {
+    return c.json({ error: 'itemIds array and brand are required' }, 400);
+  }
+
+  bulkAssignBrandToItems(batchId, itemIds, brand.trim());
+  // When assigned a brand, release the items
+  releaseBatchItems(batchId, itemIds);
+
+  for (const itemId of itemIds) {
+    onboardingEvents.emitItemStatus(batchId, itemId, 'pending', { brandHint: brand.trim() });
+  }
+
+  const preflight = analyzeBatchPreflight(workspace.id, batchId);
+  return c.json({ success: true, preflight });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/configure-brand
+ * Configures official domain and/or distributor routing for a brand.
+ */
+route.post('/onboarding/batches/:id/configure-brand', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  const { brand, domain, preferredDistributorIds, sourcingPolicy } = await c.req.json();
+  if (!brand?.trim()) {
+    return c.json({ error: 'brand is required' }, 400);
+  }
+
+  const trimmedBrand = brand.trim();
+
+  // 1. Domain config if provided
+  if (domain && domain.trim()) {
+    upsertBrandSite(trimmedBrand, domain.trim());
+  }
+
+  // 2. Distributor routing if provided
+  if (preferredDistributorIds !== undefined || sourcingPolicy !== undefined) {
+    upsertBrandAdvisoryProfile({
+      workspaceId: workspace.id,
+      brand: trimmedBrand,
+      preferredDistributorIds: preferredDistributorIds ?? [],
+      sourcingPolicy: sourcingPolicy ?? 'preferred_then_fallback',
+    });
+  }
+
+  const preflight = analyzeBatchPreflight(workspace.id, batchId);
+  return c.json({ success: true, preflight });
 });
 
 /**

@@ -1,6 +1,6 @@
 # ── Dependencies & build ──────────────────────────────────────────────────────
 dist/
-node_modules/
+node_modules
 coverage/
 *.tsbuildinfo
 

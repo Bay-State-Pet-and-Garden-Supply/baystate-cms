@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS brand_advisory_profiles (
   brand TEXT NOT NULL,
   aliases_json TEXT NOT NULL DEFAULT '[]',
   preferred_distributor_ids_json TEXT NOT NULL DEFAULT '[]',
+  sourcing_policy TEXT NOT NULL DEFAULT 'advisory',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(workspace_id, brand)

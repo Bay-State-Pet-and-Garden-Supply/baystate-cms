@@ -18,6 +18,7 @@ import {
   type DistributorAuthorityPolicy,
   type BrandAdvisoryProfile,
   type InsertBrandAdvisoryProfile,
+  type SourcingPolicy,
 } from '../../shared/schemas/distributor';
 
 // ─── Row Types ─────────────────────────────────────────────────────────────────
@@ -61,6 +62,7 @@ interface BrandProfileRow {
   brand: string;
   aliases_json: string;
   preferred_distributor_ids_json: string;
+  sourcing_policy?: string;
   created_at: string;
   updated_at: string;
 }
@@ -131,6 +133,7 @@ function mapBrandProfileRow(row: BrandProfileRow): BrandAdvisoryProfile {
     brand: row.brand,
     aliases,
     preferredDistributorIds,
+    sourcingPolicy: (row.sourcing_policy || 'preferred_then_fallback') as SourcingPolicy,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -370,13 +373,15 @@ export function upsertBrandAdvisoryProfile(data: InsertBrandAdvisoryProfile & { 
   const db = getDb();
   const now = new Date().toISOString();
   const id = data.id || `bp_${randomUUID().slice(0, 8)}`;
+  const sourcingPolicy = valid.sourcingPolicy || 'preferred_then_fallback';
 
   db.query(
-    `INSERT INTO brand_advisory_profiles (id, workspace_id, brand, aliases_json, preferred_distributor_ids_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO brand_advisory_profiles (id, workspace_id, brand, aliases_json, preferred_distributor_ids_json, sourcing_policy, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id, brand) DO UPDATE SET
        aliases_json = excluded.aliases_json,
        preferred_distributor_ids_json = excluded.preferred_distributor_ids_json,
+       sourcing_policy = excluded.sourcing_policy,
        updated_at = excluded.updated_at`,
   ).run(
     id,
@@ -384,6 +389,7 @@ export function upsertBrandAdvisoryProfile(data: InsertBrandAdvisoryProfile & { 
     valid.brand,
     JSON.stringify(valid.aliases ?? []),
     JSON.stringify(valid.preferredDistributorIds ?? []),
+    sourcingPolicy,
     now,
     now,
   );
@@ -415,8 +421,12 @@ export function getPreferredDistributorOrder(workspaceId: string, brand: string 
   if (!brand) return null;
   const db = getDb();
   const row = db
-    .query('SELECT preferred_distributor_ids_json FROM brand_advisory_profiles WHERE workspace_id = ? AND brand = ?')
-    .get(workspaceId, brand) as { preferred_distributor_ids_json: string } | undefined;
+    .query(
+      `SELECT preferred_distributor_ids_json FROM brand_advisory_profiles
+       WHERE workspace_id = ? AND (brand = ? OR LOWER(brand) = LOWER(?))
+       ORDER BY CASE WHEN brand = ? THEN 0 ELSE 1 END LIMIT 1`,
+    )
+    .get(workspaceId, brand, brand, brand) as { preferred_distributor_ids_json: string } | undefined;
   if (!row) return null;
   try {
     const parsed = JSON.parse(row.preferred_distributor_ids_json);
@@ -424,4 +434,32 @@ export function getPreferredDistributorOrder(workspaceId: string, brand: string 
   } catch {
     return null;
   }
+}
+
+/**
+ * Get brand distributor routing config (preferred distributor IDs + sourcing policy).
+ */
+export function getBrandSourcingConfig(
+  workspaceId: string,
+  brand: string | null,
+): { preferredDistributorIds: string[]; sourcingPolicy: SourcingPolicy } | null {
+  if (!brand) return null;
+  const db = getDb();
+  const row = db
+    .query(
+      `SELECT preferred_distributor_ids_json, sourcing_policy FROM brand_advisory_profiles
+       WHERE workspace_id = ? AND (brand = ? OR LOWER(brand) = LOWER(?))
+       ORDER BY CASE WHEN brand = ? THEN 0 ELSE 1 END LIMIT 1`,
+    )
+    .get(workspaceId, brand, brand, brand) as { preferred_distributor_ids_json: string; sourcing_policy?: string } | undefined;
+  if (!row) return null;
+  let preferredDistributorIds: string[] = [];
+  try {
+    const parsed = JSON.parse(row.preferred_distributor_ids_json);
+    if (Array.isArray(parsed)) preferredDistributorIds = parsed;
+  } catch {
+    preferredDistributorIds = [];
+  }
+  const sourcingPolicy = (row.sourcing_policy || 'preferred_then_fallback') as SourcingPolicy;
+  return { preferredDistributorIds, sourcingPolicy };
 }

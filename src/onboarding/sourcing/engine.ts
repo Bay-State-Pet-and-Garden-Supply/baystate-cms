@@ -8,7 +8,7 @@ import { normalizeLookupIdentifier, parseSourcingLookupResult, recordSizeViolati
 import type { ConnectorRegistry } from './connector-registry';
 import { DefaultConnectorRegistry } from './connector-registry';
 import { resolveSecret } from './secret-resolver';
-import { listConnectionsByWorkspace, getPreferredDistributorOrder } from '../../db/repositories/distributor-repo';
+import { listConnectionsByWorkspace, getPreferredDistributorOrder, getBrandSourcingConfig } from '../../db/repositories/distributor-repo';
 import { insertEvidenceAttempt } from '../../db/repositories/onboarding-evidence-repo';
 import { findItemById } from '../../db/repositories/onboarding-item-repo';
 import type { DistributorConnection } from '../../shared/schemas/distributor';
@@ -19,9 +19,11 @@ import type { EvidenceLookupOutcome } from '../../shared/schemas/distributor-evi
  *
  * `runGeneration` for one item + generation:
  * 1. resolves the workspace's ENABLED connections;
- * 2. applies ADVISORY brand ordering only (never filtering — a missing brand
- *    profile falls open to every enabled connection and never implies
- *    `not_stocked`);
+ * 2. applies brand routing configuration and policy:
+ *    - `advisory`: queries all enabled connections, preferred first;
+ *    - `preferred_only`: queries ONLY preferred connections (falls open if none configured);
+ *    - `preferred_then_fallback`: queries preferred connections first; if a match (`found`)
+ *      is found, stops and skips fallback connections; otherwise queries remaining connections;
  * 3. composes cancellation + deadline signals and invokes each connector
  *    with bounded concurrency and per-provider timeout;
  * 4. validates every connector result (`parseSourcingLookupResult` — a
@@ -69,18 +71,90 @@ export class DefaultSourcingEngine implements SourcingEngine {
     const item = findItemById(request.itemId);
     const registerName = item?.name ?? null;
 
-    // Advisory brand ordering ONLY (ADR 0014: fall-open, never filters).
-    const ordered = orderByBrandPreference(connections, request.workspaceId, request.brandHint ?? null);
+    // Resolve brand routing profile & policy
+    const sourcingConfig = getBrandSourcingConfig(request.workspaceId, request.brandHint ?? null);
+    const policy = sourcingConfig?.sourcingPolicy ?? 'advisory';
+    const preferredIds = sourcingConfig?.preferredDistributorIds ?? [];
 
-    // Bounded concurrency over the ordered connections.
-    const work = ordered.map((connection) => () => this.runOneConnection({ ...request, registerName }, connection, identifier));
-    const results = await runBounded(work, this.concurrency);
+    let preferredConns: DistributorConnection[] = [];
+    let fallbackConns: DistributorConnection[] = [];
 
-    for (const result of results) {
-      if (result.kind === 'attempt') {
-        attempts.push(result.summary);
+    if (preferredIds.length > 0) {
+      const byDistributorId = new Map(connections.map((c) => [c.distributorId, c]));
+      const seen = new Set<string>();
+      for (const distributorId of preferredIds) {
+        const connection = byDistributorId.get(distributorId);
+        if (connection && !seen.has(connection.id)) {
+          preferredConns.push(connection);
+          seen.add(connection.id);
+        }
+      }
+      fallbackConns = connections.filter((c) => !seen.has(c.id));
+    } else {
+      // Fall open: all connections are considered preferred
+      preferredConns = connections;
+      fallbackConns = [];
+    }
+
+    if (policy === 'preferred_only') {
+      // Query ONLY preferred connections. Fallback connections are skipped.
+      const work = preferredConns.map((connection) => () => this.runOneConnection({ ...request, registerName }, connection, identifier));
+      const results = await runBounded(work, this.concurrency);
+      for (const result of results) {
+        if (result.kind === 'attempt') {
+          attempts.push(result.summary);
+        } else {
+          skipped.push({ connectionId: result.connectionId, reason: result.reason });
+        }
+      }
+      for (const fb of fallbackConns) {
+        skipped.push({ connectionId: fb.id, reason: 'policy_preferred_only' });
+      }
+    } else if (policy === 'preferred_then_fallback' && preferredIds.length > 0 && fallbackConns.length > 0) {
+      // Query preferred connections first
+      const workPref = preferredConns.map((connection) => () => this.runOneConnection({ ...request, registerName }, connection, identifier));
+      const resultsPref = await runBounded(workPref, this.concurrency);
+      let foundMatch = false;
+      for (const result of resultsPref) {
+        if (result.kind === 'attempt') {
+          attempts.push(result.summary);
+          if (result.summary.outcome === 'found') {
+            foundMatch = true;
+          }
+        } else {
+          skipped.push({ connectionId: result.connectionId, reason: result.reason });
+        }
+      }
+
+      if (foundMatch) {
+        // High-confidence match found in preferred distributors: skip fallbacks!
+        for (const fb of fallbackConns) {
+          skipped.push({ connectionId: fb.id, reason: 'policy_preferred_match_found' });
+        }
       } else {
-        skipped.push({ connectionId: result.connectionId, reason: result.reason });
+        // No match found in preferred distributors: query fallbacks
+        const workFallback = fallbackConns.map((connection) => () => this.runOneConnection({ ...request, registerName }, connection, identifier));
+        const resultsFallback = await runBounded(workFallback, this.concurrency);
+        for (const result of resultsFallback) {
+          if (result.kind === 'attempt') {
+            attempts.push(result.summary);
+          } else {
+            skipped.push({ connectionId: result.connectionId, reason: result.reason });
+          }
+        }
+      }
+    } else {
+      // Advisory policy (or no preferred IDs configured): query all connections in preferred order
+      const ordered = [...preferredConns, ...fallbackConns];
+      const work = ordered.map((connection) => () => this.runOneConnection({ ...request, registerName }, connection, identifier));
+      const results = await runBounded(work, this.concurrency);
+
+      for (const result of results) {
+        if (result.kind === 'attempt') {
+          attempts.push(result.summary);
+        } else {
+          skipped.push({ connectionId: result.connectionId, reason: result.reason });
+        }
       }
     }
 

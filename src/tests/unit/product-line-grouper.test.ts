@@ -17,6 +17,8 @@ const makeItem = (overrides: Partial<OnboardingItem> & { id: string; upc: string
   expectedName: null,
   stage: 'curation' as const,
   stageStatus: 'pending' as const,
+  isHeld: false,
+  heldReason: null,
   rowNumber: 0,
   isDuplicate: false,
   existingSku: null,

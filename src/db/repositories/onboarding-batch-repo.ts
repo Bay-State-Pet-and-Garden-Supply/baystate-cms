@@ -1,7 +1,7 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
 import { getStageCounts } from './onboarding-item-repo';
-import type { OnboardingBatch, BatchStatus, PipelineStage } from '../../shared/schemas/onboarding';
+import type { OnboardingBatch, BatchStatus, BatchExecutionState, PipelineStage } from '../../shared/schemas/onboarding';
 
 export interface OnboardingBatchRow {
   id: string;
@@ -9,6 +9,7 @@ export interface OnboardingBatchRow {
   name: string;
   file_name: string;
   status: string;
+  execution_state?: string;
   total_items: number;
   completed_items: number;
   failed_items: number;
@@ -25,6 +26,7 @@ function mapRowToBatch(row: OnboardingBatchRow): OnboardingBatch {
     name: row.name,
     fileName: row.file_name,
     status: (row.status || 'active') as BatchStatus,
+    executionState: (row.execution_state || 'draft') as BatchExecutionState,
     totalItems: row.total_items,
     completedItems: row.completed_items ?? 0,
     failedItems: row.failed_items ?? 0,
@@ -40,17 +42,19 @@ export function createBatch(data: {
   name: string;
   fileName: string;
   totalItems: number;
+  executionState?: BatchExecutionState;
   columnMappingJson?: string;
 }): OnboardingBatch {
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
+  const executionState = data.executionState || 'draft';
 
   db.query(
     `INSERT INTO onboarding_batches
-      (id, workspace_id, name, file_name, status, total_items, completed_items, failed_items, column_mapping_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'active', ?, 0, 0, ?, ?, ?)`,
-  ).run(id, data.workspaceId, data.name, data.fileName, data.totalItems, data.columnMappingJson ?? null, now, now);
+      (id, workspace_id, name, file_name, status, execution_state, total_items, completed_items, failed_items, column_mapping_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'active', ?, ?, 0, 0, ?, ?, ?)`,
+  ).run(id, data.workspaceId, data.name, data.fileName, executionState, data.totalItems, data.columnMappingJson ?? null, now, now);
 
   return {
     id,
@@ -58,6 +62,7 @@ export function createBatch(data: {
     name: data.name,
     fileName: data.fileName,
     status: 'active',
+    executionState,
     totalItems: data.totalItems,
     completedItems: 0,
     failedItems: 0,
@@ -113,6 +118,19 @@ export function listBatches(workspaceId: string): OnboardingBatch[] {
      ORDER BY b.created_at DESC`,
   ).all(workspaceId) as OnboardingBatchRow[];
   return rows.map(mapRowToBatch);
+}
+
+/**
+ * Update the execution state of a batch (draft, ready, running, paused, completed).
+ */
+export function updateBatchExecutionState(id: string, executionState: BatchExecutionState): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.query('UPDATE onboarding_batches SET execution_state = ?, updated_at = ? WHERE id = ?').run(
+    executionState,
+    now,
+    id,
+  );
 }
 
 /**

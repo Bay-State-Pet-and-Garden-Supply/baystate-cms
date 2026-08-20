@@ -36,6 +36,8 @@ export interface OnboardingItemRow {
   status: string;
   stage: string;
   stage_status: string;
+  is_held?: number | null;
+  held_reason?: string | null;
   error_message: string | null;
   retry_count: number;
   is_duplicate: number;
@@ -65,6 +67,8 @@ export interface InsertItemData {
   existingSku?: string | null;
   stage?: PipelineStage;
   stageStatus?: StageStatus;
+  isHeld?: boolean;
+  heldReason?: string | null;
 }
 
 const STAGE_ORDER: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
@@ -117,6 +121,8 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItemWithEntryPolicy {
     sourcingDecision: row.sourcing_decision_json ? safeParseDecision(row.sourcing_decision_json) : null,
     stage: (row.stage || 'sourcing') as PipelineStage,
     stageStatus: (row.stage_status || 'pending') as StageStatus,
+    isHeld: row.is_held === 1,
+    heldReason: row.held_reason ?? null,
     status: (row.status || 'imported') as ItemStatus,
     errorMessage: row.error_message,
     retryCount: row.retry_count,
@@ -143,9 +149,9 @@ export function insertItems(
   const stmt = db.query(
     `INSERT INTO onboarding_items
       (id, batch_id, upc, name, price, quantity, brand_hint, department_hint, source_url, expected_name,
-       status, stage, stage_status, error_message, retry_count, is_duplicate, existing_sku,
+       status, stage, stage_status, is_held, held_reason, error_message, retry_count, is_duplicate, existing_sku,
        extraction_data_json, curation_data_json, row_number, sourcing_entry_policy_version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', ?, ?, NULL, 0, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', ?, ?, ?, ?, NULL, 0, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
   );
 
   const inserted: OnboardingItemWithEntryPolicy[] = [];
@@ -159,6 +165,7 @@ export function insertItems(
       // wins for fixtures/internal state construction only.
       const targetStage = item.stage ?? entryStage;
       const targetStageStatus = item.stageStatus ?? 'pending';
+      const isHeldNum = item.isHeld ? 1 : 0;
       stmt.run(
         id,
         batchId,
@@ -171,6 +178,8 @@ export function insertItems(
         item.sourceUrl ?? null,
         targetStage,
         targetStageStatus,
+        isHeldNum,
+        item.heldReason ?? null,
         isDuplicateNum,
         item.existingSku ?? null,
         item.rowNumber,
@@ -196,6 +205,8 @@ export function insertItems(
         sourcingDecision: null,
         stage: targetStage as PipelineStage,
         stageStatus: targetStageStatus as StageStatus,
+        isHeld: !!item.isHeld,
+        heldReason: item.heldReason ?? null,
         status: 'imported' as ItemStatus,
         errorMessage: null,
         retryCount: 0,
@@ -209,8 +220,8 @@ export function insertItems(
       });
     }
   });
-  insertAll();
 
+  insertAll();
   return inserted;
 }
 
@@ -368,16 +379,17 @@ export function claimItemsForProcessing(
 
   // Atomic UPDATE with subquery. The outer AND stage_status = 'pending'
   // prevents claiming items already picked up by a concurrent worker.
-  // Eligibility is strictly stage_status = 'pending' — stale in_progress
-  // items are recovered by requeueStaleInProgressItems.
+  // Eligibility is strictly stage_status = 'pending' in an active, running batch
+  // where the item is NOT held — stale in_progress items are recovered by requeueStaleInProgressItems.
   const result = db.run(
     `UPDATE onboarding_items
      SET stage_status = 'in_progress', claimed_by = ?, claimed_at = ?, updated_at = ?
      WHERE id IN (
        SELECT i.id FROM onboarding_items i
        JOIN onboarding_batches b ON i.batch_id = b.id
-       WHERE b.workspace_id = ? AND b.status = 'active'
+       WHERE b.workspace_id = ? AND b.status = 'active' AND b.execution_state = 'running'
        AND i.stage = ? AND i.stage_status = 'pending'
+       AND (i.is_held = 0 OR i.is_held IS NULL)
        ${versionClause}
        ORDER BY i.row_number
        LIMIT ?
@@ -399,6 +411,66 @@ export function claimItemsForProcessing(
   ).all(workerId, now, limit) as OnboardingItemRow[];
 
   return rows.map(mapRowToItem);
+}
+
+/**
+ * Release items in a batch so the worker can claim them (sets is_held = 0).
+ * If itemIds is omitted, releases all items in the batch.
+ */
+export function releaseBatchItems(batchId: string, itemIds?: string[]): number {
+  const db = getDb();
+  const now = new Date().toISOString();
+  if (itemIds && itemIds.length > 0) {
+    const placeholders = itemIds.map(() => '?').join(',');
+    const res = db.run(
+      `UPDATE onboarding_items
+       SET is_held = 0, held_reason = NULL, updated_at = ?
+       WHERE batch_id = ? AND id IN (${placeholders})`,
+      [now, batchId, ...itemIds],
+    );
+    return res.changes;
+  }
+  const res = db.run(
+    `UPDATE onboarding_items
+     SET is_held = 0, held_reason = NULL, updated_at = ?
+     WHERE batch_id = ?`,
+    [now, batchId],
+  );
+  return res.changes;
+}
+
+/**
+ * Hold items in a batch from worker claiming (sets is_held = 1 with an optional reason).
+ */
+export function holdBatchItems(batchId: string, itemIds: string[], reason?: string): number {
+  if (itemIds.length === 0) return 0;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const placeholders = itemIds.map(() => '?').join(',');
+  const res = db.run(
+    `UPDATE onboarding_items
+     SET is_held = 1, held_reason = ?, updated_at = ?
+     WHERE batch_id = ? AND id IN (${placeholders})`,
+    [reason ?? null, now, batchId, ...itemIds],
+  );
+  return res.changes;
+}
+
+/**
+ * Bulk assign a brand hint to an array of items in a batch.
+ */
+export function bulkAssignBrandToItems(batchId: string, itemIds: string[], brand: string): number {
+  if (itemIds.length === 0) return 0;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const placeholders = itemIds.map(() => '?').join(',');
+  const res = db.run(
+    `UPDATE onboarding_items
+     SET brand_hint = ?, updated_at = ?
+     WHERE batch_id = ? AND id IN (${placeholders})`,
+    [brand.trim(), now, batchId, ...itemIds],
+  );
+  return res.changes;
 }
 
 /**

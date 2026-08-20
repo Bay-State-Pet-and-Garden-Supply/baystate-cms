@@ -221,11 +221,12 @@ export type UpdateDistributorConnection = z.infer<typeof UpdateDistributorConnec
 
 // ─── Advisory Brand Profile (workspace settings, ADR 0014) ────────────────────
 
+export const SourcingPolicyEnum = z.enum(['advisory', 'preferred_then_fallback', 'preferred_only']);
+export type SourcingPolicy = z.infer<typeof SourcingPolicyEnum>;
+
 /**
- * Optional brand → ordered distributor preference. ADVISORY ONLY and
- * fall-open: a missing or stale profile never filters connections and never
- * implies `not_stocked`. Stores no credentials and never constitutes a Brand
- * authority.
+ * Optional brand → ordered distributor preference. Stores distributor routing preferences
+ * and sourcing execution policy (advisory, preferred_then_fallback, preferred_only).
  */
 export const BrandAdvisoryProfileSchema = z.object({
   id: z.string().min(1),
@@ -234,6 +235,8 @@ export const BrandAdvisoryProfileSchema = z.object({
   aliases: z.array(z.string()).default(() => []),
   /** Ordered distributor ids by preference (first = most preferred). */
   preferredDistributorIds: z.array(z.string()).default(() => []),
+  /** Sourcing execution policy. Defaults to preferred_then_fallback. */
+  sourcingPolicy: SourcingPolicyEnum.default('preferred_then_fallback'),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -245,6 +248,7 @@ export const InsertBrandAdvisoryProfileSchema = z.object({
   brand: z.string().min(1),
   aliases: z.array(z.string()).optional().default(() => []),
   preferredDistributorIds: z.array(z.string()).optional().default(() => []),
+  sourcingPolicy: SourcingPolicyEnum.optional().default('preferred_then_fallback'),
 });
 
 export type InsertBrandAdvisoryProfile = z.input<typeof InsertBrandAdvisoryProfileSchema>;

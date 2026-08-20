@@ -443,6 +443,8 @@ export async function curateItemWithPipeline(
             sourcingDecision: null,
             stage: 'curation' as const,
             stageStatus: 'pending' as const,
+            isHeld: false,
+            heldReason: null,
             rowNumber: 0,
             isDuplicate: false,
             existingSku: null,

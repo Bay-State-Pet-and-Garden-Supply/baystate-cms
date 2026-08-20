@@ -36,6 +36,8 @@ function reviewItem(overrides: Partial<OnboardingItem> = {}): OnboardingItem {
     sourcingDecision: null,
     stage: 'sourcing',
     stageStatus: 'pending',
+    isHeld: false,
+    heldReason: null,
     status: 'imported',
     errorMessage: null,
     retryCount: 0,

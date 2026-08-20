@@ -16,6 +16,7 @@ import { PipelineBoard } from './PipelineBoard';
 import { BatchWorkspace } from './onboarding/BatchWorkspace';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { WeeklyReportModal } from './WeeklyReportModal';
+import { BatchPreflightModal } from './onboarding/preflight/BatchPreflightModal';
 import type { OnboardingBatch, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
 import type { WorkStateCounts } from '../../shared/schemas/onboarding-work-state';
 import { formatCount, totalItemCount } from './onboarding/batch-workspace-logic';
@@ -102,6 +103,10 @@ export function Onboarding() {
   // Brand/Domain Management states
   const [cachedBrandSites, setCachedBrandSites] = useState<BrandSite[]>([]);
   const [catalogBrands, setCatalogBrands] = useState<string[]>([]);
+
+  // Preflight & Controlled Release modal states
+  const [showPreflightModal, setShowPreflightModal] = useState(false);
+  const [preflightBatchId, setPreflightBatchId] = useState<string | null>(null);
 
   const fetchBatchesList = async () => {
     try {
@@ -282,8 +287,12 @@ export function Onboarding() {
       setDetectedBrands([]);
       setBrandMappings({});
       
-      fetchBatchesList();
+      await fetchBatchesList();
       handleSelectBatch(res.batch.id);
+
+      // Open Batch Preflight & Controlled Release modal immediately
+      setPreflightBatchId(res.batch.id);
+      setShowPreflightModal(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -493,15 +502,63 @@ export function Onboarding() {
                     <td style={styles.td}><strong>{batch.name}</strong></td>
                     <td style={styles.td}>{batch.fileName}</td>
                     <td style={styles.td}>{batch.createdAt.slice(0, 19).replace('T', ' ')}</td>
-                    <td style={styles.td}><span style={statusStyle(batch.status)}>{statusLabel(batch.status)}</span></td>
+                    <td style={styles.td}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={statusStyle(batch.status)}>{statusLabel(batch.status)}</span>
+                        {batch.executionState && (
+                          <span style={{
+                            fontSize: 10,
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            fontWeight: 700,
+                            letterSpacing: '0.025em',
+                            background: batch.executionState === 'running' ? '#dcfce7' :
+                              batch.executionState === 'paused' ? '#fef3c7' :
+                              batch.executionState === 'completed' ? '#e0f2fe' : '#f3f4f6',
+                            color: batch.executionState === 'running' ? '#166534' :
+                              batch.executionState === 'paused' ? '#92400e' :
+                              batch.executionState === 'completed' ? '#0369a1' : '#4b5563',
+                            border: `1px solid ${
+                              batch.executionState === 'running' ? '#bbf7d0' :
+                              batch.executionState === 'paused' ? '#fde68a' :
+                              batch.executionState === 'completed' ? '#bae6fd' : '#e5e7eb'
+                            }`,
+                          }}>
+                            {batch.executionState.toUpperCase()}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td style={styles.td} onClick={(e) => e.stopPropagation()}>{renderBatchProgress(batch)}</td>
                     <td style={styles.td}>
-                      <button
-                        style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: 600, fontSize: 13 }}
-                        onClick={(e) => handleDeleteBatch(batch.id, e)}
-                      >
-                        Delete
-                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <button
+                          style={{
+                            background: '#14532d',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 4,
+                            padding: '4px 8px',
+                            cursor: 'pointer',
+                            fontWeight: 600,
+                            fontSize: 12,
+                          }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPreflightBatchId(batch.id);
+                            setShowPreflightModal(true);
+                          }}
+                          title="Open Preflight & Brand Resolution Review"
+                        >
+                          ⚡ Preflight
+                        </button>
+                        <button
+                          style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: 600, fontSize: 13 }}
+                          onClick={(e) => handleDeleteBatch(batch.id, e)}
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -778,6 +835,19 @@ export function Onboarding() {
         {showWeeklyReportModal && (
           <WeeklyReportModal onClose={() => setShowWeeklyReportModal(false)} />
         )}
+        {showPreflightModal && preflightBatchId && (
+          <BatchPreflightModal
+            batchId={preflightBatchId}
+            isOpen={showPreflightModal}
+            onClose={() => {
+              setShowPreflightModal(false);
+              setPreflightBatchId(null);
+            }}
+            onBatchStarted={() => {
+              fetchBatchesList();
+            }}
+          />
+        )}
       </div>
     );
   }
@@ -886,6 +956,22 @@ export function Onboarding() {
         )}
         {showWeeklyReportModal && (
           <WeeklyReportModal onClose={() => setShowWeeklyReportModal(false)} />
+        )}
+        {showPreflightModal && preflightBatchId && (
+          <BatchPreflightModal
+            batchId={preflightBatchId}
+            isOpen={showPreflightModal}
+            onClose={() => {
+              setShowPreflightModal(false);
+              setPreflightBatchId(null);
+            }}
+            onBatchStarted={() => {
+              fetchBatchesList();
+              if (selectedBatchId) {
+                handleSelectBatch(selectedBatchId);
+              }
+            }}
+          />
         )}
       </>
     );

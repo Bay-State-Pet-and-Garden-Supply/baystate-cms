@@ -27,6 +27,8 @@ import type {
   BrandUrlsListResponse,
   SitemapTestLookupResponse,
   SitemapTestLookupRequest,
+  BatchPreflightResponse,
+  SourcingPolicy,
 } from '../shared/schemas/onboarding';
 import type {
   WorkerHealthResponse,
@@ -136,6 +138,67 @@ export async function deleteBatch(id: string): Promise<{ success: boolean }> {
   return request<{ success: boolean }>(`/batches/${id}`, {
     method: 'DELETE',
   });
+}
+
+export async function getBatchPreflight(batchId: string): Promise<BatchPreflightResponse> {
+  return request<BatchPreflightResponse>(`/batches/${batchId}/preflight`);
+}
+
+export async function startBatch(
+  batchId: string,
+  mode: 'ready_only' | 'all' = 'ready_only',
+): Promise<{ success: boolean; executionState: string; preflight: BatchPreflightResponse }> {
+  return request<{ success: boolean; executionState: string; preflight: BatchPreflightResponse }>(
+    `/batches/${batchId}/start`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    },
+  );
+}
+
+export async function pauseBatch(batchId: string): Promise<{ success: boolean; executionState: string }> {
+  return request<{ success: boolean; executionState: string }>(`/batches/${batchId}/pause`, {
+    method: 'POST',
+  });
+}
+
+export async function resumeBatch(batchId: string): Promise<{ success: boolean; executionState: string }> {
+  return request<{ success: boolean; executionState: string }>(`/batches/${batchId}/resume`, {
+    method: 'POST',
+  });
+}
+
+export async function assignBrandGroup(
+  batchId: string,
+  itemIds: string[],
+  brand: string,
+): Promise<{ success: boolean; preflight: BatchPreflightResponse }> {
+  return request<{ success: boolean; preflight: BatchPreflightResponse }>(
+    `/batches/${batchId}/assign-brand-group`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ itemIds, brand }),
+    },
+  );
+}
+
+export async function configureBrand(
+  batchId: string,
+  data: {
+    brand: string;
+    domain?: string;
+    preferredDistributorIds?: string[];
+    sourcingPolicy?: SourcingPolicy;
+  },
+): Promise<{ success: boolean; preflight: BatchPreflightResponse }> {
+  return request<{ success: boolean; preflight: BatchPreflightResponse }>(
+    `/batches/${batchId}/configure-brand`,
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    },
+  );
 }
 
 export async function getBatchStagedItems(
