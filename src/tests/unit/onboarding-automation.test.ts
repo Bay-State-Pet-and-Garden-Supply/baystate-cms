@@ -79,7 +79,7 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     delete process.env.BAYSTATE_CMS_SOURCING_ENABLED;
     delete process.env.BAYSTATE_CMS_SOURCING_MODE;
     resetSourcingFlagsOverride();
-    resetCohortCurationFlagsOverride();
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: false });
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onboarding-automation-test-'));
     dbPath = path.join(tempDir, 'test.db');
     initDb(dbPath);
@@ -115,7 +115,7 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
   }
 
   function makeItem(batchId: string, upc: string, name: string, stage: 'discovery' | 'extraction' | 'curation' | 'review' = 'discovery') {
-    const [item] = insertItems(batchId, [{ upc, name, rowNumber: 1, stage }], stage, 1);
+    const [item] = insertItems(batchId, [{ upc, name, brandHint: 'Acme', rowNumber: 1, stage }], stage, 1);
     return item;
   }
 
@@ -958,7 +958,7 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     const workerOn = makeWorker();
     await settle(workerOn);
     expect(findItemById(item.id)!.stageStatus).toBe('pending');
-    resetCohortCurationFlagsOverride();
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: false });
 
     // Flag OFF (default): legacy per-item claiming runs — the item is claimed
     // and reaches a terminal state deterministically (readiness assertion

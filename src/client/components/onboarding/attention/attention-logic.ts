@@ -23,6 +23,7 @@ export interface AttentionGroupMeta {
 }
 
 export const ATTENTION_GROUP_ORDER: ReadonlyArray<AttentionGroupMeta> = [
+  { reason: 'brand_not_provided', label: 'Brand assignment required', chipLabel: 'Needs brand' },
   { reason: 'verify_official_url', label: 'Verify official product page', chipLabel: 'Verify page' },
   { reason: 'no_official_url', label: 'Official product page not found', chipLabel: 'No page found' },
   { reason: 'choose_official_url', label: 'Choose the correct product page', chipLabel: 'Choose page' },
@@ -47,6 +48,7 @@ export function getAttentionGroupChip(reason: AttentionReason | null | undefined
 // ─── Action labels ─────────────────────────────────────────────────────────────
 
 export const ATTENTION_ACTION_LABELS: Record<AttentionAction, string> = {
+  assign_brand: 'Assign brand',
   verify_official_url: 'Confirm the page',
   choose_official_url: 'Choose a page',
   setup_extractor_profile: 'Set up extraction',
@@ -72,6 +74,8 @@ export function getAttentionActions(
   reason: AttentionReason | null | undefined,
 ): AttentionAction[] {
   switch (reason) {
+    case 'brand_not_provided':
+      return ['assign_brand'];
     case 'verify_official_url':
     case 'no_official_url':
       return ['verify_official_url'];
@@ -95,6 +99,8 @@ export function getAttentionActions(
 /** Deterministic per-action consequence text ("what happens after I do this"). */
 export function getAttentionActionConsequence(action: AttentionAction | null | undefined): string {
   switch (action) {
+    case 'assign_brand':
+      return 'Assigning the brand re-runs distributor lookups and official site discovery automatically.';
     case 'retry_extraction':
       return 'After you retry, extraction runs again with the existing profile.';
     case 'setup_extractor_profile':
@@ -127,6 +133,8 @@ export function getAttentionConsequence(
   _detail?: string | null,
 ): string {
   switch (reason) {
+    case 'brand_not_provided':
+      return 'Assign the brand to run distributor lookup and official site discovery automatically.';
     case 'verify_official_url':
       return 'Confirm the correct page and extraction resumes automatically.';
     case 'no_official_url':

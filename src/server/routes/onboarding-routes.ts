@@ -512,6 +512,7 @@ route.post('/onboarding/batches', async (c) => {
       name,
       fileName,
       totalItems: finalItems.length,
+      executionState: 'draft',
       columnMappingJson: JSON.stringify(mapping),
     });
 

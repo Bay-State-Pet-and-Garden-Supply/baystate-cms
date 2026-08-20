@@ -98,7 +98,7 @@ function createItem(
   const inserted = insertItems(batchId, [{
     upc: overrides.upc,
     name: overrides.name,
-    brandHint: overrides.brandHint ?? 'Blue Buffalo',
+    brandHint: overrides.brandHint !== undefined ? overrides.brandHint : 'Blue Buffalo',
     sourceUrl: overrides.sourceUrl ?? null,
     rowNumber: 1,
     stage: overrides.stage as any,
@@ -625,3 +625,43 @@ describe('epic #46 review remediation — fix 5: search/filter contract', () => 
     expect(byFamily.total).toBe(2);
   });
 });
+
+describe('brand assignment work-state projection', () => {
+  it('projects held missing_brand items into needs_attention with brand_not_provided', () => {
+    const batchId = makeBatch();
+    const itemId = createItem(batchId, {
+      upc: 'NO-BRAND-1',
+      name: 'Acana Grasslands 25lb',
+      stage: 'sourcing',
+      stageStatus: 'pending',
+    });
+
+    const db = getDb();
+    db.run("UPDATE onboarding_items SET is_held = 1, held_reason = 'missing_brand' WHERE id = ?", [itemId]);
+
+    const res = getBatchWorkState(batchId);
+    expect(res.total).toBe(1);
+    expect(res.items[0].category).toBe('needs_attention');
+    expect(res.items[0].attentionReason).toBe('brand_not_provided');
+    expect(res.items[0].attentionAction).toBe('assign_brand');
+    expect(res.items[0].label).toBe('Brand assignment required');
+  });
+
+  it('projects discovery needs_input items without brandHint into brand_not_provided', () => {
+    const batchId = makeBatch();
+    const itemId = createItem(batchId, {
+      upc: 'NO-BRAND-2',
+      name: 'Fromm Gold Adult Dog 30lb',
+      brandHint: null,
+      stage: 'discovery',
+      stageStatus: 'needs_input',
+    });
+
+    const res = getBatchWorkState(batchId);
+    expect(res.total).toBe(1);
+    expect(res.items[0].category).toBe('needs_attention');
+    expect(res.items[0].attentionReason).toBe('brand_not_provided');
+    expect(res.items[0].attentionAction).toBe('assign_brand');
+  });
+});
+
