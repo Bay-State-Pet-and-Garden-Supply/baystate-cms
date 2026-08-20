@@ -2387,6 +2387,7 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
     });
     // Flags default OFF — no override active in this test.
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: true });
     expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
     const before = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
 

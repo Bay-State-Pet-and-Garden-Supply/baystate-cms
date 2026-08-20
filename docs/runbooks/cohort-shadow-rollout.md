@@ -1,12 +1,34 @@
 # Cohort Curation v2 — Shadow Rollout Runbook
 
-**Epic #46 review round (Package B).** How to observe family grouping and cohort
-Execution Product Type resolution WITHOUT changing per-item curation behavior,
-then flip to active cohort curation.
+**Epic #30 cohort-centric, type-first curation (issues #30, PR1–PR13).** How to
+observe family grouping and cohort Execution Product Type resolution, then
+operate the cohort-active default.
 
-## What shadow mode does
+## Current default (post-#30 rollout)
 
-With both flags set:
+After shadow validation (PR12) the system defaults to **cohort-active** for new
+batches (issue #30 rollout commitment):
+
+```
+BAYSTATE_CMS_COHORT_CURATION_V2=true  (default)
+BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY=false  (default)
+```
+
+- Curation is **cohort-claimed EXCLUSIVELY**: the per-item Curation claim
+  path stops; ownership flows `refreshCandidateCohorts → reconcile →
+  claimReadyCurationCohorts → processCohort`.
+- The parent op runs `ensureCohortTitlesCoordinated` — ONE consistent title set
+  per multi-item family, written to `classification_cohort_outputs`
+  (write-once; drift fails closed with `CohortTitleAuthorityDriftError` — a bad
+  title set is NEVER silently replaced; re-run the cohort revision instead).
+- Members consume the coordinated titles via the `preComputedTitle` seam.
+
+Byte-identical legacy per-item Curation remains available via explicit flag OFF
+for rollback — see Rollback below.
+
+## What shadow mode does (opt-in observation)
+
+Set explicitly to re-enable observation without cohort claiming:
 
 ```
 BAYSTATE_CMS_COHORT_CURATION_V2=true
@@ -25,6 +47,9 @@ BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY=true
   `classification_cohort_outputs` rows are created, no model calls are made,
   and no coordinated titles are written. The parent title coordinator
   (`ensureCohortTitlesCoordinated`) only runs in ACTIVE mode.
+
+Shadow mode is now opt-in. New batches no longer require an operator flag flip
+to get cohort-active behavior.
 
 ## Checking the observations
 
@@ -54,27 +79,35 @@ coordinator. `member_count = 1` cohorts are singletons and are never coordinated
 `conflicted` or `abstained` family would block or abstain in active mode too, so
 those need human attention regardless.
 
-## Flipping to active mode
+## Flipping to active mode (legacy path)
 
-When shadow observations show families grouping correctly, set:
+Active was previously opt-in via:
 
 ```
 BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY=false
 ```
 
-Active-mode effects (issue #30):
-
-- Curation becomes **cohort-claimed EXCLUSIVELY**: the per-item Curation claim
-  path stops; ownership flows `refreshCandidateCohorts → reconcile →
-  claimReadyCurationCohorts → processCohort`.
-- The parent op runs `ensureCohortTitlesCoordinated` — ONE consistent title set
-  per multi-item family, written to `classification_cohort_outputs`
-  (write-once; drift fails closed with `CohortTitleAuthorityDriftError` — a bad
-  title set is NEVER silently replaced; re-run the cohort revision instead).
-- Members consume the coordinated titles via the `preComputedTitle` seam.
+This is now the default. New deployments without explicit env overrides
+automatically run cohort-active. To force a batch back to legacy per-item with
+observation, set the shadow pair above.
 
 ## Rollback
 
-Remove the two `BAYSTATE_CMS_COHORT_CURATION_V2*` keys from `.env` (or set them
-false) and restart the worker: the byte-identical legacy per-item path resumes.
+Set both flags false (or remove them and set `BAYSTATE_CMS_COHORT_CURATION_V2=false`
+explicitly) and restart the worker: the byte-identical legacy per-item path resumes.
+
+```
+BAYSTATE_CMS_COHORT_CURATION_V2=false
+BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY=true
+# or simply BAYSTATE_CMS_COHORT_CURATION_V2=false (shadow flag irrelevant when OFF)
+```
+
 Shadow observation rows are harmless history — no cleanup required.
+
+## Legacy cleanup
+
+PR12 left the per-item curation claim and the transient family-barrier
+(`holdWaitingFamilyMembers`) behind flags for rollback. After a confidence period
+of default-on operation, those paths are candidates for deletion. Tracked as
+follow-up — not required to close #30's rollout gate, which is satisfied by
+measurable default-on operation with a reversible kill switch.

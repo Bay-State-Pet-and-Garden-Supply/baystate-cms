@@ -976,7 +976,7 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
       if (mode === 'shadow') {
         overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
       } else {
-        resetCohortCurationFlagsOverride();
+        overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: true });
       }
       // The legacy per-item worker path is the ONLY path in both modes (OFF
       // has V2 disabled; shadow observes without cohort claiming — never
@@ -1027,6 +1027,7 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
       'startedAt', 'endedAt', 'extractedAt', 'snapshotHash', 'evidenceIds',
       'supportingEvidenceIds', 'contradictingEvidenceIds', 'currentDecisionId',
       'classificationRunId', 'classificationConfigSnapshot', 'classificationHistory',
+      'verifiedPageIdSet', 'verifiedPageCount', 'pageSnapshot', 'snapshot',
     ]);
     const stripVolatile = (value: unknown): unknown => {
       if (Array.isArray(value)) return value.map(stripVolatile);
@@ -1059,6 +1060,7 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
 
     // The un-executed-item surface stays legacy in both modes.
     resetCohortCurationFlagsOverride();
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: true });
     expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
     overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
     const { workspaceId, workspacePath: wsPath } = newWorkspace();

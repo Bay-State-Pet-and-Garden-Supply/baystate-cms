@@ -1,8 +1,10 @@
 /**
  * Cohort-centric Curation V2 runtime feature flags (issue #30, PR3 M1).
  *
- * Normal onboarding must continue to work when every flag is disabled
- * (the default — byte-identical legacy behavior). Flags can be flipped at
+ * Rollout: v0.3.0 default was OFF (shadow uses legacy per-item path).
+ * After shadow validation (#30 PR12), new batches default to cohort-active
+ * (issue #30 rollout commitment) — byte-identical legacy remains available
+ * via flags OFF / kill-switch for rollback. Flags can be flipped at
  * runtime without a redeploy:
  * - environment variables are re-read on every `loadCohortCurationFlags()`
  *   call, so a process restart or env change applies without code changes;
@@ -63,8 +65,8 @@ export interface CohortCurationFlags {
 }
 
 export const DEFAULT_COHORT_CURATION_FLAGS: CohortCurationFlags = {
-  cohortCurationV2Enabled: false,
-  cohortShadowOnly: true,
+  cohortCurationV2Enabled: true,
+  cohortShadowOnly: false,
   cohortProductTypeConfidenceFloor: 0.7,
 };
 
