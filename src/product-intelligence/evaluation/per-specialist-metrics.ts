@@ -25,9 +25,13 @@ export interface SpecialistVersionMetrics {
   };
 }
 
-function datasetSha(): string {
+export function datasetSha(): string {
   const products = buildPiGoldenProducts();
-  const canonical = JSON.stringify(products.map((p) => p.input.gtin).sort());
+  const canonical = JSON.stringify(
+    products
+      .map((p) => ({ gtin: p.input.gtin, name: p.input.registerName ?? '', gold: p.gold }))
+      .sort((a, b) => a.gtin.localeCompare(b.gtin)),
+  );
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
 

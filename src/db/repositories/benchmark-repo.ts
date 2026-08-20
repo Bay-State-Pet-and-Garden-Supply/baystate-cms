@@ -627,3 +627,43 @@ export function getVerifiedReceiptDigests(): Set<string> {
     .all() as Array<{ digest: string }>;
   return new Set(rows.map(r => r.digest));
 }
+
+/**
+ * Safety-gate baseline for provider recommendation regression checks.
+ * Stored per dataset; additive table. Returns null when no baseline has been
+ * recorded yet (caller must then apply absolute-only gating).
+ * story: e03s01
+ */
+export interface BenchmarkSafetyBaseline {
+  wrongProductRate: number | null;
+  wrongVariantRate: number | null;
+  falsePassRate: number | null;
+  traceabilityCoverage: number | null;
+}
+
+function ensureBaselineTable(): void {
+  getDb().run(`
+    CREATE TABLE IF NOT EXISTS benchmark_baselines (
+      dataset_id TEXT PRIMARY KEY,
+      wrong_product_rate REAL,
+      wrong_variant_rate REAL,
+      false_pass_rate REAL,
+      traceability_coverage REAL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+}
+
+export function getBenchmarkBaseline(datasetId: string): BenchmarkSafetyBaseline | null {
+  ensureBaselineTable();
+  const row = getDb()
+    .query('SELECT * FROM benchmark_baselines WHERE dataset_id = $id')
+    .get({ $id: datasetId }) as Record<string, any> | undefined;
+  if (!row) return null;
+  return {
+    wrongProductRate: row.wrong_product_rate ?? null,
+    wrongVariantRate: row.wrong_variant_rate ?? null,
+    falsePassRate: row.false_pass_rate ?? null,
+    traceabilityCoverage: row.traceability_coverage ?? null,
+  };
+}

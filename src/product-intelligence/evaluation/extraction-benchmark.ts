@@ -10,7 +10,7 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/26
  */
-import { getExamples } from '../../db/repositories/benchmark-repo';
+import { getExamples, getBenchmarkBaseline } from '../../db/repositories/benchmark-repo';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
 import type { PageExtractionContract } from '../tools/contract';
 import { parseStructuredSignals } from '../extraction/platforms';
@@ -506,6 +506,10 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
     if (r.extractionRate < 0.8) return false;
     if (r.costPerCorrectProduct == null || r.costPerCorrectProduct > 0.01) return false;
     const traceOk = r.traceability.coverage == null ? false : r.traceability.coverage >= 0.8;
+    const baseline = getBenchmarkBaseline(opts.datasetId);
+    if (!baseline) {
+      console.warn('extraction-benchmark: no baseline recorded for dataset, gate is absolute only');
+    }
     const safety = evaluateSafetyGates(
       {
         wrongProductRate: r.exactProductAccuracy == null ? null : 1 - r.exactProductAccuracy,
@@ -513,7 +517,7 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
         falsePassRate: r.extractionRate == null ? null : 1 - r.extractionRate,
         traceabilityCoverage: r.traceability.coverage,
       },
-      null,
+      baseline,
     );
     return providerSafetyQualified(r.extractionRate, safety, traceOk);
   });
