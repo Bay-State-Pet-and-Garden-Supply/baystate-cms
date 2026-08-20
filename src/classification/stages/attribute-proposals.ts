@@ -116,9 +116,10 @@ export const productAttributeProposalsStage: StageDefinition = {
     }
 
     if (gated.length === 0) {
-      // Byte-identical legacy messages for `none`/reviewed sources; a
-      // source-aware suffix is appended ONLY when the effective type came from
-      // the cohort execution type (additive, flag-OFF runs never see it).
+      // e04s01: fail-closed with explicit abstention — silent "succeeded" with
+      // zero proposals made the review panel indistinguishable from
+      // "correctly empty". Now we emit a reviewable_abstention so the UI can
+      // surface applicability reasons and gating provenance.
       const sourceSuffix =
         source === 'execution' ? ' (driven by cohort execution Product Type.)' : '';
       const blockedReason =
@@ -126,11 +127,12 @@ export const productAttributeProposalsStage: StageDefinition = {
           ? 'No reviewed Primary Product Type; type-gated attribute proposals are withheld until the type is accepted.'
           : `No applicable product-field targets for the accepted Product Type.${sourceSuffix}`;
       return {
-        status: 'succeeded',
+        status: 'abstained',
+        reason: blockedReason,
         output: {
           evidence: [],
           proposals: [],
-          abstained: false,
+          abstained: true,
           message: blockedReason,
           metadata: {
             gated: true,

@@ -1,0 +1,21 @@
+story_id: e04s01
+title: "Stage-navigable curator — eliminate silent emptiness, preserve variant tokens, enforce ADR 0004 boundaries"
+status: planned
+bcps: 8
+tasks:
+  - id: 1
+    description: "Audit src/onboarding/product-curator.ts (1061 lines) against 7 stages in src/classification/stages/* and StageDefinition contract (types.ts); document requires/produces/evidenceFrom per stage in code comments or stage index; enforce no stage bypass and remove cohort/live divergence duplication where feasible — keep frozen vs live snapshot discipline (runtime-snapshot.ts) intact"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-curator.test.ts src/tests/unit/classification-stages.test.ts 2>&1 | tail -n 30"
+    status: todo
+  - id: 2
+    description: "Eliminate silent 'succeeded empty' for attribute_applicability unknown/not_applicable — emit reviewable_abstention or explicit applicability metadata instead of empty success; ensure ReviewClassificationPanel never sees indistinguishable empty (reference scout §4); add unit test covering unknown type and not_applicable profile"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/classification-applicability.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 3
+    description: "Fix name_consolidation variant-token preservation — thread rawRegisterName through consolidateProductTitle (src/classification/stages/name-consolidation.ts) and add guard that LLM output containing no variant tokens falls back to deterministic formatDeterministicTitle; cover sibling-cohort divergence with cohort coordination flag (coordinateCohortItemsOnce) + test gold set of LG/SM/color/size variants"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/name-consolidation.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 4
+    description: "Enforce synthesis ordering guard DECISION-C and snapshotHash fail-closed — keep assertCohortSynthesisOrdering (product-curator.ts:25-55) and snapshot mutation detection; add integration test that mutating RuntimeClassificationSnapshot mid-run fails closed, and that required stage missing blocks keyword/description synthesis"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/runtime-snapshot.test.ts 2>&1 | tail -n 20"
+    status: todo

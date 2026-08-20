@@ -1,3 +1,23 @@
+/**
+ * Curation Orchestrator — e04s01 audit (ADR 0004)
+ *
+ * Stage index (StageDefinition contract in src/classification/types.ts):
+ * | # | Stage File                          | Stage Name                      | Requires                              | Produces                                   |
+ * |---|-------------------------------------|-----------------------------------|---------------------------------------|--------------------------------------------|
+ * | 1 | evidence-extraction.ts              | evidence_extraction               | —                                     | ClassificationEvidence (spreadsheet/official/distributor/visual + brand) |
+ * | 2 | name-consolidation.ts               | name_consolidation                | evidence_extraction                   | metadata curatedTitle/titleSource (no proposals) |
+ * | 3 | primary-product-type.ts             | primary_product_type_proposal     | evidence_extraction                   | primary_product_type proposal or reviewable_abstention |
+ * | 4 | attribute-applicability.ts          | attribute_applicability           | primary_product_type_proposal         | metadata applicability[] (applicable/not_applicable/unknown) |
+ * | 5 | attribute-proposals.ts              | product_attribute_proposals       | attribute_applicability               | field_assignment proposals or abstention (e04s01: no silent empty) |
+ * | 6 | category-page-proposals.ts          | category_page_proposals           | evidence_extraction, primary_product_type_proposal | category_page proposals (gate: reviewed type + verified Pages) |
+ * | 7 | draft-projection.ts                 | product_draft_projection          | name_consolidation, category_page_proposals, product_attribute_proposals | metadata projection {fieldAssignments/pageAssignments/title} |
+ *
+ * Frozen vs live discipline (src/classification/runtime-snapshot.ts):
+ * - Legacy per-SKU: buildRuntimeSnapshot + persistRuntimeSnapshot + run linked to snapshotHash (live config path).
+ * - Cohort (preparedCohort): reuse frozen snapshot/member run + frozenBatchItems + coordinatedTitles/Pages; never re-read live DB for evidence/siblings — frozen-means-frozen (PR3/PR6/PR7).
+ *
+ * story: e04s01
+ */
 import { getPageDisplayName, getPageIdentityId } from '../shared/proposal-display';
 import { convertToLbs } from '../shared/weight-converter';
 import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../classification/page-snapshot';
@@ -92,50 +112,10 @@ export function assertCohortSynthesisOrdering(
 }
 
 // ─── Page Assignment Validation ───────────────────────────────────────────────
-
-/**
- * Validate page assignments against the product's species from VLM OCR evidence.
- * Cross-species pages (e.g., a Dog product assigned to "Cat Food") are dropped
- * with a warning. This is a safety net that catches LLM or downstream mistakes.
- */
-function validatePageAssignmentsBySpecies(
-  proposedPages: string[],
-  allEvidence: ClassificationEvidence[],
-): string[] {
-  const speciesEntries = allEvidence.filter(
-    e => e.source === 'visual_product_evidence' && e.sourceField === 'species',
-  );
-  const species = speciesEntries
-    .map(e => (typeof e.value === 'string' ? e.value.toLowerCase() : ''))
-    .filter(Boolean);
-
-  if (species.length === 0) return proposedPages;
-
-  const primarySpecies = species[0];
-
-  const speciesIncompatible: Record<string, string[]> = {
-    dog: ['cat', 'fish', 'bird', 'small animal', 'small pet', 'reptile', 'caged bird', 'wild bird', 'wildlife'],
-    cat: ['dog', 'fish', 'bird', 'small animal', 'small pet', 'reptile', 'caged bird', 'wild bird', 'wildlife'],
-    fish: ['dog', 'cat', 'bird', 'small animal', 'small pet', 'reptile', 'caged bird', 'farm animal', 'horse', 'wildlife'],
-    bird: ['dog', 'cat', 'fish', 'reptile', 'farm animal', 'horse'],
-    reptile: ['dog', 'cat', 'bird', 'farm animal', 'horse'],
-    horse: ['dog', 'cat', 'fish', 'bird', 'small pet', 'reptile'],
-  };
-
-  const incompatibleTerms = speciesIncompatible[primarySpecies] ?? [];
-  if (incompatibleTerms.length === 0) return proposedPages;
-
-  return proposedPages.filter(pageName => {
-    const nameLower = pageName.toLowerCase();
-    const isCompatible = !incompatibleTerms.some(term => nameLower.includes(term));
-    if (!isCompatible) {
-      console.warn(
-        `[ProductCurator] Dropping cross-species page assignment: "${pageName}" for species "${primarySpecies}"`,
-      );
-    }
-    return isCompatible;
-  });
-}
+// Species-guard moved to pure module so vitest (no bun:sqlite) can import it.
+import { validatePageAssignmentsBySpecies, validatePageAssignmentsWithProvenance } from '../classification/species-guard';
+// Re-export for tests that import from curator (back-compat)
+export { validatePageAssignmentsWithProvenance, validatePageAssignmentsBySpecies };
 
 /**
  * Runs the modular classification pipeline for a curated item.
@@ -756,7 +736,10 @@ export async function curateItemWithPipeline(
     }
 
     // ── Validate page assignments against species from VLM OCR evidence ───
-    const validatedPages = validatePageAssignmentsBySpecies(rawSuggestedPages, allEvidence);
+    // e05s01: capture species-guard provenance for review UI (hard guard unchanged)
+    const speciesGuardResult = validatePageAssignmentsWithProvenance(rawSuggestedPages, allEvidence);
+    const validatedPages = speciesGuardResult.validated;
+    const speciesGuardDropped = speciesGuardResult.dropped;
 
     // Suggested page names are already validated against the frozen verified
     // Page snapshot above — no post-run DB read is needed (ADR 0005).
@@ -933,6 +916,55 @@ export async function curateItemWithPipeline(
       effectiveProductType: cohortMode && preparedCohort!.effectiveType
         ? { id: preparedCohort!.effectiveType.id, source: preparedCohort!.effectiveType.source }
         : undefined,
+      // e05s01: review observability — additive, absent in legacy runs keeps byte-identical
+      // story: e05s01
+      attributeApplicability: (() => {
+        const meta = result.stageOutputs.attribute_applicability?.metadata as { applicability?: Array<{ attributeId: string; state: string; reason?: string }> } | undefined;
+        const arr = Array.isArray(meta?.applicability) ? meta!.applicability : [];
+        return arr.map(entry => ({
+          attributeId: String(entry.attributeId),
+          state: (entry.state as 'applicable' | 'not_applicable' | 'unknown'),
+          reason: entry.reason ? String(entry.reason) : undefined,
+        }));
+      })(),
+      categoryPageGating: (() => {
+        const catMeta = result.stageOutputs.category_page_proposals;
+        // Gate reasons are encoded as abstention proposals; check proposals for reviewable_abstention target category_page_proposals
+        const catAbstention = result.proposals.find(p => p.proposalType === 'reviewable_abstention' && String(p.targetId) === 'category_page_proposals');
+        const reasonRaw = (catAbstention?.proposedValue as { reason?: string } | null)?.reason ?? null;
+        const needsReviewedType = reasonRaw ? reasonRaw.includes('No reviewed Primary Product Type') : false;
+        const needsVerifiedPages = reasonRaw ? reasonRaw.includes('No verified store pages available') : false;
+        return {
+          needsReviewedType,
+          needsVerifiedPages,
+          verifiedPageCount: verifiedPageIdSet.size,
+          reason: reasonRaw,
+          verifiedPageIdSet: Array.from(verifiedPageIdSet),
+          snapshotHash: runtimeSnapshot.snapshotHash ?? null,
+        };
+      })(),
+      speciesGuardDropped,
+      // story: e05s02 — taxonomy provenance per field (bundle/snapshot/verified identity), no invented IDs
+      taxonomyProvenance: (() => {
+        const bundleHash = runtimeSnapshot.configSnapshotRef?.hash ?? context.configSnapshotRef?.hash ?? null;
+        const snapHash = runtimeSnapshot.snapshotHash ?? null;
+        const fileVersions = runtimeSnapshot.focusedFileHashes ?? {};
+        const verifiedIds = Array.from(verifiedPageIdSet);
+        const effectiveTypeId = (cohortMode && preparedCohort!.effectiveType?.id) || suggestedProductType;
+        const profileEntry = effectiveTypeId
+          ? runtimeSnapshot.attributeProfiles.find(p => p.productTypeId === effectiveTypeId) ?? null
+          : runtimeSnapshot.attributeProfiles[0] ?? null;
+        return {
+          bundleHash,
+          bundleVersion: bundleHash ? String(bundleHash).slice(0, 8) : null,
+          snapshotHash: snapHash,
+          manifestFileVersions: fileVersions,
+          verifiedPageCount: verifiedPageIdSet.size,
+          verifiedPageIdSet: verifiedIds,
+          attributeProfileId: profileEntry ? (profileEntry as { id?: string }).id ?? null : null,
+          classificationRunId: run.id,
+        };
+      })(),
     };
   } catch (err) {
     console.error(`[ProductCurator] Classification pipeline failed:`, redactTransportText(err instanceof Error ? err.message : String(err)));

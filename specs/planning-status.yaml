@@ -1,0 +1,9 @@
+# specs/planning-status.yaml — discover-phase checklist (optional)
+# Used by run-planning to track survey → scope → research → elaborate → release
+discover:
+  survey_context: done
+  scope_work: done
+  research_first: done
+  elaborate_spec: done
+  plan_release: done
+  slice_tasks: done

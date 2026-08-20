@@ -18,6 +18,7 @@
 import { useState } from 'react';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import type { ClassificationProposal } from '../../../../shared/schemas/classification';
+import type { CurationData } from '../../../../shared/schemas/onboarding';
 
 export interface ReviewClassificationPanelProps {
   detail: ItemDetailResponse | null;
@@ -136,11 +137,16 @@ export function ReviewClassificationPanel({
   busyDecisionId,
 }: ReviewClassificationPanelProps) {
   const [decisionError, setDecisionError] = useState<string | null>(null);
-  const curation = detail?.item.curationData ?? null;
+  const curation = detail?.item.curationData as CurationData | null;
   const proposals = curation?.classificationProposals ?? [];
   const suggestedPages = curation?.suggestedPages ?? [];
   const suggestions = suggestedPages.length > 0;
   const withoutResults = proposals.length === 0 && !suggestions;
+  // e05s01: surface applicability + gating provenance instead of silent emptiness
+  const applicability = curation?.attributeApplicability ?? [];
+  const gating = curation?.categoryPageGating ?? null;
+  const dropped = curation?.speciesGuardDropped ?? [];
+  const provenance = curation?.taxonomyProvenance ?? null;
 
   const handleDecision = async (proposal: ClassificationProposal, decision: 'accepted' | 'rejected') => {
     setDecisionError(null);
@@ -184,7 +190,16 @@ export function ReviewClassificationPanel({
     <section className="rv-panel" aria-label="Classification">
       <header className="rv-panel-head">Classification</header>
       <div className="rv-panel-body">
-        {withoutResults && <div className="rv-empty">No classification proposals or category suggestions yet.</div>}
+        {withoutResults && (
+          <div className="rv-empty">
+            {gating?.needsReviewedType
+              ? 'Needs reviewed Product Type — page assignment requires an accepted Product Type. Review the type proposal above first.'
+              : gating?.needsVerifiedPages
+                ? `No verified Catalog Pages for import — ${gating.verifiedPageCount} verified page${gating.verifiedPageCount === 1 ? '' : 's'} in snapshot. Import ShopSite pages first.`
+                : 'No classification proposals or category suggestions yet.'}
+            {gating?.reason && !gating.needsReviewedType && !gating.needsVerifiedPages ? ` Reason: ${gating.reason}` : ''}
+          </div>
+        )}
 
         {primary && (
           <div className="rv-field">
@@ -225,10 +240,97 @@ export function ReviewClassificationPanel({
                 <span className="rv-abstention-reason">{abstentionReason(proposal) ?? 'No evidence available.'}</span>
               </div>
             ))}
+            {/* e05s01: when category_page_proposals abstained, replace generic note with gating provenance */}
+            {gating && (gating.needsReviewedType || gating.needsVerifiedPages) && abstentions.some(a => String(a.targetId) === 'category_page_proposals') ? (
+              <p className="rv-meta-note">
+                {gating.needsReviewedType
+                  ? 'Needs reviewed Product Type — accept a Product Type above to unlock page assignment.'
+                  : `No verified Catalog Pages — ${gating.verifiedPageCount} verified in snapshot ${gating.snapshotHash ? `(${String(gating.snapshotHash).slice(0, 8)})` : ''}.`}
+              </p>
+            ) : (
+              <p className="rv-meta-note">
+                Informational only — abstentions are acknowledged automatically when you complete the
+                review. You never need to accept or reject an abstention.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* e05s01: attribute applicability — replaces silent 'succeeded empty' */}
+        {applicability.length > 0 && (
+          <div className="rv-field" aria-label="Attribute applicability">
+            <div className="rv-field-label">Attribute applicability ({applicability.length})</div>
+            {applicability.map(entry => (
+              <div key={entry.attributeId} className="rv-abstention">
+                <span className="rv-abstention-target">{humanizeId(entry.attributeId)}</span>
+                <span className={`rv-applicability-state rv-applicability-${entry.state}`}>{entry.state}</span>
+                <span className="rv-abstention-reason">
+                  {entry.state === 'unknown'
+                    ? entry.reason ?? 'type not reviewed'
+                    : entry.state === 'not_applicable'
+                      ? entry.reason ?? 'not in profile'
+                      : entry.reason ?? 'applicable'}
+                </span>
+              </div>
+            ))}
             <p className="rv-meta-note">
-              Informational only — abstentions are acknowledged automatically when you complete the
-              review. You never need to accept or reject an abstention.
+              Unknown means the attribute is type-gated and no reviewed Product Type exists yet; not_applicable means the attribute is not in the accepted type&apos;s profile.
             </p>
+          </div>
+        )}
+
+        {/* e05s02: taxonomy provenance — bundle/snapshot/verified identity, no invented IDs */}
+        {provenance && (
+          <div className="rv-field" aria-label="Taxonomy provenance">
+            <div className="rv-field-label">Taxonomy provenance</div>
+            <div className="rv-abstention">
+              <span className="rv-abstention-target">Bundle</span>
+              <span className="rv-abstention-reason" title={provenance.bundleHash ?? ''}>
+                {provenance.bundleVersion ? `${provenance.bundleVersion} · ${String(provenance.bundleHash).slice(0, 12)}` : provenance.bundleHash ?? '—'}
+              </span>
+            </div>
+            <div className="rv-abstention">
+              <span className="rv-abstention-target">Snapshot</span>
+              <span className="rv-abstention-reason" title={provenance.snapshotHash ?? ''}>
+                {provenance.snapshotHash ? `${String(provenance.snapshotHash).slice(0, 8)} · ${String(provenance.snapshotHash).slice(0, 12)}` : '—'}
+              </span>
+            </div>
+            <div className="rv-abstention">
+              <span className="rv-abstention-target">Verified pages</span>
+              <span className="rv-abstention-reason">
+                {(provenance.verifiedPageCount ?? 0).toString()} verified — IDs: {(provenance.verifiedPageIdSet ?? []).slice(0, 5).join(', ') || '—'}
+                {(provenance.verifiedPageIdSet ?? []).length > 5 ? ` +${(provenance.verifiedPageIdSet?.length ?? 0) - 5} more` : ''}
+              </span>
+            </div>
+            {provenance.attributeProfileId ? (
+              <div className="rv-abstention">
+                <span className="rv-abstention-target">Attribute profile</span>
+                <span className="rv-abstention-reason">{provenance.attributeProfileId}</span>
+              </div>
+            ) : null}
+            {provenance.classificationRunId ? (
+              <div className="rv-abstention">
+                <span className="rv-abstention-target">Run</span>
+                <span className="rv-abstention-reason">{String(provenance.classificationRunId).slice(0, 8)}</span>
+              </div>
+            ) : null}
+            <p className="rv-meta-note">SoT: store/classification/*.json → RuntimeClassificationSnapshot (snapshotHash) → verified Pages/Fields catalog → promotion. Non-technical UI is deferred; safe path is JSON-file edit + bundle release via config-store. No invented IDs (ADR 0012).</p>
+          </div>
+        )}
+
+        {/* e05s01: species-guard dropped pages — hard guard unchanged, only provenance surfaced */}
+        {dropped.length > 0 && (
+          <div className="rv-field" aria-label="Filtered by species guard">
+            <div className="rv-field-label">Filtered by species guard ({dropped.length})</div>
+            {dropped.map(item => (
+              <div key={item.pageName} className="rv-abstention">
+                <span className="rv-abstention-target">{item.pageName}</span>
+                <span className="rv-abstention-reason">
+                  species_incompatible — species &quot;{item.species}&quot; vs term &quot;{item.matchedTerm ?? ''}&quot;
+                </span>
+              </div>
+            ))}
+            <p className="rv-meta-note">Safety net — cross-species pages are dropped by curation. This list is provenance only.</p>
           </div>
         )}
 

@@ -1,0 +1,17 @@
+story_id: e04s02
+title: "Curation vs promotion field provenance — explicit mapping, stale-mapping guards, snapshot freeze discipline"
+status: planned
+bcps: 5
+tasks:
+  - id: 1
+    description: "Document explicit field mapping: what curation SETS inside curation_data_json (curatedTitle/titleSource, packagingOcrTitle, curatedWeight, curatedDescription v2-only + attemptIds, suggestedPages, suggestedProductType, searchKeywords, classificationRunId/snapshot/proposals/evidence) vs what draft-promoter SETS (product_pages rows via verified pageId + ShopSite ProductOnPages XML, customFields via accepted field_assignment + getCachedAttributeMappings with stale check, ProductField1/ProductField16, media). Add markdown reference doc specs/tech-architecture/CURATION_FIELD_MAP.md"
+    verify: "test -f specs/tech-architecture/CURATION_FIELD_MAP.md && grep -q 'curation_data_json' specs/tech-architecture/CURATION_FIELD_MAP.md && grep -q 'draft-promoter' specs/tech-architecture/CURATION_FIELD_MAP.md && echo 'field map present'"
+    status: todo
+  - id: 2
+    description: "Harden stale attribute-mapping gate — draft-promoter must skip mappings where getCachedAttributeMappings returns stale (hash mismatch) and surface skippedFieldRefs in promotion gate; add test for stale vs fresh mapping serialization (controlled-value-identity.ts canonical IDs)"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/draft-promoter.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 3
+    description: "Preserve taxonomy freeze discipline end-to-end — verify RuntimeClassificationSnapshot (attributeMappings, attributeProfiles, pages, modelPolicy, reviewedFacts) round-trips via buildRuntimeSnapshot/persistRuntimeSnapshot and cohortFrozenEvidence path never re-reads live DB; add unit test for hash recomputation failure case"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/classification-snapshot.test.ts 2>&1 | tail -n 20"
+    status: todo

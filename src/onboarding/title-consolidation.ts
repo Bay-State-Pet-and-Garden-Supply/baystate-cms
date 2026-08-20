@@ -7,11 +7,12 @@
  * Exported as a standalone helper so it can be reused by the modular
  * name-consolidation classification stage without duplicating LLM prompts.
  */
-import { getLlmConfigForTask, callLlmForTaskWithProvenance } from './llm-client';
+import { getLlmConfigForTask, callLlmForTaskWithProvenance, verifyAndRestoreProtectedTokens } from './llm-client';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import { MODEL_CALL_STATUS } from '../classification/model-operation-registry';
 import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
 import { buildPerItemPrompt } from './title-prompt-template';
+import { formatDeterministicTitle } from './cohort-name-coordinator';
 export interface TitleSignals {
   /** Original name from the spreadsheet import (always available) */
   name: string;
@@ -155,8 +156,26 @@ export async function consolidateProductTitle(
     if (auditedTitle && auditedTitle.content.length > 2) {
       const cleanTitle = auditedTitle.content.trim();
       console.log(`[TitleConsolidation] LLM consolidated title: "${cleanTitle}"`);
+      // story: e04s01 — variant preservation guard: if rawRegisterName carried
+      // protected tokens (SM/LG/weight/count) that the LLM dropped, restore
+      // them deterministically instead of losing the variant.
+      const guardedTitle = signals.rawRegisterName
+        ? verifyAndRestoreProtectedTokens(cleanTitle, signals.rawRegisterName)
+        : cleanTitle;
+      // If the LLM still produced an empty/whitespace title after guard, fail
+      // closed to deterministic fallback so no invention occurs.
+      if (!guardedTitle || guardedTitle.trim().length === 0) {
+        const fallback = formatDeterministicTitle(signals.name, signals.brandHint ?? null);
+        console.warn(`[TitleConsolidation] LLM title empty after guard; fallback deterministic: "${fallback}"`);
+        return { title: fallback, source: 'llm', ...(auditedTitle.callId ? { modelCallIds: [auditedTitle.callId] } : {}) };
+      }
+      // If guard restored tokens, keep llm source but with restored title —
+      // the variant is preserved while provenance stays llm.
+      if (guardedTitle !== cleanTitle) {
+        console.log(`[TitleConsolidation] Restored variant tokens: "${guardedTitle}" (from raw "${signals.rawRegisterName}")`);
+      }
       return {
-        title: cleanTitle,
+        title: guardedTitle,
         source: 'llm',
         ...(auditedTitle.callId ? { modelCallIds: [auditedTitle.callId] } : {}),
       };

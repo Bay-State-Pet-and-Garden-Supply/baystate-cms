@@ -1,0 +1,17 @@
+story_id: e05s02
+title: "Taxonomy provenance per field — bundle/snapshot/verified-identity exposure, no invented IDs"
+status: planned
+bcps: 5
+tasks:
+  - id: 1
+    description: "Expose taxonomy provenance per proposal/field in review — classificationProposals must carry bundle version (store/classification/*.json via config-loader), snapshotHash, attributeProfileId, and verifiedPageId provenance; UI renders provenance badge/link without inventing taxonomy IDs (workspace-scoped, validated via controlled-value-identity.ts + ADR 0012)"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/taxonomy-provenance.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 2
+    description: "Enforce no invented IDs choke-point — validateProposalSafety and config validation must reject proposals where fieldAssignment value or category_page id is not an exact canonical ID from allowed set or verified Pages catalog; add test that near-match 'Dog'/'dog' duplicate and alias mis-map fail closed (ADR 0012 guard)"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/controlled-value-identity.test.ts src/tests/unit/config-validation.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 3
+    description: "Document taxonomy edit path — document SoT chain store/classification/*.json → RuntimeClassificationSnapshot → verified Pages/Fields catalog → promotion; clarify that non-technical UI is deferred and current safe path is JSON-file edit + bundle release via config-store; do not invent auto-generative taxonomy UI in this scope"
+    verify: "test -f specs/tech-architecture/CURATION_FIELD_MAP.md && grep -q 'store/classification' specs/tech-architecture/CURATION_FIELD_MAP.md && grep -q 'RuntimeClassificationSnapshot' specs/tech-architecture/CURATION_FIELD_MAP.md && echo 'taxonomy path documented'"
+    status: todo

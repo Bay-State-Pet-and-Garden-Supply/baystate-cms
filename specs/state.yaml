@@ -6,9 +6,9 @@ active_epic_id: null
 active_story_id: null
 active_bug_id: null
 release:
-  target_version: null
-  last_tag: v0.2.0
-  last_publish: "2026-08-20T03:44:00Z"
+  target_version: "0.3.0"
+  last_tag: v0.2.1
+  last_publish: "2026-08-20T08:12:00Z"
 epic_cycle:
   current_step: null
   next_skill: null
@@ -20,17 +20,19 @@ bug_cycle:
   completed_steps: []
 git:
   branch: main
-  hash: 41b14bc
+  hash: f3ee4f2
 handoff:
-  last_step_completed: "RELEASE v0.2.0 — Epic #47 tail (#58-#60) landed (e01/e02/e03, 6 stories, 39 BCP)"
+  last_step_completed: "PLAN v0.3.0 — e04/e05 curation stabilization sliced (e04 13 BCP, e05 13 BCP, 5 stories including e05s03 gold-set); SCOPE_LATEST.yaml rewritten for onboarding pipeline determinism"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
     - AGENTS.md
     - CONTEXT.md
-    - docs/plans/epic-47-handoff.md
     - specs/product/SCOPE_LATEST.yaml
-  next_skill: null
+    - context.md
+    - specs/epics/e04-curation-determinism/epic.yaml
+    - specs/epics/e05-review-observability/epic.yaml
+  next_skill: "build-epic"
 metrics:
   story_start: "2026-08-20T03:25:00Z"
   story_end: "2026-08-20T03:41:26Z"

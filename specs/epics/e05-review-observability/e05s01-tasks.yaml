@@ -1,0 +1,17 @@
+story_id: e05s01
+title: "Explainable review gates — applicability, category-page gating, species-guard messaging"
+status: planned
+bcps: 5
+tasks:
+  - id: 1
+    description: "Surface attribute_applicability metadata in review — ReviewClassificationPanel must render applicability[] (applicable/not_applicable/unknown per attribute) from curation_data_json instead of silent absence; unknown shows 'type not reviewed', not_applicable shows 'not in profile' (profile id from applied profile); add UI snapshot test"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/review-classification-panel.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 2
+    description: "Explain category_page_proposals gating — when no category_page proposal exists because primary_product_type is not reviewed, show 'Needs reviewed Product Type' with reviewed vs inferred type hint; when gate fails due to missing verified Pages, show 'No verified Catalog Pages for import' (verifiedPageIdSet provenance) instead of empty 'Nothing to propose'"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/category-page-proposals.test.ts src/tests/unit/review-panel-gating.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 3
+    description: "Explain species guard drops — Review must surface validatePageAssignmentsBySpecies filtered pages with reason 'species_incompatible' and term map, so a plausible cross-species drop is inspectable; do not change hard guard in curation, only surface filtered provenance in UI"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/species-guard.test.ts 2>&1 | tail -n 20"
+    status: todo

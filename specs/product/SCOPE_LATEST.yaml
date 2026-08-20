@@ -1,0 +1,58 @@
+# specs/product/SCOPE_LATEST.yaml — bounded PRD for Onboarding Curation Stabilization (post v0.2.1)
+# Parent context: v0.2.0/v0.2.1 shipped Agent Lab v2 tail (#58-#60); discover now targets bulk onboarding pipeline itself
+# Scout: context.md (2026-08-20) maps product-curator.ts 1061-line monolith → 7 replaceable stages per ADR 0004, pipeline Sourcing→Discovery→Extraction→Curation→Review→Promotion
+# User signal: review-stage drafts are poor/inconsistent; curation/classification architecture is confusing; unclear what fields/taxonomy are applied
+
+core_value: "Make onboarding curation produce consistent, explainable review drafts from a navigable, staged classification pipeline with explicit field/taxonomy provenance."
+
+summary: |
+  The Agent Lab v2 tail is closed (v0.2.0 + v0.2.1 blocker fixes, 39 BCP). The next production risk is the *existing* bulk onboarding pipeline itself: Curation (src/onboarding/product-curator.ts, 1061 lines + cohort branching) orchestrates 7 classification stages (src/classification/stages/* per ADR 0004) but remains a monolith that owns snapshot capture, run lifecycle, cohort coordination, title synthesis post-processing, and CurationData assembly. Review (ReviewWorkspace + ReviewClassificationPanel) surfaces curated drafts, but reviewers see silent emptiness instead of explainable abstentions.
+
+  Three pain signals traced by scout: (1) name_consolidation LLM drops variant tokens (LG/SM/color) unless rawRegisterName is threaded and can diverge across siblings before cohort coordination; (2) category_page_proposals is fail-closed on missing reviewed Primary Product Type and hard-filtered by speciesIncompatible map — review shows "Nothing to propose" with no provenance; (3) attribute_applicability → attribute_proposals produces zero proposals with silent succeeded for unknown/not_applicable — indistinguishable from "correctly configured vs missing profile." Promotion truth lives in draft-promoter.ts (product_pages, customFields via verified pageId/field mappings, effectiveProductType) while curation only previews inside curation_data_json. Taxonomy itself comes from store/classification/*.json bundles (product-types, attribute-profiles, curation-targets) frozen via RuntimeClassificationSnapshot, plus verified Pages/Fields from live ShopSite pulls — not hand-wavy LLM output — but the edit path is JSON-file-only with no non-technical UI.
+
+  This scope stabilizes curation before any new capability work: clarify the stage contract, make review drafts deterministic and inspectable per field, and make the taxonomy source/edit path explicit. Pi Agent Lab remains experimental and out-of-scope for default-on production.
+
+in_scope:
+  - "e04 — Curation pipeline determinism + stage navigability: audit product-curator.ts vs 7 stages, enforce ADR 0004 stage boundaries, eliminate silent Succeeded emptiness, preserve variant tokens in title synthesis, document stage inputs/outputs/requires/evidenceFrom per src/classification/types.ts and runtime-snapshot discipline; cohort coordination remains but is made legible (live vs frozen snapshot, effectiveProductType fallback PR5, synthesis ordering guard DECISION-C)"
+  - "e04 — Field provenance clarity: explicitly enumerate what curation SETS (curatedTitle/titleSource, packagingOcrTitle, curatedWeight, curatedDescription v2-only, suggestedPages, suggestedProductType, searchKeywords, classificationRunId/proposals/evidence/decisions) vs what promotion SETS (product_pages rows + ShopSite ProductOnPages XML from accepted category_page proposals, customFields from accepted field_assignment proposals via getCachedAttributeMappings, brand/ProductField1/ProductField16); cover stale-mapping and unverified-name-only skip paths"
+  - "e05 — Review observability for inconsistent drafts: surface applicability reasons (attribute_applicability metadata) instead of silent absence, explain category-page gating (needs reviewed Primary Product Type + verified Pages), explain species guard drops (validatePageAssignmentsBySpecies), and expose taxonomy provenance (bundle version, snapshotHash, verifiedPageIdSet, attributeProfileId) per field in ReviewClassificationPanel/ReviewWorkspace without raw-log noise"
+  - "e05 — Taxonomy source & edit-path clarity: document store/classification/*.json as SoT + RuntimeClassificationSnapshot freezing + verified Pages/Fields catalog; define non-technical safe edit path (file fallback vs future UI deferred; do not hand-wave); no invented taxonomy IDs, Canonical Controlled Values (ADR 0012) remain enforced"
+  - "Cross-cutting: gold-set evaluation for title/field/page consistency (reproduce recent batches, score LLM vs deterministic fallback, measure species-guard false drops, attribute empty-success rate); keep bun run typecheck && vitest && test:db green; reuse existing classification/*, onboarding/*, review/* without duplicating onboarding/review authority (#46), type-first cohort (#30), profile health (#45)"
+
+in_scope_ids:
+  - e04  # curation pipeline determinism + stage legibility + field provenance
+  - e05  # review observability + taxonomy clarity (e05s03 lives here)
+
+out_of_scope:
+  - "Pi Agent Lab productionization or default-on v2 rollout — experimental per user, stays behind flags (BAYSTATE_CMS_PRODUCT_INTELLIGENCE_ENABLED etc.); tail already closed"
+  - "New specialist capabilities beyond the six (Discovery/Profile Engineer/Extraction Runner/Resolver/Curator/Verifier) or new LangChain/orchestration framework — deferred per #47 tail SCOPE"
+  - "New LLM-first page extraction or autonomous agent chat — out; extraction stays deterministic profile/ladder (src/product-intelligence/tools extraction contract)"
+  - "ShopSite publication automation from review — out; promotion remains human-gated via draft-promoter + Git workspaces"
+  - "Full visual redesign of pipeline board or media library / multi-store switcher / OS keychain — deferred per existing SCOPE"
+  - "Changing the 7-stage pipeline contract (StageDefinition) shape itself in this scope — we clarify and enforce the existing contract, not redesign it"
+
+constraints:
+  - "Reuse, never duplicate: onboarding/review authority (#46), type-first cohort (#30), profile governance (#45), PI execution boundary (ADR 0010) where touched, PI-8 import pattern not needed, #28 evaluation pattern for gold-set"
+  - "ADR 0004 is SoT for replaceable stages; product-curator.ts stays orchestrator but must be navigable (<300-line guideline waived for orchestrator with justification, else split); cohort frozen-evidence/live discipline retained"
+  - "Taxonomy IDs workspace-scoped, never invented by model; Controlled Values via controlled-value-identity.ts + ADR 0012; snapshotHash mutation fails closed"
+  - "Security: no hardcoded credentials, BAYSTATE_CMS_API_TOKEN for mutating, redact ShopSite comms, ignore .env/*.db/tokens; every model call via ModelPolicyView/PolicyGateway if LLM path retained"
+  - "Runtime: Bun 1.3.5, TS 5.9, SQLite bun:sqlite, Hono 4, React 19/Vite 6; keep typecheck + vitest + test:db green; CI skips lint (2600+ debt noted, not gated)"
+  - "Process: scope-work → slice-tasks → plan-work → build-epic per story; worker subagents + gpt_chat PASS gate retained for high-risk epics; 50min worker timeout"
+
+success_criteria:
+  - "Review-stage drafts are consistent: cohort title coordination + deterministic fallback preserves variant tokens; per-batch gold set scores title/field/page consistency and species-guard false-drop rate, with LLM vs fallback comparison — closes e04 determinism"
+  - "Every review field is explainable without raw logs: pending/abstained/settled states show provenance (stage, evidenceFrom, titleSource, bundle version/snapshotHash, verifiedPageIdSet, applicability reason), and gating explanations replace silent 'Nothing to propose' — closes e05 observability"
+  - "Field/taxonomy provenance is explicit: documented mapping of what curation sets vs what promotion sets, and taxonomy SoT (store/classification/*.json → RuntimeClassificationSnapshot → verified Pages/Fields) with safe edit path; no invented IDs — closes e04/e05 clarity"
+  - "bun run typecheck && bunx vitest run && bun run test:db green on touched paths; changed review/classification code passes focused tests; dedicated curation/review contract tests guard silent-empty regression"
+  - "Architecture is navigable: product-curator.ts or its staged decomposition is documented stage-by-stage (requires/produces/mechanism) so a new contributor can trace any review draft field to its stage and snapshot"
+
+references:
+  - "CONTEXT.md — pipeline stages + domain terms (Product Type, Category Page, ProductSeed, Classification Proposal/Evidence/Run)"
+  - "src/onboarding/product-curator.ts (1061 lines, lines 95/150-900) — monolithic orchestrator, CurationData assembly, post-pipeline synthesis"
+  - "src/classification/{types.ts,pipeline-runner.ts,runtime-snapshot.ts,stages/*} — 7 stages + StageDefinition contract, snapshot discipline, cohort extensions (#30)"
+  - "src/client/components/onboarding/review/{ReviewWorkspace.tsx,ReviewClassificationPanel.tsx,ReviewDrawerShell.tsx} — review surfacing, current silent-empty UX"
+  - "src/onboarding/draft-promoter.ts — authoritative promotion (product_pages, customFields, ShopSite XML)"
+  - "store/classification/*.json + src/classification/config-loader.ts + src/classification/releases/bay-state-v3+v4 — taxonomy bundles + frozen manifests"
+  - "docs/adr/0004-compose-classification-from-replaceable-stages.md + 0012 + tech-stack.md (Gray areas & debt) — stage composition SoT"
+  - "context.md (scout 2026-08-20) — full curation map, debt signals, 7 open questions (title metric, gating, applicability visibility, species guard, cohort scope, taxonomy edit path, description synthesis)"
+  - "specs/tech-architecture/tech-stack.md + AGENTS.md § Onboarding Pipeline & Curation Architecture — entry points"

@@ -31,7 +31,8 @@ export type SafetyFindingCode =
   | 'bulk_accept_composition'
   | 'controlled_membership'
   | 'measured_unit'
-  | 'delimiter_policy';
+  | 'delimiter_policy'
+  | 'page_unverified';
 
 export interface ProposalSafetyFinding {
   proposalId: string;
@@ -49,6 +50,8 @@ export interface ProposalSafetyContext {
   attributes: ProductAttributeConfig[];
   /** Every evidence record accumulated by the run, keyed lookup by id. */
   evidence: ClassificationEvidence[];
+  /** Verified page IDs from the frozen snapshot — when present, category_page proposals must be verified (e05s02, ADR 0012 no invented IDs). */
+  verifiedPageIds?: Set<string> | null;
 }
 
 /**
@@ -132,6 +135,23 @@ export function validateProposalSafety(
   const findings: ProposalSafetyFinding[] = [];
 
   for (const proposal of proposals) {
+    // story: e05s02 — no invented IDs for category_page (verified catalog)
+    if (proposal.proposalType === 'category_page') {
+      if (context.verifiedPageIds && context.verifiedPageIds.size > 0) {
+        const pv = proposal.proposedValue as Record<string, unknown> | null | undefined;
+        const pageId = pv && typeof pv === 'object' && typeof (pv as Record<string, unknown>).pageId === 'string'
+          ? String((pv as Record<string, unknown>).pageId)
+          : (typeof proposal.targetId === 'string' && proposal.targetId ? proposal.targetId : null);
+        if (pageId && !context.verifiedPageIds.has(pageId)) {
+          findings.push({
+            proposalId: proposal.id,
+            code: 'page_unverified',
+            message: `Category page "${pageId}" is not in the verified page catalog — invented page IDs are never promoted (ADR 0012).`,
+          });
+        }
+      }
+      continue;
+    }
     if (proposal.proposalType !== 'field_assignment') continue;
 
     const attribute = context.attributes.find(candidate => candidate.id === proposal.targetId);

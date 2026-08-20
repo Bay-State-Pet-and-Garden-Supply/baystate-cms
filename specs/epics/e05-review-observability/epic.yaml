@@ -1,0 +1,24 @@
+id: e05
+title: "Review observability + taxonomy clarity & gold-set consistency (#review-clarity)"
+wsjf: 13
+total_bcps: 13
+status: done
+stories:
+  - id: e05s01
+    title: "Explainable review gates — applicability, category-page gating, species-guard messaging"
+    bcps: 5
+    status: done
+    spec: e05s01-explainable-gates.md
+    tasks: e05s01-tasks.yaml
+  - id: e05s02
+    title: "Taxonomy provenance per field — bundle/snapshot/verified-identity exposure, no invented IDs"
+    bcps: 5
+    status: done
+    spec: e05s02-taxonomy-provenance.md
+    tasks: e05s02-tasks.yaml
+  - id: e05s03
+    title: "Gold-set consistency evaluation — title/field/page determinism, LLM vs fallback, species-guard metrics"
+    bcps: 3
+    status: done
+    spec: e05s03-goldset-eval.md
+    tasks: e05s03-tasks.yaml

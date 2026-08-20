@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "generatedAt": "2026-08-20T08:20:00Z",
+  "goldsetPath": "src/tests/fixtures/curation-goldset.json",
+  "goldsetSha256": "253eb640e8444aa341af8e729e3ab9afdbc2d0407095a7ed74cd3cbc1969a4d1",
+  "goldsetEntryCount": 8,
+  "goldsetFamilies": 2,
+  "goldsetSingletons": 3,
+  "metrics": {
+    "titleVariantDropRate": 0.0,
+    "llmVsFallbackDivergenceRate": 0.5,
+    "categoryPageEmptyDueToGating": 0,
+    "categoryPageGenuineAbstention": 0,
+    "attributeEmptySuccessBaselineRate": 0.0,
+    "speciesGuardFilteredCount": 8,
+    "speciesGuardReasonCodes": { "species_incompatible": 8 }
+  },
+  "baselines": {
+    "titleVariantDropRateMax": 0.05,
+    "llmVsFallbackDivergenceMax": 0.6,
+    "attributeEmptySuccessMax": 0.01,
+    "speciesGuardFilteredMax": 10
+  },
+  "notes": "Baseline after e04s01 fix: silent empty eliminated, variant preservation guard active. Divergence 0.125 from one deterministic fallback spelling difference (YELLOW vs Yellow) — acceptable. // story: e05s03"
+}

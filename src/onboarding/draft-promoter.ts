@@ -810,6 +810,8 @@ export async function promoteItems(
       // import. Visible and non-blocking: they are never serialized into
       // ProductOnPages, but they do not block the rest of the draft.
       const skippedPageRefs: Array<{ proposalId: string; pageName: string }> = [];
+      // story: e04s02 — stale/missing field mappings are visible and non-blocking: field is dropped, history records skippedFields
+      const skippedFieldRefs: Array<{ proposalId: string; attributeId: string; reason: 'stale_mapping' | 'missing_mapping' | 'empty_catalog_field' }> = [];
       let acceptedProductType: string | null = null;
 
       // ── PR11 Promotion gate (semantic / parent-currentness / stale) ────
@@ -848,7 +850,13 @@ export async function promoteItems(
           const targetId = getEffectiveProposalTargetId(proposal);
           if (proposal.proposalType === 'field_assignment' && targetId) {
             const mapping = mappings.find(m => m.attributeId === targetId);
-            if (mapping && !mapping.isStale && mapping.catalogField) {
+            if (!mapping) {
+              skippedFieldRefs.push({ proposalId: proposal.id, attributeId: targetId, reason: 'missing_mapping' });
+            } else if (mapping.isStale) {
+              skippedFieldRefs.push({ proposalId: proposal.id, attributeId: targetId, reason: 'stale_mapping' });
+            } else if (!mapping.catalogField) {
+              skippedFieldRefs.push({ proposalId: proposal.id, attributeId: targetId, reason: 'empty_catalog_field' });
+            } else {
               const value = getEffectiveProposalValue(proposal);
               const str = serializeAttributeValue(value, mapping.serialization);
               if (str || (proposal.hasRevisedValue && value === null)) {
@@ -1076,7 +1084,8 @@ export async function promoteItems(
           appliedFields: Object.keys(classificationCustomFields),
           appliedPages: classificationPageNames,
           skippedPages: skippedPageRefs.map(s => s.pageName),
-        });
+          skippedFields: skippedFieldRefs.map(s => `${s.attributeId}:${s.reason}`),
+        } as Record<string, unknown>);
       } catch {
         // Non-blocking
       }

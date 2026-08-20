@@ -437,9 +437,17 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
   // pass claim/composition evidence, controlled membership, measured-unit,
   // cardinality, and delimiter policy validation before the run can succeed.
   // Confidence never bypasses this review gate.
+  // story: e05s02 — pass verified page ids so category_page invented IDs fail closed (ADR 0012)
+  const verifiedPageIdsForSafety = (() => {
+    const pages = context.snapshot?.pages;
+    if (!pages || pages.state !== 'verified') return null;
+    const ids = pages.records.filter(r => r.verified).map(r => r.pageId);
+    return ids.length > 0 ? new Set(ids) : null;
+  })();
   const safety = validateProposalSafety(allProposals, {
     attributes: context.snapshot?.attributes ?? [],
     evidence: allEvidence,
+    verifiedPageIds: verifiedPageIdsForSafety,
   });
   if (!safety.ok) {
     const finding = safety.findings[0];

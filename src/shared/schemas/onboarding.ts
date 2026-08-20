@@ -679,6 +679,50 @@ export const CurationDataSchema = z.object({
    * + proposals stay intact for the Review UX (blocked-not-destroyed).
    */
   semanticValidation: CohortSemanticValidationSchema.nullable().optional(),
+  // e05s01: review observability — additive, absent in legacy runs (byte-identical)
+  attributeApplicability: z
+    .array(
+      z.object({
+        attributeId: z.string(),
+        state: z.enum(['applicable', 'not_applicable', 'unknown']),
+        reason: z.string().optional(),
+      }),
+    )
+    .optional(),
+  categoryPageGating: z
+    .object({
+      needsReviewedType: z.boolean(),
+      needsVerifiedPages: z.boolean(),
+      verifiedPageCount: z.number().int(),
+      reason: z.string().nullable().optional(),
+      // e05s02 provenance
+      verifiedPageIdSet: z.array(z.string()).optional(),
+      snapshotHash: z.string().nullable().optional(),
+    })
+    .optional(),
+  speciesGuardDropped: z
+    .array(
+      z.object({
+        pageName: z.string(),
+        species: z.string(),
+        reason: z.string(),
+        matchedTerm: z.string().optional(),
+      }),
+    )
+    .optional(),
+  // story: e05s02 — taxonomy provenance per field (bundle/snapshot/verified identity), no invented IDs
+  taxonomyProvenance: z
+    .object({
+      bundleHash: z.string().nullable().optional(),
+      bundleVersion: z.string().nullable().optional(),
+      snapshotHash: z.string().nullable().optional(),
+      manifestFileVersions: z.record(z.string(), z.string()).optional(),
+      verifiedPageCount: z.number().int().optional(),
+      verifiedPageIdSet: z.array(z.string()).optional(),
+      attributeProfileId: z.string().nullable().optional(),
+      classificationRunId: z.string().nullable().optional(),
+    })
+    .optional(),
 });
 
 export type CurationData = z.infer<typeof CurationDataSchema>;

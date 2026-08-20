@@ -23,6 +23,11 @@
  *
  * No live-DB mutation is performed by C1: `audit` and `backup` are
  * read-only/file-copy operations. `repair` is the C2 maintenance gate.
+ *
+ * e05s03 gate: curation gold-set determinism is checked by the companion
+ * script `scripts/curation-goldset-eval.ts`. Run that script alongside
+ * this integrity audit in CI. Both gates must be OK for the v0.3.0
+ * curation stabilization release. // story: e05s03
  */
 import fs from 'fs';
 import { Database } from '../src/db/driver';
@@ -125,6 +130,18 @@ function printReport(report: unknown): void {
 }
 
 function modeAudit(args: Record<string, string | boolean>): void {
+  // e05s03 — curation gold-set eval is the companion determinism gate. When fixtures exist, the
+  // integrity audit gates the gold-set evaluation deterministically and propagates failure (not advisory).
+  if (fs.existsSync('src/tests/fixtures/curation-goldset.json') && fs.existsSync('specs/metrics/curation-eval.json')) {
+    try {
+      const proc = Bun.spawnSync(['bun', 'run', 'scripts/curation-goldset-eval.ts'], { stdout: 'inherit', stderr: 'inherit' });
+      if (proc.exitCode !== 0) {
+        fail(`curation gold-set gate failed (exit ${proc.exitCode}) — see scripts/curation-goldset-eval.ts output above.`);
+      }
+    } catch (e) {
+      fail(`curation gold-set gate execution failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   const db = openDb(String(args.db ?? ''), /* readonly */ true);
   try {
     const audit = auditClassificationIntegrity(db);

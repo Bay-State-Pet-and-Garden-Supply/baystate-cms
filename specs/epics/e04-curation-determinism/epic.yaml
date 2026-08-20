@@ -1,0 +1,18 @@
+id: e04
+title: "Curation pipeline determinism + stage navigability & field provenance (#curation-stabilization)"
+wsjf: 13
+total_bcps: 13
+status: done
+stories:
+  - id: e04s01
+    title: "Stage-navigable curator — eliminate silent emptiness, preserve variant tokens, enforce ADR 0004 boundaries"
+    bcps: 8
+    status: done
+    spec: e04s01-stage-navigability.md
+    tasks: e04s01-tasks.yaml
+  - id: e04s02
+    title: "Curation vs promotion field provenance — explicit mapping, stale-mapping guards, snapshot freeze discipline"
+    bcps: 5
+    status: done
+    spec: e04s02-field-provenance.md
+    tasks: e04s02-tasks.yaml

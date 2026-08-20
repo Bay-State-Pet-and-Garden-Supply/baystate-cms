@@ -1,0 +1,17 @@
+story_id: e05s03
+title: "Gold-set consistency evaluation — title/field/page determinism, LLM vs fallback, species-guard metrics"
+status: planned
+bcps: 3
+tasks:
+  - id: 1
+    description: "Create frozen gold set from recent batches (5+ multi-SKU families + singletons) covering curatedTitle variant preservation, field_assignment applicability, and category_page proposals; score current curation vs deterministic fallback (formatDeterministicTitle) and record LLM vs fallback divergence metric"
+    verify: "test -f src/tests/fixtures/curation-goldset.json && bun run typecheck && bunx vitest run src/tests/unit/curation-goldset.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 2
+    description: "Measure species-guard false-drop and empty-success rates — compute per-stage metrics: category_page empty due to gating vs genuine abstention, attribute applicability unknown/not_applicable silent-empty rate before fix (baseline), and validatePageAssignmentsBySpecies filtered count with reason codes; store in specs/metrics/curation-eval.json with hash of gold set"
+    verify: "test -f specs/metrics/curation-eval.json && bun run typecheck && bunx vitest run src/tests/unit/species-guard.test.ts src/tests/unit/curation-eval.test.ts 2>&1 | tail -n 20"
+    status: todo
+  - id: 3
+    description: "Wire gold-set evaluation into classification integrity gate — extend scripts/classification-integrity.ts or add scripts/curation-goldset-eval.ts to run gold set deterministically (no model call by default, uses stored LLM outputs), fail CI if title variant drop rate or empty-success rate regresses vs baseline in curation-eval.json"
+    verify: "bun run typecheck && bun run lint --max-warnings 0 2>&1 | tail -n 20; bunx vitest run src/tests/unit/classification-integrity.test.ts 2>&1 | tail -n 20"
+    status: todo
