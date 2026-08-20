@@ -1,7 +1,7 @@
 import path from 'path';
 import { findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext, ClassificationConfigLoadError, ClassificationConfigNotConfiguredError } from '../../classification/config-loader';
-import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
+import { syncConfigToCache, getPersistedConfigSnapshotId, upsertConfigSnapshot } from '../../db/repositories/classification-config-repo';
 import { migrateLegacyWorkspaceIfNeeded, getStoreCatalogPath } from './migration-service';
 import { syncRegistryFromProductIndex } from './field-metadata-service';
 import type { Workspace } from '../../shared/types';
@@ -18,8 +18,9 @@ function attachClassificationConfig(ws: Workspace, workspacePath: string): void 
     const activationContext = createRuntimeActivationContext(workspacePath, ws.id);
     const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
     if (authority.kind === 'v2') {
-      // The derived cache was written transactionally at activation; never
-      // re-sync the v2 bundle through the v1-shaped cache mirror.
+      if (!getPersistedConfigSnapshotId(ws.id, authority.bundle.manifest.bundleHash)) {
+        upsertConfigSnapshot(ws.id, authority.bundle, authority.bundle.manifest.sourceCatalogCommit);
+      }
       ws.classificationConfig = authority.bundle as unknown as Workspace['classificationConfig'];
       ws.classificationConfigError = null;
       return;

@@ -428,7 +428,8 @@ export function upsertConfigSnapshot(
 ): { id: string; hash: string } {
   const db = getDb();
   const hash = bundle.manifest.bundleHash;
-  const snapshotId = randomUUID();
+  const existingId = getPersistedConfigSnapshotId(workspaceId, hash);
+  const snapshotId = existingId ?? randomUUID();
   const focusedFiles = buildFocusedFiles(bundle);
 
   db.transaction(() => {

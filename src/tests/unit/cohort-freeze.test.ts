@@ -31,7 +31,7 @@ import {
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { createRun, getRun } from '../../db/repositories/classification-run-repo';
-import { upsertConfigSnapshot, syncConfigToCache, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
+import { upsertConfigSnapshot, syncConfigToCache, createConfigSnapshot, getPersistedConfigSnapshotId } from '../../db/repositories/classification-config-repo';
 import { upsertApiKey, deleteApiKey } from '../../db/repositories/api-key-repo';
 import { saveClassificationConfig, loadClassificationConfig, loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
 import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
@@ -996,7 +996,7 @@ describe('two-phase freeze service (PR3 M2)', () => {
     }).toThrow();
   });
 
-  it('fail-closed: active v2 without a persisted config snapshot row -> capture (and thus freeze) fails; freeze succeeds once the row is persisted', async () => {
+  it('active v2 without an existing persisted config snapshot row -> capture automatically persists snapshot row; freeze succeeds with H5', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const { bundle } = writeActiveV2Bundle(wsPath);
 
@@ -1004,15 +1004,15 @@ describe('two-phase freeze service (PR3 M2)', () => {
     const authority = loadRuntimeConfigAuthority(wsPath, activationContext);
     expect(authority.kind).toBe('v2');
 
-    // No persisted classification_config_snapshots row for the bundle hash yet.
-    expect(() => captureCohortAuthorities(wsPath, workspaceId)).toThrow(/no persisted classification_config_snapshot row/);
+    // No persisted classification_config_snapshots row for the bundle hash yet before capture.
+    expect(getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash)).toBeNull();
 
-    // Persisting the snapshot row makes the same capture succeed with H5.
-    upsertConfigSnapshot(workspaceId, bundle);
+    // Capture automatically persists the snapshot row and succeeds with H5.
     const captured = captureCohortAuthorities(wsPath, workspaceId);
     expect(captured.configSnapshotRef.hash).toBe(bundle.manifest.bundleHash);
     expect(captured.configSnapshotRef.id).not.toBeNull();
     expect(captured.modelExecutionDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash)).toBe(captured.configSnapshotRef.id);
 
     // Full v2 freeze: ready cohort + persisted config snapshot → running with H5.
     createReadyCohort(workspaceId, { '100000000001': settledExtraction() });

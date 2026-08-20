@@ -26,7 +26,7 @@ import { coordinateCohortItemsOnce, formatDeterministicTitle } from './cohort-na
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import { getDb } from '../db/connection';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../classification/config-loader';
-import { createConfigSnapshot, syncConfigToCache, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
+import { createConfigSnapshot, syncConfigToCache, getPersistedConfigSnapshotId, upsertConfigSnapshot } from '../db/repositories/classification-config-repo';
 import { buildRuntimeSnapshot, persistRuntimeSnapshot, getRuntimeSnapshotByHash, deepFreeze } from '../classification/runtime-snapshot';
 import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
 import { ensureMemberRun } from '../db/repositories/classification-cohort-run-repo';
@@ -245,9 +245,13 @@ export async function curateItemWithPipeline(
     let catalogEvidenceHash: string | null;
     if (authority.kind === 'v2') {
       const bundle = authority.bundle;
-      const persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+      let persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+      if (!persistedId) {
+        const snap = upsertConfigSnapshot(workspaceId, bundle, bundle.manifest.sourceCatalogCommit);
+        persistedId = snap.id;
+      }
       configSnapshotRef = {
-        id: persistedId ?? bundle.manifest.bundleHash,
+        id: persistedId,
         hash: bundle.manifest.bundleHash,
         sourceCommit: bundle.manifest.sourceCatalogCommit,
         createdAt: new Date().toISOString(),
