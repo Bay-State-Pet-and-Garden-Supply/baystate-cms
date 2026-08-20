@@ -19,7 +19,7 @@ bug_cycle:
   completed_steps: []
 git:
   branch: feat/e03s02-rollout
-  hash: 24b5ea9
+  hash: 21f0010
 handoff:
   last_step_completed: "e03s02 kickoff-branch — feature branch created, baseline verified"
   open_decisions: []
