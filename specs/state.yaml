@@ -10,18 +10,18 @@ release:
   last_tag: v0.1.0
   last_publish: null
 epic_cycle:
-  current_step: 2
-  next_skill: kickoff-branch
-  completed_steps: [1, 2]
+  current_step: 3
+  next_skill: develop-tdd
+  completed_steps: [1, 2, 3]
   story_bcps: 8
 bug_cycle:
   current_step: null
   completed_steps: []
 git:
-  branch: main
-  hash: ffd03c4
+  branch: feat/e02-agent-lab-workspace
+  hash: dbeeb1f
 handoff:
-  last_step_completed: "e02s01 plan-work — specialist stage workspace survey + threat model + task verification"
+  last_step_completed: "e02s01 kickoff-branch — feature branch created, baseline verified"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
@@ -29,7 +29,7 @@ handoff:
     - CONTEXT.md
     - docs/plans/epic-47-handoff.md
     - specs/product/SCOPE_LATEST.yaml
-  next_skill: kickoff-branch
+  next_skill: develop-tdd
 metrics:
   story_start: "2026-08-20T02:03:59Z"
   story_end: null
