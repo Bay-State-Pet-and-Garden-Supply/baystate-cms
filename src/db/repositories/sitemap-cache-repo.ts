@@ -178,4 +178,11 @@ export function listAllSitemapCaches(): SitemapCacheRow[] {
   });
 }
 
+export function deleteSitemapCacheByDomain(domain: string): boolean {
+  const db = getDb();
+  const normDomain = normalizeDomain(domain);
+  const result = db.query('DELETE FROM sitemap_cache WHERE domain = ?').run(normDomain);
+  return result.changes > 0;
+}
+
 

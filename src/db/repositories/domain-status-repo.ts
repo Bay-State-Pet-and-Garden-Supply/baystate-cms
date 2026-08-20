@@ -122,3 +122,10 @@ export function listAllDomainStatuses(): DomainStatus[] {
     reason: row.reason,
   }));
 }
+
+export function deleteDomainStatus(domain: string): boolean {
+  const db = getDb();
+  const normDomain = normalizeDomain(domain);
+  const result = db.query('DELETE FROM domain_status WHERE domain = ?').run(normDomain);
+  return result.changes > 0;
+}

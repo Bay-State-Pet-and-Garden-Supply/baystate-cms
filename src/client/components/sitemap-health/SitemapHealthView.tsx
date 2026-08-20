@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { getSitemapsOverview, refreshSitemapDomain } from '../../onboarding-api';
+import {
+  getSitemapsOverview,
+  refreshSitemapDomain,
+  addSitemapDomain,
+  deleteSitemapDomain,
+} from '../../onboarding-api';
 import type {
   SitemapsOverviewResponse,
   DomainSitemapSummary,
@@ -19,6 +24,8 @@ export function SitemapHealthView() {
   // Selected domain for drawer
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
   const [refreshingDomains, setRefreshingDomains] = useState<Set<string>>(new Set());
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [deletingDomain, setDeletingDomain] = useState<string | null>(null);
 
   const loadData = async () => {
     try {
@@ -55,6 +62,25 @@ export function SitemapHealthView() {
         next.delete(domain);
         return next;
       });
+    }
+  };
+
+  const handleDeleteDomain = async (domain: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const confirmed = window.confirm(
+      `Are you sure you want to remove site "${domain}" and all its indexed URLs from Sitemaps?\n\nThis will remove its sitemap cache, telemetry, and indexed URLs.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      setDeletingDomain(domain);
+      await deleteSitemapDomain(domain);
+      if (selectedDomain === domain) setSelectedDomain(null);
+      await loadData();
+    } catch (err) {
+      alert(`Failed to remove site ${domain}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setDeletingDomain(null);
     }
   };
 
@@ -179,6 +205,25 @@ export function SitemapHealthView() {
           />
           Needs Attention only
         </label>
+
+        <button
+          onClick={() => setShowAddModal(true)}
+          style={{
+            padding: '8px 14px',
+            fontSize: '0.85rem',
+            background: '#16a34a',
+            color: '#ffffff',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+          }}
+        >
+          <span>+</span> Add Site
+        </button>
 
         <button
           onClick={loadData}
@@ -390,6 +435,23 @@ export function SitemapHealthView() {
                         >
                           Inspect →
                         </button>
+                        <button
+                          onClick={(e) => handleDeleteDomain(dom.domain, e)}
+                          disabled={deletingDomain === dom.domain}
+                          title="Remove site and all indexed URLs"
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: '0.75rem',
+                            borderRadius: '4px',
+                            background: '#fef2f2',
+                            color: '#dc2626',
+                            border: '1px solid #fecaca',
+                            cursor: deletingDomain === dom.domain ? 'not-allowed' : 'pointer',
+                            opacity: deletingDomain === dom.domain ? 0.6 : 1,
+                          }}
+                        >
+                          {deletingDomain === dom.domain ? '...' : '🗑️ Remove'}
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -400,6 +462,18 @@ export function SitemapHealthView() {
         )}
       </div>
 
+      {/* Add Site Modal */}
+      {showAddModal && (
+        <AddSiteModal
+          onClose={() => setShowAddModal(false)}
+          onSuccess={(newDomain) => {
+            setShowAddModal(false);
+            loadData();
+            setSelectedDomain(newDomain);
+          }}
+        />
+      )}
+
       {/* Slide-over Domain Drawer */}
       {selectedDomain && (
         <SitemapDomainDrawer
@@ -408,6 +482,206 @@ export function SitemapHealthView() {
           onRefreshComplete={loadData}
         />
       )}
+    </div>
+  );
+}
+
+interface AddSiteModalProps {
+  onClose: () => void;
+  onSuccess: (domain: string) => void;
+}
+
+function AddSiteModal({ onClose, onSuccess }: AddSiteModalProps) {
+  const [domain, setDomain] = useState('');
+  const [brandName, setBrandName] = useState('');
+  const [productUrlPattern, setProductUrlPattern] = useState('');
+  const [fetchNow, setFetchNow] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!domain.trim()) {
+      setError('Domain is required');
+      return;
+    }
+    try {
+      setSaving(true);
+      setError(null);
+      const res = await addSitemapDomain({
+        domain: domain.trim(),
+        brandName: brandName.trim() || undefined,
+        productUrlPattern: productUrlPattern.trim() || undefined,
+        fetchNow,
+      });
+      onSuccess(res.domain);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'rgba(0, 0, 0, 0.4)',
+        zIndex: 1100,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: '#ffffff',
+          borderRadius: '10px',
+          padding: '24px',
+          width: '480px',
+          maxWidth: '90vw',
+          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 600, color: '#0f172a' }}>Add Brand Site / Sitemap</h3>
+          <button
+            onClick={onClose}
+            style={{ border: 'none', background: 'transparent', fontSize: '1.2rem', cursor: 'pointer', color: '#94a3b8' }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {error && (
+          <div style={{ padding: '10px 14px', borderRadius: '6px', background: '#fef2f2', color: '#991b1b', border: '1px solid #fecaca', fontSize: '0.85rem', marginBottom: '16px' }}>
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: '14px' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
+              Site Domain / URL <span style={{ color: '#dc2626' }}>*</span>
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. frommfamily.com or https://frommfamily.com/sitemap.xml"
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              required
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.85rem',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '3px' }}>
+              Accepts bare domain or sitemap XML URL. Standard sitemap paths will be discovered automatically.
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '14px' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
+              Brand Name (Optional)
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. Fromm Family Foods"
+              value={brandName}
+              onChange={(e) => setBrandName(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.85rem',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '3px' }}>
+              Maps this brand to the domain for onboarding discovery & catalog matches.
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
+              Product URL Pattern Filter (Optional)
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. /products/ or /shop/"
+              value={productUrlPattern}
+              onChange={(e) => setProductUrlPattern(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.85rem',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: '#334155', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={fetchNow}
+                onChange={(e) => setFetchNow(e.target.checked)}
+              />
+              <span>Fetch and index sitemap immediately</span>
+            </label>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              style={{
+                padding: '8px 16px',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                background: '#ffffff',
+                color: '#475569',
+                cursor: 'pointer',
+                fontSize: '0.85rem',
+                fontWeight: 500,
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              style={{
+                padding: '8px 16px',
+                borderRadius: '6px',
+                border: 'none',
+                background: '#16a34a',
+                color: '#ffffff',
+                cursor: saving ? 'not-allowed' : 'pointer',
+                fontSize: '0.85rem',
+                fontWeight: 600,
+                opacity: saving ? 0.7 : 1,
+              }}
+            >
+              {saving ? 'Adding & Fetching...' : '+ Add Site'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

@@ -6,6 +6,7 @@ import {
   testSitemapLookup,
   deleteSitemapUrl,
   deleteSitemapUrls,
+  deleteSitemapDomain,
 } from '../../onboarding-api';
 import type {
   SitemapDomainDetailResponse,
@@ -40,6 +41,7 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
   const [selectedUrlIds, setSelectedUrlIds] = useState<Set<string>>(new Set());
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [deletingSite, setDeletingSite] = useState(false);
 
   // Sandbox tab state
   const [testUpc, setTestUpc] = useState('');
@@ -148,6 +150,24 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
       alert(`Failed to delete selected URLs: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBatchDeleting(false);
+    }
+  };
+
+  const handleDeleteSite = async () => {
+    const confirmed = window.confirm(
+      `Are you sure you want to remove site "${domain}" and all its indexed URLs from Sitemaps?\n\nThis will remove its sitemap cache, telemetry, and indexed URLs.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      setDeletingSite(true);
+      await deleteSitemapDomain(domain);
+      onClose();
+      onRefreshComplete?.();
+    } catch (err) {
+      alert(`Failed to remove site ${domain}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setDeletingSite(false);
     }
   };
 
@@ -306,7 +326,7 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button
             onClick={handleRefresh}
-            disabled={refreshing}
+            disabled={refreshing || deletingSite}
             style={{
               padding: '6px 14px',
               fontSize: '0.85rem',
@@ -315,11 +335,29 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
               color: '#ffffff',
               border: 'none',
               borderRadius: '6px',
-              cursor: refreshing ? 'not-allowed' : 'pointer',
-              opacity: refreshing ? 0.7 : 1,
+              cursor: refreshing || deletingSite ? 'not-allowed' : 'pointer',
+              opacity: refreshing || deletingSite ? 0.7 : 1,
             }}
           >
             {refreshing ? 'Refreshing...' : '↻ Refresh Sitemap'}
+          </button>
+          <button
+            onClick={handleDeleteSite}
+            disabled={deletingSite || refreshing}
+            title="Remove site and all indexed URLs"
+            style={{
+              padding: '6px 14px',
+              fontSize: '0.85rem',
+              fontWeight: 500,
+              background: '#fef2f2',
+              color: '#dc2626',
+              border: '1px solid #fecaca',
+              borderRadius: '6px',
+              cursor: deletingSite || refreshing ? 'not-allowed' : 'pointer',
+              opacity: deletingSite || refreshing ? 0.7 : 1,
+            }}
+          >
+            {deletingSite ? 'Removing...' : '🗑️ Remove Site'}
           </button>
           <button
             onClick={onClose}

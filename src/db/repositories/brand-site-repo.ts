@@ -140,6 +140,13 @@ export function deleteBrandSite(id: string): boolean {
   return result.changes > 0;
 }
 
+export function deleteBrandSitesByDomain(domain: string): number {
+  const db = getDb();
+  const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
+  const result = db.query('DELETE FROM brand_sites WHERE domain = ?').run(normalizedDomain);
+  return result.changes;
+}
+
 export function updateBrandSiteDomain(brandName: string, domain: string): BrandSite {
   const db = getDb();
   const now = new Date().toISOString();

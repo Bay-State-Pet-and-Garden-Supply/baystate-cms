@@ -275,3 +275,10 @@ export function getAllDomainDiscoveryEconomics(
   }
   return result;
 }
+
+export function deleteTelemetryByDomain(domain: string): void {
+  const db = getDb();
+  const norm = normalizeDomain(domain);
+  db.query('DELETE FROM sitemap_refresh_history WHERE domain = ?').run(norm);
+  db.query('DELETE FROM sitemap_discovery_events WHERE domain = ?').run(norm);
+}

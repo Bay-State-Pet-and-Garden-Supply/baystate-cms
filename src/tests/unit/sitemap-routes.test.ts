@@ -196,5 +196,66 @@ describe('Sitemap API Routes (/api/onboarding/sitemaps)', () => {
     expect(afterBody.urls).toHaveLength(1);
     expect(afterBody.urls[0].id).toBe(ids[2]);
   });
+
+  it('POST /api/onboarding/sitemaps should add a new site with brand mapping', async () => {
+    const res = await app.request('/api/onboarding/sitemaps', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        domain: 'https://frommfamily.com/products/',
+        brandName: 'Fromm Family Foods',
+        productUrlPattern: '/products/',
+        fetchNow: false,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.domain).toBe('frommfamily.com');
+
+    // Verify it shows up in domain overview
+    const overviewRes = await app.request('/api/onboarding/sitemaps?search=fromm');
+    const overviewBody = await overviewRes.json();
+    expect(overviewBody.domains).toHaveLength(1);
+    expect(overviewBody.domains[0].domain).toBe('frommfamily.com');
+    expect(overviewBody.domains[0].brandAssociations[0].brandName).toBe('fromm family foods');
+  });
+
+  it('DELETE /api/onboarding/sitemaps/:domain should completely delete a domain and its indexed URLs', async () => {
+    upsertBrandSite('Sample Brand', 'samplebrand.com');
+    reconcileSitemapUrls(
+      'samplebrand.com',
+      [
+        { url: 'https://samplebrand.com/products/item-a' },
+        { url: 'https://samplebrand.com/products/item-b' },
+      ],
+      'https://samplebrand.com/sitemap.xml',
+    );
+
+    const checkBefore = await app.request('/api/onboarding/sitemaps/samplebrand.com/urls');
+    expect(checkBefore.status).toBe(200);
+    const checkBeforeBody = await checkBefore.json();
+    expect(checkBeforeBody.urls).toHaveLength(2);
+
+    const delRes = await app.request('/api/onboarding/sitemaps/samplebrand.com', {
+      method: 'DELETE',
+    });
+    expect(delRes.status).toBe(200);
+    const delBody = await delRes.json();
+    expect(delBody.ok).toBe(true);
+    expect(delBody.domain).toBe('samplebrand.com');
+    expect(delBody.deletedUrlsCount).toBe(2);
+
+    // Verify URLs are gone
+    const checkAfter = await app.request('/api/onboarding/sitemaps/samplebrand.com/urls');
+    const checkAfterBody = await checkAfter.json();
+    expect(checkAfterBody.urls).toHaveLength(0);
+
+    // Verify domain is gone from overview
+    const overviewRes = await app.request('/api/onboarding/sitemaps?search=samplebrand.com');
+    const overviewBody = await overviewRes.json();
+    expect(overviewBody.domains).toHaveLength(0);
+  });
 });
 

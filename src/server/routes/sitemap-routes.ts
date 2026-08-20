@@ -1,19 +1,22 @@
 import { Hono } from 'hono';
-import { listAllBrandSites } from '../../db/repositories/brand-site-repo';
-import { listAllProfiles, findProfileByDomain } from '../../db/repositories/extractor-profile-repo';
-import { listAllDomainStatuses } from '../../db/repositories/domain-status-repo';
+import { listAllBrandSites, upsertBrandSite, deleteBrandSitesByDomain } from '../../db/repositories/brand-site-repo';
+import { listAllProfiles, findProfileByDomain, upsertProfile, deleteProfileByDomain } from '../../db/repositories/extractor-profile-repo';
+import { listAllDomainStatuses, deleteDomainStatus } from '../../db/repositories/domain-status-repo';
+import { deleteSitemapCacheByDomain } from '../../db/repositories/sitemap-cache-repo';
 import {
   findUrlsByDomain,
   getAllDomainUrlCounts,
   normalizeDomain,
   deleteBrandUrlById,
   deleteBrandUrlsByIds,
+  deleteBrandUrlsByDomain,
 } from '../../db/repositories/brand-url-index-repo';
 import {
   getAllLatestRefreshRuns,
   listRefreshHistory,
   getAllDomainDiscoveryEconomics,
   getDiscoveryEconomics,
+  deleteTelemetryByDomain,
 } from '../../db/repositories/sitemap-telemetry-repo';
 import {
   evaluateDomainSitemapHealth,
@@ -332,5 +335,102 @@ sitemapRoutes.delete('/onboarding/sitemaps/:domain/urls', async (c) => {
   }
   const deletedCount = deleteBrandUrlsByIds(ids);
   return c.json({ ok: true, deletedCount, domain });
+});
+
+/**
+ * POST /api/onboarding/sitemaps
+ * Add a new site/domain to the sitemap index, with optional brand mapping and immediate crawl.
+ */
+sitemapRoutes.post('/onboarding/sitemaps', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    domain?: string;
+    brandName?: string;
+    productUrlPattern?: string;
+    fetchNow?: boolean;
+  };
+
+  if (!body.domain || typeof body.domain !== 'string' || !body.domain.trim()) {
+    return c.json({ error: 'domain is required' }, 400);
+  }
+
+  const rawDomain = body.domain.trim();
+  let domain = normalizeDomain(rawDomain);
+  if (domain.includes('://')) {
+    try {
+      domain = normalizeDomain(new URL(domain).hostname);
+    } catch {
+      // fallback
+    }
+  }
+  domain = domain.split('/')[0].split(':')[0];
+
+  if (!domain) {
+    return c.json({ error: 'Invalid domain format' }, 400);
+  }
+
+  // 1. If brandName provided, save brand mapping
+  if (body.brandName && typeof body.brandName === 'string' && body.brandName.trim()) {
+    upsertBrandSite(body.brandName.trim(), domain);
+  }
+
+  // 2. If productUrlPattern provided, save profile with pattern
+  if (body.productUrlPattern && typeof body.productUrlPattern === 'string') {
+    upsertProfile(domain, {
+      sitemapProductUrlPattern: body.productUrlPattern.trim() || null,
+    });
+  }
+
+  // 3. If fetchNow !== false, immediately fetch and index the sitemap
+  let fetchResult = null;
+  if (body.fetchNow !== false) {
+    try {
+      fetchResult = await fetchAndParseSitemap(
+        domain,
+        body.productUrlPattern?.trim() || null,
+      );
+    } catch (err) {
+      console.warn(`[SitemapRoutes] Initial sitemap fetch for ${domain} failed:`, err);
+    }
+  }
+
+  const summary = getDomainSitemapHealth(domain);
+
+  return c.json({
+    ok: true,
+    domain,
+    summary,
+    fetchResult: fetchResult
+      ? {
+          urlsCount: fetchResult.urls.length,
+          sourceUrl: fetchResult.sourceUrl,
+          reconcileResult: fetchResult.reconcileResult,
+        }
+      : null,
+  }, 201);
+});
+
+/**
+ * DELETE /api/onboarding/sitemaps/:domain
+ * Delete an entire domain from the sitemap index, cascading all URLs, cache, status, and telemetry.
+ */
+sitemapRoutes.delete('/onboarding/sitemaps/:domain', async (c) => {
+  const domain = normalizeDomain(c.req.param('domain'));
+  if (!domain) {
+    return c.json({ error: 'domain is required' }, 400);
+  }
+
+  // Cascade deletion
+  const deletedUrlsCount = deleteBrandUrlsByDomain(domain);
+  deleteSitemapCacheByDomain(domain);
+  deleteDomainStatus(domain);
+  deleteTelemetryByDomain(domain);
+  deleteBrandSitesByDomain(domain);
+  deleteProfileByDomain(domain);
+
+  return c.json({
+    ok: true,
+    domain,
+    deletedUrlsCount,
+  });
 });
 

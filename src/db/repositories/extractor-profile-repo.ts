@@ -207,3 +207,10 @@ export function deleteProfile(id: string): boolean {
   const result = db.query('DELETE FROM extractor_profiles WHERE id = ?').run(id);
   return result.changes > 0;
 }
+
+export function deleteProfileByDomain(domain: string): boolean {
+  const db = getDb();
+  const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
+  const result = db.query('DELETE FROM extractor_profiles WHERE domain = ?').run(normalizedDomain);
+  return result.changes > 0;
+}

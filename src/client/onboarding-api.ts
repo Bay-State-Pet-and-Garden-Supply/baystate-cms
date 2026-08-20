@@ -23,6 +23,7 @@ import type {
   DistributorEvidenceAttemptView,
   SitemapsOverviewResponse,
   SitemapDomainDetailResponse,
+  DomainSitemapSummary,
   BrandUrlsListResponse,
   SitemapTestLookupResponse,
   SitemapTestLookupRequest,
@@ -1435,6 +1436,32 @@ export async function deleteSitemapUrls(
     {
       method: 'DELETE',
       body: JSON.stringify({ ids }),
+    },
+  );
+}
+
+export async function addSitemapDomain(data: {
+  domain: string;
+  brandName?: string;
+  productUrlPattern?: string;
+  fetchNow?: boolean;
+}): Promise<{ ok: boolean; domain: string; summary: DomainSitemapSummary; fetchResult?: any }> {
+  return request<{ ok: boolean; domain: string; summary: DomainSitemapSummary; fetchResult?: any }>(
+    '/sitemaps',
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    },
+  );
+}
+
+export async function deleteSitemapDomain(
+  domain: string,
+): Promise<{ ok: boolean; domain: string; deletedUrlsCount: number }> {
+  return request<{ ok: boolean; domain: string; deletedUrlsCount: number }>(
+    `/sitemaps/${encodeURIComponent(domain)}`,
+    {
+      method: 'DELETE',
     },
   );
 }
