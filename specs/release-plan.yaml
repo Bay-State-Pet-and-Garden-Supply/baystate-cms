@@ -1,0 +1,35 @@
+# specs/release-plan.yaml — release index (mirror, not authority)
+# Authority: git tags via `gh release view` / semantic-release. This version is a codename/label.
+# Epic #47 tail — remaining issues #58/#59/#60 after core #48-#56 landed through e4c6642
+release:
+  version: "0.1.0"
+  codename: "Baystate CMS — Agent Lab v2 tail (#58-#60)"
+  status: done
+  semantic_release: true
+  bump_hint: minor
+epics:
+  - id: e01
+    title: "Agent Lab → Onboarding handoff — verified v2 import with provenance (#58)"
+    wsjf: 13
+    bcps: 13
+    capsule_dir: epics/e01-onboarding-handoff
+    status: done
+  - id: e02
+    title: "Agent Lab workspace — specialist workflow investigation UI (#59)"
+    wsjf: 8
+    bcps: 13
+    capsule_dir: epics/e02-agent-lab-workspace
+    status: done
+  - id: e03
+    title: "Specialist evals, shadow comparison, rollout gates and legacy migration (#60)"
+    wsjf: 5
+    bcps: 13
+    capsule_dir: epics/e03-evals-shadow-rollout
+    status: done
+  - id: e00
+    title: Bootstrap — bigpowers scaffolding
+    wsjf: 0
+    bcps: 0
+    capsule_dir: epics/e00-bootstrap
+    status: done
+    note: "Placeholder epic to satisfy validate-specs-yaml until first real epic is scoped via scope-work → slice-tasks → plan-release. Remove or replace when real epics are defined."
