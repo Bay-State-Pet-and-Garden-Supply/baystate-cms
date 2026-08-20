@@ -1,6 +1,6 @@
 story_id: e06s03
 title: "LLM-assisted build + deterministic validation — Generate/Suggest/Explain/Revise task buttons with per-field governance"
-status: failing
+status: passing
 bcps: 5
 spec: e06s03-llm-build.md
 tasks:
@@ -8,7 +8,7 @@ tasks:
     description: "Extend generateSelectorsService + Hono routes to accept the 3-confirmed-suite snapshot set, run deterministic discovery first (JSON-LD/Shopify/WooCommerce), validate LLM candidates via validateAndRankSelectors, and record provenance (provider/model/configId/promptHash/htmlLeftMachine) → verify: selector candidates are schema-validated with warnings"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/generate-selectors-schemas.test.ts src/tests/unit/selectorValidator.test.ts 2>&1 | tail -n 40"
     risk: P1
-    status: failing
+    status: passing
     allure:
       severity: high
       categories: ["domain", "unit"]
@@ -16,7 +16,7 @@ tasks:
     description: "Add suggest/explain/revise affordances reusing sanitize→LLM→parse→validate pipeline (single-field suggest, explain passthrough, structured-feedback revise) with disclosure badge data"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-llm-propose.test.ts 2>&1 | tail -n 40"
     risk: P1
-    status: failing
+    status: passing
     allure:
       severity: high
       categories: ["domain", "unit"]
@@ -24,7 +24,7 @@ tasks:
     description: "Build workspace Build canvas per-field governance UI (grouped Identity/Description/Media/Commerce/Nutrition/Variants, active vs draft vs LLM alternatives, stability/cardinality warnings, extracted previews, accept/reject/revise per field, explicit unsupported-for-domain, pending decisions prevent Save/Activate) and wire useProfileBuilderController task buttons + provenance dispatch"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-governance.test.ts src/tests/unit/profile-build-canvas.test.ts 2>&1 | tail -n 40"
     risk: P1
-    status: failing
+    status: passing
     allure:
       severity: high
       categories: ["domain", "unit"]
@@ -32,7 +32,7 @@ tasks:
     description: "Guard save/activate path: onboarding-routes:2636 + SaveBar call profile-governance-service gates (per-field decisions, MIN_IMAGE_APPROVAL_SAMPLES, single-sample warning) before any extractor_profiles write; LLM output never activates directly"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-governance.test.ts src/tests/unit/savebar-governance.test.ts 2>&1 | tail -n 40"
     risk: P1
-    status: failing
+    status: passing
     allure:
       severity: high
       categories: ["domain", "unit", "Security Review"]
@@ -41,7 +41,7 @@ tasks:
     description: "Implement LLM-unavailable fail-clearly: when getLlmTaskConfig returns null / provider route missing, Generate/Suggest/Revise show actionable error, no mutation, deterministic evidence rail still works"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-llm-unavailable.test.ts 2>&1 | tail -n 40"
     risk: P2
-    status: failing
+    status: passing
     allure:
       severity: normal
       categories: ["domain", "unit"]
