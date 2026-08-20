@@ -21,9 +21,12 @@ export interface HealthResponse {
 export async function handleHealth(res: ServerResponse): Promise<void> {
   let camoufoxAvailable = false;
   try {
-    // Attempt to verify Camoufox is installed via dynamic import (ESM-safe).
+    // Attempt to verify Camoufox is installed and native modules are functional
     const { launchOptions } = await import('camoufox-js');
-    camoufoxAvailable = typeof launchOptions === 'function';
+    if (typeof launchOptions === 'function') {
+      await launchOptions({ headless: true });
+      camoufoxAvailable = true;
+    }
   } catch {
     camoufoxAvailable = false;
   }

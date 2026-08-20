@@ -75,5 +75,10 @@ export async function createLaunchContext(
     return createPlainPlaywrightLaunchContext(config);
   }
   console.log('[browser] Using Camoufox (anti-detect Firefox)');
-  return createCamoufoxLaunchContext(config);
+  try {
+    return await createCamoufoxLaunchContext(config);
+  } catch (err) {
+    console.warn('[browser] Failed to initialize Camoufox, falling back to plain Playwright Chromium:', err);
+    return createPlainPlaywrightLaunchContext(config);
+  }
 }
