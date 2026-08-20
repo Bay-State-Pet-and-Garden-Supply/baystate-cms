@@ -1,18 +1,19 @@
 # specs/state.yaml — session source of truth (bigpowers)
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
-active_flow: null
-active_epic_id: null
-active_story_id: null
+active_flow: build_epic
+active_epic_id: e02
+active_story_id: e02s01
 active_bug_id: null
 release:
   target_version: null
   last_tag: v0.1.0
   last_publish: null
 epic_cycle:
-  current_step: null
-  next_skill: null
-  completed_steps: [1, 2, 3, 4, 5, 6, 7, 8]
+  current_step: 2
+  next_skill: kickoff-branch
+  completed_steps: [1, 2]
+  story_bcps: 8
 bug_cycle:
   current_step: null
   completed_steps: []
@@ -20,7 +21,7 @@ git:
   branch: main
   hash: ffd03c4
 handoff:
-  last_step_completed: "e01 (#58 onboarding handoff) — e01s01 (create/augment+provenance) + e01s02 (fail-closed guards) completed on feat/e01-onboarding-handoff"
+  last_step_completed: "e02s01 plan-work — specialist stage workspace survey + threat model + task verification"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
@@ -28,9 +29,9 @@ handoff:
     - CONTEXT.md
     - docs/plans/epic-47-handoff.md
     - specs/product/SCOPE_LATEST.yaml
-  next_skill: plan-work
+  next_skill: kickoff-branch
 metrics:
-  story_start: null
+  story_start: "2026-08-20T02:03:59Z"
   story_end: null
   cycle_minutes: null
   bcp_per_hour: null
