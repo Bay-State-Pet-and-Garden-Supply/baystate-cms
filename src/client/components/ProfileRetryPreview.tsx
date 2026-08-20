@@ -3,8 +3,7 @@
  * missing/unhealthy profiles, and lets operators retry them.
  *
  * Used from OnboardingSettings (domain detail panel) via the
- * "Show blocked items" button, and optionally from
- * ProfileBuilderWorkspace after "promote to healthy" succeeds.
+ * "Show blocked items" button.
  */
 
 import React, { useState, useEffect } from 'react';

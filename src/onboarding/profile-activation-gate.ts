@@ -1,8 +1,9 @@
-// story: e06s04, e07s01 — evidence-gated activation (fail-closed on missing_matrix / artifact_mismatch / missing_samples)
+// story: e06s04, e07s01, e07s04 — evidence-gated + cluster-aware activation (fail-closed)
 import type { MatrixResult } from './profile-test-matrix';
+import { templateAwarePrefix } from './template-clustering';
 
 export interface GateInput {
-  requiredResults: Array<{ field: string; success: boolean }>;
+  requiredResults: Array<{ field: string; success: boolean; provenance?: string; artifactHash?: string }>;
   wrongProduct: boolean;
   wrongVariant: boolean;
   waiver: boolean;
@@ -12,6 +13,7 @@ export interface GateInput {
   matrixResult?: MatrixResult | null;
   expectedArtifactHashes?: string[] | null;
   sampleIds?: string[];
+  clusterIds?: string[];
 }
 
 export interface GateResult {
@@ -43,6 +45,20 @@ export function evaluateGate(input: GateInput): GateResult {
         return { allowed: false, blockReason: 'missing_samples', reviseAction: `Run matrix against missing samples: ${missing.join(', ')}`, reason: `missing_samples: ${missing.join(', ')}` };
       }
     }
+    if (input.clusterIds && input.clusterIds.length > 0) {
+      const prefixForUrl = (u: string): string => templateAwarePrefix(u);
+      for (const cid of input.clusterIds) {
+        const rowsForCluster = input.matrixResult!.rows.filter(r => prefixForUrl(r.sampleUrl) === cid);
+        if (rowsForCluster.length === 0) {
+          return { allowed: false, blockReason: 'missing_cluster', reviseAction: `Revise <field> selector for cluster ${cid}`, reason: `missing_cluster ${cid} expected vs actual: no sample for ${cid}` };
+        }
+        const failing = rowsForCluster.flatMap(r => r.cells.filter(c => !c.success));
+        if (failing.length > 0) {
+          const f = failing[0];
+          return { allowed: false, blockReason: `${f.field} failed in cluster ${cid}`, reviseAction: `Revise ${f.field} selector for cluster ${cid}`, reason: `${f.field} failed in cluster ${cid} expected=${f.expected ?? ''} actual=${f.extracted ?? ''} provenance=${f.provenance} artifact=${f.artifactHash}` };
+        }
+      }
+    }
   }
 
   if (input.wrongProduct) return { allowed: false, blockReason: 'wrong_product', reviseAction: 'Revise selectors to avoid wrong_product', reason: 'wrong_product detected' };
@@ -51,8 +67,8 @@ export function evaluateGate(input: GateInput): GateResult {
 
   const failing = input.requiredResults.filter(r => !r.success);
   if (failing.length > 0) {
-    const field = failing[0].field;
-    return { allowed: false, blockReason: `${field} failed on 1 of ${input.requiredResults.length}`, reviseAction: `Revise ${field} selector`, reason: `${field} failed` };
+    const f = failing[0];
+    return { allowed: false, blockReason: `${f.field} failed on 1 of ${input.requiredResults.length}`, reviseAction: `Revise ${f.field} selector`, reason: `${f.field} failed expected=${(f as any).expected ?? ''} actual=${(f as any).extracted ?? ''} provenance=${(f as any).provenance ?? ''} artifact=${(f as any).artifactHash ?? ''}` };
   }
 
   if (input.confirmedCount < 3 && !input.waiver) {

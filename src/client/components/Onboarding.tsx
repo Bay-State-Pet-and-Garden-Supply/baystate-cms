@@ -14,9 +14,10 @@ import { colors } from '../theme';
 import { OnboardingSettings } from './OnboardingSettings';
 import { PipelineBoard } from './PipelineBoard';
 import { BatchWorkspace } from './onboarding/BatchWorkspace';
-import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { WeeklyReportModal } from './WeeklyReportModal';
 import type { OnboardingBatch, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
+import { getProfileWorkspacePath } from './profile-workspace/route';
+import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDomain';
 import type { WorkStateCounts } from '../../shared/schemas/onboarding-work-state';
 import { formatCount, totalItemCount } from './onboarding/batch-workspace-logic';
 import { matchExistingBrand } from '../../shared/brand-matcher';
@@ -93,8 +94,7 @@ export function Onboarding() {
   // rollover — per-item review lives in the Review workspace, bulk actions in
   // the Batch Workspace, and the legacy Pipeline Board (diagnostics) owns its
   // own drawer components.
-  const [profileBuilderDomain, setProfileBuilderDomain] = useState<string | null>(null);
-  const [profileBuilderSeed, setProfileBuilderSeed] = useState<{ url?: string; item?: any } | null>(null);
+  // story: e07s04 — profile builder modal state removed; navigation via getProfileWorkspacePath
 
   // Custom Selector Editor state was removed; extractor profiles are
   // managed in OnboardingSettings ("Domain Extractor Profiles" section).
@@ -821,23 +821,18 @@ export function Onboarding() {
               _catalogBrands={catalogBrands}
               sourcingEngineEnabled={sourcingEngineEnabled}
               onRefreshBrandSites={loadBrandSites}
-              onOpenProfileBuilder={(domain, item) => {
-                setProfileBuilderDomain(domain);
-                setProfileBuilderSeed({ url: item.sourceUrl ?? undefined, item });
+              onOpenProfileBuilder={(domain) => {
+                const normalized = normalizeBrandHubDomain(domain);
+                if (!normalized) return;
+                const path = getProfileWorkspacePath(normalized, window.location.pathname + window.location.search);
+                window.history.pushState(null, '', path);
+                window.dispatchEvent(new PopStateEvent('popstate'));
               }}
               onOpenBrandSetup={() => {
                 setShowSettings(true);
               }}
             />
           </div>
-          {profileBuilderDomain && (
-            <ProfileBuilder
-              mode="modal"
-              initialDomain={profileBuilderDomain}
-              initialProductUrl={profileBuilderSeed?.url}
-              onCancel={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}
-            />
-          )}
         </>
       );
     }
@@ -859,9 +854,12 @@ export function Onboarding() {
             _catalogBrands={catalogBrands}
             sourcingEngineEnabled={sourcingEngineEnabled}
             onRefreshBrandSites={loadBrandSites}
-            onOpenProfileBuilder={(domain, item) => {
-              setProfileBuilderDomain(domain);
-              setProfileBuilderSeed({ url: item.sourceUrl ?? undefined, item });
+            onOpenProfileBuilder={(domain) => {
+              const normalized = normalizeBrandHubDomain(domain);
+              if (!normalized) return;
+              const path = getProfileWorkspacePath(normalized, window.location.pathname + window.location.search);
+              window.history.pushState(null, '', path);
+              window.dispatchEvent(new PopStateEvent('popstate'));
             }}
             onOpenBrandSetup={() => {
               setShowSettings(true);
@@ -875,14 +873,6 @@ export function Onboarding() {
             />
             <button onClick={handleBackToBatches} style={styles.secondaryBtn}>← All Batches</button>
           </div>
-        )}
-        {profileBuilderDomain && (
-          <ProfileBuilder
-            mode="modal"
-            initialDomain={profileBuilderDomain}
-            initialProductUrl={profileBuilderSeed?.url}
-            onCancel={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}
-          />
         )}
         {showWeeklyReportModal && (
           <WeeklyReportModal onClose={() => setShowWeeklyReportModal(false)} />
