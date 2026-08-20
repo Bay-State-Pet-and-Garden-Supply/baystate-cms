@@ -206,7 +206,8 @@ export interface ProfileBuilderController {
   updateTitleOptionalSelector(index: number, selector: string): void;
   removeTitleOptionalSelector(index: number): void;
 
-  generateSelectorFromOuterHtml(key: string, outerHTML: string): Promise<void>;
+  // generateSelectorFromOuterHtml deleted (e07s03) — paste-outerHTML path removed; kept optional for type compat until callers fully removed
+  generateSelectorFromOuterHtml?: (key: string, outerHTML: string) => Promise<void>;
 
   addCustomField(name: string): void;
   removeCustomField(key: string): void;

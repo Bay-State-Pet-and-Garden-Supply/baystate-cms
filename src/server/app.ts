@@ -27,6 +27,7 @@ import { sitemapRoutes } from './routes/sitemap-routes';
 import { brandHubRoutes } from './routes/brand-hub-routes';
 import { domainProfileStateRoutes } from './routes/domain-profile-state-routes';
 import { representativeSuiteRoutes } from './routes/representative-suite-routes';
+import { profileCaptureRoutes } from './routes/profile-capture-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
@@ -96,6 +97,7 @@ app.route('/api', sitemapRoutes);
 app.route('/api', brandHubRoutes);
 app.route('/api', domainProfileStateRoutes);
 app.route('/api', representativeSuiteRoutes);
+app.route('/api', profileCaptureRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));
