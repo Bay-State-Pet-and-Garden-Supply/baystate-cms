@@ -418,8 +418,10 @@ async function fetchSitemapBody(
         'Accept': ACCEPT_HEADER,
       },
       // Bun's `fetch` accepts `signal` on the init object.
+      // Relax TLS authorization to handle expired or altname-mismatched manufacturer SSL certificates.
+      tls: { rejectUnauthorized: false },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    } as RequestInit);
   } catch (err) {
     console.warn(`[SitemapFetcher] Network error fetching ${url}:`, err);
     return null;
@@ -523,8 +525,9 @@ async function parseRobotsSitemaps(
         'User-Agent': HTTP_USER_AGENT,
         'Accept': 'text/plain, text/*, */*;q=0.1',
       },
+      tls: { rejectUnauthorized: false },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    } as RequestInit);
     if (!response.ok) {
       if (tracker) {
         tracker.lastStatus = response.status;
