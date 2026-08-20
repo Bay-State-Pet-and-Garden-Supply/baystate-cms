@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { PiLiveEvent } from '../product-intelligence-api';
 import { mergeEventStream, isTerminalEvent } from '../agent-lab/logic';
 
-export type EventStreamStatus = 'connecting' | 'live' | 'reconnecting' | 'closed';
+export type EventStreamStatus = 'connecting' | 'live' | 'reconnecting' | 'closed' | 'error';
 
 export interface UseEventsResult {
   events: PiLiveEvent[];
@@ -118,7 +118,16 @@ export function useProductIntelligenceEvents(
         }
         es.close();
         esRef.current = null;
-        setStatus('reconnecting');
+        fetch(`/api/product-intelligence/runs/${encodeURIComponent(runId)}`)
+          .then((response) => {
+            if (response.status === 404 && runIdRef.current === runId) {
+              stoppedRef.current = true;
+              setStatus('error');
+              return;
+            }
+            setStatus('reconnecting');
+          })
+          .catch(() => setStatus('reconnecting'));
         const delay = BACKOFF_SCHEDULE[Math.min(backoffIdxRef.current, BACKOFF_SCHEDULE.length - 1)];
         backoffIdxRef.current++;
         reconnectTimerRef.current = setTimeout(connect, delay);

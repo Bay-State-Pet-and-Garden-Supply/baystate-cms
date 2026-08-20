@@ -122,8 +122,9 @@ describe('useProductIntelligenceEvents', () => {
     h.unmount();
   });
 
-  it('reconnects after an error using the advanced cursor (replay safety)', () => {
+  it('reconnects after an error using the advanced cursor (replay safety)', async () => {
     vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 200 }));
     const h = mountHarness('run-1');
     const es0 = FakeEventSource.instances[0];
     act(() => {
@@ -133,6 +134,10 @@ describe('useProductIntelligenceEvents', () => {
     act(() => {
       es0.fail();
     });
+    // The stale-run guard (404 fetch) defers the status flip to a microtask.
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(h.latest().status).toBe('reconnecting');
     act(() => {
       vi.advanceTimersByTime(1000);
@@ -140,6 +145,7 @@ describe('useProductIntelligenceEvents', () => {
     expect(FakeEventSource.instances).toHaveLength(2);
     expect(FakeEventSource.instances[1].url).toContain('after=3');
     h.unmount();
+    vi.unstubAllGlobals();
   });
 
   it('caps the reconnect backoff at 8s', () => {

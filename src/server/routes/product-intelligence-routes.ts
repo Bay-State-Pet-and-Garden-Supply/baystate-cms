@@ -78,6 +78,7 @@ import {
 import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
 import { importSpecialistWorkflowToOnboarding } from '../../product-intelligence/specialist-workflow-import';
 import type { SpecialistWorkflowResult } from '../../product-intelligence/workflow/orchestrator';
+import { routeSpecialistRetry, type SpecialistRetryTarget } from '../../product-intelligence/workflow/orchestrator';
 import { specialistWorkflowPersistence } from '../../db/repositories/specialist-workflow-repo';
 import { assertRunApprovedForImport } from '../../product-intelligence/review-gate';
 import {
@@ -116,6 +117,7 @@ import { aggregatePiComparisons } from '../../product-intelligence/evaluation/me
 import { PI_GOLDEN_DATASET_NAME } from '../../product-intelligence/evaluation/fixture-dataset';
 
 const router = new Hono();
+const controlResponses = new Map<string, unknown>();
 
 function requireWorkspace() {
   const ws = getCurrentWorkspace();
@@ -438,6 +440,39 @@ router.post('/product-intelligence/runs/:id/cancel', (c) => {
 });
 
 /** POST /api/product-intelligence/runs/:id/compare — Pi vs baseline. */
+router.post('/product-intelligence/runs/:id/retry', async (c) => {
+  const runId = c.req.param('id');
+  const run = requireRunInWorkspace(runId);
+  if (!run) return c.json({ error: 'Run not found' }, 404);
+  let body: { target?: unknown; idempotencyKey?: unknown };
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+  const target = body.target;
+  if (target !== 'retry_discovery' && target !== 'retry_curator' && target !== 'retry_resolver' && target !== 'human_review') {
+    return c.json({ error: 'target is invalid' }, 400);
+  }
+  const key = typeof body.idempotencyKey === 'string' ? `${runId}:retry:${body.idempotencyKey}` : null;
+  if (key && controlResponses.has(key)) return c.json(controlResponses.get(key));
+  const route = routeSpecialistRetry(target as SpecialistRetryTarget);
+  const response = { runId, accepted: true, target, route, idempotent: Boolean(key) };
+  if (key) controlResponses.set(key, response);
+  return c.json(response, 202);
+});
+
+router.post('/product-intelligence/runs/:id/handoff', async (c) => {
+  const runId = c.req.param('id');
+  const run = requireRunInWorkspace(runId);
+  if (!run) return c.json({ error: 'Run not found' }, 404);
+  let body: { action?: unknown; idempotencyKey?: unknown };
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+  const actions = ['open_workflow', 'open_agent_lab', 'compare_onboarding', 'compare_onboarding_evidence', 'import_verified', 'retry_agent_lab'] as const;
+  if (!actions.includes(body.action as typeof actions[number])) return c.json({ error: 'action is invalid' }, 400);
+  const key = typeof body.idempotencyKey === 'string' ? `${runId}:handoff:${body.idempotencyKey}` : null;
+  if (key && controlResponses.has(key)) return c.json(controlResponses.get(key));
+  const response = { runId, accepted: true, action: body.action, idempotent: Boolean(key) };
+  if (key) controlResponses.set(key, response);
+  return c.json(response, 202);
+});
+
 router.post('/product-intelligence/runs/:id/compare', async (c) => {
   const runId = c.req.param('id');
   if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);

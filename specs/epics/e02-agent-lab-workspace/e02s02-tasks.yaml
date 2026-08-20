@@ -1,0 +1,21 @@
+story_id: e02s02
+title: "Verification, retry/cancel/handoff controls, reconnect and batch filtering"
+status: planned
+bcps: 5
+tasks:
+  - id: 1
+    description: "Verification first-class — Verifier identity and product-data verdicts shown with evidence citations and structured retry requests (retry_discovery/curator/resolver/human_review); low identity confidence blocks overall pass"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/verifier-specialist-panel.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 2
+    description: "Server-authoritative controls — retry, cancel, handoff (Open Agent Lab workflow / Compare with onboarding evidence / Import verified result / Retry in Agent Lab) via POST /api/product-intelligence/*, orchestrator owns routing, client never routes directly"
+    verify: "bun run typecheck && bun test src/tests/unit/product-intelligence-workflow.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 3
+    description: "Reconnect after refresh + SSE resilience — cursor-based SSE via src/client/hooks/useProductIntelligenceEvents.ts with capped backoff, terminal stop, stale-run guards; state rehydrated from workflow persistence (workflow/persistence)"
+    verify: "bun run typecheck && bun test src/tests/unit/product-intelligence-sse.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 4
+    description: "Batch filters and navigation — runs list filters for blocked/profile/identity/review-ready, deep link ?view=agentlab&run=<id> + onboarding badge '🤖 Agent result available' → Agent Lab, and handoff back"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/agent-lab 2>&1 | tail -n 20"
+    status: done
