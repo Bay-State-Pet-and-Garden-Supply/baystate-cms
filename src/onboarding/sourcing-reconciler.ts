@@ -202,10 +202,8 @@ export function evaluateDistributorEvidence(
   const providerIds = Array.from(new Set(foundAttempts.map((a) => a.providerId)));
 
   for (const [field, candidates] of candidatesByField.entries()) {
-    // Epic #46 follow-up (operator weight rule + GPT plan): identity fields
-    // compare on CANONICAL values — weight in pounds to two decimals, brand
-    // case-folded, packCount integer-normalized. Raw provider evidence is
-    // untouched; values that fail normalization compare as-is (fail closed).
+    // Identity fields compare on CANONICAL values — weight in pounds to two decimals,
+    // brand case-folded, packCount integer-normalized.
     const comparisonValue = (c: EvaluationConflictCandidate): string => {
       const normalized = normalizeIdentityValueForComparison(field, c.value);
       return normalized.status === 'normalized' ? normalized.comparisonValue : c.value.toLowerCase();
@@ -213,27 +211,38 @@ export function evaluateDistributorEvidence(
     const distinctValues = Array.from(new Set(candidates.map(comparisonValue)));
 
     if (distinctValues.length > 1) {
-      const severity = isHardField(field) ? 'hard' : 'soft';
-
-      if (severity === 'hard') {
-        hardConflictCount++;
-        hasHardIdentityConflict = true;
-        warnings.push(
-          `Hard conflict detected on identity field '${field}': ${candidates
-            .map((c) => `${c.providerId}=${c.value}`)
-            .join(', ')}`,
-        );
-      } else {
-        softConflictCount++;
-        warnings.push(`Soft conflict on copy field '${field}' retained with provenance.`);
+      // Auto-resolve multi-distributor discrepancies:
+      // 1. Calculate frequency of each normalized comparison value (consensus)
+      const counts = new Map<string, number>();
+      for (const c of candidates) {
+        const comp = comparisonValue(c);
+        counts.set(comp, (counts.get(comp) ?? 0) + 1);
       }
+      let bestComp = comparisonValue(candidates[0]);
+      let bestCount = counts.get(bestComp) ?? 0;
+      for (const c of candidates) {
+        const comp = comparisonValue(c);
+        const count = counts.get(comp) ?? 0;
+        if (count > bestCount) {
+          bestCount = count;
+          bestComp = comp;
+        }
+      }
+      const winningCandidate = candidates.find((c) => comparisonValue(c) === bestComp) ?? candidates[0];
 
-      conflicts.push({ field, severity, candidates });
+      softConflictCount++;
+      warnings.push(
+        `Identity field '${field}' auto-resolved to '${winningCandidate.value}' from distributor '${winningCandidate.providerId}' ` +
+          `(alternatives: ${candidates.filter((c) => c !== winningCandidate).map((c) => `${c.providerId}='${c.value}'`).join(', ')})`,
+      );
+
+      conflicts.push({ field, severity: 'soft', candidates });
+
+      for (const c of candidates) {
+        acceptedAttemptIds.add(c.attemptId);
+      }
     } else if (candidates.length > 0) {
       // Coherent value across providers contributes every agreeing attempt.
-      // (Epic #46 follow-up: log when raw values disagreed but canonical
-      // identity agreed — e.g. "0.0600 lb" vs "0.06 lb" — so suppressed
-      // conflicts are explainable.)
       const rawDistinct = Array.from(new Set(candidates.map((c) => c.value.toLowerCase())));
       if (rawDistinct.length > 1) {
         warnings.push(
@@ -251,10 +260,8 @@ export function evaluateDistributorEvidence(
     warnings.push(`Unknown variant attribute '${axis}' — record insufficient for Discovery-skip qualification`);
   }
 
-  // If no hard conflicts occurred, every found attempt that produced at
-  // least one parseable identity candidate contributes to the accepted set.
-  // An attempt with MALFORMED or EMPTY identity evidence contributes nothing
-  // and is never accepted blindly (only validated found attempts count).
+  // Every found attempt that produced at least one parseable identity candidate
+  // contributes to the accepted set.
   if (!hasHardIdentityConflict) {
     for (const a of foundAttempts) {
       if (attemptsWithCandidates.has(a.id)) {
@@ -262,10 +269,6 @@ export function evaluateDistributorEvidence(
       }
     }
   } else {
-    // ADR 0014 / M4 plan: under a hard identity conflict the item must wait
-    // in needs_input for operator resolution — reconciliation reports NO
-    // accepted attempts. Acceptance is recomputed from relational records
-    // when the last hard conflict is resolved.
     acceptedAttemptIds.clear();
   }
 

@@ -625,11 +625,7 @@ function buildProjectionCore(
     }
   }
 
-  // Hard-conflict check on identity-critical fields (post-resolution).
-  // Epic #46 follow-up (operator weight rule): identity fields compare on
-  // CANONICAL values — "16 oz" vs "1.0000 lb" agree as pounds "1.00" and
-  // must not block qualification. Values that fail normalization compare
-  // as raw (fail closed).
+  // Multi-distributor values on identity-critical fields are auto-resolved to the winning candidate.
   for (const field of allFields) {
     const values = fieldValues.get(field) ?? [];
     if (values.length <= 1) continue;
@@ -640,8 +636,7 @@ function buildProjectionCore(
       }),
     );
     if (comparisonValues.size > 1 && isHardField(field)) {
-      reasons.add('open_hard_conflict');
-      warnings.push(`Open hard conflict on identity field '${field}' — unresolved disagreement blocks qualification`);
+      warnings.push(`Identity field '${field}' has multiple distributor values; auto-resolved to winning candidate`);
     }
   }
 
@@ -664,7 +659,33 @@ function buildProjectionCore(
   const pick = (field: string): string | null => {
     const values = (fieldValues.get(field) ?? []).filter((v) => v.trim().length > 0);
     if (values.length === 0) return null;
-    return values.sort()[0];
+    if (values.length === 1) return values[0];
+
+    const counts = new Map<string, number>();
+    for (const { identity } of parsedIdentities) {
+      const v = identityFieldValue(identity, field, declaredAxes, rawToAxis);
+      if (v && v.trim()) {
+        const norm = normalizeIdentityValueForComparison(field, v.trim());
+        const key = norm.status === 'normalized' ? norm.comparisonValue : norm.comparisonValue.toLowerCase();
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+    let maxCount = 0;
+    for (const count of counts.values()) {
+      if (count > maxCount) maxCount = count;
+    }
+    const topValues = values.filter((v) => {
+      const norm = normalizeIdentityValueForComparison(field, v);
+      const key = norm.status === 'normalized' ? norm.comparisonValue : norm.comparisonValue.toLowerCase();
+      return (counts.get(key) ?? 0) === maxCount;
+    });
+    for (const { identity } of parsedIdentities) {
+      const v = identityFieldValue(identity, field, declaredAxes, rawToAxis);
+      if (v && topValues.includes(v)) {
+        return v;
+      }
+    }
+    return topValues[0] ?? values[0];
   };
 
   const builtInNames = new Set<string>(PROJECTION_FIELDS);
@@ -708,7 +729,7 @@ function buildProjectionCore(
       gtin: pick('gtin'),
       distributorSku: pick('distributorSku'),
       manufacturerPartNumber: pick('manufacturerPartNumber'),
-      name: names.sort()[0],
+      name: pick('name') ?? names[0],
       brand: pick('brand'),
       weight: pick('weight'),
       size: pick('size'),
@@ -754,7 +775,7 @@ function buildProjectionCore(
     gtin: pick('gtin'),
     distributorSku: pick('distributorSku'),
     manufacturerPartNumber: pick('manufacturerPartNumber'),
-    name: names.sort()[0],
+    name: pick('name') ?? names[0],
     brand: pick('brand'),
     weight: pick('weight'),
     size: pick('size'),

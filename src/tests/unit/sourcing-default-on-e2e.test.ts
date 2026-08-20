@@ -519,8 +519,8 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     expect(routed?.sourcingDecision?.providerIds).toEqual(expect.arrayContaining(['phillips', 'bci']));
   });
 
-  // 8. Flavor/formula/custom-axis conflict → needs_input.
-  test('8. flavor disagreement is a HARD identity conflict → needs_input, never qualified', async () => {
+  // 8. Flavor/formula/custom-axis auto-resolution in automatic mode.
+  test('8. flavor disagreement auto-resolves to primary distributor → routes to Extraction', async () => {
     overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
     const { item } = makeItem('012345678903', 'Flavor Conflict');
     const gen = startSourcingGeneration(item.id, 'automatic_policy');
@@ -530,23 +530,15 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     await settle(fixtureWorker(workspaceId, tempDir));
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('sourcing');
-    expect(after?.stageStatus).toBe('needs_input');
-    expect(after?.sourcingDecision?.route).toBe('needs_input_conflict');
-    const hard = getDb().query(
-      "SELECT field FROM onboarding_evidence_conflicts WHERE item_id = ? AND severity = 'hard' AND status = 'open'",
-    ).all(item.id) as Array<{ field: string }>;
-    expect(hard.some((c) => c.field === 'flavor')).toBe(true);
-    // Epic #46 follow-up (GPT finding): the decision payload must reference
-    // the durable conflicts instead of a contradictory empty array.
-    expect(after?.sourcingDecision?.conflicts?.length).toBeGreaterThan(0);
-    const flavorConflict = after?.sourcingDecision?.conflicts?.find(c => c.field === 'flavor');
-    expect(flavorConflict?.severity).toBe('hard');
-    expect(Object.keys(flavorConflict?.providerValues ?? {}).length).toBeGreaterThanOrEqual(2);
+    expect(after?.stage).toBe('extraction');
+    expect(after?.stageStatus).toBe('pending');
+    expect(after?.sourcingDecision?.route).toBe('distributor_record_to_extraction');
+    const warnings = (after?.sourcingDecision?.warnings ?? []) as string[];
+    expect(warnings.some((w) => w.includes("Identity field 'flavor' auto-resolved"))).toBe(true);
   });
 
-  // 8b. Formula disagreement → needs_input (formula is identity-critical).
-  test('8b. formula disagreement is a HARD identity conflict → needs_input, never qualified', async () => {
+  // 8b. Formula disagreement auto-resolves.
+  test('8b. formula disagreement auto-resolves to primary distributor → routes to Extraction', async () => {
     overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
     const { item } = makeItem('012345678903', 'Formula Conflict');
     const gen = startSourcingGeneration(item.id, 'automatic_policy');
@@ -556,25 +548,17 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     await settle(fixtureWorker(workspaceId, tempDir));
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('sourcing');
-    expect(after?.stageStatus).toBe('needs_input');
-    expect(after?.sourcingDecision?.route).toBe('needs_input_conflict');
-    const hard = getDb().query(
-      "SELECT field FROM onboarding_evidence_conflicts WHERE item_id = ? AND severity = 'hard' AND status = 'open'",
-    ).all(item.id) as Array<{ field: string }>;
-    expect(hard.some((c) => c.field === 'formula')).toBe(true);
+    expect(after?.stage).toBe('extraction');
+    expect(after?.stageStatus).toBe('pending');
+    expect(after?.sourcingDecision?.route).toBe('distributor_record_to_extraction');
   });
 
-  // 8c. Connector-declared custom-axis disagreement → needs_input (declared
-  // axes join the hard identity authority per Amendment A).
-  test('8c. custom-axis (connector-declared) disagreement is a HARD conflict → needs_input', async () => {
+  // 8c. Connector-declared custom-axis disagreement auto-resolves.
+  test('8c. custom-axis (connector-declared) disagreement auto-resolves → routes to Extraction', async () => {
     overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
     const { item } = makeItem('012345678903', 'Custom Axis Conflict');
     const gen = startSourcingGeneration(item.id, 'automatic_policy');
     const declarations = [{ rawField: 'scent', normalizedAxis: 'scent' }];
-    // The repo accepts variantAxisDeclarations (tolerant cast); the shared
-    // InsertEvidenceAttempt interface predates the field — pass through the
-    // typed-extras escape hatch the repo already uses for this column.
     const withDeclarations = { variantAxisDeclarations: declarations } as unknown as Partial<Parameters<typeof insertEvidenceAttempt>[0]>;
     seedQualified(item.id, item.upc, gen.id, 'phillips', { attributes: { scent: 'peach' } }, withDeclarations);
     seedQualified(item.id, item.upc, gen.id, 'bci', { attributes: { scent: 'cedar' } }, withDeclarations);
@@ -582,13 +566,9 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     await settle(fixtureWorker(workspaceId, tempDir));
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('sourcing');
-    expect(after?.stageStatus).toBe('needs_input');
-    expect(after?.sourcingDecision?.route).toBe('needs_input_conflict');
-    const hard = getDb().query(
-      "SELECT field FROM onboarding_evidence_conflicts WHERE item_id = ? AND severity = 'hard' AND status = 'open'",
-    ).all(item.id) as Array<{ field: string }>;
-    expect(hard.some((c) => c.field === 'scent')).toBe(true);
+    expect(after?.stage).toBe('extraction');
+    expect(after?.stageStatus).toBe('pending');
+    expect(after?.sourcingDecision?.route).toBe('distributor_record_to_extraction');
   });
 
   // 9. Unknown variant axis / no-name insufficiency → evidence_to_discovery.
@@ -610,6 +590,7 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     seedQualified(item2.item.id, item2.item.upc, gen2.id, 'phillips', { name: '' });
     await settle(fixtureWorker(workspaceId, tempDir));
     expect(findItemById(item2.item.id)?.sourcingDecision?.route).toBe('evidence_to_discovery');
+    expect(findItemById(item2.item.id)?.stage).toBe('discovery');
   });
 
   // 10. Found + provider timeout → qualified route with the error warning retained.
@@ -692,22 +673,33 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     expect(engineCalls).toBe(1);
   });
 
+  // 12b. Manual mode holds every non-conflict outcome at sourcing/needs_input.
+  test('12b. manual mode holds every non-conflict outcome at sourcing/needs_input', async () => {
+    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'manual' });
+    const { item } = makeItem('012345678905', 'Manual Hold');
+    const gen = startSourcingGeneration(item.id, 'manual_policy');
+    seedQualified(item.id, item.upc, gen.id, 'phillips');
+
+    await settle(fixtureWorker(workspaceId, tempDir));
+
+    const after = findItemById(item.id);
+    expect(after?.stage).toBe('sourcing');
+    expect(after?.stageStatus).toBe('needs_input');
+    expect(after?.sourcingDecision?.route).toBe('needs_input_conflict');
+  });
+
   // 13. Retry supersession / stale generation never routes.
   test('13. retry supersedes the generation; stale attempts never influence the new decision', async () => {
-    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
+    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'manual' });
     const { item } = makeItem('012345678903', 'Retry Supersede');
-    const gen1 = startSourcingGeneration(item.id, 'automatic_policy');
-    // Stale found (disagrees) from generation 1.
+    const gen1 = startSourcingGeneration(item.id, 'manual_policy');
     seedQualified(item.id, item.upc, gen1.id, 'phillips', { attributes: { size: '10 lb' } });
-    seedQualified(item.id, item.upc, gen1.id, 'bci', { attributes: { size: '20 lb' } });
     await settle(fixtureWorker(workspaceId, tempDir));
     expect(findItemById(item.id)?.stage).toBe('sourcing');
     expect(findItemById(item.id)?.stageStatus).toBe('needs_input');
 
-    // Operator retry supersedes generation 1 (creating the replacement
-    // generation itself — ADR 0014) and generation 2 is coherent.
-    // Mirror the real Re-run-Sourcing flow: supersede + requeue to pending
-    // so the auto worker can claim and route the new generation.
+    // Operator retry supersedes generation 1 and runs in automatic mode
+    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
     const gen2 = supersedeCurrentSourcingGeneration(item.id, 'operator_retry');
     seedQualified(item.id, item.upc, gen2.id, 'phillips');
     updateItemStageStatus(item.id, 'pending');
@@ -717,7 +709,7 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     expect(after?.stage).toBe('extraction');
     expect(after?.stageStatus).toBe('pending');
     expect(after?.sourcingDecision?.route).toBe('distributor_record_to_extraction');
-    // The stale generation's conflicts/attempts remain audit-visible but inert.
+    // The stale generation's attempts remain audit-visible but inert.
     expect(getDb().query('SELECT COUNT(*) as c FROM sourcing_generations WHERE item_id = ?').get(item.id)).toMatchObject({ c: 2 });
   });
 

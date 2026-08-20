@@ -687,15 +687,12 @@ describe('Distributor Scrapers offline acceptance (M7, Amendment B)', () => {
     expect(after?.sourcingDecision?.route).toBe('degraded_fallback_to_discovery');
   });
 
-  test('9d. cross-provider identity disagreement (weight/brand) → needs_input_conflict, never qualified', async () => {
-    overrideSourcingFlags({ sourcingEngineEnabled: true, mode: 'automatic' });
-    // Bradley + Central Pet both "find" UPC 018653299524 with different
-    // identity-critical values (brand/weight): hard conflict → needs_input.
+  test('9d. cross-provider identity disagreement (weight/brand) auto-resolves and qualifies to extraction', async () => {
     const bradley = SCRAPER_BY_ID.get('bradley')!;
     const central = SCRAPER_BY_ID.get('central_pet')!;
     const bradleyFetcher = makeScraperFetcher(bradley, { mode: 'found' });
-    // Rewrite the Central Pet fixture to carry the Bradley UPC so both
-    // providers agree on the identifier but disagree on brand/weight.
+    // Point central_pet's found fixture at bradley's UPC to produce a cross-provider
+    // lookup collision with differing brand/weight strings.
     const centralFetcher = makeScraperFetcher(central, {
       mode: 'found',
       fixtureReplace: [['035585775210', '018653299524']],
@@ -718,12 +715,9 @@ describe('Distributor Scrapers offline acceptance (M7, Amendment B)', () => {
     const foundIds = attempts.filter((a) => a.outcome === 'found').map((a) => a.providerId).sort();
     expect(foundIds).toEqual(['bradley', 'central_pet']);
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('sourcing');
-    expect(after?.stageStatus).toBe('needs_input');
-    expect(after?.sourcingDecision?.route).toBe('needs_input_conflict');
-    const hard = getDb().query(
-      "SELECT DISTINCT field FROM onboarding_evidence_conflicts WHERE item_id = ? AND severity = 'hard' AND status = 'open'",
-    ).all(item.id) as Array<{ field: string }>;
-    expect(hard.length).toBeGreaterThan(0);
+    expect(after?.stage).toBe('extraction');
+    expect(after?.stageStatus).toBe('pending');
+    expect(after?.sourcingDecision?.route).toBe('distributor_record_to_extraction');
+    expect(after?.sourcingDecision?.warnings?.some((w) => w.includes('auto-resolved'))).toBe(true);
   });
 });
