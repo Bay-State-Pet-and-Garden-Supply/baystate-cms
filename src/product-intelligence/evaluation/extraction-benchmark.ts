@@ -526,10 +526,13 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
     );
     return providerSafetyQualified(r.extractionRate, safety, traceOk);
   });
-  // Seed baseline for the next run if this was the first run (after evaluation, so self-compare is avoided).
+  // Seed baseline for the next run if this was the first run and at least one rate is non-null
+  // (avoids persisting an all-null baseline from an empty run that would block future real seeding).
   if (isFirstRun) {
     const agg = aggregateSafetyRates(rows);
-    if (agg) recordBenchmarkBaseline(opts.datasetId, agg);
+    if (agg && (agg.wrongProductRate != null || agg.wrongVariantRate != null || agg.falsePassRate != null || agg.traceabilityCoverage != null)) {
+      recordBenchmarkBaseline(opts.datasetId, agg);
+    }
   }
   const sorted = [...passing].sort((a, b) => b.extractionRate - a.extractionRate || a.costPerPage - b.costPerPage);
   const recommendation =

@@ -1202,15 +1202,11 @@ export class SpecialistOrchestrator {
     let curatorOutput: CuratedProductDraft | undefined;
     let verifierOutput: VerificationReport | undefined;
 
-    // Retry resume: if a retry target was persisted as currentPhase (retry_discovery/curator/resolver -> curator/resolver/discovery),
-    // start from that phase for this re-run. This makes retrySpecialistWorkflow's persisted currentPhase observable.
+    // Retry is intentionally a full orchestrated re-run from discovery (specialists never invoke each other;
+    // the orchestrator is the sole executor). The retry target is persisted as currentPhase audit hint by
+    // retrySpecialistWorkflow so it is observably used, but execution still starts from discovery to preserve
+    // budget/lease invariants and required upstream artifacts (resolver needs extraction, curator needs resolver).
     let targetPhase: 'discovery' | 'extraction' | 'resolver' | 'curator' | 'verifier' = 'discovery';
-    try {
-      const persisted = await this.persistenceRepo.get(context.runId);
-      if (persisted && ['discovery', 'extraction', 'resolver', 'curator', 'verifier'].includes(persisted.currentPhase)) {
-        targetPhase = persisted.currentPhase as typeof targetPhase;
-      }
-    } catch { /* persistence read is best-effort for resume */ }
 
     const profileAttemptsByDomainVersion = new Map<string, number>();
 
