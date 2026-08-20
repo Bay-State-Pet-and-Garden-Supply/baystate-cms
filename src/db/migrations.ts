@@ -4489,6 +4489,71 @@ export function runMigrations(): void {
     console.log('[Migrations] Brand URL index & sitemap health schema migration complete.');
   }
 
+  // ── Seed default / known brand sites mapping ──
+  const brandSitesSeedVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('brand_sites_seed_version') as { value: string } | undefined;
+  if (!brandSitesSeedVersion) {
+    console.log('[Migrations] Seeding known brand sites mappings...');
+    const now = new Date().toISOString();
+    const seedMappings: Array<{ brandName: string; domain: string }> = [
+      { brandName: 'The Honest Kitchen', domain: 'thehonestkitchen.com' },
+      { brandName: 'Honest Kitchen', domain: 'thehonestkitchen.com' },
+      { brandName: 'Woof', domain: 'mywoof.com' },
+      { brandName: 'My Woof', domain: 'mywoof.com' },
+      { brandName: 'Earth Animal', domain: 'earthanimal.com' },
+      { brandName: 'Instinct', domain: 'instinctpetfood.com' },
+      { brandName: "Stella & Chewy's", domain: 'stellaandchewys.com' },
+      { brandName: 'Stella & Chewys', domain: 'stellaandchewys.com' },
+      { brandName: 'Polkadog', domain: 'polkadog.com' },
+      { brandName: 'Polka Dog Bakery', domain: 'polkadog.com' },
+      { brandName: 'Manna Pro', domain: 'mannapro.com' },
+      { brandName: "Nature's Way", domain: 'natureswaybirds.com' },
+      { brandName: 'Natures Way', domain: 'natureswaybirds.com' },
+      { brandName: 'The Missing Link', domain: 'missinglinkproducts.com' },
+      { brandName: 'Missing Link', domain: 'missinglinkproducts.com' },
+      { brandName: 'Koha', domain: 'kohapet.com' },
+      { brandName: 'Dr. Marty', domain: 'drmartypets.com' },
+      { brandName: 'Dr Marty', domain: 'drmartypets.com' },
+      { brandName: 'Company of Animals', domain: 'companyofanimals.com' },
+      { brandName: 'The Company of Animals', domain: 'companyofanimals.com' },
+      { brandName: 'Rescue', domain: 'rescue.com' },
+      { brandName: 'Blue Buffalo', domain: 'bluebuffalo.com' },
+      { brandName: 'Purina', domain: 'purina.com' },
+    ];
+
+    const insertStmt = db.prepare(`
+      INSERT OR IGNORE INTO brand_sites (id, brand_name, domain, success_count, created_at)
+      VALUES (?, ?, ?, 1, ?)
+    `);
+
+    for (const m of seedMappings) {
+      const normBrand = m.brandName.toLowerCase().trim();
+      const normDomain = m.domain.toLowerCase().replace(/^www\./, '').trim();
+      const id = randomUUID();
+      insertStmt.run(id, normBrand, normDomain, now);
+    }
+
+    // Backfill brand into brand_url_index and rebuild FTS if table exists
+    try {
+      const updateUrlBrandStmt = db.prepare(`
+        UPDATE brand_url_index
+        SET brand = ?
+        WHERE domain = ? AND (brand IS NULL OR brand = '')
+      `);
+      for (const m of seedMappings) {
+        const normDomain = m.domain.toLowerCase().replace(/^www\./, '').trim();
+        updateUrlBrandStmt.run(m.brandName, normDomain);
+      }
+      db.exec("INSERT INTO brand_url_fts(brand_url_fts) VALUES('rebuild');");
+    } catch {
+      // ignore if brand_url_index doesn't exist yet
+    }
+
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('brand_sites_seed_version', '1');");
+    console.log('[Migrations] Brand sites mapping seed complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

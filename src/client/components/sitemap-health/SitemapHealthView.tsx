@@ -250,7 +250,7 @@ export function SitemapHealthView() {
                                 fontWeight: 600,
                               }}
                             >
-                              🏷️ {b.brandName}
+                              🏷️ {b.brandName && b.brandName === b.brandName.toLowerCase() ? b.brandName.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : b.brandName}
                             </span>
                           ))
                         ) : (

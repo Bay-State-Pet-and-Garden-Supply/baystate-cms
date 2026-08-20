@@ -282,7 +282,7 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
                     fontWeight: 600,
                   }}
                 >
-                  🏷️ {b.brandName}
+                  🏷️ {b.brandName && b.brandName === b.brandName.toLowerCase() ? b.brandName.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : b.brandName}
                 </span>
               ))
             ) : (
@@ -594,7 +594,7 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
                                   display: 'inline-block',
                                 }}
                               >
-                                {domainBrand}
+                                {domainBrand && domainBrand === domainBrand.toLowerCase() ? domainBrand.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : domainBrand}
                               </span>
                             ) : (
                               <span style={{ color: '#94a3b8', fontSize: '0.75rem' }}>—</span>
