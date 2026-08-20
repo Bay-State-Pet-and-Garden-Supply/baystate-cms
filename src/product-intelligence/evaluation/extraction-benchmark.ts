@@ -501,20 +501,20 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
 
   // Safety-aware recommendation: retrieval 200 with wrong size is already counted as extraction failure;
   // traceability coverage must be >=0.8 and safety gates must pass to be recommended.
+  // Baseline is read ONCE before filtering so the entire run is evaluated consistently;
+  // first run with no prior baseline is intentionally absolute-only, then the baseline is
+  // seeded AFTER the filter for the next run (avoids within-run self-compare where later
+  // rows would see a baseline just created from earlier rows in the same run).
+  const baseline = getBenchmarkBaseline(opts.datasetId);
+  const isFirstRun = !baseline;
+  if (isFirstRun) {
+    console.warn('extraction-benchmark: no baseline recorded for dataset, gate is absolute only (intentional first-run fallback)');
+  }
   const passing = rows.filter((r) => {
     if (r.pages === 0) return false;
     if (r.extractionRate < 0.8) return false;
     if (r.costPerCorrectProduct == null || r.costPerCorrectProduct > 0.01) return false;
     const traceOk = r.traceability.coverage == null ? false : r.traceability.coverage >= 0.8;
-    // First-run baseline: no prior baseline exists, so gate is absolute-only by design (cannot regress against self).
-    // Intentionally evaluate with baseline=null for this run, then persist current rates as baseline for subsequent runs.
-    const baseline = getBenchmarkBaseline(opts.datasetId);
-    if (!baseline) {
-      console.warn('extraction-benchmark: no baseline recorded for dataset, gate is absolute only (intentional first-run fallback)');
-      // Seed the baseline once from this run so later runs enforce non-regression.
-      const agg = aggregateSafetyRates(rows);
-      if (agg) recordBenchmarkBaseline(opts.datasetId, agg);
-    }
     const safety = evaluateSafetyGates(
       {
         wrongProductRate: r.exactProductAccuracy == null ? null : 1 - r.exactProductAccuracy,
@@ -526,6 +526,11 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
     );
     return providerSafetyQualified(r.extractionRate, safety, traceOk);
   });
+  // Seed baseline for the next run if this was the first run (after evaluation, so self-compare is avoided).
+  if (isFirstRun) {
+    const agg = aggregateSafetyRates(rows);
+    if (agg) recordBenchmarkBaseline(opts.datasetId, agg);
+  }
   const sorted = [...passing].sort((a, b) => b.extractionRate - a.extractionRate || a.costPerPage - b.costPerPage);
   const recommendation =
     sorted.length > 0

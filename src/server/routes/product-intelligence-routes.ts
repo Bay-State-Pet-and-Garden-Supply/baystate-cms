@@ -119,6 +119,25 @@ import { PI_GOLDEN_DATASET_NAME } from '../../product-intelligence/evaluation/fi
 const router = new Hono();
 const controlResponses = new Map<string, unknown>();
 
+function ensureHandoffTable(): void {
+  try {
+    getDb().exec(`CREATE TABLE IF NOT EXISTS handoff_intents (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`);
+  } catch { /* best-effort */ }
+}
+function persistHandoffIntent(runId: string, action: string): void {
+  try {
+    ensureHandoffTable();
+    getDb().query(`INSERT INTO handoff_intents (id, run_id, action, created_at) VALUES ($id, $runId, $action, $createdAt)`).run({
+      $id: `${runId}:${action}:${Date.now()}`, $runId: runId, $action: action, $createdAt: new Date().toISOString(),
+    });
+  } catch { /* best-effort durable queue */ }
+}
+
 function requireWorkspace() {
   const ws = getCurrentWorkspace();
   if (!ws) return null;
@@ -494,10 +513,11 @@ router.post('/product-intelligence/runs/:id/handoff', async (c) => {
   if (!(await isVerifiedTerminalWorkflow(runId))) {
     return c.json({ error: 'handoff requires verified terminal state', code: 'not_verified_terminal' }, 409);
   }
-  // Handoff is intentionally 202 Accepted (async navigation/handoff queued server-authoritatively).
+  // Handoff is 202 Accepted but durably queued server-authoritatively (persisted + in-memory idempotency).
   // Mutating handoffs (import_verified) are executed via POST /specialist-workflows/:id/import which is the
-  // fail-closed import path (shadowOnly/kill switch enforced there). This endpoint queues the handoff intent
-  // server-authoritatively so the client never routes directly.
+  // fail-closed import path (shadowOnly/kill switch enforced there). This endpoint persists the intent so a
+  // crash does not lose the queued handoff, and the client never routes directly.
+  persistHandoffIntent(runId, String(body.action));
   const response = { runId, accepted: true, action: body.action, idempotent: Boolean(key) };
   if (key) controlResponses.set(key, response);
   return c.json(response, 202);
