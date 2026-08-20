@@ -87,6 +87,12 @@ export interface SitemapFetchResult {
   reconcileResult?: ReconcileResult;
 }
 
+interface FetchAttemptTracker {
+  lastStatus: number | null;
+  isBlocked: boolean;
+  blockReason: string | null;
+}
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /** Per-fetch timeout (ms). Mirrors `HTTP_FETCH_TIMEOUT_MS` in `page-extractor.ts`. */
@@ -171,13 +177,16 @@ export async function fetchAndParseSitemap(
   const shouldPersist = options?.persistIndex !== false;
 
   let matchedResult: { entries: SitemapUrlEntry[]; sourceUrl: string } | null = null;
-  let lastErrorStatus: number | null = null;
-  let lastErrorMessage: string | null = null;
+  const tracker: FetchAttemptTracker = {
+    lastStatus: null,
+    isBlocked: false,
+    blockReason: null,
+  };
 
   // ── Step 1: try standard sitemap paths ────────────────────────────────
   for (const path of STANDARD_SITEMAP_PATHS) {
     const url = origin + path;
-    const result = await tryFetchSitemap(url, 0, fetchFn);
+    const result = await tryFetchSitemap(url, 0, fetchFn, tracker);
     if (result) {
       matchedResult = result;
       break;
@@ -189,9 +198,9 @@ export async function fetchAndParseSitemap(
     console.log(
       `[SitemapFetcher] All standard paths failed for ${origin}; falling back to /robots.txt.`,
     );
-    const robotsUrls = await parseRobotsSitemaps(origin + '/robots.txt', fetchFn);
+    const robotsUrls = await parseRobotsSitemaps(origin + '/robots.txt', fetchFn, tracker);
     for (const robotsUrl of robotsUrls) {
-      const result = await tryFetchSitemap(robotsUrl, 0, fetchFn);
+      const result = await tryFetchSitemap(robotsUrl, 0, fetchFn, tracker);
       if (result) {
         matchedResult = result;
         break;
@@ -203,7 +212,7 @@ export async function fetchAndParseSitemap(
   if (!matchedResult) {
     for (const path of SHOPIFY_SITEMAP_PATHS) {
       const url = origin + path;
-      const result = await tryFetchSitemap(url, 0, fetchFn);
+      const result = await tryFetchSitemap(url, 0, fetchFn, tracker);
       if (result) {
         matchedResult = result;
         break;
@@ -275,13 +284,23 @@ export async function fetchAndParseSitemap(
 
   // Failed to discover sitemap
   console.log(`[SitemapFetcher] No sitemap discovered for ${origin}.`);
+  if (tracker.isBlocked) {
+    try {
+      recordDomainStatus(
+        normDomain,
+        'blocked',
+        tracker.blockReason || 'Site blocked crawler (HTTP 403 / Cloudflare Challenge)',
+      );
+    } catch { /* non-critical */ }
+  }
+
   if (shouldPersist) {
     try {
       recordRefreshRun({
         domain: normDomain,
         started_at: startedAt,
         completed_at: completedAt,
-        status: 'failed',
+        status: tracker.isBlocked ? 'blocked' : 'failed',
         source_url: null,
         total_urls_observed: 0,
         product_urls_eligible: 0,
@@ -289,8 +308,10 @@ export async function fetchAndParseSitemap(
         updated_count: 0,
         inactivated_count: 0,
         duration_ms: durationMs,
-        error_message: lastErrorMessage || 'No sitemap discovered',
-        http_status: lastErrorStatus,
+        error_message: tracker.isBlocked
+          ? tracker.blockReason || 'Site blocked crawler (HTTP 403 / Cloudflare Challenge)'
+          : 'No sitemap discovered',
+        http_status: tracker.lastStatus,
       });
     } catch { /* best effort */ }
   }
@@ -318,8 +339,9 @@ async function tryFetchSitemap(
   url: string,
   depth: number,
   fetchFn: NetworkFetch = fetch,
+  tracker?: FetchAttemptTracker,
 ): Promise<{ urls: string[]; entries: SitemapUrlEntry[]; sourceUrl: string } | null> {
-  const body = await fetchSitemapBody(url, fetchFn);
+  const body = await fetchSitemapBody(url, fetchFn, tracker);
   if (body === null) return null;
 
   const detected = detectSitemapKind(body);
@@ -341,7 +363,7 @@ async function tryFetchSitemap(
     );
     const collected: SitemapUrlEntry[] = [];
     for (const child of childUrls) {
-      const childResult = await tryFetchSitemap(child, depth + 1, fetchFn);
+      const childResult = await tryFetchSitemap(child, depth + 1, fetchFn, tracker);
       if (childResult) {
         for (const e of childResult.entries) collected.push(e);
       }
@@ -366,7 +388,11 @@ async function tryFetchSitemap(
  * Honors `Content-Encoding: gzip` and the gzip magic bytes for
  * pre-compressed bodies served without the header.
  */
-async function fetchSitemapBody(url: string, fetchFn: NetworkFetch = fetch): Promise<string | null> {
+async function fetchSitemapBody(
+  url: string,
+  fetchFn: NetworkFetch = fetch,
+  tracker?: FetchAttemptTracker,
+): Promise<string | null> {
   let response: Response;
   try {
     response = await fetchFn(url, {
@@ -383,6 +409,18 @@ async function fetchSitemapBody(url: string, fetchFn: NetworkFetch = fetch): Pro
   }
 
   if (!response.ok) {
+    if (tracker) {
+      tracker.lastStatus = response.status;
+      const isCloudflare =
+        response.headers.get('server')?.toLowerCase().includes('cloudflare') ||
+        response.headers.get('cf-mitigated') === 'challenge';
+      if (response.status === 403 || response.status === 401 || isCloudflare) {
+        tracker.isBlocked = true;
+        tracker.blockReason = isCloudflare
+          ? 'Site blocked crawler (Cloudflare Bot Challenge / HTTP 403)'
+          : `Site blocked crawler (HTTP ${response.status})`;
+      }
+    }
     console.log(`[SitemapFetcher] ${url} → HTTP ${response.status}; skipping.`);
     return null;
   }
@@ -456,7 +494,11 @@ function gunzip(bytes: Uint8Array): Uint8Array {
  * directives. Returns an empty array when the file is missing, empty,
  * or unparseable; never throws.
  */
-async function parseRobotsSitemaps(robotsUrl: string, fetchFn: NetworkFetch = fetch): Promise<string[]> {
+async function parseRobotsSitemaps(
+  robotsUrl: string,
+  fetchFn: NetworkFetch = fetch,
+  tracker?: FetchAttemptTracker,
+): Promise<string[]> {
   let body: string | null = null;
   try {
     const response = await fetchFn(robotsUrl, {
@@ -467,6 +509,18 @@ async function parseRobotsSitemaps(robotsUrl: string, fetchFn: NetworkFetch = fe
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!response.ok) {
+      if (tracker) {
+        tracker.lastStatus = response.status;
+        const isCloudflare =
+          response.headers.get('server')?.toLowerCase().includes('cloudflare') ||
+          response.headers.get('cf-mitigated') === 'challenge';
+        if (response.status === 403 || response.status === 401 || isCloudflare) {
+          tracker.isBlocked = true;
+          tracker.blockReason = isCloudflare
+            ? 'Site blocked crawler (Cloudflare Bot Challenge / HTTP 403)'
+            : `Site blocked crawler (HTTP ${response.status})`;
+        }
+      }
       console.log(`[SitemapFetcher] robots.txt ${robotsUrl} → HTTP ${response.status}.`);
       return [];
     }

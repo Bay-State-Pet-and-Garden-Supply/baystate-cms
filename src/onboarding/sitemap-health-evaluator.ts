@@ -59,6 +59,10 @@ export function evaluateDomainSitemapHealth(
     status = 'blocked';
     statusReason = `Domain is marked ${domainStatus.status} (${domainStatus.reason || 'anti-bot/connectivity'})`;
     attentionReasons.push('domain_blocked');
+  } else if (latestRefresh?.status === 'blocked') {
+    status = 'blocked';
+    statusReason = latestRefresh.error_message || 'Crawler blocked (HTTP 403 / Cloudflare Challenge)';
+    attentionReasons.push('domain_blocked');
   } else if (!latestRefresh && counts.totalCount === 0) {
     status = 'missing';
     statusReason = 'No sitemap discovered or fetched yet';
