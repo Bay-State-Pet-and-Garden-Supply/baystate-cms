@@ -64,6 +64,9 @@ export function SaveBar({ state, controller }: SaveBarProps) {
     warnings.push(`${totalSuggestionWarnings} warning${totalSuggestionWarnings !== 1 ? 's' : ''} from generated selectors should be reviewed before saving.`);
   }
 
+  // story: e06s03 — per-field governance blocks Save while any decision is pending/proposed
+  const hasPendingFieldDecision = Object.values((state as any).generation?.fieldSuggestions ?? {}).some((s: any) => s?.decision === 'pending' || s?.decision === 'proposed');
+  if (hasPendingFieldDecision) blockingErrors.push('Per-field decisions pending — accept/reject or mark unsupported before saving.');
   const canSave = blockingErrors.length === 0 && !isSaving && dirty;
 
   const handleSave = () => { if (canSave) controller.saveProfile(); };

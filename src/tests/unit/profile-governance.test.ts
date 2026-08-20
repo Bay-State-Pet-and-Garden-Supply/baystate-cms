@@ -1,6 +1,6 @@
 // story: e06s03 — per-field governance in Build canvas + Save guard
 import { describe, it, expect } from 'vitest';
-import { canSaveProfile, isFieldDecisionPending } from '../../onboarding/profile-governance-service';
+import { canSaveProfile, isFieldDecisionPending } from '../../onboarding/profile-governance-helpers';
 
 describe('profile-governance — per-field approval blocks Save/Activate, unsupported explicit', () => {
   it('pending decisions block save', () => {

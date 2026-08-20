@@ -1046,3 +1046,7 @@ export function listFieldDecisionsForGeneration(generationId: string): ProfileGe
 export function listValidationResultsForRevision(revisionId: string): ProfileGenerationValidationResult[] {
   return listValidationResultsByRevision(revisionId) as unknown as ProfileGenerationValidationResult[];
 }
+
+// ─── Build-canvas per-field governance helpers (story: e06s03) ───────────────
+// Re-export pure helpers to keep governance service as single authority.
+export { isFieldDecisionPending, canSaveProfile } from './profile-governance-helpers';
