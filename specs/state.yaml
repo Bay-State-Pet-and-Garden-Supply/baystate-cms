@@ -6,9 +6,9 @@ active_epic_id: null
 active_story_id: null
 active_bug_id: null
 release:
-  target_version: "0.3.0"
-  last_tag: v0.2.1
-  last_publish: "2026-08-20T08:12:00Z"
+  target_version: null
+  last_tag: v0.3.0
+  last_publish: "2026-08-20T08:44:00Z"
 epic_cycle:
   current_step: null
   next_skill: null
@@ -20,21 +20,20 @@ bug_cycle:
   completed_steps: []
 git:
   branch: main
-  hash: f3ee4f2
+  hash: 7996f58
 handoff:
-  last_step_completed: "PLAN v0.3.0 — e04/e05 curation stabilization sliced (e04 13 BCP, e05 13 BCP, 5 stories including e05s03 gold-set); SCOPE_LATEST.yaml rewritten for onboarding pipeline determinism"
+  last_step_completed: "RELEASE v0.3.0 — e04/e05 curation stabilization landed (5 stories, 26 BCP, stage navigability + field provenance + explainable gates + taxonomy provenance + e05s03 gold-set, GPT blockers fixed)"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
     - AGENTS.md
     - CONTEXT.md
     - specs/product/SCOPE_LATEST.yaml
-    - context.md
-    - specs/epics/e04-curation-determinism/epic.yaml
-    - specs/epics/e05-review-observability/epic.yaml
-  next_skill: "build-epic"
+    - specs/tech-architecture/CURATION_FIELD_MAP.md
+    - specs/metrics/curation-eval.json
+  next_skill: null
 metrics:
-  story_start: "2026-08-20T03:25:00Z"
-  story_end: "2026-08-20T03:41:26Z"
-  cycle_minutes: 16
-  bcp_per_hour: 18.8
+  story_start: "2026-08-20T08:26:00Z"
+  story_end: "2026-08-20T08:44:00Z"
+  cycle_minutes: 18
+  bcp_per_hour: 86.7
