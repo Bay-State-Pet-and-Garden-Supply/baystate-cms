@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './theme.css';
+import './styles/workspace-tokens.css';
 import App from './App';
 
 const rootEl = document.getElementById('root');

@@ -20,6 +20,11 @@
 
   --radius-lg: 8px;
   --radius-sm: 4px;
+  /* aliases for theme.css naming — picker uses --rounded-* and --color-corner-callout-gold */
+  --rounded-lg: var(--radius-lg);
+  --rounded-sm: var(--radius-sm);
+  --color-corner-callout-gold: var(--color-corner-gold);
+  --color-muted-gold: var(--color-muted-gold);
 
   --grid-cols: 12;
   --gutter: 24px;
