@@ -20,7 +20,7 @@ bug_cycle:
   completed_steps: []
 git:
   branch: main
-  hash: REPLACE_AFTER_MERGE
+  hash: d55ca03
 handoff:
   last_step_completed: "e03s01 release-branch — landed to main"
   open_decisions: []
