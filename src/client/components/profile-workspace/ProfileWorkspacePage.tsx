@@ -9,6 +9,7 @@ import { HistoryShell } from './HistoryShell';
 import { ProfileBuilder } from '../profile-builder/ProfileBuilder';
 import type { DomainProfileState } from '../../../db/repositories/domain-profile-state-repo';
 import { deriveReadinessState } from '../../../onboarding/profile-readiness';
+import { SuitePanel } from './SuitePanel';
 
 export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }): React.ReactElement {
   const domain = normalizeBrandHubDomain(rawDomain);
@@ -55,6 +56,7 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
       <ReadinessRail state={readiness} />
       <div>
         {state ? <ProfileWorkspaceHeader state={state} /> : <div>Loading {domain}…</div>}
+        <SuitePanel domain={domain} />
         <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: 12 }}>
           <ProfileBuilder mode="inline" initialDomain={domain} onCancel={() => {}} />
         </div>
