@@ -712,6 +712,7 @@ describe('PR6 acceptance — durable parent title coordination, replay-safe afte
   it('5: flag OFF — zero output rows, the legacy coordinator + cohortCache path (byte-identical), zero parent-level title calls', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const { items } = await prepareActiveV2Workspace(workspaceId, wsPath, TWO_MEMBER_EXTRACTIONS);
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: true });
     expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
 
     const worker = new OnboardingWorker(workspaceId, wsPath);

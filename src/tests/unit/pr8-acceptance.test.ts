@@ -1142,6 +1142,7 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     // byte-identically (flag defaults OFF; a freeze would force the flags ON).
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: true });
     expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
 
     const worker = new OnboardingWorker(workspaceId, wsPath);

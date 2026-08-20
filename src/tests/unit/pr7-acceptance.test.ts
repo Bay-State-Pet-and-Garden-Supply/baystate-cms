@@ -1296,7 +1296,7 @@ describe('PR7 acceptance — durable parent page coordination, replay-safe after
     // member reuses the cached promise — a no-cache implementation would
     // re-invoke the transport).
     for (const mode of [
-      { label: 'flag OFF', apply: () => resetCohortCurationFlagsOverride() },
+      { label: 'flag OFF', apply: () => overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: true }) },
       { label: 'shadow', apply: () => overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true }) },
     ]) {
       // Reset the shared mock counters per iteration (the loop runs both modes

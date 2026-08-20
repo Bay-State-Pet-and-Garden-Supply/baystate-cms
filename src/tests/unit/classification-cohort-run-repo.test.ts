@@ -621,21 +621,21 @@ describe('classification cohort run repo (issue #30, PR3 M1)', () => {
 describe('cohort curation flags (issue #30, PR3 M1)', () => {
   afterEach(() => resetCohortCurationFlagsOverride());
 
-  it('defaults to everything OFF (byte-identical legacy behavior)', () => {
+  it('defaults to cohort-active (issue #30 rollout: default-on for new batches)', () => {
     expect(DEFAULT_COHORT_CURATION_FLAGS).toEqual({
-      cohortCurationV2Enabled: false,
-      cohortShadowOnly: true,
+      cohortCurationV2Enabled: true,
+      cohortShadowOnly: false,
       cohortProductTypeConfidenceFloor: 0.7,
     });
     expect(loadCohortCurationFlags({})).toEqual(DEFAULT_COHORT_CURATION_FLAGS);
     expect(getCohortCurationFlags()).toEqual(DEFAULT_COHORT_CURATION_FLAGS);
   });
 
-  it('parses env fail-closed (unparseable values fall back to OFF)', () => {
+  it('parses env fail-closed (unparseable values fall back to default)', () => {
     expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_CURATION_V2: 'true' }).cohortCurationV2Enabled).toBe(true);
     expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_CURATION_V2: 'TRUE' }).cohortCurationV2Enabled).toBe(true);
     expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_CURATION_V2: '1' }).cohortCurationV2Enabled).toBe(true);
-    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_CURATION_V2: 'banana' }).cohortCurationV2Enabled).toBe(false);
+    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_CURATION_V2: 'banana' }).cohortCurationV2Enabled).toBe(true);
     expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY: 'yes' }).cohortShadowOnly).toBe(true);
     expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY: '0' }).cohortShadowOnly).toBe(false);
     expect(loadCohortCurationFlags({
@@ -658,12 +658,12 @@ describe('cohort curation flags (issue #30, PR3 M1)', () => {
   });
 
   it('runtime override round-trips', () => {
-    const flags = overrideCohortCurationFlags({ cohortCurationV2Enabled: true });
-    expect(flags.cohortCurationV2Enabled).toBe(true);
-    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(true);
+    const flags = overrideCohortCurationFlags({ cohortCurationV2Enabled: false });
+    expect(flags.cohortCurationV2Enabled).toBe(false);
+    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
 
     resetCohortCurationFlagsOverride();
-    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
+    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(true);
   });
 });
 
@@ -953,8 +953,8 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
   it('rerunIdleCohortRevision: ONE cohort-atomic op — idle TERMINAL parent superseded + children terminalized + EXACT members reset in the same transaction; claim slot reopens (PR10 C1 + review R1)', () => {
     const wsId = newWorkspace();
     const { items, cohorts } = setupFamilyBatch(wsId);
-    const cohort = cohorts[0];
     const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const cohort = cohorts.find(c => c.id === run.cohortId)!;
     expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
     expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
     const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
@@ -1038,13 +1038,11 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
   it('rerunIdleCohortRevision: TWO cohorts in ONE batch — re-running cohort A leaves EVERY cohort B item byte-equivalent (PR10 review R1, cross-cohort isolation)', () => {
     const wsId = newWorkspace();
     const { cohorts } = setupFamilyBatch(wsId);
-    // setupFamilyBatch forms TWO cohorts: the Purina group (2 items) + the
-    // Acme singleton (1 item).
-    const cohortA = cohorts.find(c => c.groupKey.includes('purina')) ?? cohorts[0];
-    const cohortB = cohorts.find(c => c !== cohortA)!;
+    const [runA] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const cohortA = cohorts.find(c => c.id === runA.cohortId)!;
+    const cohortB = cohorts.find(c => c.id !== cohortA.id)!;
     const bMembers = getCohortMembers(cohortB.id).map(m => m.onboardingItemId);
     expect(bMembers.length).toBeGreaterThan(0);
-    const [runA] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
     // Tie the claimed run to the selected cohort explicitly — the test can
     // never mask a mismatched (cohortId, currentRunId) invocation.
     expect(runA.cohortId).toBe(cohortA.id);
@@ -1072,8 +1070,8 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
   it('rerunIdleCohortRevision: ATOMIC ROLLBACK — a failure after the parent CAS leaves parent, children, and items all unchanged (PR10 review R1)', () => {
     const wsId = newWorkspace();
     const { items, cohorts } = setupFamilyBatch(wsId);
-    const cohort = cohorts[0];
     const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const cohort = cohorts.find(c => c.id === run.cohortId)!;
     expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
     expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
     const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
@@ -1134,9 +1132,9 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
   it('rerunIdleCohortRevision: SELF-AUTHENTICATING CAS — a mismatched (cohortId, currentRunId) pair can never supersede a run of another cohort (PR10-close P2)', () => {
     const wsId = newWorkspace();
     const { cohorts } = setupFamilyBatch(wsId);
-    const cohortA = cohorts[0];
-    const cohortB = cohorts.find(c => c !== cohortA)!;
     const [runA] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const cohortA = cohorts.find(c => c.id === runA.cohortId)!;
+    const cohortB = cohorts.find(c => c.id !== cohortA.id)!;
     expect(runA.cohortId).toBe(cohortA.id);
     expect(freezeAuthorities(runA.id, 'worker-a')).toBe(true);
     expect(transitionCohortRunToRunning(runA.id, 'worker-a')).toBe(true);
