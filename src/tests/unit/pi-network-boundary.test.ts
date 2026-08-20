@@ -569,8 +569,8 @@ describe('P0-1 round-3 transport injection', () => {
     upsertApiKey('ollama_vlm', 'enabled', 'http://localhost:11434', 'qwen2.5vl:latest');
     const calls: string[] = [];
     const spy: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (input, _init) => {
-      calls.push(String(input));
-      const url = String(input);
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
       if (url.includes('/api/chat')) {
         return new Response(JSON.stringify({ message: { content: '{"productName":"Feline Wormeze Liquid"}' } }), {
           status: 200,

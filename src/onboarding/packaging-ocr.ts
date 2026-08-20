@@ -562,7 +562,7 @@ export async function extractPackagingOcr(
   let rawResponse: string;
   let executedVlmTarget: { connectionId: string; modelId: string } | null = null;
   try {
-    if (!runBound && !modelFetchFn) {
+    if (!runBound && !modelFetchFn && !fetchFn) {
       // Live OCR through the AI Compute visionOcr dispatcher: executes the
       // configured fallback and enforces the image data-sharing policy.
       // Frozen (run-bound) and gateway-bound (Product Intelligence) calls

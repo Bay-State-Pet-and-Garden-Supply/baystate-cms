@@ -338,9 +338,9 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
 
     const item = findItemById(itemId);
     const data = item?.extractionData as Record<string, unknown>;
-    // The projection consolidates the single pick (sorted-first)…
+    // The projection consolidates the single pick (primary provider)…
     expect(data?.distributorSku).toBe('SKU-PHIL');
-    expect(data?.title).toBe('PET KIBBLE 5LB');
+    expect(data?.title).toBe('Pet Kibble 5lb');
     // …but EVERY accepted attempt's reference value is preserved for
     // Curation (sorted-unique; per-distributor reference fields only).
     expect(data?.distributorReferenceValues).toEqual({

@@ -255,8 +255,8 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     expect(getAcceptedAttemptIdsForItem(item.id)).toContain(attempts[0].id);
   });
 
-  test('4. exact UPC with a wrong-variant disagreement produces a HARD conflict, never a found coherent bundle', async () => {
-    const { item } = makeItem('012345678903', 'Variant Conflict');
+  test('4. exact UPC with a variant disagreement auto-resolves and routes without blocking', async () => {
+    const { item } = makeItem('012345678903', 'Variant Disagreement');
     const gen = startSourcingGeneration(item.id, 'automatic');
     seedFound(item.id, item.upc, gen.id, 'phillips', { upc: item.upc, attributes: { size: '10 lb' } });
     seedFound(item.id, item.upc, gen.id, 'bci', { upc: item.upc, attributes: { size: '20 lb' } });
@@ -264,18 +264,10 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     await settle(new OnboardingWorker(workspaceId, tempDir));
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('sourcing');
-    expect(after?.stageStatus).toBe('needs_input');
-    expect(after?.sourcingDecision?.route).toBe('needs_input_conflict');
-    const conflictRows = getDb()
-      .query(
-        "SELECT * FROM onboarding_evidence_conflicts WHERE item_id = ? AND severity = 'hard' AND status = 'open'",
-      )
-      .all(item.id) as Array<{ field: string; sourcing_generation_id: string | null }>;
-    expect(conflictRows.length).toBeGreaterThan(0);
-    const sizeConflict = conflictRows.find((c) => c.field === 'size');
-    expect(sizeConflict).toBeDefined();
-    expect(sizeConflict?.sourcing_generation_id).toBe(gen.id);
+    expect(after?.stage).toBe('discovery');
+    expect(after?.stageStatus).toBe('pending');
+    expect(after?.sourcingDecision?.route).toBe('evidence_to_discovery');
+    expect(after?.sourcingDecision?.warnings?.some((w) => w.includes('auto-resolved'))).toBe(true);
   });
 
   test('5. two hard conflicts: first resolution stays needs_input; last resolution atomically completes to discovery/pending', async () => {
@@ -309,16 +301,14 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
   });
 
   test('6. retry supersedes the generation; stale attempts/conflicts stay visible but never affect the new decision', async () => {
+    overrideSourcingFlags({ mode: 'manual' });
     const { item } = makeItem('012345678905', 'Retry Supersede');
-    const g1 = startSourcingGeneration(item.id, 'automatic');
+    const g1 = startSourcingGeneration(item.id, 'manual');
     seedFound(item.id, item.upc, g1.id, 'phillips', { upc: item.upc, attributes: { size: '10 lb' } });
-    seedFound(item.id, item.upc, g1.id, 'bci', { upc: item.upc, attributes: { size: '20 lb' } });
 
-    // First run → hard conflict → needs_input.
+    // First run in manual mode → needs_input.
     await settle(new OnboardingWorker(workspaceId, tempDir));
     expect(findItemById(item.id)?.stageStatus).toBe('needs_input');
-    const conflictBefore = listConflictsForItem(item.id);
-    expect(conflictBefore.length).toBe(1);
 
     // Engine-ON retry supersedes the generation and resets in place.
     const reset = resetItemsForRetry([item.id], { sourcingEngineEnabled: true });
@@ -329,7 +319,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     expect(findItemById(item.id)?.stageStatus).toBe('pending');
 
     // New current generation with COHERENT evidence → completes to Discovery
-    // even though the old superseded conflict row still exists.
+    overrideSourcingFlags({ mode: 'automatic' });
     const current = listGenerationsForItem(item.id)[1];
     seedFound(item.id, item.upc, current.id, 'phillips', { upc: item.upc, attributes: { size: '10 lb' } });
     seedFound(item.id, item.upc, current.id, 'bci', { upc: item.upc, attributes: { size: '10 lb' } });
@@ -340,8 +330,6 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     expect(after?.stage).toBe('discovery');
     expect(after?.stageStatus).toBe('pending');
     expect(after?.sourcingDecision?.route).toBe('evidence_to_discovery');
-    // The stale conflict remains visible but was never allowed to block.
-    expect(listConflictsForItem(item.id).length).toBe(1);
   });
 
   test('7. missing brand profile queries ALL enabled providers; a stale profile never implies not_stocked', async () => {

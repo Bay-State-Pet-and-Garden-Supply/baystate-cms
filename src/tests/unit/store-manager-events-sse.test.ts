@@ -199,7 +199,7 @@ describe('events routes — stream behavior', () => {
 describe('events routes — ownership guard (no workspace)', () => {
   beforeAll(() => {
     try { resetDb(); } catch { /* ok */ }
-    mock.module('/Users/nickborrello/Desktop/Projects/shopsite-cms/src/server/services/workspace-service', () => ({
+    mock.module('../../server/services/workspace-service', () => ({
       getCurrentWorkspace: () => null,
     }));
   });

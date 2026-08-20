@@ -162,16 +162,16 @@ describe('ADR 0017 — brand-domain blockers aggregation', () => {
 
 describe('assignOfficialDomainForBrand (guarded shared service)', () => {
   it('rejects blank/invalid domains with a typed error', () => {
-    const blank = assignOfficialDomainForBrand({ brand: 'Fromm', domain: '   ' });
+    const blank = assignOfficialDomainForBrand({ brand: 'InvalidTestBrand', domain: '   ' });
     expect(blank.ok).toBe(false);
     if (!blank.ok) {
       expect(blank.code).toBe('invalid_domain');
       expect(blank.message).toContain('valid bare domain or URL');
     }
-    const invalid = assignOfficialDomainForBrand({ brand: 'Fromm', domain: 'not a domain' });
+    const invalid = assignOfficialDomainForBrand({ brand: 'InvalidTestBrand', domain: 'not a domain' });
     expect(invalid.ok).toBe(false);
     if (!invalid.ok) expect(invalid.code).toBe('invalid_domain');
-    expect(findBrandSites('Fromm')).toHaveLength(0);
+    expect(findBrandSites('InvalidTestBrand')).toHaveLength(0);
   });
 
   it('rejects known retailer/distributor domains with a typed error (no upsert)', () => {

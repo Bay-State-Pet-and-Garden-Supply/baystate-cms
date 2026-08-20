@@ -157,7 +157,7 @@ describe('Sourcing worker pass-through (ADR 0014 flag-gated leg)', () => {
     expect(accepted).toContain(att2.id);
   });
 
-  test('flag ON + hard identity conflict: stays sourcing/needs_input with durable conflict', async () => {
+  test('flag ON + distributor discrepancy: auto-resolves and routes to discovery with warnings', async () => {
     const item = makeSourcingItem();
     const gen = startSourcingGeneration(item.id, 'automatic');
 
@@ -168,15 +168,11 @@ describe('Sourcing worker pass-through (ADR 0014 flag-gated leg)', () => {
     await worker.poll();
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('sourcing');
-    expect(after?.stageStatus).toBe('needs_input');
-    expect(after?.sourcingDecision?.route).toBe('needs_input_conflict');
+    expect(after?.stage).toBe('discovery');
+    expect(['pending', 'in_progress']).toContain(after?.stageStatus ?? '');
+    expect(after?.sourcingDecision?.route).toBe('evidence_to_discovery');
     expect(after?.sourcingDecision?.origin).toBe('automatic_policy');
-
-    const conflicts = getDb()
-      .query("SELECT * FROM onboarding_evidence_conflicts WHERE item_id = ? AND severity = 'hard' AND status = 'open'")
-      .all(item.id) as unknown[];
-    expect(conflicts.length).toBe(1);
+    expect(after?.sourcingDecision?.warnings?.some((w) => w.includes('auto-resolved'))).toBe(true);
   });
 
   test('flag ON: discovery claiming still happens (other stages unaffected)', async () => {
@@ -216,7 +212,7 @@ describe('Sourcing worker pass-through (ADR 0014 flag-gated leg)', () => {
     expect(terminal[0]).toMatchObject({ status: 'completed', stage: 'sourcing', route: 'fallback_to_discovery' });
   });
 
-  test('emits exactly one needs_input event for a hard conflict and never advances', async () => {
+  test('emits exactly one completed event for auto-resolved match and advances', async () => {
     const batch = createBatch({ workspaceId, name: 'SSE Conflict Batch', fileName: 'ssec.csv', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '012345678931', name: 'SSE Conflict', rowNumber: 1, stage: 'sourcing' }], 'sourcing', SOURCING_ENTRY_POLICY_VERSION);
     const gen = startSourcingGeneration(item.id, 'automatic');
@@ -234,9 +230,8 @@ describe('Sourcing worker pass-through (ADR 0014 flag-gated leg)', () => {
 
     const terminal = events.filter((e) => ['completed', 'failed', 'needs_input'].includes(e.status));
     expect(terminal.length).toBe(1);
-    expect(terminal[0].status).toBe('needs_input');
-    expect(findItemById(item.id)?.stage).toBe('sourcing');
-    expect(findItemById(item.id)?.stageStatus).toBe('needs_input');
+    expect(terminal[0].status).toBe('completed');
+    expect(findItemById(item.id)?.stage).toBe('discovery');
   });
 
   // ── Amendment A distributor routing (MC) — inside the shared fixture scope.

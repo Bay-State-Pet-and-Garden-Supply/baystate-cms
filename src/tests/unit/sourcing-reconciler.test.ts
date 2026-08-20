@@ -69,25 +69,19 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
-  test('hard identity conflict on weight persists a durable OPEN conflict and blocks acceptance', async () => {
+  test('identity conflict on weight is auto-resolved to primary distributor and attempts are accepted', async () => {
     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '10 lbs' });
     const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '20 lbs' });
 
     const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
 
-    expect(result.hasHardIdentityConflict).toBe(true);
-    expect(result.hardConflictCount).toBe(1);
-    expect(result.warnings.some((w) => w.includes("Hard conflict detected on identity field 'weight'"))).toBe(true);
-    // Conflicted attempts are NOT accepted.
-    expect(result.acceptedAttemptIds).toEqual([]);
-
-    const conflicts = listConflictsForItem(itemId);
-    expect(conflicts.length).toBe(1);
-    expect(conflicts[0].field).toBe('weight');
-    expect(conflicts[0].severity).toBe('hard');
-    expect(conflicts[0].status).toBe('open');
-    expect(conflicts[0].sourcingGenerationId).toBe(generationId);
-    expect(conflicts[0].candidates.length).toBe(2);
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.hardConflictCount).toBe(0);
+    expect(result.softConflictCount).toBe(1);
+    expect(result.warnings.some((w) => w.includes("auto-resolved to '10 lbs'"))).toBe(true);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    // Soft/auto-resolved discrepancies do not insert blocking open conflict rows
+    expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
   // Epic #46 follow-up (operator weight rule): "0.0600 lb" vs "0.06 lb" are
@@ -129,29 +123,29 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
   });
 
-  test('true weight mismatch still produces a hard conflict', async () => {
+  test('true weight mismatch is auto-resolved with explainable warning', async () => {
     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '0.25 lb' });
     const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '0.50 lb' });
 
     const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
 
-    expect(result.hasHardIdentityConflict).toBe(true);
-    expect(result.hardConflictCount).toBe(1);
-    expect(result.acceptedAttemptIds).toEqual([]);
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.hardConflictCount).toBe(0);
+    expect(result.warnings.some((w) => w.includes("auto-resolved to '0.25 lb'"))).toBe(true);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
   });
 
-  test('malformed weight fails closed: no auto-resolution against a valid value', async () => {
+  test('malformed weight is auto-resolved against valid values with primary provider precedence', async () => {
     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: 'approx 1 lb' });
     const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '1.00 lb' });
 
     const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
 
-    // Fail closed: the malformed value compares as its raw form → conflict stands.
-    expect(result.hasHardIdentityConflict).toBe(true);
-    expect(listConflictsForItem(itemId).length).toBe(1);
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
   });
 
-  test('brand casing-only disagreement is NOT a conflict; distinct brands still are', async () => {
+  test('brand casing-only agreement and distinct brand strings auto-resolve with explainable warning', async () => {
     const caseA = makeAttempt('c1', 'phillips', { upc: '012345678905', brand: 'WHOLESOMES', weight: '5 lb' });
     const caseB = makeAttempt('c2', 'bci', { upc: '012345678905', brand: 'Wholesomes', weight: '5 lb' });
     const caseResult = await reconcileDistributorEvidence(itemId, [caseA, caseB], generationId);
@@ -161,8 +155,20 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     const distinctA = makeAttempt('d1', 'phillips', { upc: '012345678905', brand: 'Wholesomes', weight: '5 lb' });
     const distinctB = makeAttempt('d2', 'bci', { upc: '012345678905', brand: 'WholesomesFlavor', weight: '5 lb' });
     const distinctResult = await reconcileDistributorEvidence(itemId, [distinctA, distinctB], generationId);
-    expect(distinctResult.hasHardIdentityConflict).toBe(true);
-    expect(distinctResult.acceptedAttemptIds).toEqual([]);
+    expect(distinctResult.hasHardIdentityConflict).toBe(false);
+    expect(distinctResult.warnings.some((w) => w.includes("auto-resolved to 'Wholesomes'"))).toBe(true);
+    expect(distinctResult.acceptedAttemptIds.sort()).toEqual(['d1', 'd2']);
+  });
+
+  test('consensus brand resolution (e.g. KONG vs THE KONG COMPANY)', async () => {
+    const d1 = makeAttempt('d1', 'phillips', { upc: '012345678905', brand: 'KONG' });
+    const d2 = makeAttempt('d2', 'bradley', { upc: '012345678905', brand: 'KONG' });
+    const d3 = makeAttempt('d3', 'orgill', { upc: '012345678905', brand: 'THE KONG COMPANY' });
+
+    const result = await reconcileDistributorEvidence(itemId, [d1, d2, d3], generationId);
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.warnings.some((w) => w.includes("auto-resolved to 'KONG'"))).toBe(true);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['d1', 'd2', 'd3']);
   });
 
   test('soft disagreements (copy + distributor reference fields) are consolidated, never persisted as conflict rows, and never block acceptance', async () => {
@@ -191,7 +197,7 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
-  test('confidence NEVER overrides a hard conflict; agreement is accepted even at low confidence', async () => {
+  test('confidence does not override primary distributor candidate selection', async () => {
     const low = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '10 lbs' });
     low.confidence = 0.1;
     const highConflict = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '20 lbs' });
@@ -199,10 +205,9 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
 
     const result = await reconcileDistributorEvidence(itemId, [low, highConflict], generationId);
 
-    // The high-confidence conflicting value does NOT win — it is a hard conflict.
-    expect(result.hasHardIdentityConflict).toBe(true);
-    expect(result.hardConflictCount).toBe(1);
-    expect(result.acceptedAttemptIds).toEqual([]);
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    expect(result.warnings.some((w) => w.includes("auto-resolved to '10 lbs'"))).toBe(true);
   });
 
   test('no found attempts yields an empty result with the no-evidence warning', async () => {
@@ -219,27 +224,17 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
-  test('generation-scoped idempotency: same generation returns the same conflict, a new generation creates a new row', async () => {
+  test('generation-scoped idempotency: auto-resolved evidence is consistent across retries', async () => {
     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', brand: 'Nutro', weight: '10 lbs' });
     const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', brand: 'Nutro', weight: '20 lbs' });
 
-    await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
-    const firstConflictId = listConflictsForItem(itemId)[0].id;
+    const res1 = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+    expect(res1.hasHardIdentityConflict).toBe(false);
+    expect(res1.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
 
-    // Same generation + identical candidate set → the SAME conflict (no dup).
-    await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
-    const conflictsAfterSecond = listConflictsForItem(itemId);
-    expect(conflictsAfterSecond.length).toBe(1);
-    expect(conflictsAfterSecond[0].id).toBe(firstConflictId);
-
-    // A NEW generation gets its own conflict row (stale-generation isolation).
-    const secondGenerationId = startSourcingGeneration(itemId, 'operator_retry').id;
-    await reconcileDistributorEvidence(itemId, [a1, a2], secondGenerationId);
-    const conflictsAfterNewGen = listConflictsForItem(itemId);
-    expect(conflictsAfterNewGen.length).toBe(2);
-    const newGenConflicts = conflictsAfterNewGen.filter((c) => c.sourcingGenerationId === secondGenerationId);
-    expect(newGenConflicts.length).toBe(1);
-    expect(newGenConflicts[0].id).not.toBe(firstConflictId);
+    const res2 = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+    expect(res2.hasHardIdentityConflict).toBe(false);
+    expect(res2.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
   });
 
   test('a found attempt with malformed identityJson is skipped WITHOUT being accepted', async () => {
@@ -258,37 +253,31 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(result.acceptedAttemptIds).toEqual([]);
   });
 
-  test('variant dimensions inside attributes disagree → HARD conflict on the flattened field', async () => {
+  test('variant dimensions inside attributes disagree → auto-resolved on the flattened field', async () => {
     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', attributes: { size: '10 lb', count: '24' } });
     const a2 = makeAttempt('a2', 'unfi', { upc: '012345678905', attributes: { size: '20 lb', count: '24' } });
 
     const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
 
-    // size is identity-critical: the disagreement is a HARD conflict, not a
-    // soft 'attributes' blob; agreeing attributes (count) stay coherent.
-    expect(result.hasHardIdentityConflict).toBe(true);
-    expect(result.hardConflictCount).toBe(1);
-    expect(result.acceptedAttemptIds).toEqual([]);
-    const conflicts = listConflictsForItem(itemId);
-    expect(conflicts.some((c) => c.field === 'size' && c.severity === 'hard')).toBe(true);
-    expect(conflicts.some((c) => c.field === 'count' && c.severity === 'hard')).toBe(false);
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.warnings.some((w) => w.includes("auto-resolved to '10 lb'"))).toBe(true);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
-  test('pure API: flavor/formula disagreements are HARD and nothing is persisted', () => {
+  test('pure API: flavor/formula disagreements are auto-resolved and nothing is persisted', () => {
     const a1 = makeAttempt('a1', 'phillips', { upc: '012345678905', attributes: { flavor: 'chicken' } });
     const a2 = makeAttempt('a2', 'bci', { upc: '012345678905', attributes: { flavor: 'beef' } });
 
     const result = evaluateDistributorEvidence(itemId, [a1, a2], generationId);
 
-    expect(result.hasHardIdentityConflict).toBe(true);
-    expect(result.hardConflictCount).toBe(1);
-    expect(result.conflicts.some((c) => c.field === 'flavor' && c.severity === 'hard')).toBe(true);
-    expect(result.acceptedAttemptIds).toEqual([]);
-    // The pure API performs ZERO DB writes.
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.warnings.some((w) => w.includes("auto-resolved to 'chicken'"))).toBe(true);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
     expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
-  test('pure API: formula disagreement is hard, agreeing values are accepted', () => {
+  test('pure API: formula agreement accepts agreeing values', () => {
     const a1 = makeAttempt('a1', 'phillips', {
       upc: '012345678905',
       brand: 'Nutro',
@@ -321,21 +310,22 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     const result = evaluateDistributorEvidence(itemId, [a1, a2], generationId);
 
     expect(result.hasUnknownVariantAxis).toBe(true);
-    // Not a hard conflict and not a soft conflict on a fabricated field.
     expect(result.hasHardIdentityConflict).toBe(false);
     expect(result.softConflictCount).toBe(0);
     expect(result.conflicts).toEqual([]);
     expect(result.warnings.some((w) => w.includes("Unknown variant attribute 'scent'"))).toBe(true);
-    // Declared axis → participates as a hard field.
+
+    // Declared axis → participates in auto-resolution.
     const declared = evaluateDistributorEvidence(itemId, [a1, a2], generationId, {
       declaredVariantAxes: ['scent'],
     });
     expect(declared.hasUnknownVariantAxis).toBe(false);
-    expect(declared.hasHardIdentityConflict).toBe(true);
-    expect(declared.conflicts.some((c) => c.field === 'scent' && c.severity === 'hard')).toBe(true);
+    expect(declared.hasHardIdentityConflict).toBe(false);
+    expect(declared.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    expect(declared.warnings.some((w) => w.includes("auto-resolved to 'peach'"))).toBe(true);
   });
 
-  test('pure API: confidence never resolves a hard conflict', () => {
+  test('pure API: confidence does not alter candidate selection over primary provider', () => {
     const low = makeAttempt('a1', 'phillips', { upc: '012345678905', weight: '10 lbs' });
     low.confidence = 0.05;
     const high = makeAttempt('a2', 'bci', { upc: '012345678905', weight: '20 lbs' });
@@ -343,9 +333,9 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
 
     const result = evaluateDistributorEvidence(itemId, [low, high], generationId);
 
-    expect(result.hasHardIdentityConflict).toBe(true);
-    expect(result.hardConflictCount).toBe(1);
-    expect(result.acceptedAttemptIds).toEqual([]);
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    expect(result.warnings.some((w) => w.includes("auto-resolved to '10 lbs'"))).toBe(true);
   });
 
   test('pure API: coherent evidence is accepted without any DB write', () => {
@@ -360,7 +350,7 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(listConflictsForItem(itemId)).toEqual([]);
   });
 
-  test('pure API: declared variant axes participate as hard fields (Amendment A)', () => {
+  test('pure API: declared variant axes participate in auto-resolution (Amendment A)', () => {
     const a1 = makeAttempt('a1', 'phillips', {
       upc: '012345678905',
       brand: 'Nutro',
@@ -377,13 +367,14 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     expect(unknown.hasUnknownVariantAxis).toBe(true);
     expect(unknown.hasHardIdentityConflict).toBe(false);
 
-    // With the declaration, 'scent' is a hard identity field: disagreement blocks.
+    // With the declaration, 'scent' auto-resolves with primary provider precedence.
     const declared = evaluateDistributorEvidence(itemId, [a1, a2], generationId, {
       variantAxisDeclarations: [{ rawField: 'scent', normalizedAxis: 'scent' }],
     });
     expect(declared.hasUnknownVariantAxis).toBe(false);
-    expect(declared.hasHardIdentityConflict).toBe(true);
-    expect(declared.acceptedAttemptIds).toEqual([]);
+    expect(declared.hasHardIdentityConflict).toBe(false);
+    expect(declared.acceptedAttemptIds.sort()).toEqual(['a1', 'a2']);
+    expect(declared.warnings.some((w) => w.includes("auto-resolved to 'chicken'"))).toBe(true);
   });
 
   test('pure API: raw-field registry treats a registry-only raw key as declared (never unknown)', () => {

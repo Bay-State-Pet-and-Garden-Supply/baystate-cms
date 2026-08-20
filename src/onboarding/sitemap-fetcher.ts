@@ -304,7 +304,7 @@ export async function fetchAndParseSitemap(
   try {
     recordDomainStatus(
       normDomain,
-      tracker.isBlocked ? 'blocked' : 'failed',
+      tracker.isBlocked ? 'blocked' : 'offline',
       tracker.isBlocked
         ? tracker.blockReason || 'Site blocked crawler (HTTP 403 / Cloudflare Challenge)'
         : 'No sitemap discovered',

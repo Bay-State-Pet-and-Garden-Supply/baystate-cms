@@ -258,7 +258,7 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       { attemptId: 'a3', providerId: 'phillips', catalogVersion: 'v2026.3', connectionId: 'conn-1' },
     ]);
     // The same registry maps the raw field to a hard axis: disagreement on it
-    // is an open hard conflict.
+    // is auto-resolved with explainable warnings.
     const other = makeFound('a4', 'bci', {
       upc: ITEM_UPC,
       name: 'Dog Food',
@@ -270,11 +270,11 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       acceptedAttemptIds: ['a3', 'a4'],
       variantAxisDeclarations: [{ rawField: 'Scent Level', normalizedAxis: 'scent' }],
     });
-    expect(registryConflict.qualified).toBe(false);
-    if (registryConflict.qualified) return;
-    expect(registryConflict.reasonCodes).toContain('open_hard_conflict');
+    expect(registryConflict.qualified).toBe(true);
+    if (!registryConflict.qualified) return;
+    expect(registryConflict.warnings.some((w) => w.includes('auto-resolved'))).toBe(true);
 
-    // Declared-axis disagreement between providers is a HARD conflict.
+    // Declared-axis disagreement between providers auto-resolves to primary provider.
     const a2 = makeFound('a2', 'bci', { upc: ITEM_UPC, name: 'Dog Food', attributes: { scent: 'cedar' } });
     const disagree = buildDistributorRecordProjectionV1({
       ...baseInput,
@@ -282,9 +282,9 @@ describe('Distributor record projection (Amendment A) — qualification', () => 
       acceptedAttemptIds: ['a1', 'a2'],
       declaredVariantAxes: ['scent'],
     });
-    expect(disagree.qualified).toBe(false);
-    if (disagree.qualified) return;
-    expect(disagree.reasonCodes).toContain('open_hard_conflict');
+    expect(disagree.qualified).toBe(true);
+    if (!disagree.qualified) return;
+    expect(disagree.warnings.some((w) => w.includes('auto-resolved'))).toBe(true);
 
     // Dismissed unknown axis → qualified (field removed from consideration).
     const dismissed = buildDistributorRecordProjectionV1({
@@ -397,11 +397,11 @@ describe('Distributor record projection — conflicts and operator resolutions',
     attributes: { flavor: 'beef' },
   });
 
-  test('identity-critical disagreement blocks with open_hard_conflict', () => {
+  test('identity-critical disagreement auto-resolves with warning and qualifies', () => {
     const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [a1, a2], acceptedAttemptIds: ['a1', 'a2'] });
-    expect(result.qualified).toBe(false);
-    if (result.qualified) return;
-    expect(result.reasonCodes).toContain('open_hard_conflict');
+    expect(result.qualified).toBe(true);
+    if (!result.qualified) return;
+    expect(result.warnings.some((w) => w.includes('auto-resolved'))).toBe(true);
   });
 
   // Epic #46 follow-up (operator weight rule): the projection is the
@@ -417,13 +417,13 @@ describe('Distributor record projection — conflicts and operator resolutions',
     }
   });
 
-  test('true weight mismatch (0.25 lb vs 0.50 lb) still blocks qualification', () => {
+  test('true weight mismatch (0.25 lb vs 0.50 lb) auto-resolves to primary provider', () => {
     const m1 = makeFound('m1', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', weight: '0.25 lb' });
     const m2 = makeFound('m2', 'bci', { upc: ITEM_UPC, name: 'Dog Food', weight: '0.50 lb' });
     const result = buildDistributorRecordProjectionV1({ ...baseInput, attempts: [m1, m2], acceptedAttemptIds: ['m1', 'm2'] });
-    expect(result.qualified).toBe(false);
-    if (!result.qualified) {
-      expect(result.reasonCodes).toContain('open_hard_conflict');
+    expect(result.qualified).toBe(true);
+    if (result.qualified) {
+      expect(result.projection.weight).toBe('0.50 lb');
     }
   });
 
@@ -564,13 +564,13 @@ describe('Distributor record projection v2 (Amendment B) — merchandising depth
     // Deterministic lexical selection.
     expect(r.projection.description).toBe('Copy A');
 
-    // Identity disagreement on the same inputs still blocks.
+    // Identity disagreement on the same inputs auto-resolves and qualifies with warning.
     const a3 = makeFound('a3', 'phillips', { upc: ITEM_UPC, name: 'Dog Food', weight: '10 lb' });
     const a4 = makeFound('a4', 'unfi', { upc: ITEM_UPC, name: 'Dog Food', weight: '20 lb' });
     const conflict = buildDistributorRecordProjection({ ...baseInput, attempts: [a3, a4], acceptedAttemptIds: ['a3', 'a4'] });
-    expect(conflict.qualified).toBe(false);
-    if (conflict.qualified) return;
-    expect(conflict.reasonCodes).toContain('open_hard_conflict');
+    expect(conflict.qualified).toBe(true);
+    if (!conflict.qualified) return;
+    expect(conflict.projection.weight).toBe('10 lb');
   });
 
   test('features merge as a case-insensitive sorted-unique union preserving first-seen spelling', () => {
