@@ -4,14 +4,53 @@ import { z } from 'zod';
 import { getRepresentativeSuite, setRepresentativeSuite } from '../../db/repositories/representative-suite-repo';
 import { getWaiver, createWaiver } from '../../db/repositories/waiver-repo';
 import { getSitemapInventory } from '../../onboarding/sitemap-inventory-service';
+import { clusterInventoryUrls } from '../../onboarding/template-clustering';
+import { getClusterOverrides, setClusterOverride, applyOverrides } from '../../db/repositories/cluster-override-repo';
 
 export const representativeSuiteRoutes = new Hono();
+
+function safeClusters(domain: string): { clusters: unknown[]; suggested: string[]; filtered: { count: number; reason: string }; overrides: unknown[] } {
+  try {
+    const raw = clusterInventoryUrls(domain);
+    const overrides = getClusterOverrides(domain);
+    const clusters = applyOverrides(raw.clusters as never[], overrides as never[]) as unknown[];
+    return { clusters, suggested: raw.suggested, filtered: raw.filtered, overrides };
+  } catch {
+    return { clusters: [], suggested: [], filtered: { count: 0, reason: '' }, overrides: [] };
+  }
+}
 
 representativeSuiteRoutes.get('/domains/:domain/representative-suite', (c) => {
   const domain = c.req.param('domain') ?? '';
   const suite = getRepresentativeSuite(domain);
   const inv = getSitemapInventory(domain);
-  return c.json({ suite, inventory: inv });
+  const extra = safeClusters(domain);
+  return c.json({ suite, inventory: inv, ...extra });
+});
+
+const overrideSchema = z.object({
+  clusterKey: z.string().min(1),
+  action: z.string().min(1),
+  actor: z.string().min(1),
+});
+
+representativeSuiteRoutes.post('/domains/:domain/cluster-overrides', async (c) => {
+  const domain = c.req.param('domain') ?? '';
+  const body = await c.req.json();
+  const parsed = overrideSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
+  try {
+    const ov = setClusterOverride(domain, parsed.data.clusterKey, parsed.data.action, parsed.data.actor);
+    return c.json({ override: ov });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+});
+
+representativeSuiteRoutes.get('/domains/:domain/cluster-overrides', (c) => {
+  const domain = c.req.param('domain') ?? '';
+  const list = getClusterOverrides(domain);
+  return c.json({ overrides: list });
 });
 
 const putSchema = z.object({
