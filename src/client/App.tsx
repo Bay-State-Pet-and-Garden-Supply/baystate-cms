@@ -12,9 +12,15 @@ import { Onboarding } from './components/Onboarding';
 import { StoreManagerAssistant } from './components/StoreManagerAssistant';
 import { Settings } from './components/Settings';
 import { AgentLab } from './components/agent-lab/AgentLab';
+import { ProfileWorkspacePage } from './components/profile-workspace/ProfileWorkspacePage';
 import { colors, fonts, rounded } from './theme';
 
 type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings' | 'agentlab';
+
+function getProfileWorkspaceDomainFromPath(pathname: string): string | null {
+  const m = pathname.match(/^\/settings\/domains\/([^/]+)\/profile\/?$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
 
 // Static Navigation Styles
 const navStyles: Record<string, React.CSSProperties> = {
@@ -151,10 +157,18 @@ function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [selectedSku, setSelectedSku] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [profileWorkspaceDomain, setProfileWorkspaceDomain] = useState<string | null>(() =>
+    typeof window !== 'undefined' ? getProfileWorkspaceDomainFromPath(window.location.pathname) : null,
+  );
   const hasPushedHistory = useRef(false);
   const handleNavigate = (newView: View, replace = false) => {
     setView(newView);
+    setProfileWorkspaceDomain(null);
     const url = new URL(window.location.href);
+    // Clear profile-workspace pathname when navigating via top nav (so it doesn't keep rendering workspace)
+    if (getProfileWorkspaceDomainFromPath(url.pathname)) {
+      url.pathname = '/';
+    }
     url.searchParams.delete('settingsTab');
     // Store Settings tab deep link (`?view=settings&tab=ai|catalog`): keep a
     // valid one when (re-)entering settings so deep links survive navigation,
@@ -181,6 +195,17 @@ function App() {
   };
 
   useEffect(() => {
+    // If URL is already a profile workspace path, keep it — don't overwrite with dashboard
+    const initialPwDomain = getProfileWorkspaceDomainFromPath(window.location.pathname);
+    if (initialPwDomain) {
+      setProfileWorkspaceDomain(initialPwDomain);
+      // still load workspace for nav, but don't override view
+      getWorkspace().then(res => {
+        if (res.workspace) setWorkspace(res.workspace);
+        setReady(true);
+      }).catch(() => setReady(true));
+      return;
+    }
     getWorkspace().then(res => {
       if (res.workspace) {
         setWorkspace(res.workspace);
@@ -212,6 +237,9 @@ function App() {
 
   useEffect(() => {
     const handlePopState = () => {
+      const pwDomain = getProfileWorkspaceDomainFromPath(window.location.pathname);
+      setProfileWorkspaceDomain(pwDomain);
+      if (pwDomain) return;
       const params = new URLSearchParams(window.location.search);
       const sku = params.get('product');
       setSelectedSku(sku);
@@ -397,8 +425,12 @@ function App() {
         </span>
       </nav>
 
-      <main style={(view === 'onboarding' || view === 'assistant' || view === 'changesets' || view === 'agentlab') ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : navStyles.main}>
-        {view === 'setup' && (
+      <main style={profileWorkspaceDomain ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : (view === 'onboarding' || view === 'assistant' || view === 'changesets' || view === 'agentlab') ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : navStyles.main}>
+        {profileWorkspaceDomain ? (
+          <ProfileWorkspacePage domain={profileWorkspaceDomain} />
+        ) : (
+          <>
+            {view === 'setup' && (
           <SetupWizard
             onComplete={handleSetupComplete}
             onUpdated={handleSetupUpdated}
@@ -433,7 +465,9 @@ function App() {
 
         {view === 'settings' && <Settings />}
 
-        {view === 'agentlab' && <AgentLab />}
+            {view === 'agentlab' && <AgentLab />}
+          </>
+        )}
       </main>
 
       <style dangerouslySetInnerHTML={{ __html: `

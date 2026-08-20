@@ -61,9 +61,29 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
           <ProfileBuilder mode="inline" initialDomain={domain} onCancel={() => {}} />
         </div>
         <HistoryShell />
-        {returnPath && (
-          <a href={returnPath} style={{ marginTop: 12, display: 'inline-block' }}>
+        {returnPath ? (
+          <a
+            href={returnPath}
+            onClick={(e) => {
+              e.preventDefault();
+              window.history.pushState(null, '', returnPath);
+              window.dispatchEvent(new PopStateEvent('popstate'));
+            }}
+            style={{ marginTop: 12, display: 'inline-block' }}
+          >
             Back
+          </a>
+        ) : (
+          <a
+            href="/?view=settings"
+            onClick={(e) => {
+              e.preventDefault();
+              window.history.pushState(null, '', '/?view=settings');
+              window.dispatchEvent(new PopStateEvent('popstate'));
+            }}
+            style={{ marginTop: 12, display: 'inline-block' }}
+          >
+            Back to Settings
           </a>
         )}
         <div style={{ marginTop: 8, fontSize: 12, color: '#6b7280' }}>

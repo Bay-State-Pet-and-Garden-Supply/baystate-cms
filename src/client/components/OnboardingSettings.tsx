@@ -60,6 +60,15 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthResponse | null>(null);
   const [workspaceDomain, setWorkspaceDomain] = useState<string | null>(null);
 
+  const navigateToProfileWorkspace = (domain: string) => {
+    const normalized = normalizeBrandHubDomain(domain);
+    if (!normalized) return;
+    const path = getProfileWorkspacePath(normalized, window.location.pathname + window.location.search);
+    window.history.pushState(null, '', path);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    setWorkspaceDomain(null);
+  };
+
   const [localDomain, setLocalDomain] = useState('');
   const [settingsTab, setSettingsTab] = useState<OnboardingSettingsTab>(resolveOnboardingSettingsTab(initialTab ?? 'general'));
   const [sourcingEngineEnabled, setSourcingEngineEnabled] = useState(false);
@@ -765,7 +774,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
             Unified brand domains — sitemap inventory alongside extractor profile status. Shared domain normalization; legacy profiles/sitemaps alias here.
           </p>
         </div>
-        <SitemapHealthView onEditProfile={(domain) => setWorkspaceDomain(domain)} />
+        <SitemapHealthView onEditProfile={(domain) => navigateToProfileWorkspace(domain)} />
       </div>
 
       <div style={{ display: settingsTab === 'distributors' ? 'block' : 'none' }}>
@@ -808,12 +817,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           />
           <button
             type="button"
-            onClick={() => {
-              const normalized = normalizeBrandHubDomain(localDomain);
-              if (normalized) {
-                setWorkspaceDomain(normalized);
-              }
-            }}
+            onClick={() => navigateToProfileWorkspace(localDomain)}
             disabled={!localDomain.trim()}
             style={{
               background: '#2563eb',
@@ -836,7 +840,14 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       {/* ── Profile Workspace link (e06s01) — dedicated page replaces inline builder ── */}
       {workspaceDomain && (
         <div style={{ marginBottom: 24, background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 20 }}>
-          <a href={getProfileWorkspacePath(workspaceDomain, window.location.search)} style={{ color: '#2563eb', fontWeight: 600 }}>
+          <a
+            href={getProfileWorkspacePath(workspaceDomain, window.location.pathname + window.location.search)}
+            onClick={(e) => {
+              e.preventDefault();
+              navigateToProfileWorkspace(workspaceDomain);
+            }}
+            style={{ color: '#2563eb', fontWeight: 600 }}
+          >
             Open {workspaceDomain} profile workspace →
           </a>
           <button type="button" style={styles.secondaryBtn} onClick={() => setWorkspaceDomain(null)}>Close</button>
