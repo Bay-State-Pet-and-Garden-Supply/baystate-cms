@@ -289,6 +289,11 @@ export async function retrySpecialistWorkflow(
   }
   // Specialist targets re-run the orchestrated workflow but persist the requested
   // target so it is observably used (never silently ignored).
+  // NOTE: retry is intentionally a full orchestrated re-run from discovery (the
+  // orchestrator is the sole executor; specialists never invoke each other).
+  // The target is persisted as currentPhase audit hint (retry_discovery/curator/resolver)
+  // and is read by runWorkflow's persisted-state resume path; partial re-execution
+  // would bypass budget/lease invariants, so full workflow is the product behavior.
   const targeting: SpecialistWorkflowRecord = {
     ...record,
     currentPhase: target.replace('retry_', ''),

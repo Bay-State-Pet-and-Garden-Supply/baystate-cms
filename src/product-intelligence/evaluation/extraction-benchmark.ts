@@ -506,9 +506,11 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
     if (r.extractionRate < 0.8) return false;
     if (r.costPerCorrectProduct == null || r.costPerCorrectProduct > 0.01) return false;
     const traceOk = r.traceability.coverage == null ? false : r.traceability.coverage >= 0.8;
+    // First-run baseline: no prior baseline exists, so gate is absolute-only by design (cannot regress against self).
+    // Intentionally evaluate with baseline=null for this run, then persist current rates as baseline for subsequent runs.
     const baseline = getBenchmarkBaseline(opts.datasetId);
     if (!baseline) {
-      console.warn('extraction-benchmark: no baseline recorded for dataset, gate is absolute only');
+      console.warn('extraction-benchmark: no baseline recorded for dataset, gate is absolute only (intentional first-run fallback)');
       // Seed the baseline once from this run so later runs enforce non-regression.
       const agg = aggregateSafetyRates(rows);
       if (agg) recordBenchmarkBaseline(opts.datasetId, agg);

@@ -494,6 +494,10 @@ router.post('/product-intelligence/runs/:id/handoff', async (c) => {
   if (!(await isVerifiedTerminalWorkflow(runId))) {
     return c.json({ error: 'handoff requires verified terminal state', code: 'not_verified_terminal' }, 409);
   }
+  // Handoff is intentionally 202 Accepted (async navigation/handoff queued server-authoritatively).
+  // Mutating handoffs (import_verified) are executed via POST /specialist-workflows/:id/import which is the
+  // fail-closed import path (shadowOnly/kill switch enforced there). This endpoint queues the handoff intent
+  // server-authoritatively so the client never routes directly.
   const response = { runId, accepted: true, action: body.action, idempotent: Boolean(key) };
   if (key) controlResponses.set(key, response);
   return c.json(response, 202);
