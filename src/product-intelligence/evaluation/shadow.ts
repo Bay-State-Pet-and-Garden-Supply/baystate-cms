@@ -13,11 +13,19 @@ import { aggregatePiComparisons, type PiComparison } from './metrics';
 import { PiGoldLabelsSchema } from './gold';
 
 export interface ShadowPairResult {
+  /** Stable UUID for this pair; links to shadow_comparisons + shadow_adjudications. */
+  id: string;
   sku: string;
   v1Outcome: string;
   v2Outcome: string;
   adjudication: 'deterministic' | 'needs_reviewer';
   comparison: PiComparison | null;
+}
+
+/** A comparison paired with the frozen-seed SKU it was produced for. */
+export interface SkuComparison {
+  sku: string;
+  comparison: PiComparison;
 }
 
 export interface ShadowComparisonReport {
@@ -70,8 +78,8 @@ function skuNeedsHumanCorrection(outcome: string): boolean {
 
 export function runShadowComparison(opts: {
   datasetId: string;
-  v1Comparisons: PiComparison[];
-  v2Comparisons: PiComparison[];
+  v1Comparisons: SkuComparison[];
+  v2Comparisons: SkuComparison[];
 }): ShadowComparisonReport {
   const ws = findWorkspace();
   if (!ws) throw new Error('No active workspace');
@@ -81,14 +89,10 @@ export function runShadowComparison(opts: {
   const examples = getExamples(opts.datasetId, 'test');
   const skuMap = new Map(examples.map((e) => [e.product_sku, e.gold_labels_json]));
 
-  // Pair by identical frozen seed SKU, never by index. Index-aligned inputs are
-  // mapped to their dataset SKU; a SKU missing from either version is skipped.
-  const v1BySku = new Map<string, PiComparison>();
-  const v2BySku = new Map<string, PiComparison>();
-  examples.forEach((e, i) => {
-    if (opts.v1Comparisons[i]) v1BySku.set(e.product_sku, opts.v1Comparisons[i]);
-    if (opts.v2Comparisons[i]) v2BySku.set(e.product_sku, opts.v2Comparisons[i]);
-  });
+  // Pair strictly by frozen-seed SKU, never by array index. A SKU present in
+  // the examples but missing from either version is skipped (no index fallback).
+  const v1BySku = new Map(opts.v1Comparisons.map((c) => [c.sku, c.comparison]));
+  const v2BySku = new Map(opts.v2Comparisons.map((c) => [c.sku, c.comparison]));
 
   const pairs: ShadowPairResult[] = [];
   const notes: string[] = [];
@@ -104,22 +108,24 @@ export function runShadowComparison(opts: {
     const deterministic = isDeterministicGold(goldJson);
     const adjudication = deterministic ? 'deterministic' : 'needs_reviewer';
     if (!deterministic) notes.push(`sku ${sku}: ground truth non-deterministic, durable reviewer adjudication required`);
-    pairs.push({ sku, v1Outcome: v1.outcome, v2Outcome: v2.outcome, adjudication, comparison: v2 });
+    // Stable UUID links the pair to shadow_comparisons and shadow_adjudications.
+    const id = randomUUID();
+    pairs.push({ id, sku, v1Outcome: v1.outcome, v2Outcome: v2.outcome, adjudication, comparison: v2 });
     // Shadow never mutates — write only to shadow tables (additive).
     try {
       const db = getDb();
       db.run(
         `INSERT INTO shadow_comparisons (id, dataset_id, dataset_hash, sku, v1_outcome, v2_outcome, adjudication, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [randomUUID(), opts.datasetId, hash, sku, v1.outcome, v2.outcome, adjudication, new Date().toISOString()],
+        [id, opts.datasetId, hash, sku, v1.outcome, v2.outcome, adjudication, new Date().toISOString()],
       );
     } catch (error) {
       console.warn(`shadow: failed to persist comparison for sku ${sku}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  const v1Agg = opts.v1Comparisons.length ? aggregatePiComparisons(opts.v1Comparisons) : null;
-  const v2Agg = opts.v2Comparisons.length ? aggregatePiComparisons(opts.v2Comparisons) : null;
+  const v1Agg = opts.v1Comparisons.length ? aggregatePiComparisons(opts.v1Comparisons.map((c) => c.comparison)) : null;
+  const v2Agg = opts.v2Comparisons.length ? aggregatePiComparisons(opts.v2Comparisons.map((c) => c.comparison)) : null;
   const v1Needs = pairs.filter((p) => skuNeedsHumanCorrection(p.v1Outcome)).length;
   const v2Needs = pairs.filter((p) => skuNeedsHumanCorrection(p.v2Outcome)).length;
   const v1Rate = pairs.length ? v1Needs / pairs.length : 0;

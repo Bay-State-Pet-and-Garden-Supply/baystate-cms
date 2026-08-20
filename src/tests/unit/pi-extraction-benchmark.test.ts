@@ -264,4 +264,29 @@ describe('PI-9 extraction benchmark', () => {
     expect(report.rows[0].pages).toBe(0);
     expect(report.rows[0].failureRate).toBe(1);
   });
+
+  it('baseline absent returns null; recordBenchmarkBaseline then getBenchmarkBaseline returns it', () => {
+    const dsId = seedDataset('baseline-ds', STUB_BENCHMARK_PAGES.map((p) => p.url).slice(0, 1));
+    // Absent: null (caller applies absolute-only gating).
+    expect(benchmarkRepo.getBenchmarkBaseline(dsId)).toBeNull();
+    // Write path records the v1 baseline; reader returns the same rates.
+    benchmarkRepo.recordBenchmarkBaseline(dsId, {
+      wrongProductRate: 0.01,
+      wrongVariantRate: 0.03,
+      falsePassRate: 0.02,
+      traceabilityCoverage: 0.9,
+    });
+    const read = benchmarkRepo.getBenchmarkBaseline(dsId);
+    expect(read).not.toBeNull();
+    expect(read?.wrongVariantRate).toBeCloseTo(0.03);
+    expect(read?.traceabilityCoverage).toBeCloseTo(0.9);
+    // Re-run overwrites the prior baseline for the same dataset.
+    benchmarkRepo.recordBenchmarkBaseline(dsId, {
+      wrongProductRate: 0.02,
+      wrongVariantRate: 0.04,
+      falsePassRate: 0.03,
+      traceabilityCoverage: 0.85,
+    });
+    expect(benchmarkRepo.getBenchmarkBaseline(dsId)?.wrongVariantRate).toBeCloseTo(0.04);
+  });
 });

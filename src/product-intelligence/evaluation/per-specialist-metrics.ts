@@ -27,10 +27,12 @@ export interface SpecialistVersionMetrics {
 
 export function datasetSha(): string {
   const products = buildPiGoldenProducts();
+  // Hash the FULL frozen dataset contents (input + gold labels), not just GTIN/name,
+  // so any change to the frozen dataset changes the reported content hash.
   const canonical = JSON.stringify(
     products
-      .map((p) => ({ gtin: p.input.gtin, name: p.input.registerName ?? '', gold: p.gold }))
-      .sort((a, b) => a.gtin.localeCompare(b.gtin)),
+      .map((p) => ({ input: p.input, gold: p.gold }))
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
   );
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }

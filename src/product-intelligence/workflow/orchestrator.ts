@@ -268,12 +268,33 @@ export function routeSpecialistRetry(target: SpecialistRetryTarget): { specialis
  */
 export async function retrySpecialistWorkflow(
   runId: string,
-  _target: SpecialistRetryTarget,
+  target: SpecialistRetryTarget,
 ): Promise<SpecialistWorkflowResult> {
-  const record = await resolveDefaultWorkflowPersistence().get(runId);
+  const repo = resolveDefaultWorkflowPersistence();
+  const record = await repo.get(runId);
   if (!record) throw new Error(`Workflow ${runId} record not found`);
   const ws = findWorkspace();
   if (!ws) throw new Error('No active workspace');
+  // human_review does NOT re-run the workflow; it only marks the record for
+  // human review (the orchestrator is the sole authorized executor for re-runs).
+  if (target === 'human_review') {
+    const updated: SpecialistWorkflowRecord = {
+      ...record,
+      status: 'needs_review',
+      currentPhase: 'human_review',
+      updatedAt: new Date().toISOString(),
+    };
+    await repo.save(updated);
+    return humanReviewResult(runId, record);
+  }
+  // Specialist targets re-run the orchestrated workflow but persist the requested
+  // target so it is observably used (never silently ignored).
+  const targeting: SpecialistWorkflowRecord = {
+    ...record,
+    currentPhase: target.replace('retry_', ''),
+    updatedAt: new Date().toISOString(),
+  };
+  await repo.save(targeting);
   const classificationContext: ClassificationContext = {
     availableProductTypes: [],
     availableCategories: [],
@@ -288,6 +309,45 @@ export async function retrySpecialistWorkflow(
   };
   const orchestrator = new SpecialistOrchestrator();
   return orchestrator.runWorkflow(record.productSeed, classificationContext, specialistContext, {});
+}
+
+/** Minimal result for a human_review retry (no workflow re-execution). */
+function humanReviewResult(runId: string, record: SpecialistWorkflowRecord): SpecialistWorkflowResult {
+  const emptyUsage: WorkflowUsageLedger = {
+    totalDispatches: 0,
+    totalToolCalls: 0,
+    totalModelCalls: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    estimatedCostUsd: 0,
+    bySpecialist: {},
+  };
+  const snapshot: WorkflowStateSnapshot = {
+    runId,
+    version: record.workflowVersion,
+    status: 'needs_review',
+    currentPhase: 'human_review',
+    retriesCount: record.retriesCount + 1,
+    totalDispatches: 0,
+    invocations: { discovery: 0, extraction: 0, profile_engineer: 0, resolver: 0, curator: 0, verifier: 0 },
+    capabilityInvocationIds: { discovery: [], extraction: [], profile_engineer: [], resolver: [], curator: [], verifier: [] },
+    extractionArtifactRefs: [],
+    routeRecords: [],
+    usage: emptyUsage,
+    artifactIds: [],
+    totalDurationMs: 0,
+  };
+  return {
+    runId,
+    status: 'needs_review',
+    productSeed: record.productSeed,
+    extractionBundles: [],
+    events: [],
+    retriesCount: record.retriesCount + 1,
+    totalDispatches: 0,
+    totalDurationMs: 0,
+    workflowState: snapshot,
+  };
 }
 
 export interface RunWorkflowOptions {

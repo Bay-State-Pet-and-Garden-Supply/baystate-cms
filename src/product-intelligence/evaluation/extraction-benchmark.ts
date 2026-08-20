@@ -10,7 +10,7 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/26
  */
-import { getExamples, getBenchmarkBaseline } from '../../db/repositories/benchmark-repo';
+import { getExamples, getBenchmarkBaseline, recordBenchmarkBaseline } from '../../db/repositories/benchmark-repo';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
 import type { PageExtractionContract } from '../tools/contract';
 import { parseStructuredSignals } from '../extraction/platforms';
@@ -509,6 +509,9 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
     const baseline = getBenchmarkBaseline(opts.datasetId);
     if (!baseline) {
       console.warn('extraction-benchmark: no baseline recorded for dataset, gate is absolute only');
+      // Seed the baseline once from this run so later runs enforce non-regression.
+      const agg = aggregateSafetyRates(rows);
+      if (agg) recordBenchmarkBaseline(opts.datasetId, agg);
     }
     const safety = evaluateSafetyGates(
       {
@@ -537,5 +540,22 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
     rows,
     recommendation,
     generatedAt: new Date().toISOString(),
+  };
+}
+
+/** Aggregate per-provider safety rates into a dataset baseline (nulls ignored). */
+function aggregateSafetyRates(
+  rows: Array<{ exactProductAccuracy: number | null; wrongVariantRate: number | null; extractionRate: number | null; traceability: { coverage: number | null } }>,
+): { wrongProductRate: number | null; wrongVariantRate: number | null; falsePassRate: number | null; traceabilityCoverage: number | null } | null {
+  const pick = (vals: Array<number | null>): number | null => {
+    const present = vals.filter((v): v is number => v != null);
+    if (present.length === 0) return null;
+    return present.reduce((a, b) => a + b, 0) / present.length;
+  };
+  return {
+    wrongProductRate: pick(rows.map((r) => (r.exactProductAccuracy == null ? null : 1 - r.exactProductAccuracy))),
+    wrongVariantRate: pick(rows.map((r) => r.wrongVariantRate)),
+    falsePassRate: pick(rows.map((r) => (r.extractionRate == null ? null : 1 - r.extractionRate))),
+    traceabilityCoverage: pick(rows.map((r) => r.traceability.coverage)),
   };
 }

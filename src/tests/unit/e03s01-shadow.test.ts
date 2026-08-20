@@ -11,6 +11,10 @@ import { createDataset, insertExample, markFamilyReviewComplete, freezeDataset }
 import { runShadowComparison, resolveShadowAdjudication } from '../../product-intelligence/evaluation/shadow';
 import type { PiComparison } from '../../product-intelligence/evaluation/metrics';
 
+function skuComp(sku: string, outcome: PiComparison['outcome']): { sku: string; comparison: PiComparison } {
+  return { sku, comparison: fakeComp(outcome) };
+}
+
 function fakeComp(outcome: PiComparison['outcome']): PiComparison {
   return {
     outcome,
@@ -47,34 +51,52 @@ describe('shadow v1/v2 comparison', () => {
     datasetId = ds.id;
   });
   it('runs v1/v2 on identical seeds, never mutates state, adjudicates non-deterministic', () => {
-    const report = runShadowComparison({ datasetId, v1Comparisons: [fakeComp('submitted'), fakeComp('wrong_variant')], v2Comparisons: [fakeComp('submitted'), fakeComp('wrong_variant')] });
+    const report = runShadowComparison({ datasetId, v1Comparisons: [skuComp('085000079585', 'submitted'), skuComp('070628048161', 'wrong_variant')], v2Comparisons: [skuComp('085000079585', 'submitted'), skuComp('070628048161', 'wrong_variant')] });
     expect(report.evaluated).toBe(2);
     expect(report.deltas.quality).not.toBeNull();
     expect(report.pairs[1].adjudication).toBe('needs_reviewer');
     expect(report.adjudicationNotes.length).toBeGreaterThan(0);
+    // Each pair exposes a stable UUID linking to shadow_comparisons.
+    for (const p of report.pairs) {
+      expect(p.id).toMatch(/^[0-9a-f-]{36}$/);
+      const row = getDb().query('SELECT COUNT(*) as c FROM shadow_comparisons WHERE id = ?').get(p.id) as { c: number };
+      expect(row.c).toBe(1);
+    }
     // Verify shadow writes did not affect benchmark_examples
     const examples = getDb().query('SELECT COUNT(*) as c FROM benchmark_examples WHERE dataset_id = ?').get(datasetId) as { c: number };
     expect(examples.c).toBe(2);
   });
 
   it('pairs by identical frozen seed SKU, skips when v1/v2 length mismatch', () => {
-    // v1 has 2 comparisons (aligned to example SKUs), v2 has only 1.
+    // v1 has both SKUs, v2 has only the first — second SKU must be skipped.
     const report = runShadowComparison({
       datasetId,
-      v1Comparisons: [fakeComp('submitted'), fakeComp('submitted')],
-      v2Comparisons: [fakeComp('submitted')],
+      v1Comparisons: [skuComp('085000079585', 'submitted'), skuComp('070628048161', 'submitted')],
+      v2Comparisons: [skuComp('085000079585', 'submitted')],
     });
-    // Second SKU (070628048161) has no v2 comparison -> skipped.
     expect(report.evaluated).toBe(1);
     expect(report.pairs[0].sku).toBe('085000079585');
     expect(report.adjudicationNotes.some((n) => n.includes('070628048161') && n.includes('missing'))).toBe(true);
   });
 
+  it('pairs strictly by SKU, not array order', () => {
+    // v1 supplies SKUs in reverse order; pairing must follow SKU, not index.
+    const report = runShadowComparison({
+      datasetId,
+      v1Comparisons: [skuComp('070628048161', 'wrong_variant'), skuComp('085000079585', 'submitted')],
+      v2Comparisons: [skuComp('085000079585', 'submitted'), skuComp('070628048161', 'wrong_variant')],
+    });
+    expect(report.evaluated).toBe(2);
+    const bySku = new Map(report.pairs.map((p) => [p.sku, p.v1Outcome]));
+    expect(bySku.get('085000079585')).toBe('submitted');
+    expect(bySku.get('070628048161')).toBe('wrong_variant');
+  });
+
   it('reports humanCorrection delta and per-version rates from outcomes', () => {
     const report = runShadowComparison({
       datasetId,
-      v1Comparisons: [fakeComp('submitted'), fakeComp('wrong_variant')],
-      v2Comparisons: [fakeComp('submitted'), fakeComp('submitted')],
+      v1Comparisons: [skuComp('085000079585', 'submitted'), skuComp('070628048161', 'wrong_variant')],
+      v2Comparisons: [skuComp('085000079585', 'submitted'), skuComp('070628048161', 'submitted')],
     });
     // v1 needs correction on 1/2 (wrong_variant), v2 needs 0/2 -> delta = -0.5.
     expect(report.humanCorrectionRates.v1Rate).toBeCloseTo(0.5);
@@ -82,10 +104,11 @@ describe('shadow v1/v2 comparison', () => {
     expect(report.deltas.humanCorrection).toBeCloseTo(-0.5);
   });
 
-  it('persists durable reviewer adjudication without throwing', () => {
-    runShadowComparison({ datasetId, v1Comparisons: [fakeComp('submitted')], v2Comparisons: [fakeComp('submitted')] });
-    expect(() => resolveShadowAdjudication('cmp-1', '085000079585', 'confirmed', 'reviewer-1')).not.toThrow();
-    const rows = getDb().query('SELECT COUNT(*) as c FROM shadow_adjudications WHERE sku = ?').get('085000079585') as { c: number };
+  it('persists durable reviewer adjudication linked to the pair id', () => {
+    const report = runShadowComparison({ datasetId, v1Comparisons: [skuComp('085000079585', 'submitted')], v2Comparisons: [skuComp('085000079585', 'submitted')] });
+    const pairId = report.pairs[0].id;
+    expect(() => resolveShadowAdjudication(pairId, '085000079585', 'confirmed', 'reviewer-1')).not.toThrow();
+    const rows = getDb().query('SELECT COUNT(*) as c FROM shadow_adjudications WHERE shadow_comparison_id = ?').get(pairId) as { c: number };
     expect(rows.c).toBe(1);
   });
 });

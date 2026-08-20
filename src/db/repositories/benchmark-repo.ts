@@ -667,3 +667,32 @@ export function getBenchmarkBaseline(datasetId: string): BenchmarkSafetyBaseline
     traceabilityCoverage: row.traceability_coverage ?? null,
   };
 }
+
+/**
+ * Persist the v1 baseline safety rates for a dataset so subsequent benchmark
+ * runs can enforce non-regression (blocker #1: write path). Idempotent — a
+ * later baseline overwrites the prior one for the same dataset.
+ * story: e03s01
+ */
+export function recordBenchmarkBaseline(datasetId: string, rates: BenchmarkSafetyBaseline): void {
+  ensureBaselineTable();
+  getDb()
+    .query(
+      `INSERT INTO benchmark_baselines (dataset_id, wrong_product_rate, wrong_variant_rate, false_pass_rate, traceability_coverage, updated_at)
+     VALUES ($id, $wpr, $wvr, $fpr, $tc, $ts)
+     ON CONFLICT(dataset_id) DO UPDATE SET
+       wrong_product_rate = excluded.wrong_product_rate,
+       wrong_variant_rate = excluded.wrong_variant_rate,
+       false_pass_rate = excluded.false_pass_rate,
+       traceability_coverage = excluded.traceability_coverage,
+       updated_at = excluded.updated_at`,
+    )
+    .run({
+      $id: datasetId,
+      $wpr: rates.wrongProductRate ?? null,
+      $wvr: rates.wrongVariantRate ?? null,
+      $fpr: rates.falsePassRate ?? null,
+      $tc: rates.traceabilityCoverage ?? null,
+      $ts: new Date().toISOString(),
+    });
+}
