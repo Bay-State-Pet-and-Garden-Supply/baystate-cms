@@ -1,8 +1,19 @@
-// story: e07s03, e07s04 — single capture with SSRF guard, persistence, redacted logs
+// story: e07s03, e07s04 — single capture with element-map + viewport + 16-hex hash + SSRF guard
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+
+export interface CaptureElement {
+  id: string;
+  tag: string;
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  dataAttrs: string[];
+}
 
 export interface CaptureResult {
   dom: string;
@@ -11,10 +22,15 @@ export interface CaptureResult {
   runtime: string;
   hash: string;
   capturedAt: string;
+  elements: CaptureElement[];
+  viewport: { w: number; h: number; deviceScaleFactor: number } | null;
 }
 
-function hashCapture(input: { dom: string; screenshotBase64: string; runtime: string; url: string }): string {
-  return createHash('sha256').update(input.dom + input.screenshotBase64 + input.runtime + input.url).digest('hex').slice(0, 16);
+function hashCapture(input: { dom: string; screenshotBase64: string; runtime: string; url: string; elementsCount: number }): string {
+  return createHash('sha256')
+    .update(input.dom + input.screenshotBase64 + input.runtime + input.url + String(input.elementsCount))
+    .digest('hex')
+    .slice(0, 16);
 }
 
 function redactUrl(url: string): string {
@@ -39,7 +55,7 @@ async function isPrivateHost(url: string): Promise<boolean> {
     const addrs = await lookup(host, { all: true });
     return addrs.some(a => {
       const ip = a.address;
-      return ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.') || ip.startsWith('127.') || ip === '::1' || ip.startsWith('169.254.') || ip.startsWith('100.') ;
+      return ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.') || ip.startsWith('127.') || ip === '::1' || ip.startsWith('169.254.') || ip.startsWith('100.');
     });
   } catch { return false; }
 }
@@ -53,14 +69,33 @@ function persistCapture(result: CaptureResult & { url: string }): CaptureResult 
   const dir = path.join(os.tmpdir(), 'baystate-captures');
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   const ref = path.join(dir, `${result.hash}.json`);
-  try { fs.writeFileSync(ref, JSON.stringify({ dom: result.dom.slice(0, 5_000_000), screenshotBase64: result.screenshotBase64.slice(0, 5_000_000), runtime: result.runtime, hash: result.hash, capturedAt: result.capturedAt, url: result.url }), 'utf-8'); } catch {}
+  try {
+    fs.writeFileSync(
+      ref,
+      JSON.stringify({
+        dom: result.dom.slice(0, 5_000_000),
+        screenshotBase64: result.screenshotBase64.slice(0, 5_000_000),
+        runtime: result.runtime,
+        hash: result.hash,
+        capturedAt: result.capturedAt,
+        url: result.url,
+        elements: result.elements.slice(0, 2000),
+        viewport: result.viewport,
+      }),
+      'utf-8',
+    );
+  } catch {}
   return { ...result, screenshotRef: ref };
 }
 
-export async function captureProfilePage(input: {
-  url: string;
-  runtime: 'static' | 'rendered';
-}): Promise<CaptureResult> {
+export function hitTest(elements: CaptureElement[], x: number, y: number): string | null {
+  const hit = elements
+    .filter(e => x >= e.x && x <= e.x + e.w && y >= e.y && y <= e.y + e.h)
+    .sort((a, b) => a.w * a.h - b.w * b.h)[0];
+  return hit ? hit.id : null;
+}
+
+export async function captureProfilePage(input: { url: string; runtime: 'static' | 'rendered' }): Promise<CaptureResult> {
   const runtime = input.runtime;
   if (runtime === 'static') return captureStatic(input.url);
   return captureRendered(input.url);
@@ -72,35 +107,25 @@ async function captureStatic(url: string): Promise<CaptureResult> {
   const overall = setTimeout(() => ac.abort(), 15000);
   const sizeCap = 5 * 1024 * 1024;
   try {
-    const res = await fetch(url, {
-      signal: ac.signal,
-      headers: { 'User-Agent': 'BaystateCMS-capture/1.0' },
-      redirect: 'manual',
-    });
+    const res = await fetch(url, { signal: ac.signal, headers: { 'User-Agent': 'BaystateCMS-capture/1.0' }, redirect: 'manual' });
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get('location');
-      if (loc) {
-        const next = new URL(loc, url).toString();
-        await assertAllowedUrl(next);
-      }
+      if (loc) { const next = new URL(loc, url).toString(); await assertAllowedUrl(next); }
       throw new Error(`redirect blocked for capture: ${redactUrl(url)}`);
     }
     if (!res.ok) throw new Error(`fetch failed ${res.status} for ${redactUrl(url)}`);
     const ct = res.headers.get('content-type') ?? '';
-    if (ct && !ct.includes('text/html') && !ct.includes('application/xhtml')) {
-      throw new Error(`blocked content-type ${ct} for ${redactUrl(url)}`);
-    }
+    if (ct && !ct.includes('text/html') && !ct.includes('application/xhtml')) throw new Error(`blocked content-type ${ct} for ${redactUrl(url)}`);
     const buf = new Uint8Array(await res.arrayBuffer());
     if (buf.length > sizeCap) throw new Error(`capture too large ${buf.length} for ${redactUrl(url)}`);
     const dom = new TextDecoder().decode(buf);
     const capturedAt = new Date().toISOString();
+    const elements: CaptureElement[] = [];
     const base: CaptureResult & { url: string } = {
-      dom, screenshotBase64: '', runtime: 'static', hash: hashCapture({ dom, screenshotBase64: '', runtime: 'static', url }), capturedAt, url,
+      dom, screenshotBase64: '', runtime: 'static', hash: hashCapture({ dom, screenshotBase64: '', runtime: 'static', url, elementsCount: 0 }), capturedAt, url, elements, viewport: null,
     };
     return persistCapture(base);
-  } finally {
-    clearTimeout(overall);
-  }
+  } finally { clearTimeout(overall); }
 }
 
 async function captureRendered(url: string): Promise<CaptureResult> {
@@ -112,18 +137,34 @@ async function captureRendered(url: string): Promise<CaptureResult> {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
-    page.on('request', async (req: any) => {
-      try { const u = req.url(); if (u !== url) await assertAllowedUrl(u); } catch {}
-    });
+    page.on('request', async (req: any) => { try { const u = req.url(); if (u !== url) await assertAllowedUrl(u); } catch {} });
     await page.goto(url, { waitUntil: 'networkidle', timeout: 10000 });
     await page.waitForTimeout(1000);
-    let dom = await page.evaluate(() => document.documentElement.outerHTML);
+    const evaluated = await page.evaluate(() => {
+      const elements: Array<{ id: string; tag: string; text: string; x: number; y: number; w: number; h: number; dataAttrs: string[] }> = [];
+      let counter = 0;
+      for (const el of document.querySelectorAll('*')) {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        if (rect.width < 3 || rect.height < 3) continue;
+        if (rect.width * rect.height > 2_000_000) continue;
+        const id = `bs-${counter++}`;
+        el.setAttribute('data-baystate-id', id);
+        const dataAttrs = [...(el as Element).attributes].filter(a => a.name.startsWith('data-')).map(a => a.name).slice(0, 4);
+        elements.push({ id, tag: el.tagName.toLowerCase(), text: ((el as HTMLElement).innerText ?? '').trim().slice(0, 120), x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height), dataAttrs });
+      }
+      const dom = document.documentElement.outerHTML;
+      const viewport = { w: window.innerWidth, h: window.innerHeight, deviceScaleFactor: window.devicePixelRatio };
+      return { dom, elements, viewport };
+    });
+    let dom: string = evaluated.dom;
     if (dom.length > 5 * 1024 * 1024) dom = dom.slice(0, 5 * 1024 * 1024);
     let screenshotBase64 = await page.screenshot({ type: 'png' }).then((buf: Buffer) => buf.toString('base64'));
     if (screenshotBase64.length > 5 * 1024 * 1024) screenshotBase64 = screenshotBase64.slice(0, 5 * 1024 * 1024);
     await context.close();
     const capturedAt = new Date().toISOString();
-    const base: CaptureResult & { url: string } = { dom, screenshotBase64, runtime: 'rendered', hash: hashCapture({ dom, screenshotBase64, runtime: 'rendered', url }), capturedAt, url };
+    const elements: CaptureElement[] = evaluated.elements;
+    const viewport = evaluated.viewport;
+    const base: CaptureResult & { url: string } = { dom, screenshotBase64, runtime: 'rendered', hash: hashCapture({ dom, screenshotBase64, runtime: 'rendered', url, elementsCount: elements.length }), capturedAt, url, elements, viewport };
     return persistCapture(base);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

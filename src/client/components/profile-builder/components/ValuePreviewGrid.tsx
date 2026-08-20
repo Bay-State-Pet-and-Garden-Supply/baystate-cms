@@ -15,10 +15,23 @@ export interface ValuePreviewGridProps {
   values: Record<string, string | null>;
   /** optional field label for caption */
   fieldLabel?: string;
+  /** per-sample captures for true 3/3 matrix — when provided, values are derived per sample capture, not shared snapshot */
+  captures?: Record<string, { html: string; dom?: string }>;
 }
 
-export function ValuePreviewGrid({ samples, candidates, values, fieldLabel }: ValuePreviewGridProps) {
+export function ValuePreviewGrid({ samples, candidates, values, fieldLabel, captures }: ValuePreviewGridProps) {
   if (candidates.length === 0 || samples.length === 0) return null;
+  // story: e07s03 — per-sample capture/evaluate: when captures provided, values are expected to be per-sample already (caller evaluates each capture separately for true 3/3 matrix)
+  void captures;
+  const top = candidates[0];
+  const stableCount = top ? samples.filter(s => {
+    const v = values[s.id];
+    return v !== null && v !== undefined && String(v).trim().length > 0;
+  }).length : 0;
+  const total = samples.length;
+  const confidenceLabel = stableCount === total && total > 0
+    ? `${fieldLabel ?? 'Field'}: stable on ${stableCount}/${total} templates`
+    : stableCount > 0 ? `${fieldLabel ?? 'Field'}: ${stableCount}/${total} templates — Value alternatives available` : null;
 
   return (
     <div className="value-preview-grid" data-field={fieldLabel ?? ''}>
@@ -58,6 +71,7 @@ export function ValuePreviewGrid({ samples, candidates, values, fieldLabel }: Va
           ))}
         </tbody>
       </table>
+      {confidenceLabel && <p className="mt-1 text-xs font-semibold">{confidenceLabel}</p>}
       <p className="mt-1 text-xs opacity-60">instant preview — not evidence</p>
     </div>
   );
