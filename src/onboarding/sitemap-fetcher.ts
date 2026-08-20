@@ -220,6 +220,23 @@ export async function fetchAndParseSitemap(
     }
   }
 
+  // ── Step 4: Camoufox anti-detect browser fallback (if bot-blocked) ────
+  if (!matchedResult && tracker.isBlocked) {
+    console.log(
+      `[SitemapFetcher] Standard HTTP fetch blocked by bot protection for ${origin}; attempting Camoufox rendered fallback...`,
+    );
+    try {
+      matchedResult = await tryFetchSitemapRendered(origin);
+      if (matchedResult && matchedResult.entries.length > 0) {
+        console.log(
+          `[SitemapFetcher] Camoufox rendered fallback succeeded for ${origin} (${matchedResult.entries.length} URLs resolved).`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[SitemapFetcher] Rendered fallback failed for ${origin}:`, err);
+    }
+  }
+
   const completedAt = new Date().toISOString();
   const durationMs = Date.now() - startTime;
 
@@ -569,17 +586,28 @@ function detectSitemapKind(body: string): 'index' | 'urlset' | null {
 }
 
 /**
+ * Unescape standard XML entities in sitemap URLs.
+ */
+function decodeXmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+/**
  * Extract every `<loc>…</loc>` payload in document order.
  * The regex is intentionally narrow — anything containing `<` inside
- * the tag would be malformed XML anyway, and we don't need to support
- * CDATA or entity encoding for sitemap documents.
+ * the tag would be malformed XML anyway. Decodes XML entities like `&amp;`.
  */
 function extractAllLocs(body: string): string[] {
   const out: string[] = [];
   const re = /<loc>([^<]+)<\/loc>/gi;
   let match: RegExpExecArray | null;
   while ((match = re.exec(body)) !== null) {
-    const value = match[1].trim();
+    const value = decodeXmlEntities(match[1].trim());
     if (value) out.push(value);
   }
   return out;
@@ -597,7 +625,7 @@ function extractAllUrlEntries(body: string): SitemapUrlEntry[] {
     const block = blockMatch[1];
     const locMatch = /<loc>([^<]+)<\/loc>/i.exec(block);
     if (!locMatch) continue;
-    const url = locMatch[1].trim();
+    const url = decodeXmlEntities(locMatch[1].trim());
     if (!url) continue;
 
     const lastmodMatch = /<lastmod>([^<]+)<\/lastmod>/i.exec(block);
@@ -757,6 +785,256 @@ function isGzipBytes(bytes: Uint8Array): boolean {
     bytes[0] === GZIP_MAGIC[0] &&
     bytes[1] === GZIP_MAGIC[1]
   );
+}
+
+// ─── Camoufox Rendered Fallback Helpers ─────────────────────────────────────
+
+/**
+ * Helper to parse `Sitemap:` directives from raw robots.txt text.
+ */
+function parseRobotsDirectives(body: string): string[] {
+  if (!body) return [];
+  const sitemaps: string[] = [];
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = line.match(/^sitemap\s*:\s*(.+)$/i);
+    if (match) {
+      const candidate = match[1].trim();
+      if (candidate) sitemaps.push(candidate);
+    }
+  }
+  return sitemaps;
+}
+
+/**
+ * Extract child sitemap URLs from rendered HTML/XML content.
+ */
+function extractRenderedChildSitemaps(content: string, origin: string): string[] {
+  let domainHost = '';
+  try {
+    domainHost = new URL(origin).hostname.replace(/^www\./, '');
+  } catch {
+    domainHost = origin.replace(/^www\./, '');
+  }
+
+  const childUrls: string[] = [];
+  const seen = new Set<string>();
+
+  const locRegex = /<loc>(?:<!\[CDATA\[)?(https?:\/\/[^<\]\s]+)(?:\]\]>)?<\/loc>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = locRegex.exec(content)) !== null) {
+    const rawUrl = decodeXmlEntities(m[1].trim());
+    if (rawUrl.includes('sitemap') || rawUrl.endsWith('.xml')) {
+      if (!seen.has(rawUrl)) {
+        seen.add(rawUrl);
+        childUrls.push(rawUrl);
+      }
+    }
+  }
+
+  const hrefRegex = /href=["'](https?:\/\/[^"'\s]+)["']/gi;
+  while ((m = hrefRegex.exec(content)) !== null) {
+    const rawUrl = decodeXmlEntities(m[1].trim());
+    try {
+      const u = new URL(rawUrl);
+      const host = u.hostname.replace(/^www\./, '');
+      if ((host === domainHost || host.endsWith('.' + domainHost)) && (rawUrl.includes('sitemap') || rawUrl.endsWith('.xml'))) {
+        if (!seen.has(rawUrl)) {
+          seen.add(rawUrl);
+          childUrls.push(rawUrl);
+        }
+      }
+    } catch {}
+  }
+
+  return childUrls;
+}
+
+/**
+ * Extract product / page URLs from rendered HTML/XML content.
+ */
+function extractRenderedUrls(content: string, origin: string): SitemapUrlEntry[] {
+  let domainHost = '';
+  try {
+    domainHost = new URL(origin).hostname.replace(/^www\./, '');
+  } catch {
+    domainHost = origin.replace(/^www\./, '');
+  }
+
+  const xmlEntries = extractAllUrlEntries(content);
+  if (xmlEntries.length > 0) {
+    return xmlEntries;
+  }
+
+  const locRegex = /<loc>(?:<!\[CDATA\[)?(https?:\/\/[^<\]\s]+)(?:\]\]>)?<\/loc>/gi;
+  const entries: SitemapUrlEntry[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+
+  while ((m = locRegex.exec(content)) !== null) {
+    const url = decodeXmlEntities(m[1].trim());
+    if (url && !seen.has(url) && !url.includes('sitemap') && !url.endsWith('.xml')) {
+      seen.add(url);
+      entries.push({ url });
+    }
+  }
+
+  if (entries.length > 0) {
+    return entries;
+  }
+
+  const hrefRegex = /href=["'](https?:\/\/[^"'\s]+)["']/gi;
+  while ((m = hrefRegex.exec(content)) !== null) {
+    const url = decodeXmlEntities(m[1].trim());
+    try {
+      const u = new URL(url);
+      const host = u.hostname.replace(/^www\./, '');
+      if (host === domainHost || host.endsWith('.' + domainHost)) {
+        if (!url.endsWith('.xml') && !url.includes('sitemap') && !seen.has(url)) {
+          seen.add(url);
+          entries.push({ url });
+        }
+      }
+    } catch {}
+  }
+
+  return entries;
+}
+
+/**
+ * Rendered sitemap fetcher using Camoufox (anti-detect Firefox).
+ * Invoked as an automatic fallback when standard HTTP fetch is blocked by Cloudflare / bot protection (HTTP 403).
+ */
+async function tryFetchSitemapRendered(
+  origin: string,
+): Promise<{ entries: SitemapUrlEntry[]; sourceUrl: string } | null> {
+  const normOrigin = origin.toLowerCase().replace(/\/+$/, '');
+  const overallDeadline = Date.now() + 25000; // 25s hard deadline per domain
+
+  let launchContextFactory: any;
+  let browserConfigLoader: any;
+
+  try {
+    launchContextFactory = await import('../extraction-worker/browser/camoufox-launch');
+    browserConfigLoader = await import('../extraction-worker/browser/config');
+  } catch (err) {
+    console.warn('[SitemapFetcher] Camoufox extraction worker modules not available:', err);
+    return null;
+  }
+
+  const config = browserConfigLoader.loadWorkerBrowserConfig();
+  const launchCtx = await launchContextFactory.createLaunchContext(config);
+  let browser: any = null;
+
+  try {
+    browser = await launchCtx.launcher.launch(launchCtx.launchOptions);
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0',
+    });
+    const page = await context.newPage();
+
+    const candidatePaths = [
+      '/sitemap.xml',
+      '/sitemap_index.xml',
+      '/robots.txt',
+    ];
+
+    for (const path of candidatePaths) {
+      if (Date.now() >= overallDeadline) {
+        console.warn(`[SitemapFetcher] [Camoufox] Deadline exceeded for ${origin}; skipping remaining paths.`);
+        break;
+      }
+
+      const targetUrl = normOrigin + path;
+      try {
+        console.log(`[SitemapFetcher] [Camoufox] Navigating to ${targetUrl}...`);
+        const resp = await page.goto(targetUrl, {
+          waitUntil: 'commit',
+          timeout: 8000,
+        });
+        await page.waitForTimeout(1500);
+
+        const status = resp?.status();
+        if (status && status >= 400 && status !== 403) {
+          continue;
+        }
+
+        const title = (await page.title()).toLowerCase();
+        if (title.includes('just a moment') || title.includes('attention required') || title.includes('cloudflare')) {
+          console.log(`[SitemapFetcher] [Camoufox] Waiting for Turnstile challenge on ${targetUrl}...`);
+          await page.waitForTimeout(3000);
+        }
+
+        const content = await page.content();
+        if (!content || content.length < 50) continue;
+
+        if (path === '/robots.txt') {
+          const bodyText = await page.innerText('body').catch(() => content);
+          const robotsSitemaps = parseRobotsDirectives(bodyText);
+          for (const sitemapUrl of robotsSitemaps.slice(0, 2)) {
+            if (Date.now() >= overallDeadline) break;
+            const normSitemap = decodeXmlEntities(sitemapUrl);
+            console.log(`[SitemapFetcher] [Camoufox] Navigating to robots sitemap ${normSitemap}...`);
+            const sResp = await page.goto(normSitemap, { waitUntil: 'commit', timeout: 8000 });
+            await page.waitForTimeout(1500);
+            if (sResp && sResp.status() < 400) {
+              const sContent = await page.content();
+              const urls = extractRenderedUrls(sContent, normOrigin);
+              if (urls.length > 0) {
+                return { entries: urls, sourceUrl: normSitemap };
+              }
+            }
+          }
+          continue;
+        }
+
+        const children = extractRenderedChildSitemaps(content, normOrigin);
+        if (children.length > 0) {
+          console.log(`[SitemapFetcher] [Camoufox] Discovered ${children.length} child sitemaps in index at ${targetUrl}`);
+          const collected: SitemapUrlEntry[] = [];
+          const productChildren = children.filter((c: string) => /product|item|catalog|shop/i.test(c));
+          const toFetch = (productChildren.length > 0 ? productChildren : children).slice(0, 8);
+
+          for (const childUrl of toFetch) {
+            if (Date.now() >= overallDeadline) break;
+            const normChild = childUrl.startsWith('http://') ? childUrl.replace('http://', 'https://') : childUrl;
+            try {
+              console.log(`[SitemapFetcher] [Camoufox] Fetching child sitemap ${normChild}...`);
+              const cResp = await page.goto(normChild, { waitUntil: 'commit', timeout: 8000 });
+              await page.waitForTimeout(1500);
+              if (cResp && cResp.status() < 400) {
+                const cContent = await page.content();
+                const childUrls = extractRenderedUrls(cContent, normOrigin);
+                for (const u of childUrls) collected.push(u);
+              }
+            } catch (e) {
+              console.warn(`[SitemapFetcher] [Camoufox] Failed to fetch child ${normChild}:`, e);
+            }
+          }
+
+          const deduped = dedupeEntries(collected);
+          if (deduped.length > 0) {
+            return { entries: deduped, sourceUrl: targetUrl };
+          }
+        }
+
+        const urls = extractRenderedUrls(content, normOrigin);
+        if (urls.length > 0) {
+          return { entries: urls, sourceUrl: targetUrl };
+        }
+      } catch (err) {
+        console.warn(`[SitemapFetcher] [Camoufox] Navigation error on ${targetUrl}:`, err);
+      }
+    }
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+
+  return null;
 }
 
 // (No additional public exports; only `fetchAndParseSitemap` is part
