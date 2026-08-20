@@ -31,12 +31,83 @@ import {
   saveExtractorProfile,
   testExtractorProfile,
   snapshotPageForBuilder,
-  generateSelectorFromElement,
-  fetchPageHtml,
   validateProfileDraft,
   generateSelectors as generateSelectorsApi,
 } from '../../../onboarding-api';
 import type { ProfileBuilderProps, ProfileBuilderController, ValidationSample } from '../profileBuilderTypes';
+// story: e07s03 — click→ranked recipes (shared with ValuePreviewGrid)
+import * as cheerio from 'cheerio';
+import { buildStableSelector } from '../../../../shared/selector-utils';
+
+export type RankedRecipe = {
+  selector: string;
+  stability: 'high' | 'medium' | 'low';
+  source: 'jsonld' | 'css-stable' | 'shopify' | 'semantic' | 'generic';
+  score: number;
+};
+
+/**
+ * Rank candidate recipes for a field given a capture (dom+html).
+ * Prefers structured JSON-LD, then [data-testid], then shopify, then semantic, then generic.
+ * Deterministic, no network.
+ */
+export function rankCandidates(capture: { dom: string; html: string }, field: string): RankedRecipe[] {
+  const html = (capture.html ?? capture.dom ?? '') as string;
+  const dom = (capture.dom ?? html) as string;
+  const candidates: RankedRecipe[] = [];
+  const lower = html.toLowerCase();
+  // 1) JSON-LD — high
+  if (lower.includes('application/ld+json')) {
+    candidates.push({ selector: 'jsonld:Product.name', stability: 'high', source: 'jsonld', score: 100 });
+  }
+  // 2) [data-testid] etc. — high (use buildStableSelector if we can find an element with data-testid)
+  const hasStableAttr = /data-testid|data-test|data-cy|data-qa/.test(lower);
+  if (hasStableAttr) {
+    // try to build a real selector via cheerio for the first element with that attr
+    try {
+      const $ = cheerio.load(dom);
+      const el = $('[data-testid],[data-test],[data-cy],[data-qa]').get(0) as unknown as import('domhandler').Element | undefined;
+      if (el) {
+        const built = buildStableSelector($, el);
+        candidates.push({ selector: built.selector, stability: built.stability, source: 'css-stable', score: 90 });
+      } else {
+        candidates.push({ selector: '[data-testid="product"]', stability: 'high', source: 'css-stable', score: 90 });
+      }
+    } catch {
+      candidates.push({ selector: '[data-testid="product"]', stability: 'high', source: 'css-stable', score: 90 });
+    }
+  }
+  // 3) shopify — medium
+  if (lower.includes('shopify') || lower.includes('cdn.shopify')) {
+    candidates.push({ selector: '[id^="shopify-section"] h1', stability: 'medium', source: 'shopify', score: 70 });
+  }
+  // 4) semantic class/id — medium (check semantic hints for field)
+  const semanticHints: Record<string, string> = { title: 'product-title', description: 'description', price: 'price', brand: 'brand', image: 'product-image' };
+  const hint = semanticHints[field] ?? 'title';
+  if (lower.includes(hint)) {
+    candidates.push({ selector: `h1.${hint}`, stability: 'medium', source: 'semantic', score: 60 });
+  }
+  // 5) generic — low
+  candidates.push({ selector: 'h1', stability: 'low', source: 'generic', score: 10 });
+  // already scored in order high→low; ensure deterministic sort
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Instant local eval for value previews — DOMParser-style but via cheerio for tests.
+ * Labeled "instant preview — not evidence" in UI; never satisfies testsPass.
+ */
+export function evaluateValuesInstant(capture: { html: string }, selector: string): string | null {
+  try {
+    const $ = cheerio.load(capture.html);
+    const els = $(selector);
+    if (els.length === 0) return null;
+    const text = els.first().text().replace(/\s+/g, ' ').trim();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Normalize a domain string for matching:
@@ -139,73 +210,43 @@ export function useProfileBuilderController(
     dispatch({ type: 'runtime/set', runtime });
   }, []);
 
-  // ── Snapshot + HTML fetch ───────────────────────────────────────────────
+  // ── Snapshot (single capture artifact — e07s03) ───────────────────────
+  // Single capture (DOM + screenshot + runtime + hash, networkidle+1s) is the source of truth.
+  // Independent HTML-fetch hop deleted — previously raced with snapshot.
   const captureSnapshot = useCallback(async () => {
     const url = state.draft.productUrl;
     if (!url) return;
 
     dispatch({ type: 'snapshot/start' });
     try {
-      const result = await snapshotPageForBuilder({
-        url,
-        runtime: state.draft.runtime,
-        captureScreenshot: true,
+      const res = await fetch('/api/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, runtime: state.draft.runtime }),
       });
-      if (!result.ok || !result.data) {
-        dispatch({
-          type: 'snapshot/failed',
-          error: result.error ?? 'Snapshot failed',
-        });
+      const data = (await res.json()) as { ok: boolean; dom?: string; screenshotBase64?: string; runtime?: string; hash?: string; capturedAt?: string; error?: string };
+      if (!res.ok || !data.ok || !data.dom) {
+        dispatch({ type: 'snapshot/failed', error: data.error ?? 'Snapshot failed' });
         return;
       }
-
-      dispatch({ type: 'snapshot/succeeded', snapshot: result.data });
-
-      // Fetch page HTML for local evaluation.
-      try {
-        const htmlResult = await fetchPageHtml(url);
-        if (htmlResult.ok && htmlResult.html) {
-          dispatch({ type: 'pageHtml/set', html: htmlResult.html });
-
-          // Evaluate all selectors locally.
-          const localResults = evaluateAllSelectorsLocally(
-            htmlResult.html,
-            state.draft,
-            ALL_STANDARD_FIELDS as FieldDefinition[],
-          );
-          for (const [key, evalResult] of Object.entries(localResults)) {
-            dispatch({ type: 'field/selectorEvaluated', key, result: evalResult });
-          }
-
-          // Evaluate titleOptionalSelectors.
-          if (state.draft.titleOptionalSelectors.length > 0) {
-            const titleOptResult = evaluateTitleOptionalSelectors(
-              htmlResult.html,
-              state.draft.titleOptionalSelectors,
-            );
-            // Dispatch evaluation result for titleOptionalSelectors as a combined field.
-            dispatch({
-              type: 'field/selectorEvaluated',
-              key: 'titleOptionalSelectors',
-              result: {
-                status: titleOptResult.status,
-                extractedPreview: titleOptResult.concatenatedPreview,
-                matchCount: titleOptResult.parts.reduce((sum, p) => sum + p.matchCount, 0),
-                warnings: titleOptResult.parts.flatMap((p) => p.warnings),
-              },
-            });
-          }
-        }
-      } catch {
-        // HTML fetch failure is non-fatal — keep snapshot, allow preview/validation.
+      const snapshot = {
+        url,
+        dom: data.dom,
+        screenshotBase64: data.screenshotBase64 ?? '',
+        runtime: data.runtime ?? state.draft.runtime,
+        hash: data.hash ?? '',
+        capturedAt: data.capturedAt ?? new Date().toISOString(),
+      };
+      dispatch({ type: 'snapshot/succeeded', snapshot: snapshot as unknown as any });
+      dispatch({ type: 'pageHtml/set', html: data.dom });
+      const localResults = evaluateAllSelectorsLocally(data.dom, state.draft, ALL_STANDARD_FIELDS as FieldDefinition[]);
+      for (const [key, evalResult] of Object.entries(localResults)) {
+        dispatch({ type: 'field/selectorEvaluated', key, result: evalResult });
       }
     } catch (err) {
-      dispatch({
-        type: 'snapshot/failed',
-        error: err instanceof Error ? err.message : 'Snapshot failed',
-      });
+      dispatch({ type: 'snapshot/failed', error: err instanceof Error ? err.message : 'Snapshot failed' });
     }
-  }, [state.draft.productUrl, state.draft.runtime, state.draft.titleOptionalSelectors]);
+  }, [state.draft.productUrl, state.draft.runtime, state.draft])
 
   // ── Selector update ─────────────────────────────────────────────────────
   const updateSelector = useCallback(
@@ -246,37 +287,7 @@ export function useProfileBuilderController(
     [],
   );
 
-  // ── Generate selector from outerHTML ─────────────────────────────────────
-  const generateSelectorFromOuterHtml = useCallback(
-    async (key: string, outerHTML: string) => {
-      if (!state.pageHtml) return;
-
-      dispatch({ type: 'field/generateStarted', key });
-      try {
-        const result = await generateSelectorFromElement({
-          html: state.pageHtml,
-          outerHTML,
-        });
-
-        if (result.ok && result.data) {
-          dispatch({ type: 'field/generateSucceeded', key, result: result.data });
-        } else {
-          dispatch({
-            type: 'field/generateFailed',
-            key,
-            error: result.error ?? 'Selector generation failed',
-          });
-        }
-      } catch (err) {
-        dispatch({
-          type: 'field/generateFailed',
-          key,
-          error: err instanceof Error ? err.message : 'Selector generation failed',
-        });
-      }
-    },
-    [state.pageHtml],
-  );
+  // paste-HTML generator deleted (e07s03) — local DOMParser eval stays as instant preview — not evidence (see captureSnapshot comment).
 
   // ── Custom field operations ─────────────────────────────────────────────
   const addCustomField = useCallback((name: string) => {
@@ -512,7 +523,7 @@ export function useProfileBuilderController(
       addTitleOptionalSelector,
       updateTitleOptionalSelector,
       removeTitleOptionalSelector,
-      generateSelectorFromOuterHtml,
+      // paste-HTML generator deleted (e07s03)
       addCustomField,
       removeCustomField,
       runPreview,
@@ -540,7 +551,6 @@ export function useProfileBuilderController(
       addTitleOptionalSelector,
       updateTitleOptionalSelector,
       removeTitleOptionalSelector,
-      generateSelectorFromOuterHtml,
       addCustomField,
       removeCustomField,
       runPreview,

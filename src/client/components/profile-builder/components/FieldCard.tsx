@@ -7,7 +7,7 @@
 
 import React from 'react';
 import { SelectorInput } from './SelectorInput';
-import { GenerateSelectorPopover } from './GenerateSelectorPopover';
+// paste-HTML popover deleted (e07s03) — use single capture + visual correction (ValuePreviewGrid)
 import type { ProfileBuilderState, ProfileBuilderController } from '../profileBuilderTypes';
 import type { SelectorFieldState } from '../profileBuilderTypes';
 import type { FieldDefinition } from '../fieldCatalog';
@@ -139,7 +139,8 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
     return <TitleOptionalCard state={state} controller={controller} />;
   }
 
-  const canGenerate = key === 'titleSelector' || key === 'brandSelector' || key === 'descriptionSelector' || key === 'imagesSelector';
+  // canGenerate removed with paste popover (e07s03) — visual correction via capture artifact replaces paste-HTML flow
+  const canGenerate = false as const;
 
   return (
     <div style={s.card}>
@@ -197,14 +198,7 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
             Clear
           </button>
         )}
-        {canGenerate && (
-          <GenerateSelectorPopover
-            fieldKey={key}
-            fieldLabel={label}
-            onGenerate={controller.generateSelectorFromOuterHtml}
-            loading={false}
-          />
-        )}
+        {canGenerate && null}
       </div>
     </div>
   );
