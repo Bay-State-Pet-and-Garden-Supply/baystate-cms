@@ -42,6 +42,12 @@ export function EvidenceSourceCard({ source }: Props) {
       {source.retrievedAt && (
         <div style={styles.meta}>Accessed: {new Date(source.retrievedAt).toLocaleString()}</div>
       )}
+      {source.contentHash && (
+        <div style={styles.meta}>Hash: {source.contentHash.slice(0, 16)}…</div>
+      )}
+      {source.artifactRef && (
+        <div style={styles.meta}>Artifact: {source.artifactRef.slice(0, 16)}… · hash/method inspectable in provenance panel</div>
+      )}
       {source.licenseRef && (
         <div style={styles.meta}>License: {source.licenseRef}</div>
       )}
