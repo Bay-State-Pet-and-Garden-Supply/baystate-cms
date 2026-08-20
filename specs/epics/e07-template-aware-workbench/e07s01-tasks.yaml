@@ -1,0 +1,17 @@
+story_id: e07s01
+title: "Fix persistence + evidence-gated activation"
+status: planned
+bcps: 8
+tasks:
+  - id: e07s01t01
+    description: "Migrate profile-version-repo from in-memory Maps to SQLite (profile_versions + profile_active) with txn atomic active pointer + rollback + revalidation"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-version-repo.test.ts"
+    status: planned
+  - id: e07s01t02
+    description: "Bind MatrixResult artifact_hashes to version hash and derive testsPass/readiness from persisted evidence (fix ProfileWorkspacePage:55 active+3 drift)"
+    verify: "bunx vitest run src/tests/unit/profile-activation-gate.test.ts src/tests/unit/profile-workspace.test.ts"
+    status: planned
+  - id: e07s01t03
+    description: "Seed/migrate existing extractor_profiles single-row to versioned row + smoke that restart retains versions (no Map loss)"
+    verify: "bun run test:db 2>&1 | head -n 60"
+    status: planned
