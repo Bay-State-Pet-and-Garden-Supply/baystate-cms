@@ -3,26 +3,25 @@
 workflow_mode: solo-git
 active_flow: build_epic
 active_epic_id: e02
-active_story_id: e02s01
+active_story_id: e02s02
 active_bug_id: null
 release:
   target_version: null
   last_tag: v0.1.0
   last_publish: null
 epic_cycle:
-  current_step: 8
-  next_skill: null
-  completed_steps: [1, 2, 3, 4, 5, 6, 7, 8]
-  story_bcps: 8
-  audit_result: pass
+  current_step: 6
+  next_skill: audit-code
+  completed_steps: [1, 2, 3, 4, 5]
+  story_bcps: 5
 bug_cycle:
   current_step: null
   completed_steps: []
 git:
-  branch: main
-  hash: ab83604
+  branch: feat/e02s02-controls
+  hash: 734e30d
 handoff:
-  last_step_completed: "e02s01 release-branch — landed to main"
+  last_step_completed: "e02s02 verify-work PASS — typecheck + 88 agent-lab + 6 e02s02/verifier + 43 DB (workflow/sse) + eslint clean; verifiers corrected"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
@@ -30,9 +29,9 @@ handoff:
     - CONTEXT.md
     - docs/plans/epic-47-handoff.md
     - specs/product/SCOPE_LATEST.yaml
-  next_skill: plan-work
+  next_skill: audit-code
 metrics:
-  story_start: "2026-08-20T02:03:59Z"
-  story_end: "2026-08-20T02:32:30Z"
-  cycle_minutes: 28
-  bcp_per_hour: 17.1
+  story_start: "2026-08-20T02:34:03Z"
+  story_end: null
+  cycle_minutes: null
+  bcp_per_hour: null
