@@ -1,0 +1,21 @@
+story_id: e02s01
+title: "Specialist stage workspace — seed/identity/evidence per field, profile inspectable, conflicts visible"
+status: planned
+bcps: 8
+tasks:
+  - id: 1
+    description: "Extend src/client/components/agent-lab/* to render specialist stages (ProductSeed immutable, Discovery candidates, Extraction profile/version/method/path, Resolver ResolvedFactSet per-field, Curator draft grounding, Verifier identity/data) reusing contracts.ts artifacts; never show private chain-of-thought, only operational events/artifacts"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/agent-lab 2>&1 | tail -n 20"
+    status: done
+  - id: 2
+    description: "Per-field provenance reveal — every Curator fact links back to supporting resolvedFacts/evidence IDs, evidence inspector shows source page/method/hash, profile/version/method/path inspectable from extraction evidence"
+    verify: "bun run typecheck && bunx vitest run src/client/agent-lab/logic.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 3
+    description: "Conflicts/unresolved without raw logs — Resolver conflicts and unresolved fields surface in dedicated panel, Verifier human_review/failed states cite evidence/conflicts, unsupported claims clearly marked"
+    verify: "bun run typecheck && bun run lint src/client/components/agent-lab/ 2>&1 | tail -n 20"
+    status: done
+  - id: 4
+    description: "Registry-backed config editing read-only in UI — feature flags, per-run policy snapshots, capability versions shown but not mutated from client; server owns policy"
+    verify: "bun run typecheck && bun test src/tests/unit/product-intelligence-policy.test.ts 2>&1 | tail -n 20"
+    status: done
