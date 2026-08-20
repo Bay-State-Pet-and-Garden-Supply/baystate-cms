@@ -1,0 +1,21 @@
+story_id: e03s02
+title: "Rollout thresholds, safety gates, kill switches and legacy migration"
+status: planned
+bcps: 5
+tasks:
+  - id: 1
+    description: "Documented rollout thresholds before v2 default — staged enablement shadow_only → manual_agent_lab → reviewed_import → optional_onboarding → automatic, with thresholds over measured metrics only (never model confidence); code enforces thresholds via evaluateRolloutGate (min sample size, documentedBy/updatedAt audit)"
+    verify: "bun run typecheck && bun test src/tests/unit/pi-rollout.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 2
+    description: "Global kill switch — BAYSTATE_CMS_PI_KILL_SWITCH / flags.killSwitch forces legacy everywhere and blocks imports, exercised in tests; feature flags productIntelligence.* remain default-disabled with in-memory overrides"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-intelligence/flags.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 3
+    description: "Legacy removal only after default-on stabilization — shared PI runtime/governance retained throughout, monolithic code marked deprecated not deleted; removal guarded by rollout state + tests"
+    verify: "bun run typecheck && grep -r 'legacy-executor' src/product-intelligence 2>&1 | head -n 20"
+    status: done
+  - id: 4
+    description: "Migration and verifier coverage — add ADR 0029 for evals/shadow/rollout, update specs/tech-architecture for tail, and ensure CI treats lint advisory (CI skips lint) while typecheck+tests are hard gates"
+    verify: "bash scripts/validate-specs-yaml.sh && bun run typecheck && bunx vitest run src/tests/unit/product-intelligence/flags.test.ts 2>&1 | tail -n 20 && bun test src/tests/unit/pi-rollout.test.ts 2>&1 | tail -n 20"
+    status: done

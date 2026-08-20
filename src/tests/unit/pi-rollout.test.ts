@@ -17,6 +17,7 @@ import {
   evaluateRolloutGate,
   getRolloutConfig,
   isPiKillSwitchEnabled,
+  isLegacyRemovalAllowed,
   setRolloutConfig,
   currentRolloutState,
 } from '../../product-intelligence/evaluation/rollout';
@@ -160,6 +161,22 @@ describe('PI-9 rollout gates', () => {
     transitionPiRunStatus(run.id, 'completed', {});
     process.env.BAYSTATE_CMS_PI_KILL_SWITCH = 'true';
     expect(() => importRunToOnboarding(run.id, { mode: 'create' })).toThrow(/kill switch/);
+  });
+
+  it('isLegacyRemovalAllowed is false before default-on stabilization (ADR 0029)', () => {
+    setRolloutConfig({ stage: 'manual_agent_lab', documentedBy: 'test-run' });
+    expect(isLegacyRemovalAllowed(null)).toBe(false);
+    setRolloutConfig({ stage: 'reviewed_import', documentedBy: 'test-run' });
+    expect(isLegacyRemovalAllowed(null)).toBe(false);
+    // Automatic stage but no measured metrics -> still not allowed.
+    setRolloutConfig({ stage: 'automatic', documentedBy: 'test-run' });
+    expect(isLegacyRemovalAllowed(null)).toBe(false);
+    // Automatic stage with passing measured metrics -> allowed.
+    expect(isLegacyRemovalAllowed(reportWith(50, {}))).toBe(true);
+    // Kill switch overrides everything.
+    process.env.BAYSTATE_CMS_PI_KILL_SWITCH = 'true';
+    expect(isLegacyRemovalAllowed(reportWith(50, {}))).toBe(false);
+    delete process.env.BAYSTATE_CMS_PI_KILL_SWITCH;
   });
 
   it('currentRolloutState reflects kill switch + configured stage', () => {

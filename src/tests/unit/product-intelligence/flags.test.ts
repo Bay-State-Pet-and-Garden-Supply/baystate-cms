@@ -39,6 +39,28 @@ describe('loadProductIntelligenceFlags', () => {
   });
 });
 
+describe('kill switch (PI-9)', () => {
+  afterEach(() => resetProductIntelligenceFlagsOverride());
+
+  it('reads BAYSTATE_CMS_PI_KILL_SWITCH from the environment', () => {
+    expect(loadProductIntelligenceFlags({ BAYSTATE_CMS_PI_KILL_SWITCH: 'true' }).killSwitch).toBe(true);
+    expect(loadProductIntelligenceFlags({ BAYSTATE_CMS_PI_KILL_SWITCH: 'false' }).killSwitch).toBe(false);
+    expect(loadProductIntelligenceFlags({}).killSwitch).toBe(false);
+  });
+
+  it('fails closed on an unparseable kill-switch value', () => {
+    expect(loadProductIntelligenceFlags({ BAYSTATE_CMS_PI_KILL_SWITCH: 'maybe' }).killSwitch).toBe(false);
+  });
+
+  it('supports an in-memory override independent of env', () => {
+    expect(getProductIntelligenceFlags().killSwitch).toBe(false);
+    overrideProductIntelligenceFlags({ killSwitch: true });
+    expect(getProductIntelligenceFlags().killSwitch).toBe(true);
+    resetProductIntelligenceFlagsOverride();
+    expect(getProductIntelligenceFlags().killSwitch).toBe(false);
+  });
+});
+
 describe('runtime override', () => {
   afterEach(() => resetProductIntelligenceFlagsOverride());
 
