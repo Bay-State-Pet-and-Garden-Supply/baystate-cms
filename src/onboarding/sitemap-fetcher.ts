@@ -301,15 +301,15 @@ export async function fetchAndParseSitemap(
 
   // Failed to discover sitemap
   console.log(`[SitemapFetcher] No sitemap discovered for ${origin}.`);
-  if (tracker.isBlocked) {
-    try {
-      recordDomainStatus(
-        normDomain,
-        'blocked',
-        tracker.blockReason || 'Site blocked crawler (HTTP 403 / Cloudflare Challenge)',
-      );
-    } catch { /* non-critical */ }
-  }
+  try {
+    recordDomainStatus(
+      normDomain,
+      tracker.isBlocked ? 'blocked' : 'failed',
+      tracker.isBlocked
+        ? tracker.blockReason || 'Site blocked crawler (HTTP 403 / Cloudflare Challenge)'
+        : 'No sitemap discovered',
+    );
+  } catch { /* non-critical */ }
 
   if (shouldPersist) {
     try {
@@ -433,7 +433,8 @@ async function fetchSitemapBody(
       const isCloudflare =
         response.headers.get('server')?.toLowerCase().includes('cloudflare') ||
         response.headers.get('cf-mitigated') === 'challenge';
-      if (response.status === 403 || response.status === 401 || isCloudflare) {
+      const isPhp403 = url.endsWith('.php') && response.status === 403 && !isCloudflare;
+      if (!isPhp403 && (response.status === 403 || response.status === 401 || isCloudflare)) {
         tracker.isBlocked = true;
         tracker.blockReason = isCloudflare
           ? 'Site blocked crawler (Cloudflare Bot Challenge / HTTP 403)'
