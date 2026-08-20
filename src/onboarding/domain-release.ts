@@ -34,6 +34,8 @@ import {
   requeueBlockedExtractionItem,
 } from '../db/repositories/onboarding-item-repo';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
+import { getActiveVersion } from '../db/repositories/profile-version-repo';
+import { getMatrixResult } from './profile-test-matrix';
 import { onboardingEvents } from './sse-emitter';
 
 /** Error signature written by `processExtraction` when a profile is missing. */
@@ -82,8 +84,22 @@ export function releaseDomainExtractionItems(
   options: DomainReleaseOptions = {},
 ): DomainReleaseResult {
   const normalized = normalizeReleaseDomain(domain);
-  const profile = findProfileByDomain(normalized);
-  if (!profile) {
+  // Prefer immutable version evidence; fall back to legacy extractor_profiles for backward compat
+  let hasUsableProfile = false;
+  try {
+    const active = getActiveVersion(normalized);
+    if (active) {
+      const matrix = getMatrixResult(normalized, active.id);
+      if (matrix) {
+        const allPass = matrix.rows.every(r => r.cells.every(c => c.success));
+        if (allPass && active.artifactHashes.length >= 3) hasUsableProfile = true;
+      } else if (active.artifactHashes.length === 0 && (active.validationSummary as any)?.legacy) {
+        hasUsableProfile = false;
+      }
+    }
+  } catch {}
+  const legacyProfile = hasUsableProfile ? { domain: normalized } as any : findProfileByDomain(normalized);
+  if (!legacyProfile && !hasUsableProfile) {
     return {
       domain: normalized,
       profileAvailable: false,

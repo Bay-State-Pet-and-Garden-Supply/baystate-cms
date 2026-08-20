@@ -492,13 +492,53 @@ export function runMigrations(): void {
     db.exec(`
       CREATE TABLE IF NOT EXISTS cluster_overrides (
         domain TEXT NOT NULL,
-        clusterKey TEXT NOT NULL,
+        cluster_key TEXT NOT NULL,
         action TEXT NOT NULL,
         actor TEXT NOT NULL,
-        at TEXT NOT NULL,
-        PRIMARY KEY (domain, clusterKey)
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (domain, cluster_key)
       );
     `);
+    // Repair legacy schema with camelCase columns (clusterKey/at) from early e07 migration
+    const cols = db.query("PRAGMA table_info(cluster_overrides)").all() as Array<{ name: string }>;
+    const hasClusterKey = cols.some(c => c.name === 'clusterKey');
+    const hasAt = cols.some(c => c.name === 'at');
+    if (hasClusterKey || hasAt) {
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS cluster_overrides_new (
+              domain TEXT NOT NULL,
+              cluster_key TEXT NOT NULL,
+              action TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (domain, cluster_key)
+            )
+          `);
+          const hasOldClusterKey = cols.some(c => c.name === 'clusterKey');
+          const hasOldAt = cols.some(c => c.name === 'at');
+          // Copy: map old columns to new names (both schemas may coexist transiently)
+          if (hasOldClusterKey && hasOldAt) {
+            db.exec(`INSERT OR IGNORE INTO cluster_overrides_new (domain, cluster_key, action, actor, created_at)
+                     SELECT domain, clusterKey, action, actor, at FROM cluster_overrides`);
+          } else if (hasOldClusterKey) {
+            db.exec(`INSERT OR IGNORE INTO cluster_overrides_new (domain, cluster_key, action, actor, created_at)
+                     SELECT domain, clusterKey, action, actor, created_at FROM cluster_overrides`);
+          } else if (hasOldAt) {
+            db.exec(`INSERT OR IGNORE INTO cluster_overrides_new (domain, cluster_key, action, actor, created_at)
+                     SELECT domain, cluster_key, action, actor, at FROM cluster_overrides`);
+          }
+          db.exec('DROP TABLE cluster_overrides');
+          db.exec('ALTER TABLE cluster_overrides_new RENAME TO cluster_overrides');
+        })();
+        const fk = db.query("PRAGMA foreign_key_check('cluster_overrides')").all();
+        if (fk.length > 0) console.warn('[Migrations] FK violations after cluster_overrides repair:', fk.slice(0,3));
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
   } catch (e) {
     console.error('[Migrations] Failed to create cluster_overrides table:', e);
   }

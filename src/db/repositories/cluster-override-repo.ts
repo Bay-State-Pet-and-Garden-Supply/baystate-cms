@@ -50,10 +50,25 @@ export function setClusterOverride(domain: string, clusterKey: string, action: s
 export function applyOverrides<T extends { key: string }>(clusters: T[], overrides: ClusterOverride[]): T[] {
   if (overrides.length === 0) return clusters;
   const byKey = new Map(overrides.map((o) => [o.clusterKey, o.action]));
-  const mergedKey = overrides.find((o) => o.action === 'merge')?.clusterKey;
-  if (mergedKey) {
-    const kept = clusters.filter((c) => c.key !== mergedKey || c.key === clusters[0]?.key);
-    return kept;
+  let result = clusters.filter(c => {
+    const action = byKey.get(c.key);
+    if (action === 'split_exclude') return false;
+    return true;
+  });
+  // merge: if any override has action 'merge', collapse to first cluster (representative merge)
+  const hasMerge = overrides.some(o => o.action === 'merge');
+  if (hasMerge && result.length > 1) {
+    result = [result[0]];
   }
-  return clusters.filter((c) => !byKey.has(c.key) || byKey.get(c.key) !== 'split_exclude');
+  // replace: keep cluster but caller may swap suggested URL separately (key stays same)
+  return result;
+}
+
+export function applyOverridesToSuggested<T extends { clusterKey: string }>(suggested: T[], overrides: ClusterOverride[]): T[] {
+  if (overrides.length === 0) return suggested;
+  const byKey = new Map(overrides.map(o => [o.clusterKey, o.action]));
+  let result = suggested.filter(s => byKey.get(s.clusterKey) !== 'split_exclude');
+  const hasMerge = overrides.some(o => o.action === 'merge');
+  if (hasMerge && result.length > 1) result = [result[0]];
+  return result;
 }

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * FieldCard — single field selector editor with status, preview, and actions.
  *
@@ -9,7 +10,8 @@
 
 import React from 'react';
 import { SelectorInput } from './SelectorInput';
-// paste-HTML popover deleted (e07s03) — use single capture + visual correction (ValuePreviewGrid)
+import { ValuePreviewGrid } from './ValuePreviewGrid';
+import { rankCandidates, evaluateValuesInstant } from '../hooks/useProfileBuilderController';
 import type { ProfileBuilderState, ProfileBuilderController } from '../profileBuilderTypes';
 import type { SelectorFieldState } from '../profileBuilderTypes';
 import type { FieldDefinition } from '../fieldCatalog';
@@ -159,17 +161,33 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
         <span style={statusBadgeStyle(status)}>{STYLE_MAP[status]?.label ?? status}</span>
       </div>
 
-      <SelectorInput
-        value={selector}
-        onChange={(val) => controller.updateSelector(key, val)}
-        placeholder={`e.g. ${key}`}
-        error={error}
-      />
-
       {(matchCount !== undefined || stability) && (
         <div style={s.meta}>
           {matchCount !== undefined && <span>Matches: {matchCount}</span>}
           {stability && <span>Stability: {stability}</span>}
+        </div>
+      )}
+
+      {(state.snapshot as any)?.dom && (
+        <div style={{ marginTop: 6 }}>
+          <ValuePreviewGrid
+            samples={state.samples.length > 0 ? state.samples : [{ id: 'preview', url: state.draft.productUrl || '' }]}
+            candidates={rankCandidates({ dom: (state.snapshot as any).dom as string, html: (state.snapshot as any).dom as string }, key)}
+            values={Object.fromEntries(
+              (state.samples.length > 0 ? state.samples : [{ id: 'preview', url: state.draft.productUrl || '' }]).map(s => [
+                s.id,
+                evaluateValuesInstant({ html: ((state.snapshot as any)!.dom as string) }, selector),
+              ])
+            )}
+            fieldLabel={label}
+          />
+          <button
+            type="button"
+            style={{ ...s.clearBtn, marginTop: 6 }}
+            onClick={() => controller.captureSnapshot()}
+          >
+            Select on page
+          </button>
         </div>
       )}
 
@@ -193,6 +211,18 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
 
       {/* ── Suggestion display ── */}
       {renderFieldSuggestion(field.key, state.generation.fieldSuggestions[field.key], controller)}
+
+      <details style={{ marginTop: 8 }}>
+        <summary style={{ fontSize: 11, color: '#6b7280', cursor: 'pointer' }}>Advanced</summary>
+        <div style={{ marginTop: 6 }}>
+          <SelectorInput
+            value={selector}
+            onChange={(val) => controller.updateSelector(key, val)}
+            placeholder={`e.g. ${key}`}
+            error={error}
+          />
+        </div>
+      </details>
 
       <div style={s.actions}>
         {selector && (

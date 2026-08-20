@@ -5,7 +5,7 @@ import { getRepresentativeSuite, setRepresentativeSuite } from '../../db/reposit
 import { getWaiver, createWaiver } from '../../db/repositories/waiver-repo';
 import { getSitemapInventory } from '../../onboarding/sitemap-inventory-service';
 import { clusterInventoryUrls } from '../../onboarding/template-clustering';
-import { getClusterOverrides, setClusterOverride, applyOverrides } from '../../db/repositories/cluster-override-repo';
+import { getClusterOverrides, setClusterOverride, applyOverrides, applyOverridesToSuggested } from '../../db/repositories/cluster-override-repo';
 
 export const representativeSuiteRoutes = new Hono();
 
@@ -14,7 +14,9 @@ function safeClusters(domain: string): { clusters: unknown[]; suggested: string[
     const raw = clusterInventoryUrls(domain);
     const overrides = getClusterOverrides(domain);
     const clusters = applyOverrides(raw.clusters as never[], overrides as never[]) as unknown[];
-    return { clusters, suggested: raw.suggested, filtered: raw.filtered, overrides };
+    const suggestedRaw = raw.suggested.map(url => ({ clusterKey: url, url }));
+    const suggestedFiltered = applyOverridesToSuggested(suggestedRaw as any, overrides as never[]).map((s: any) => s.url);
+    return { clusters, suggested: suggestedFiltered, filtered: raw.filtered, overrides };
   } catch {
     return { clusters: [], suggested: [], filtered: { count: 0, reason: '' }, overrides: [] };
   }
