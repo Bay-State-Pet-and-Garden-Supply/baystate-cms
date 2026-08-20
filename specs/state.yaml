@@ -2,8 +2,8 @@
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
 active_flow: null
-active_epic_id: null
-active_story_id: null
+active_epic_id: e06
+active_story_id: e06s04
 active_bug_id: null
 release:
   target_version: null
@@ -22,7 +22,7 @@ git:
   branch: main
   hash: 7996f58
 handoff:
-  last_step_completed: "RELEASE v0.3.0 — e04/e05 curation stabilization landed (5 stories, 26 BCP, stage navigability + field provenance + explainable gates + taxonomy provenance + e05s03 gold-set, GPT blockers fixed)"
+  last_step_completed: "e06 Profile Workspace landed (4 stories, 23 BCP + 2 polish): dedicated page, indexed-product harness (no manual URL), LLM task buttons, 3-sample gate, park→release, Needs Attention → workspace wired, impeccable grid+tokens+Hierarchy polish"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
