@@ -31,6 +31,7 @@ export interface ShadowComparisonReport {
     latency: number | null;
     humanCorrection: number | null;
   };
+  humanCorrectionRates: { v1Rate: number; v2Rate: number };
   adjudicationNotes: string[];
   pairs: ShadowPairResult[];
 }
@@ -48,6 +49,25 @@ function avg(values: Array<number | null>): number | null {
   return present.reduce((a, b) => a + b, 0) / present.length;
 }
 
+function ensureAdjudicationsTable(): void {
+  getDb().run(
+    `CREATE TABLE IF NOT EXISTS shadow_adjudications (
+      id TEXT PRIMARY KEY,
+      shadow_comparison_id TEXT NOT NULL,
+      sku TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      reviewer TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+  );
+}
+
+function skuNeedsHumanCorrection(outcome: string): boolean {
+  // A version's result needs human correction when it did not produce a clean
+  // submitted outcome (i.e. it abstained, failed, or hit a wrong-variant path).
+  return outcome !== 'submitted';
+}
+
 export function runShadowComparison(opts: {
   datasetId: string;
   v1Comparisons: PiComparison[];
@@ -59,14 +79,27 @@ export function runShadowComparison(opts: {
   if (!dataset) throw new Error(`Dataset ${opts.datasetId} not found`);
   const hash = dataset.dataset_hash ?? '';
   const examples = getExamples(opts.datasetId, 'test');
-  const pairs: ShadowPairResult[] = [];
-  const notes: string[] = [];
   const skuMap = new Map(examples.map((e) => [e.product_sku, e.gold_labels_json]));
 
-  for (let i = 0; i < Math.min(opts.v1Comparisons.length, opts.v2Comparisons.length); i++) {
-    const v1 = opts.v1Comparisons[i];
-    const v2 = opts.v2Comparisons[i];
-    const sku = examples[i]?.product_sku ?? `sku-${i}`;
+  // Pair by identical frozen seed SKU, never by index. Index-aligned inputs are
+  // mapped to their dataset SKU; a SKU missing from either version is skipped.
+  const v1BySku = new Map<string, PiComparison>();
+  const v2BySku = new Map<string, PiComparison>();
+  examples.forEach((e, i) => {
+    if (opts.v1Comparisons[i]) v1BySku.set(e.product_sku, opts.v1Comparisons[i]);
+    if (opts.v2Comparisons[i]) v2BySku.set(e.product_sku, opts.v2Comparisons[i]);
+  });
+
+  const pairs: ShadowPairResult[] = [];
+  const notes: string[] = [];
+  for (const example of examples) {
+    const sku = example.product_sku;
+    const v1 = v1BySku.get(sku);
+    const v2 = v2BySku.get(sku);
+    if (!v1 || !v2) {
+      notes.push(`sku ${sku}: missing v1 or v2 comparison on identical seed, skipped`);
+      continue;
+    }
     const goldJson = skuMap.get(sku) ?? '{}';
     const deterministic = isDeterministicGold(goldJson);
     const adjudication = deterministic ? 'deterministic' : 'needs_reviewer';
@@ -80,13 +113,17 @@ export function runShadowComparison(opts: {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [randomUUID(), opts.datasetId, hash, sku, v1.outcome, v2.outcome, adjudication, new Date().toISOString()],
       );
-    } catch {
-      // Table may not exist in older DB — shadow is best-effort, never fails the report.
+    } catch (error) {
+      console.warn(`shadow: failed to persist comparison for sku ${sku}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   const v1Agg = opts.v1Comparisons.length ? aggregatePiComparisons(opts.v1Comparisons) : null;
   const v2Agg = opts.v2Comparisons.length ? aggregatePiComparisons(opts.v2Comparisons) : null;
+  const v1Needs = pairs.filter((p) => skuNeedsHumanCorrection(p.v1Outcome)).length;
+  const v2Needs = pairs.filter((p) => skuNeedsHumanCorrection(p.v2Outcome)).length;
+  const v1Rate = pairs.length ? v1Needs / pairs.length : 0;
+  const v2Rate = pairs.length ? v2Needs / pairs.length : 0;
   const deltas = {
     quality:
       v1Agg && v2Agg && v1Agg.rates['fields.recall'] != null && v2Agg.rates['fields.recall'] != null
@@ -104,8 +141,39 @@ export function runShadowComparison(opts: {
       v1Agg && v2Agg && v1Agg.ops.avgDurationMs != null && v2Agg.ops.avgDurationMs != null
         ? (v2Agg.ops.avgDurationMs as number) - (v1Agg.ops.avgDurationMs as number)
         : null,
-    humanCorrection: avg(pairs.map((p) => (p.adjudication === 'needs_reviewer' ? 1 : 0))),
+    humanCorrection: pairs.length ? v2Rate - v1Rate : null,
   };
 
-  return { datasetId: opts.datasetId, datasetHash: hash, evaluated: pairs.length, deltas, adjudicationNotes: notes, pairs };
+  return {
+    datasetId: opts.datasetId,
+    datasetHash: hash,
+    evaluated: pairs.length,
+    deltas,
+    humanCorrectionRates: { v1Rate, v2Rate },
+    adjudicationNotes: notes,
+    pairs,
+  };
+}
+
+/**
+ * Durable reviewer adjudication for a non-deterministic shadow pair.
+ * Additive write to shadow_adjudications; never fails the report.
+ * story: e03s01
+ */
+export function resolveShadowAdjudication(
+  shadowComparisonId: string,
+  sku: string,
+  decision: 'confirmed' | 'rejected' | 'escalated',
+  reviewer: string,
+): void {
+  try {
+    ensureAdjudicationsTable();
+    getDb().run(
+      `INSERT INTO shadow_adjudications (id, shadow_comparison_id, sku, decision, reviewer, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [randomUUID(), shadowComparisonId, sku, decision, reviewer, new Date().toISOString()],
+    );
+  } catch (error) {
+    console.warn(`shadow: failed to persist adjudication for sku ${sku}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

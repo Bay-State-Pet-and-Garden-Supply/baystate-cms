@@ -86,6 +86,8 @@ import type {
   ExtractionObservation,
 } from '../extraction/evidence';
 import type { SpecialistContext, SpecialistResult, SpecialistUsage, SpecialistRuntimeAllowance, SpecialistSpendGateway } from '../specialists/contracts';
+import { ProductIntelligencePolicySchema } from '../contracts';
+import { findWorkspace } from '../../db/repositories/workspace-repo';
 import {
   captureSpecialistCodeCommit,
   serializeSpecialistArtifact,
@@ -255,6 +257,37 @@ export type SpecialistRetryTarget = 'retry_discovery' | 'retry_curator' | 'retry
 export function routeSpecialistRetry(target: SpecialistRetryTarget): { specialist: string | null; requiresHuman: boolean } {
   if (target === 'human_review') return { specialist: null, requiresHuman: true };
   return { specialist: target.replace('retry_', ''), requiresHuman: false };
+}
+
+/**
+ * Server-authoritative retry dispatch: re-runs the specialist workflow for a
+ * verified-terminal run. Reads the persisted record, rebuilds the deterministic
+ * orchestrator context, and calls runWorkflow. Callers must guard eligibility
+ * (verified terminal state) before invoking.
+ * story: e03s02
+ */
+export async function retrySpecialistWorkflow(
+  runId: string,
+  _target: SpecialistRetryTarget,
+): Promise<SpecialistWorkflowResult> {
+  const record = await resolveDefaultWorkflowPersistence().get(runId);
+  if (!record) throw new Error(`Workflow ${runId} record not found`);
+  const ws = findWorkspace();
+  if (!ws) throw new Error('No active workspace');
+  const classificationContext: ClassificationContext = {
+    availableProductTypes: [],
+    availableCategories: [],
+    attributeProfiles: [],
+  };
+  const specialistContext: SpecialistContext = {
+    runId,
+    workspaceId: ws.id,
+    workspacePath: ws.workspacePath,
+    policy: ProductIntelligencePolicySchema.parse({}),
+    seq: 0,
+  };
+  const orchestrator = new SpecialistOrchestrator();
+  return orchestrator.runWorkflow(record.productSeed, classificationContext, specialistContext, {});
 }
 
 export interface RunWorkflowOptions {

@@ -2,7 +2,9 @@
  * e03s01 Task1 per-specialist versioned metrics — vitest pure (story: e03s01)
  */
 import { describe, it, expect } from 'vitest';
-import { computePerSpecialistVersionedMetrics, compareSpecialistDeltas } from '../../product-intelligence/evaluation/per-specialist-metrics';
+import { createHash } from 'node:crypto';
+import { computePerSpecialistVersionedMetrics, compareSpecialistDeltas, datasetSha } from '../../product-intelligence/evaluation/per-specialist-metrics';
+import { buildPiGoldenProducts } from '../../product-intelligence/evaluation/fixture-dataset';
 import type { PiComparison } from '../../product-intelligence/evaluation/metrics';
 
 function fakeComparison(recall: number | null, provenance: number | null): PiComparison {
@@ -40,5 +42,16 @@ describe('per-specialist versioned metrics', () => {
   it('empty comparisons returns zero sample', () => {
     const m = computePerSpecialistVersionedMetrics('discovery', 'v1', []);
     expect(m.sampleSize).toBe(0);
+  });
+  it('datasetSha covers full frozen contents + gold labels, not just GTINs', () => {
+    const full = datasetSha();
+    expect(full).toMatch(/^[a-f0-9]{16}$/);
+    // A GTIN-only hash of the same products must differ, proving gold labels are included.
+    const products = buildPiGoldenProducts();
+    const gtinOnly = createHash('sha256')
+      .update(JSON.stringify(products.map((p) => p.input.gtin).sort()))
+      .digest('hex')
+      .slice(0, 16);
+    expect(full).not.toBe(gtinOnly);
   });
 });

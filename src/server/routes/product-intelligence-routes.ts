@@ -78,7 +78,7 @@ import {
 import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
 import { importSpecialistWorkflowToOnboarding } from '../../product-intelligence/specialist-workflow-import';
 import type { SpecialistWorkflowResult } from '../../product-intelligence/workflow/orchestrator';
-import { routeSpecialistRetry, type SpecialistRetryTarget } from '../../product-intelligence/workflow/orchestrator';
+import { routeSpecialistRetry, retrySpecialistWorkflow, type SpecialistRetryTarget } from '../../product-intelligence/workflow/orchestrator';
 import { specialistWorkflowPersistence } from '../../db/repositories/specialist-workflow-repo';
 import { assertRunApprovedForImport } from '../../product-intelligence/review-gate';
 import {
@@ -136,6 +136,19 @@ function requireRunInWorkspace(runId: string) {
   const run = getPiRun(runId);
   if (!run || run.workspaceId !== ws.id) return null;
   return run;
+}
+
+/**
+ * Verified-terminal guard for specialist retry/handoff controls.
+ * A workflow is eligible only when its persisted state is a verified terminal
+ * status (completed | needs_review). Mirrors the eligibility check in
+ * specialist-workflow-import terminalGate without requiring the full result.
+ * story: e03s02
+ */
+async function isVerifiedTerminalWorkflow(runId: string): Promise<boolean> {
+  const record = await specialistWorkflowPersistence().get(runId);
+  if (!record) return false;
+  return record.status === 'completed' || record.status === 'needs_review';
 }
 
 function buildRouter() {
@@ -452,7 +465,16 @@ router.post('/product-intelligence/runs/:id/retry', async (c) => {
   }
   const key = typeof body.idempotencyKey === 'string' ? `${runId}:retry:${body.idempotencyKey}` : null;
   if (key && controlResponses.has(key)) return c.json(controlResponses.get(key));
+  // Guard: retry requires a verified terminal workflow state.
+  if (!(await isVerifiedTerminalWorkflow(runId))) {
+    return c.json({ error: 'retry requires verified terminal state', code: 'not_verified_terminal' }, 409);
+  }
   const route = routeSpecialistRetry(target as SpecialistRetryTarget);
+  try {
+    await retrySpecialistWorkflow(runId, target as SpecialistRetryTarget);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error), code: 'retry_failed' }, 500);
+  }
   const response = { runId, accepted: true, target, route, idempotent: Boolean(key) };
   if (key) controlResponses.set(key, response);
   return c.json(response, 202);
@@ -468,6 +490,10 @@ router.post('/product-intelligence/runs/:id/handoff', async (c) => {
   if (!actions.includes(body.action as typeof actions[number])) return c.json({ error: 'action is invalid' }, 400);
   const key = typeof body.idempotencyKey === 'string' ? `${runId}:handoff:${body.idempotencyKey}` : null;
   if (key && controlResponses.has(key)) return c.json(controlResponses.get(key));
+  // Guard: handoff requires a verified terminal workflow state.
+  if (!(await isVerifiedTerminalWorkflow(runId))) {
+    return c.json({ error: 'handoff requires verified terminal state', code: 'not_verified_terminal' }, 409);
+  }
   const response = { runId, accepted: true, action: body.action, idempotent: Boolean(key) };
   if (key) controlResponses.set(key, response);
   return c.json(response, 202);
