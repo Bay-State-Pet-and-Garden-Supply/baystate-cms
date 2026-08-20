@@ -1,17 +1,17 @@
 # specs/state.yaml — session source of truth (bigpowers)
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
-active_flow: build_epic
-active_epic_id: e03
-active_story_id: e03s02
+active_flow: null
+active_epic_id: null
+active_story_id: null
 active_bug_id: null
 release:
   target_version: null
-  last_tag: v0.1.0
-  last_publish: null
+  last_tag: v0.2.0
+  last_publish: "2026-08-20T03:44:00Z"
 epic_cycle:
-  current_step: 8
-  next_skill: verify-work
+  current_step: null
+  next_skill: null
   completed_steps: [1, 2, 3, 4, 5, 6, 7, 8]
   audit_result: pass
   story_bcps: 5
@@ -20,9 +20,9 @@ bug_cycle:
   completed_steps: []
 git:
   branch: main
-  hash: 15b0b12
+  hash: 41b14bc
 handoff:
-  last_step_completed: "e03s02 release-branch — landed to main"
+  last_step_completed: "RELEASE v0.2.0 — Epic #47 tail (#58-#60) landed (e01/e02/e03, 6 stories, 39 BCP)"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
@@ -30,7 +30,7 @@ handoff:
     - CONTEXT.md
     - docs/plans/epic-47-handoff.md
     - specs/product/SCOPE_LATEST.yaml
-  next_skill: verify-work
+  next_skill: null
 metrics:
   story_start: "2026-08-20T03:25:00Z"
   story_end: "2026-08-20T03:41:26Z"
