@@ -6,8 +6,14 @@ development_status:
   e01s01: done
   e01s02: done
   e02: planned
-  e02s01: planned
+  e02s01: done
   e02s02: planned
   e03: planned
   e03s01: planned
   e03s02: planned
+# story timestamps (build_epic survey-context writes started_at; release-branch writes completed_at)
+stories:
+  e02s01:
+    status: done
+    started_at: "2026-08-20T02:03:59Z"
+    completed_at: "2026-08-20T02:32:30Z"

@@ -24,6 +24,11 @@ import { EvidenceInspector } from './EvidenceInspector';
 import { ConflictReviewPanel } from './ConflictReviewPanel';
 import { ImageEvidencePanel } from './ImageEvidencePanel';
 import { AgentRunComparison } from './AgentRunComparison';
+import { SpecialistStagePanel } from './SpecialistStagePanel';
+import { SeedPanel } from './SeedPanel';
+import { CuratorProvenancePanel } from './CuratorProvenancePanel';
+import { ResolverConflictPanel } from './ResolverConflictPanel';
+import { PolicySnapshotPanel } from './PolicySnapshotPanel';
 
 interface Props {
   runId: string;
@@ -302,6 +307,16 @@ export function AgentRunInspector({ runId, onBack }: Props) {
     </div>
   );
 
+  const specialistWorkspace = (
+    <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
+      <SpecialistStagePanel projection={projection} />
+      <SeedPanel inputJson={projection.run.inputJson} />
+      <CuratorProvenancePanel projection={projection} />
+      <ResolverConflictPanel projection={projection} />
+      <PolicySnapshotPanel run={projection.run} />
+    </div>
+  );
+
   const review = (
     <div>
       <ConflictReviewPanel projection={projection} onReject={handleReject} />
@@ -349,6 +364,8 @@ export function AgentRunInspector({ runId, onBack }: Props) {
 
       {actionError && <div style={styles.error}>{actionError}</div>}
       {importNotice && <div style={styles.importNotice}>{importNotice}</div>}
+
+      {specialistWorkspace}
 
       {isWide ? (
         <div style={styles.wideGrid}>
