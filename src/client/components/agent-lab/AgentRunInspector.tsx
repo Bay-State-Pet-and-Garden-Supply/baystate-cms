@@ -25,6 +25,7 @@ import { ConflictReviewPanel } from './ConflictReviewPanel';
 import { ImageEvidencePanel } from './ImageEvidencePanel';
 import { AgentRunComparison } from './AgentRunComparison';
 import { SpecialistStagePanel } from './SpecialistStagePanel';
+import { VerifierVerdictPanel } from './VerifierVerdictPanel';
 import { SeedPanel } from './SeedPanel';
 import { CuratorProvenancePanel } from './CuratorProvenancePanel';
 import { ResolverConflictPanel } from './ResolverConflictPanel';
@@ -313,6 +314,7 @@ export function AgentRunInspector({ runId, onBack }: Props) {
       <SeedPanel inputJson={projection.run.inputJson} />
       <CuratorProvenancePanel projection={projection} />
       <ResolverConflictPanel projection={projection} />
+      <VerifierVerdictPanel projection={projection} />
       <PolicySnapshotPanel run={projection.run} />
     </div>
   );

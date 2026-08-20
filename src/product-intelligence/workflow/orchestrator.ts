@@ -249,6 +249,14 @@ export interface SpecialistOrchestratorDependencies {
   ) => Promise<ExtractionEvidenceBundle>;
 }
 
+export type SpecialistRetryTarget = 'retry_discovery' | 'retry_curator' | 'retry_resolver' | 'human_review';
+
+/** Server-authoritative retry routing; clients submit intent, never choose a specialist. */
+export function routeSpecialistRetry(target: SpecialistRetryTarget): { specialist: string | null; requiresHuman: boolean } {
+  if (target === 'human_review') return { specialist: null, requiresHuman: true };
+  return { specialist: target.replace('retry_', ''), requiresHuman: false };
+}
+
 export interface RunWorkflowOptions {
   discoveredGtin?: string | null;
   gtinScope?: IdentifierScope;

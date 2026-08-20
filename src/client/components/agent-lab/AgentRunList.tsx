@@ -15,6 +15,7 @@ export function AgentRunList({ onSelect }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showLauncher, setShowLauncher] = useState(false);
+  const [filter, setFilter] = useState<'all' | 'blocked' | 'profile' | 'identity' | 'review-ready'>('all');
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -83,16 +84,25 @@ export function AgentRunList({ onSelect }: Props) {
     );
   }
 
+  const filteredRuns = runs.filter((run) => {
+    if (filter === 'all') return true;
+    if (filter === 'blocked') return run.status === 'failed';
+    if (filter === 'profile') return run.errorCode?.includes('profile') === true;
+    if (filter === 'identity') return run.errorCode?.includes('identity') === true;
+    return run.status === 'completed';
+  });
+
   return (
     <div>
       <div style={styles.btnRow}>
+        <label style={{ fontSize: 13, alignSelf: 'center' }}>Filter <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}><option value="all">All</option><option value="blocked">Blocked</option><option value="profile">Profile</option><option value="identity">Identity</option><option value="review-ready">Review ready</option></select></label>
         <button style={styles.primaryBtn} onClick={refresh}>↻ Refresh</button>
         <button style={styles.primaryBtn} onClick={() => setShowLauncher(true)}>+ New run</button>
       </div>
       {error && <p style={styles.error}>{error}</p>}
       {loading && <p style={{ color: '#6b7280', fontSize: 14 }}>Loading…</p>}
       <div style={styles.card}>
-        {runs.length === 0 ? (
+        {filteredRuns.length === 0 ? (
           <div style={styles.empty}>No runs yet. Click "New run" to start product research.</div>
         ) : (
           <table style={styles.table}>
@@ -107,7 +117,7 @@ export function AgentRunList({ onSelect }: Props) {
               </tr>
             </thead>
             <tbody>
-              {runs.map((run) => (
+              {filteredRuns.map((run) => (
                 <tr
                   key={run.id}
                   style={styles.row}

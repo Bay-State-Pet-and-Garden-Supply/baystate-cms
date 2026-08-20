@@ -373,6 +373,19 @@ export function createPiRun(input: CreateRunInput): Promise<CreateRunResponse> {
   });
 }
 
+export type SpecialistRetryTarget = 'retry_discovery' | 'retry_curator' | 'retry_resolver' | 'human_review';
+export type HandoffAction = 'open_workflow' | 'compare_onboarding' | 'import_verified' | 'retry_agent_lab';
+
+export interface ControlResponse { runId: string; accepted: boolean; target?: string; action?: string; idempotent: boolean; route?: { specialist: string | null; requiresHuman: boolean } }
+
+export function retryPiRun(id: string, target: SpecialistRetryTarget, idempotencyKey: string): Promise<ControlResponse> {
+  return request<ControlResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}/retry`, { method: 'POST', body: JSON.stringify({ target, idempotencyKey }) });
+}
+
+export function handoffPiRun(id: string, action: HandoffAction, idempotencyKey: string): Promise<ControlResponse> {
+  return request<ControlResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}/handoff`, { method: 'POST', body: JSON.stringify({ action, idempotencyKey }) });
+}
+
 export function cancelPiRun(id: string): Promise<CancelRunResponse> {
   return request<CancelRunResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}/cancel`, {
     method: 'POST',
