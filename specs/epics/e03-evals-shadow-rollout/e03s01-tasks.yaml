@@ -1,0 +1,21 @@
+story_id: e03s01
+title: "Per-specialist versioned evals + v1/v2 shadow on frozen dataset"
+status: planned
+bcps: 8
+tasks:
+  - id: 1
+    description: "Add per-specialist versioned evals/metrics in src/product-intelligence/evaluation/ reusing #28 benchmark tables (frozen versioned dataset, deterministic splits) — metrics per specialist version including quality/provenance/cost/latency/human-correction deltas"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/e03s01-per-specialist.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 2
+    description: "Wire v1 (single-agent) vs v2 (specialist) shadow — run both on identical seeds, shadow never mutates state, durable reviewer adjudication where ground truth non-deterministic, comparison report quality/provenance/cost/latency/human-correction"
+    verify: "bun test src/tests/unit/e03s01-shadow.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 3
+    description: "Safety metrics gate — wrong-product / wrong-variant / false-pass must not regress vs v1 baseline; benchmark + traceability distinguished (200 with wrong size = failed), provider recommendation included"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/e03s01-safety.test.ts 2>&1 | tail -n 20"
+    status: done
+  - id: 4
+    description: "Historical runs remain readable — additive tables/migration keeps historical single-agent runs queryable; no breaking read-path change"
+    verify: "bun test src/tests/unit/e03s01-additive.test.ts 2>&1 | tail -n 20"
+    status: done

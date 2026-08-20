@@ -264,6 +264,9 @@ export default defineConfig({
       'src/tests/unit/onboarding-telemetry.test.ts',
       // Product intelligence seed persistence (bun:test / bun:sqlite — run under bun test via test:db)
       'src/tests/unit/product-intelligence/product-seed-persistence.test.ts',
+      // e03s01 DB-backed shadow + additive (bun:sqlite — run under bun test via test:db)
+      'src/tests/unit/e03s01-shadow.test.ts',
+      'src/tests/unit/e03s01-additive.test.ts',
     ],
   },
 });
