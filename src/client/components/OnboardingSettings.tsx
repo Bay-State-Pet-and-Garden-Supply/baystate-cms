@@ -14,7 +14,6 @@ import { downloadPagesImport, activatePagesImport } from '../api';
 import { readinessViewFromReport } from '../classification-readiness-view';
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
 import { AiRouteSummary } from './common/AiRouteSummary';
-import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
 import { ViewHeader } from './common/ViewHeader';

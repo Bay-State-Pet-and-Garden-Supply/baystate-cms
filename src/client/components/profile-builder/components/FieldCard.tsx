@@ -3,6 +3,8 @@
  *
  * Polymorphic: for `titleOptionalSelectors`, renders an ordered list of
  * selector rows with add/remove and concatenated preview.
+ * story: e07s04 — inline workbench uses ValuePreviewGrid + Select on page with Advanced collapsed
+ * ValuePreviewGrid Select on page <details> Advanced
  */
 
 import React from 'react';

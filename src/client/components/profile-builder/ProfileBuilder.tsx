@@ -1,7 +1,7 @@
 /**
  * ProfileBuilder — public entrypoint for the profile builder workspace.
  *
- * Renders inline by default; supports `mode="modal"` via a simple overlay shell.
+ * Renders inline only; modal overlay removed (e07s04) — canonical surface is /settings/domains/:domain/profile.
  *
  * This file is intentionally thin — it composes child components and avoids
  * embedding API calls or reducer logic directly.
@@ -62,27 +62,7 @@ const rightRailStyle: React.CSSProperties = {
   top: 16,
 };
 
-const modalOverlayStyle: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(0,0,0,0.4)',
-  zIndex: 998,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-};
-
-const modalContentStyle: React.CSSProperties = {
-  background: '#fff',
-  borderRadius: 12,
-  boxShadow: '0 8px 40px rgba(0,0,0,0.2)',
-  width: '90vw',
-  maxWidth: 1200,
-  maxHeight: '90vh',
-  overflow: 'auto',
-  padding: 24,
-  zIndex: 999,
-};
+// story: e07s04 — modal overlay removed; ProfileBuilder is inline only (canonical /settings/domains/:domain/profile)
 
 /**
  * Group field definitions by category for rendering.
@@ -209,14 +189,9 @@ export function ProfileBuilder(props: ProfileBuilderProps) {
     </div>
   );
 
+  // story: e07s04 — deprecated modal branch removed; inline is the only surface
   if (props.mode === 'modal') {
-    return (
-      <div style={modalOverlayStyle} onClick={props.onCancel}>
-        <div style={modalContentStyle} onClick={(e) => e.stopPropagation()}>
-          {mainContent}
-        </div>
-      </div>
-    );
+    throw new Error('ProfileBuilder mode="modal" is removed — use getProfileWorkspacePath');
   }
 
   return mainContent;
