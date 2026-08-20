@@ -16,6 +16,7 @@ import type { PageExtractionContract } from '../tools/contract';
 import { parseStructuredSignals } from '../extraction/platforms';
 import type { ManagedBrowserProvider } from '../extraction/managed-fallback';
 import { PiGoldLabelsSchema, PiProductInputSchema } from './gold';
+import { evaluateSafetyGates, providerSafetyQualified } from './safety-gates';
 
 export interface ExtractionProviderExtraction {
   identityStatus: string | null;
@@ -498,16 +499,31 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
     });
   }
 
-  const passing = rows.filter(
-    (r) => r.pages > 0 && r.extractionRate >= 0.8 && r.costPerCorrectProduct != null && r.costPerCorrectProduct <= 0.01,
-  );
+  // Safety-aware recommendation: retrieval 200 with wrong size is already counted as extraction failure;
+  // traceability coverage must be >=0.8 and safety gates must pass to be recommended.
+  const passing = rows.filter((r) => {
+    if (r.pages === 0) return false;
+    if (r.extractionRate < 0.8) return false;
+    if (r.costPerCorrectProduct == null || r.costPerCorrectProduct > 0.01) return false;
+    const traceOk = r.traceability.coverage == null ? false : r.traceability.coverage >= 0.8;
+    const safety = evaluateSafetyGates(
+      {
+        wrongProductRate: r.exactProductAccuracy == null ? null : 1 - r.exactProductAccuracy,
+        wrongVariantRate: r.wrongVariantRate,
+        falsePassRate: r.extractionRate == null ? null : 1 - r.extractionRate,
+        traceabilityCoverage: r.traceability.coverage,
+      },
+      null,
+    );
+    return providerSafetyQualified(r.extractionRate, safety, traceOk);
+  });
   const sorted = [...passing].sort((a, b) => b.extractionRate - a.extractionRate || a.costPerPage - b.costPerPage);
   const recommendation =
     sorted.length > 0
       ? {
           recommended: sorted.map((r) => r.provider),
           rationale:
-            'providers with extractionRate >= 0.8 and costPerCorrectProduct <= $0.01, sorted by extraction rate then cost',
+            'safety-qualified: extractionRate>=0.8, cost<=0.01, traceability>=0.8, safety gates pass (wrong-product/wrong-variant/false-pass not regressed; 200 with wrong size already failed)',
         }
       : null;
 
