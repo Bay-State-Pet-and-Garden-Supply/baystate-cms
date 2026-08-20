@@ -1691,6 +1691,51 @@ export const SitemapTestLookupResponseSchema = z.object({
 });
 export type SitemapTestLookupResponse = z.infer<typeof SitemapTestLookupResponseSchema>;
 
+// ─── Brand Hub (Refactor e35s10) ───────────────────────────────────────────────────
+// Thin view-model hub that joins extractor profile + sitemap/brand-url signals
+// domain-keyed, read-only, mirrors SitemapsOverview shape plus profile enrichment.
+export const BrandHubProfileStatusEnum = z.enum(['missing', 'partial', 'complete']);
+export type BrandHubProfileStatus = z.infer<typeof BrandHubProfileStatusEnum>;
+
+export const BrandHubRowSchema = z.object({
+  domain: z.string(),
+  normalizedDomain: z.string(),
+  profile: z.object({
+    exists: z.boolean(),
+    status: BrandHubProfileStatusEnum,
+    sitemapProductUrlPattern: z.string().nullable(),
+    runtime: z.enum(['static', 'rendered']).nullable(),
+  }),
+  sitemap: z
+    .object({
+      status: z.string(),
+      needsAttention: z.boolean(),
+      attentionReasons: z.array(z.string()),
+      lastRefreshedAt: z.string().nullable(),
+    })
+    .nullable(),
+  urlCounts: z.object({
+    totalCount: z.number().int(),
+    activeCount: z.number().int(),
+    inactiveCount: z.number().int(),
+    productCount: z.number().int(),
+  }),
+  brandAssociations: z.array(BrandSiteSchema),
+});
+export type BrandHubRow = z.infer<typeof BrandHubRowSchema>;
+
+export const BrandHubOverviewResponseSchema = z.object({
+  rows: z.array(BrandHubRowSchema),
+  totals: z.object({
+    totalDomains: z.number().int(),
+    healthyCount: z.number().int(),
+    needsAttentionCount: z.number().int(),
+    totalProductUrls: z.number().int(),
+  }),
+  generatedAt: z.string(),
+});
+export type BrandHubOverviewResponse = z.infer<typeof BrandHubOverviewResponseSchema>;
+
 export const ProfileBlockedItemSchema = z.object({
   itemId: z.string(),
   upc: z.string(),

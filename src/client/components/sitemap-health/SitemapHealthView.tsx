@@ -10,8 +10,14 @@ import type {
   DomainSitemapSummary,
 } from '../../../shared/schemas/onboarding';
 import { SitemapDomainDrawer } from './SitemapDomainDrawer';
+import { normalizeBrandHubDomain } from '../../../onboarding/brand-hub/normalizeDomain';
+import { getBrandHubProfileBuilderTarget } from '../../../onboarding/brand-hub/navigation';
 
-export function SitemapHealthView() {
+type SitemapHealthViewProps = {
+  onEditProfile?: (domain: string) => void;
+};
+
+export function SitemapHealthView({ onEditProfile }: SitemapHealthViewProps = {}) {
   const [data, setData] = useState<SitemapsOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -435,6 +441,27 @@ export function SitemapHealthView() {
                         >
                           Inspect →
                         </button>
+                        {onEditProfile && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const target = getBrandHubProfileBuilderTarget(dom.domain);
+                              if (target) onEditProfile(target);
+                            }}
+                            style={{
+                              padding: '4px 8px',
+                              fontSize: '0.75rem',
+                              borderRadius: '4px',
+                              background: '#fefce8',
+                              color: '#854d0e',
+                              border: '1px solid #fde68a',
+                              cursor: 'pointer',
+                              fontWeight: 600,
+                            }}
+                          >
+                            ✏️ Profile
+                          </button>
+                        )}
                         <button
                           onClick={(e) => handleDeleteDomain(dom.domain, e)}
                           disabled={deletingDomain === dom.domain}
@@ -508,8 +535,14 @@ function AddSiteModal({ onClose, onSuccess }: AddSiteModalProps) {
     try {
       setSaving(true);
       setError(null);
+      const normalizedDomain = normalizeBrandHubDomain(domain);
+      if (!normalizedDomain) {
+        setError('Domain is required');
+        setSaving(false);
+        return;
+      }
       const res = await addSitemapDomain({
-        domain: domain.trim(),
+        domain: normalizedDomain,
         brandName: brandName.trim() || undefined,
         productUrlPattern: productUrlPattern.trim() || undefined,
         fetchNow,

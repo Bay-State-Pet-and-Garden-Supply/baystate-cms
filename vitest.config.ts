@@ -278,6 +278,7 @@ export default defineConfig({
       'src/tests/unit/page-extractor-images.test.ts',
       'src/tests/unit/page-extractor-profile-generation.test.ts',
       'src/tests/unit/page-extractor-variant-inference.test.ts',
+      'src/tests/unit/brand-hub-routes.test.ts',
       'src/tests/unit/profile-engineer-workflow-repo.test.ts',
       'src/tests/unit/specialist-workflow-import.test.ts',
       'src/tests/unit/specialist-workflow-repo.test.ts',

@@ -21,8 +21,11 @@ import { ViewHeader } from './common/ViewHeader';
 import { colors } from '../theme';
 import { DistributorConnectionsPanel } from './onboarding-settings/DistributorConnectionsPanel';
 import { SitemapHealthView } from './sitemap-health/SitemapHealthView';
+import { primaryOnboardingSettingsTabs, resolveOnboardingSettingsTab } from './onboarding-settings/tabRegistry';
+import type { OnboardingSettingsTabId } from './onboarding-settings/tabRegistry';
+import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDomain';
 
-type OnboardingSettingsTab = 'general' | 'curation' | 'profiles' | 'sitemaps' | 'distributors';
+type OnboardingSettingsTab = OnboardingSettingsTabId;
 
 interface OnboardingSettingsProps {
   onBack: () => void;
@@ -57,7 +60,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   const [workspaceDomain, setWorkspaceDomain] = useState<string | null>(null);
 
   const [localDomain, setLocalDomain] = useState('');
-  const [settingsTab, setSettingsTab] = useState<OnboardingSettingsTab>(initialTab ?? 'general');
+  const [settingsTab, setSettingsTab] = useState<OnboardingSettingsTab>(resolveOnboardingSettingsTab(initialTab ?? 'general'));
   const [sourcingEngineEnabled, setSourcingEngineEnabled] = useState(false);
 
   useEffect(() => {
@@ -227,15 +230,9 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
 
       <AiRouteSummary />
 
-      {/* ─── Tab Bar ─── */}
+      {/* ─── Tab Bar — single source via tabRegistry (e35s10) — legacy profiles|sitemaps retired to brands alias ─── */}
       <div style={{ display: 'flex', gap: 0, marginBottom: 24, borderBottom: '1px solid #dee2e6' }}>
-        {[
-          { id: 'general', label: 'General' },
-          { id: 'curation', label: 'Curation' },
-          { id: 'profiles', label: 'Extractor Profiles' },
-          { id: 'sitemaps', label: 'Sitemaps & Brand URLs' },
-          { id: 'distributors', label: 'Distributors' },
-        ].map(tab => (
+        {primaryOnboardingSettingsTabs().map(tab => (
           <button
             key={tab.id}
             onClick={() => setSettingsTab(tab.id as any)}
@@ -758,6 +755,18 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
         <SitemapHealthView />
       </div>
 
+      <div style={{ display: settingsTab === 'brands' ? 'block' : 'none' }}>
+        <div style={{ marginBottom: 16 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 600, margin: '0 0 8px', color: '#111827' }}>
+            Brands — Domain Sitemap & Profile Hub
+          </h2>
+          <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>
+            Unified brand domains — sitemap inventory alongside extractor profile status. Shared domain normalization; legacy profiles/sitemaps alias here.
+          </p>
+        </div>
+        <SitemapHealthView onEditProfile={(domain) => setWorkspaceDomain(domain)} />
+      </div>
+
       <div style={{ display: settingsTab === 'distributors' ? 'block' : 'none' }}>
       <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 24 }}>
         <h2 style={{ fontSize: 20, fontWeight: 600, margin: '0 0 8px', color: '#111827' }}>
@@ -799,8 +808,9 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           <button
             type="button"
             onClick={() => {
-              if (localDomain.trim()) {
-                setWorkspaceDomain(localDomain.trim().toLowerCase().replace(/^www\\./, ''));
+              const normalized = normalizeBrandHubDomain(localDomain);
+              if (normalized) {
+                setWorkspaceDomain(normalized);
               }
             }}
             disabled={!localDomain.trim()}
