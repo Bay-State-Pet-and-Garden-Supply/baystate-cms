@@ -25,3 +25,6 @@ stories:
     status: done
     started_at: "2026-08-20T03:14:05Z"
     completed_at: "2026-08-20T03:24:53Z"
+  e03s02:
+    status: planned
+    started_at: "2026-08-20T03:25:00Z"
