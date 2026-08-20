@@ -100,25 +100,26 @@ export function createVersion(input: {
     return version;
   }
   const db = getDbSafe();
-  const existing = db
-    .query('SELECT MAX(version) as m FROM profile_versions WHERE domain = ?')
-    .get(domain) as { m: number | null } | undefined;
-  const nextVersion = (existing?.m ?? 0) + 1;
-  const version: ProfileVersion = {
-    id: randomUUID(),
-    domain,
-    version: nextVersion,
-    selectors: input.selectors,
-    runtime: input.runtime,
-    sampleIds: input.sampleIds,
-    artifactHashes: [...input.artifactHashes].sort(),
-    validationSummary: input.validationSummary,
-    provenance: input.provenance,
-    approver: input.approver,
-    reason: input.reason,
-    createdAt: new Date().toISOString(),
-  };
+  let version: ProfileVersion | null = null;
   const tx = db.transaction(() => {
+    const existing = db
+      .query('SELECT MAX(version) as m FROM profile_versions WHERE domain = ?')
+      .get(domain) as { m: number | null } | undefined;
+    const nextVersion = (existing?.m ?? 0) + 1;
+    version = {
+      id: randomUUID(),
+      domain,
+      version: nextVersion,
+      selectors: input.selectors,
+      runtime: input.runtime,
+      sampleIds: input.sampleIds,
+      artifactHashes: [...input.artifactHashes].sort(),
+      validationSummary: input.validationSummary,
+      provenance: input.provenance,
+      approver: input.approver,
+      reason: input.reason,
+      createdAt: new Date().toISOString(),
+    } as ProfileVersion;
     db.query(
       `INSERT INTO profile_versions (id, domain, version, selectors, runtime, sample_ids, artifact_hashes, validation_summary, provenance, approver, reason, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -138,7 +139,7 @@ export function createVersion(input: {
     );
   });
   tx();
-  return version;
+  return version!;
 }
 
 export function getVersionById(id: string): ProfileVersion | null {
@@ -192,6 +193,51 @@ export function setActiveVersion(domain: string, id: string): void {
     ).run(key, id);
   });
   tx();
+}
+
+export function createAndActivateVersion(input: {
+  domain: string;
+  selectors: Record<string, unknown>;
+  runtime: string;
+  sampleIds: string[];
+  artifactHashes: string[];
+  validationSummary: Record<string, unknown>;
+  provenance: { provider: string; model: string; configId: string };
+  approver: string;
+  reason: string;
+}): ProfileVersion {
+  const domain = normalizeDomain(input.domain);
+  if (useFallback()) {
+    const created = createVersion(input);
+    setActiveVersion(domain, created.id);
+    return created;
+  }
+  const db = getDbSafe();
+  let version: ProfileVersion | null = null;
+  const tx = db.transaction(() => {
+    const existing = db.query('SELECT MAX(version) as m FROM profile_versions WHERE domain = ?').get(domain) as { m: number | null } | undefined;
+    const nextVersion = (existing?.m ?? 0) + 1;
+    version = {
+      id: randomUUID(),
+      domain,
+      version: nextVersion,
+      selectors: input.selectors,
+      runtime: input.runtime,
+      sampleIds: input.sampleIds,
+      artifactHashes: [...input.artifactHashes].sort(),
+      validationSummary: input.validationSummary,
+      provenance: input.provenance,
+      approver: input.approver,
+      reason: input.reason,
+      createdAt: new Date().toISOString(),
+    } as ProfileVersion;
+    db.query(`INSERT INTO profile_versions (id, domain, version, selectors, runtime, sample_ids, artifact_hashes, validation_summary, provenance, approver, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      version!.id, version!.domain, version!.version, JSON.stringify(version!.selectors), version!.runtime, JSON.stringify(version!.sampleIds), JSON.stringify(version!.artifactHashes), JSON.stringify(version!.validationSummary), JSON.stringify(version!.provenance), version!.approver, version!.reason, version!.createdAt,
+    );
+    db.query(`INSERT INTO profile_active (domain, active_version_id) VALUES (?, ?) ON CONFLICT(domain) DO UPDATE SET active_version_id = excluded.active_version_id`).run(domain, version!.id);
+  });
+  tx();
+  return version!;
 }
 
 export function rollbackToVersion(domain: string, id: string): ProfileVersion | null {

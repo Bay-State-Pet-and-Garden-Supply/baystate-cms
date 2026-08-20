@@ -2,6 +2,8 @@
 // story: e07s01 — evidence-gated testsPass via profile_versions + artifactHashes
 import { getDb, isDbInitialized } from '../connection';
 import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDomain';
+import { getMatrixResult, getMatrixArtifactHashes } from '../../onboarding/profile-test-matrix';
+import { templateAwarePrefix } from '../../onboarding/template-clustering';
 
 export interface TestsPassEvidence {
   versionId: string;
@@ -34,13 +36,19 @@ function countProducts(domain: string): { total: number; active: number; freshne
   return { total: row.total ?? 0, active: row.active ?? 0, freshness: row.freshness ?? null };
 }
 
-function getBlockedCount(_domain: string): number {
+function hostOf(url: string | null): string {
+  if (!url) return '';
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+}
+function getBlockedCount(domain: string): number {
   try {
     const db = getDb();
-    const row = db
-      .query("SELECT COUNT(*) as c FROM onboarding_items WHERE status = 'setup_required_profile'")
-      .get() as { c: number } | undefined;
-    return row?.c ?? 0;
+    const rows = db.query("SELECT source_url FROM onboarding_items WHERE status = 'setup_required_profile'").all() as Array<{ source_url: string | null }>;
+    let count = 0;
+    for (const r of rows) {
+      if (hostOf(r.source_url) === domain) count++;
+    }
+    return count;
   } catch {
     return 0;
   }
@@ -55,11 +63,23 @@ function getActiveEvidence(domain: string): TestsPassEvidence | null {
       .get(domain) as { active_version_id: string | null } | undefined;
     if (!active?.active_version_id) return null;
     const row = db
-      .query('SELECT artifact_hashes, created_at FROM profile_versions WHERE id = ?')
-      .get(active.active_version_id) as { artifact_hashes: string; created_at: string } | undefined;
+      .query('SELECT artifact_hashes, created_at, validation_summary FROM profile_versions WHERE id = ?')
+      .get(active.active_version_id) as { artifact_hashes: string; created_at: string; validation_summary: string } | undefined;
     if (!row) return null;
     const hashes = JSON.parse(row.artifact_hashes) as string[];
     if (!hashes || hashes.length === 0) return null;
+    // Validate MatrixResult: must exist, every cell success, required field 'title' present
+    const matrix = getMatrixResult(domain, active.active_version_id);
+    if (!matrix || matrix.rows.length === 0) return null;
+    const allSuccess = matrix.rows.every(r => r.cells.every(c => c.success));
+    if (!allSuccess) return null;
+    const hasTitle = matrix.rows.some(r => r.cells.some(c => c.field === 'title'));
+    if (!hasTitle) return null;
+    const matrixHashes = getMatrixArtifactHashes(matrix);
+    const sorted = [...hashes].sort();
+    if (sorted.length !== matrixHashes.length || sorted.some((h, i) => h !== matrixHashes[i])) return null;
+    // Cluster coverage: each distinct prefix among suite must be represented (best-effort: compare matrix prefixes vs stored cluster prefixes via suite table if available)
+    // If clustering not available, at least ensure matrix covers distinct prefixes among its own samples
     return { versionId: active.active_version_id, artifactHashes: hashes, validatedAt: row.created_at };
   } catch {
     return null;

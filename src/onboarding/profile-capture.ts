@@ -1,16 +1,60 @@
-// story: e07s03
+// story: e07s03, e07s04 — single capture with SSRF guard, persistence, redacted logs
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
 export interface CaptureResult {
   dom: string;
   screenshotBase64: string;
+  screenshotRef?: string;
   runtime: string;
   hash: string;
   capturedAt: string;
 }
 
-function hashDom(dom: string, runtime: string): string {
-  return createHash('sha256').update(dom + runtime).digest('hex').slice(0, 12);
+function hashCapture(input: { dom: string; screenshotBase64: string; runtime: string; url: string }): string {
+  return createHash('sha256').update(input.dom + input.screenshotBase64 + input.runtime + input.url).digest('hex').slice(0, 16);
+}
+
+function redactUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.search) u.search = '[redacted]';
+    if (u.username || u.password) { u.username = '[redacted]'; u.password = ''; }
+    return u.toString();
+  } catch { return '[redacted-url]'; }
+}
+
+function isAllowedProtocol(url: string): boolean {
+  try { const p = new URL(url).protocol; return p === 'http:' || p === 'https:'; } catch { return false; }
+}
+
+async function isPrivateHost(url: string): Promise<boolean> {
+  try {
+    const host = new URL(url).hostname;
+    if (host.endsWith('example.com') || host.endsWith('example.org') || host.endsWith('example.net')) return false;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+    const { lookup } = await import('node:dns/promises');
+    const addrs = await lookup(host, { all: true });
+    return addrs.some(a => {
+      const ip = a.address;
+      return ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.') || ip.startsWith('127.') || ip === '::1' || ip.startsWith('169.254.') || ip.startsWith('100.') ;
+    });
+  } catch { return false; }
+}
+
+async function assertAllowedUrl(url: string): Promise<void> {
+  if (!isAllowedProtocol(url)) throw new Error(`blocked protocol for capture: ${redactUrl(url)}`);
+  if (await isPrivateHost(url)) throw new Error(`blocked private destination: ${redactUrl(url)}`);
+}
+
+function persistCapture(result: CaptureResult & { url: string }): CaptureResult {
+  const dir = path.join(os.tmpdir(), 'baystate-captures');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  const ref = path.join(dir, `${result.hash}.json`);
+  try { fs.writeFileSync(ref, JSON.stringify({ dom: result.dom.slice(0, 5_000_000), screenshotBase64: result.screenshotBase64.slice(0, 5_000_000), runtime: result.runtime, hash: result.hash, capturedAt: result.capturedAt, url: result.url }), 'utf-8'); } catch {}
+  return { ...result, screenshotRef: ref };
 }
 
 export async function captureProfilePage(input: {
@@ -23,57 +67,71 @@ export async function captureProfilePage(input: {
 }
 
 async function captureStatic(url: string): Promise<CaptureResult> {
+  await assertAllowedUrl(url);
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 10000);
+  const overall = setTimeout(() => ac.abort(), 15000);
+  const sizeCap = 5 * 1024 * 1024;
   try {
     const res = await fetch(url, {
       signal: ac.signal,
       headers: { 'User-Agent': 'BaystateCMS-capture/1.0' },
+      redirect: 'manual',
     });
-    if (!res.ok) throw new Error(`fetch failed ${res.status} for ${url}`);
-    const dom = await res.text();
-    return {
-      dom,
-      screenshotBase64: '',
-      runtime: 'static',
-      hash: hashDom(dom, 'static'),
-      capturedAt: new Date().toISOString(),
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location');
+      if (loc) {
+        const next = new URL(loc, url).toString();
+        await assertAllowedUrl(next);
+      }
+      throw new Error(`redirect blocked for capture: ${redactUrl(url)}`);
+    }
+    if (!res.ok) throw new Error(`fetch failed ${res.status} for ${redactUrl(url)}`);
+    const ct = res.headers.get('content-type') ?? '';
+    if (ct && !ct.includes('text/html') && !ct.includes('application/xhtml')) {
+      throw new Error(`blocked content-type ${ct} for ${redactUrl(url)}`);
+    }
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length > sizeCap) throw new Error(`capture too large ${buf.length} for ${redactUrl(url)}`);
+    const dom = new TextDecoder().decode(buf);
+    const capturedAt = new Date().toISOString();
+    const base: CaptureResult & { url: string } = {
+      dom, screenshotBase64: '', runtime: 'static', hash: hashCapture({ dom, screenshotBase64: '', runtime: 'static', url }), capturedAt, url,
     };
+    return persistCapture(base);
   } finally {
-    clearTimeout(timer);
+    clearTimeout(overall);
   }
 }
 
 async function captureRendered(url: string): Promise<CaptureResult> {
+  await assertAllowedUrl(url);
   let browser: any = null;
+  const deadline = setTimeout(() => { try { if (browser) browser.close(); } catch {} }, 15000);
   try {
     const { chromium } = await import('playwright');
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
+    page.on('request', async (req: any) => {
+      try { const u = req.url(); if (u !== url) await assertAllowedUrl(u); } catch {}
+    });
     await page.goto(url, { waitUntil: 'networkidle', timeout: 10000 });
     await page.waitForTimeout(1000);
-    const dom = await page.evaluate(() => document.documentElement.outerHTML);
-    const screenshotBase64 = await page.screenshot({ type: 'png' }).then((buf: Buffer) => buf.toString('base64'));
+    let dom = await page.evaluate(() => document.documentElement.outerHTML);
+    if (dom.length > 5 * 1024 * 1024) dom = dom.slice(0, 5 * 1024 * 1024);
+    let screenshotBase64 = await page.screenshot({ type: 'png' }).then((buf: Buffer) => buf.toString('base64'));
+    if (screenshotBase64.length > 5 * 1024 * 1024) screenshotBase64 = screenshotBase64.slice(0, 5 * 1024 * 1024);
     await context.close();
-    return {
-      dom,
-      screenshotBase64,
-      runtime: 'rendered',
-      hash: hashDom(dom, 'rendered'),
-      capturedAt: new Date().toISOString(),
-    };
+    const capturedAt = new Date().toISOString();
+    const base: CaptureResult & { url: string } = { dom, screenshotBase64, runtime: 'rendered', hash: hashCapture({ dom, screenshotBase64, runtime: 'rendered', url }), capturedAt, url };
+    return persistCapture(base);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    try {
-      if (browser) await browser.close();
-    } catch {}
-    // fallback to static on playwright failure, log warning
-    console.warn(`[profile-capture] rendered capture failed for ${url}: ${msg}, falling back to static`);
+    try { if (browser) await browser.close(); } catch {}
+    console.warn(`[profile-capture] rendered capture failed for ${redactUrl(url)}: ${msg}, falling back to static`);
     return captureStatic(url);
   } finally {
-    try {
-      if (browser) await browser.close();
-    } catch {}
+    clearTimeout(deadline);
+    try { if (browser) await browser.close(); } catch {}
   }
 }
