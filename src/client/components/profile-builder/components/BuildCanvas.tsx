@@ -39,29 +39,31 @@ interface BuildCanvasProps {
 
 export function BuildCanvas({ fieldGroups, onAccept, onReject, onSuggest, onExplain, onRevise, provenance, canSave }: BuildCanvasProps) {
   return (
-    <div data-testid="build-canvas">
-      {provenance && <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 8 }}>{provenance.disclosureBadge} · {provenance.provider}/{provenance.model} · {provenance.promptHash}</div>}
-      {!canSave && <div style={{ fontSize: 12, color: '#92400e', background: '#fef3c7', padding: 6, borderRadius: 6, marginBottom: 8 }}>pending decisions block Save/Activate</div>}
+    <div data-testid="build-canvas" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+      {provenance && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '6px 10px', display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap', alignItems: 'center' }}><span style={{ background: 'var(--color-uniform-green)', color: 'var(--color-feed-bag-cream)', padding: '2px 6px', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>{provenance.disclosureBadge}</span><span>{provenance.provider}/{provenance.model}</span><span style={{ opacity: 0.6 }}>·</span><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{provenance.promptHash}</span>{provenance.htmlLeftMachine && <span style={{ color: 'var(--color-signet-burgundy)', fontWeight: 600 }}>· HTML left machine</span>}</div>}
+      {!canSave && <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-signet-burgundy)', background: 'rgba(118,12,25,0.06)', border: '1px solid var(--color-signet-burgundy)', padding: '8px 12px', borderRadius: 'var(--radius-sm)' }}>pending decisions block Save/Activate — accept/reject or mark unsupported per field</div>}
       {fieldGroups.map((g) => (
-        <div key={g.group} style={{ marginBottom: 16, border: '1px solid #e5e7eb', borderRadius: 8, padding: 12 }}>
-          <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>{g.group}</h3>
-          {g.fields.map((f) => (
-            <div key={f.key} style={{ marginBottom: 12, padding: 8, background: '#f9fafb', borderRadius: 6 }}>
-              <div style={{ fontWeight: 600 }}>{f.label} <span style={{ fontSize: 11, color: '#6b7280' }}>({f.key})</span> — decision: {f.decision} {f.decision === 'unsupported' && <em>unsupported for domain</em>}</div>
-              {f.active && <div style={{ fontSize: 12 }}>active: <code>{f.active}</code></div>}
-              {f.draft && <div style={{ fontSize: 12 }}>draft: <code>{f.draft}</code></div>}
-              {f.alternatives.length > 0 && <div style={{ fontSize: 12 }}>alternatives: {f.alternatives.map((a) => <code key={a.selector} style={{ marginRight: 6 }}>{a.selector}</code>)}</div>}
-              {f.warnings.length > 0 && <div style={{ fontSize: 11, color: '#92400e' }}>warnings: {f.warnings.join('; ')}</div>}
-              {f.preview && <div style={{ fontSize: 12, color: '#374151' }}>preview: {f.preview}</div>}
-              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                <button type="button" onClick={() => onAccept(f.key)} style={{ fontSize: 12 }}>Accept</button>
-                <button type="button" onClick={() => onReject(f.key)} style={{ fontSize: 12 }}>Reject</button>
-                <button type="button" onClick={() => onSuggest(f.key)} style={{ fontSize: 12 }}>Suggest alternatives</button>
-                <button type="button" onClick={() => onExplain(f.key)} style={{ fontSize: 12 }}>Explain failure</button>
-                <button type="button" onClick={() => onRevise(f.key, 'feedback')} style={{ fontSize: 12 }}>Revise</button>
+        <div key={g.group} style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)', boxShadow: '0 1px 3px 0 rgba(33,20,20,0.06)' }}>
+          <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1rem', fontWeight: 700, color: 'var(--color-ledger-charcoal)', margin: '0 0 var(--space-2)', paddingBottom: 'var(--space-1)', borderBottom: '1px solid var(--color-card-border)' }}>{g.group}</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 'var(--space-2)' }}>
+            {g.fields.map((f) => (
+              <div key={f.key} style={{ padding: 'var(--space-2)', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-ledger-charcoal)', lineHeight: 1.3 }}>{f.label} <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', fontWeight: 400 }}>({f.key})</span> — <span style={{ fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: f.decision === 'unsupported' ? 'var(--color-mulch-brown)' : f.decision === 'accepted' ? 'var(--color-seedling-green)' : 'var(--color-ledger-charcoal)', background: f.decision === 'unsupported' ? 'var(--color-feed-bag-cream)' : 'transparent', padding: '1px 5px', borderRadius: 'var(--radius-sm)' }}>{f.decision}</span> {f.decision === 'unsupported' && <em style={{ fontSize: '0.75rem', color: 'var(--color-mulch-brown)' }}>unsupported for domain</em>}</div>
+                {f.active && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-ledger-charcoal)', background: 'var(--color-feed-bag-cream)', padding: '4px 6px', borderRadius: 'var(--radius-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>active: {f.active}</div>}
+                {f.draft && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-ledger-charcoal)', background: 'var(--color-white-surface)', border: '1px dashed var(--color-card-border)', padding: '4px 6px', borderRadius: 'var(--radius-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>draft: {f.draft}</div>}
+                {f.alternatives.length > 0 && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', display: 'flex', flexWrap: 'wrap', gap: 4 }}>{f.alternatives.map((a) => <code key={a.selector} style={{ background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', padding: '2px 5px', borderRadius: 'var(--radius-sm)' }}>{a.selector}</code>)}</div>}
+                {f.warnings.length > 0 && <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, color: 'var(--color-signet-burgundy)', background: 'rgba(118,12,25,0.06)', padding: '4px 6px', borderRadius: 'var(--radius-sm)' }}>warnings: {f.warnings.join('; ')}</div>}
+                {f.preview && <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)', background: 'var(--color-feed-bag-cream)', padding: '6px 8px', borderRadius: 'var(--radius-sm)', borderLeft: '2px solid var(--color-uniform-green)' }}>{f.preview}</div>}
+                <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                  <button type="button" onClick={() => onAccept(f.key)} style={{ background: 'var(--color-uniform-green)', color: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-shadow-pine)', borderRadius: 'var(--radius-sm)', padding: '4px 10px', fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', cursor: 'pointer' }}>Accept</button>
+                  <button type="button" onClick={() => onReject(f.key)} style={{ background: 'var(--color-white-surface)', color: 'var(--color-ledger-charcoal)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '4px 10px', fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', cursor: 'pointer' }}>Reject</button>
+                  <button type="button" onClick={() => onSuggest(f.key)} style={{ background: 'transparent', color: 'var(--color-uniform-green)', border: '1px solid transparent', borderRadius: 'var(--radius-sm)', padding: '4px 8px', fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer' }}>Suggest</button>
+                  <button type="button" onClick={() => onExplain(f.key)} style={{ background: 'transparent', color: 'var(--color-mulch-brown)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '4px 8px', fontFamily: 'var(--font-body)', fontSize: '0.7rem', cursor: 'pointer' }}>Explain</button>
+                  <button type="button" onClick={() => onRevise(f.key, 'feedback')} style={{ background: 'transparent', color: 'var(--color-signet-burgundy)', border: '1px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-sm)', padding: '4px 8px', fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer' }}>Revise</button>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       ))}
     </div>

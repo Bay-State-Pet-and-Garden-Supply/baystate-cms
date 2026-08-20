@@ -14,6 +14,7 @@ import { Settings } from './components/Settings';
 import { AgentLab } from './components/agent-lab/AgentLab';
 import { ProfileWorkspacePage } from './components/profile-workspace/ProfileWorkspacePage';
 import { colors, fonts, rounded } from './theme';
+import './styles/workspace-tokens.css';
 
 type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings' | 'agentlab';
 
