@@ -1,0 +1,36 @@
+story_id: e06s02
+title: "Guided brand → domain → index → confirm 3 products — sitemap inventory, candidate/confirmed distinction, and waiver"
+status: failing
+bcps: 5
+spec: e06s02-guided-setup.md
+tasks:
+  - id: 1
+    description: "Wire brand → guarded official domain → sitemap index guided flow into workspace: reuse brand-site domain guards and brand_url_index-repo + sitemap-routes inventory; surface candidate (sitemap-only) vs confirmed (operator-confirmed) distinction in workspace; add domain verification and index freshness indicators"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/brand-url-index.test.ts src/tests/unit/sitemap-inventory.test.ts 2>&1 | tail -n 30"
+    risk: P1
+    status: failing
+    allure:
+      severity: high
+      categories:
+        - "Profile Workspace"
+        - "Onboarding"
+  - id: 2
+    description: "Implement 3-representative-product confirmation with persistent suite (3-10 covering templates/variants/edges): select from filtered brand_url_index page_type=product, persist confirmed set per domain, enforce 3 minimum; show path-cluster/variant signals; add repo + API for confirmed suite"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/representative-suite.test.ts 2>&1 | tail -n 30"
+    risk: P1
+    status: failing
+    allure:
+      severity: high
+      categories:
+        - "Profile Workspace"
+        - "Onboarding"
+  - id: 3
+    description: "Add explicit waiver for <3 product URLs with reason+actor audit: when sitemap product count <3, workspace requires operator-waiver (reason text + actor) recorded with artifact hash; activation gate allows waiver-bound domains to activate with 1-2 confirmed products, otherwise blocks; add waiver provenance + audit test"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-waiver.test.ts 2>&1 | tail -n 30"
+    risk: P0
+    status: failing
+    allure:
+      severity: critical
+      categories:
+        - "Profile Workspace"
+        - "Governance"

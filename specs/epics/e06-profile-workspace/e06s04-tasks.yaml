@@ -1,0 +1,42 @@
+story_id: e06s04
+title: "Test matrix + activation gate + release — 3-sample hard-block, immutable versions, park as setup_required_profile, distributor bypass"
+status: failing
+bcps: 8
+spec: e06s04-test-matrix-release.md
+tasks:
+  - id: 1
+    description: "Build full-width Test Matrix rows=3 confirmed products, cols=fields + identity/variant checks via production static/rendered profile runner (profile-runner-client); expandable extracted vs expected + provenance + artifact + failure reason; matrix bound to exact draft version and retained artifacts; execute tests deterministically and persist result per domain+version"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-test-matrix.test.ts src/tests/unit/profile-runner.test.ts 2>&1 | tail -n 30"
+    risk: P0
+    status: failing
+    security: none
+    allure:
+      severity: critical
+      categories: ["profile-workspace", "unit", "profile-matrix"]
+  - id: 2
+    description: "Implement hard-block activation gate: required title must succeed on every confirmed sample, no wrong-product/wrong-variant, no failing required field, image rule (two-sample + preview attestation) preserved; selector failing on 1 of 3 blocks activation with per-field expanded reason and Revise action; passing run required before activate mutation can succeed; add gate integration tests for fail/pass + 3-sample vs waiver"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-activation-gate.test.ts 2>&1 | tail -n 30"
+    risk: P0
+    status: failing
+    security: none
+    allure:
+      severity: critical
+      categories: ["profile-workspace", "unit", "profile-gate"]
+  - id: 3
+    description: "Introduce immutable activated versions with domain active-version pointer (selectors, runtime/variant settings, sample IDs, artifact hashes, validation summary, model/config provenance, approver, reason); migrate legacy mutable extractor_profiles (no grandfather — degrade until re-passed, show Active (legacy) degraded state); rollback moves pointer atomically and revalidates/re-releases affected work"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-versioning.test.ts src/tests/unit/profile-rollback.test.ts 2>&1 | tail -n 30"
+    risk: P0
+    status: failing
+    security: none
+    allure:
+      severity: critical
+      categories: ["profile-workspace", "unit", "profile-versioning"]
+  - id: 4
+    description: "Replace late-failure enforcement with park-at-Discovery→Extraction as setup_required_profile and domain-level task 'Build profile for example.com — unblocks N products'; activation deterministically releases parked items via onboarding-work release path; ensure distributor_record items bypass profiles entirely and proceed to profile-free extraction; regressions trigger on edits/drift but never auto-activate"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-parking.test.ts src/tests/unit/distributor-bypass.test.ts 2>&1 | tail -n 30"
+    risk: P0
+    status: failing
+    security: low
+    allure:
+      severity: critical
+      categories: ["profile-workspace", "unit", "profile-parking"]

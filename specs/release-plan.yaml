@@ -38,6 +38,12 @@ epics:
     bcps: 13
     capsule_dir: epics/e03-evals-shadow-rollout
     status: done
+  - id: e06
+    title: "Brand Domain Profile Workspace + Guided Setup — dedicated page, indexed-product harness, LLM-assisted build, and hard-block release"
+    wsjf: 13
+    bcps: 23
+    capsule_dir: epics/e06-profile-workspace
+    status: planned
   - id: e00
     title: Bootstrap — bigpowers scaffolding
     wsjf: 0

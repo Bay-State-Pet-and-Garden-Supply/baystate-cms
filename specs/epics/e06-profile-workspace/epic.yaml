@@ -1,0 +1,30 @@
+id: e06
+title: "Brand Domain Profile Workspace + Guided Setup — dedicated page, indexed-product harness, LLM-assisted build, and hard-block release"
+wsjf: 13
+total_bcps: 23
+status: planned
+stories:
+  - id: e06s01
+    title: "Dedicated Profile Workspace shell — domain-scoped page at /settings/domains/:domain/profile with header, readiness rail, and navigation"
+    bcps: 5
+    status: planned
+    spec: e06s01-workspace-shell.md
+    tasks: e06s01-tasks.yaml
+  - id: e06s02
+    title: "Guided brand → domain → index → confirm 3 products — sitemap inventory, candidate/confirmed distinction, and waiver"
+    bcps: 5
+    status: planned
+    spec: e06s02-guided-setup.md
+    tasks: e06s02-tasks.yaml
+  - id: e06s03
+    title: "LLM-assisted build + deterministic validation — Generate/Suggest/Explain/Revise task buttons with per-field governance"
+    bcps: 5
+    status: planned
+    spec: e06s03-llm-build.md
+    tasks: e06s03-tasks.yaml
+  - id: e06s04
+    title: "Test matrix + activation gate + release — 3-sample hard-block, immutable versions, park as setup_required_profile, distributor bypass"
+    bcps: 8
+    status: planned
+    spec: e06s04-test-matrix-release.md
+    tasks: e06s04-tasks.yaml
