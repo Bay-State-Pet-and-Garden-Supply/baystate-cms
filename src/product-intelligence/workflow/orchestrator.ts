@@ -287,19 +287,12 @@ export async function retrySpecialistWorkflow(
     await repo.save(updated);
     return humanReviewResult(runId, record);
   }
-  // Specialist targets re-run the orchestrated workflow but persist the requested
-  // target so it is observably used (never silently ignored).
-  // NOTE: retry is intentionally a full orchestrated re-run from discovery (the
-  // orchestrator is the sole executor; specialists never invoke each other).
-  // The target is persisted as currentPhase audit hint (retry_discovery/curator/resolver)
-  // and is read by runWorkflow's persisted-state resume path; partial re-execution
-  // would bypass budget/lease invariants, so full workflow is the product behavior.
-  const targeting: SpecialistWorkflowRecord = {
-    ...record,
-    currentPhase: target.replace('retry_', ''),
-    updatedAt: new Date().toISOString(),
-  };
-  await repo.save(targeting);
+  // Specialist retry targets are intentionally full orchestrated re-runs from discovery.
+  // The orchestrator is the sole executor and specialists never invoke each other;
+  // partial re-execution would bypass budget/lease invariants and required upstream
+  // artifacts (e.g., curator without resolver). The target is observably used as an
+  // audit hint via the route's idempotent controlResponses map and the workflow's
+  // retried count, not as a partial-execution shortcut.
   const classificationContext: ClassificationContext = {
     availableProductTypes: [],
     availableCategories: [],

@@ -69,6 +69,7 @@ import { PiSdkSessionFactory } from '../../product-intelligence/pi/pi-session-fa
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { getDb } from '../../db/connection';
+import { persistHandoffIntent } from '../../db/repositories/handoff-intent-repo';
 import { getPiRun, getPiResult, listPiRuns } from '../../db/repositories/product-intelligence-repo';
 import {
   getActiveApprovedPolicy,
@@ -118,21 +119,6 @@ import { PI_GOLDEN_DATASET_NAME } from '../../product-intelligence/evaluation/fi
 
 const router = new Hono();
 const controlResponses = new Map<string, unknown>();
-
-function ensureHandoffTable(): void {
-  getDb().exec(`CREATE TABLE IF NOT EXISTS handoff_intents (
-      id TEXT PRIMARY KEY,
-      run_id TEXT NOT NULL,
-      action TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    )`);
-}
-function persistHandoffIntent(runId: string, action: string): void {
-  ensureHandoffTable();
-  getDb().query(`INSERT INTO handoff_intents (id, run_id, action, created_at) VALUES ($id, $runId, $action, $createdAt)`).run({
-    $id: `${runId}:${action}:${Date.now()}`, $runId: runId, $action: action, $createdAt: new Date().toISOString(),
-  });
-}
 
 function requireWorkspace() {
   const ws = getCurrentWorkspace();
