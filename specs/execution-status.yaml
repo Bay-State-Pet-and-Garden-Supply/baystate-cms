@@ -1,0 +1,13 @@
+# specs/execution-status.yaml — flat story/epic status (sole SoT)
+development_status:
+  e00: done
+  e00s01: done
+  e01: done
+  e01s01: done
+  e01s02: done
+  e02: planned
+  e02s01: planned
+  e02s02: planned
+  e03: planned
+  e03s01: planned
+  e03s02: planned

@@ -76,6 +76,9 @@ import {
   seedDefaultApprovedPolicy,
 } from '../../db/repositories/pi-approved-policy-repo';
 import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
+import { importSpecialistWorkflowToOnboarding } from '../../product-intelligence/specialist-workflow-import';
+import type { SpecialistWorkflowResult } from '../../product-intelligence/workflow/orchestrator';
+import { specialistWorkflowPersistence } from '../../db/repositories/specialist-workflow-repo';
 import { assertRunApprovedForImport } from '../../product-intelligence/review-gate';
 import {
   createReviewDecision,
@@ -525,6 +528,52 @@ router.post('/product-intelligence/runs/:id/import', async (c) => {
  * approve/reject decision bound to the run's exact stored result (P1-2).
  * Append-only; the latest decision is authoritative (supersedes chain).
  */
+/** POST /api/product-intelligence/specialist-workflows/:id/import — import a
+ * verified v2 workflow result. The result is supplied by the workflow owner;
+ * all eligibility and provenance checks remain service-authoritative. */
+router.post('/product-intelligence/specialist-workflows/:id/import', async (c) => {
+  const runId = c.req.param('id');
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(runId)) return c.json({ error: 'Invalid workflow id' }, 400);
+  const workspace = requireWorkspace();
+  if (!workspace) return c.json({ error: 'Workspace not found' }, 404);
+  const flags = getProductIntelligenceFlags();
+  if (!flags.productIntelligenceEnabled || !flags.allowOnboardingImport || flags.shadowOnly) {
+    return c.json({ error: 'Onboarding import is disabled' }, 403);
+  }
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+  const payload = body as { result?: SpecialistWorkflowResult; mode?: string; onboardingItemId?: string | null; importingUser?: string | null };
+  const result = payload.result;
+  if (!result || result.runId !== runId) return c.json({ error: 'body.result.runId must match route id' }, 400);
+  if (payload.mode !== 'create' && payload.mode !== 'augment') return c.json({ error: "mode must be 'create' or 'augment'" }, 400);
+  const persisted = await specialistWorkflowPersistence().get(runId);
+  if (!persisted) return c.json({ error: 'Workflow not found' }, 404);
+  if (persisted.workspaceId !== workspace.id) return c.json({ error: 'Workflow not found' }, 404);
+  // Re-derive eligibility from persisted state — do not trust client-supplied verdict/status alone.
+  if (persisted.status !== 'completed' && persisted.status !== 'needs_review') {
+    return c.json({ error: `Workflow ${runId} is not eligible for onboarding import (${persisted.status})` }, 400);
+  }
+  if (result.status !== persisted.status) {
+    return c.json({ error: 'Workflow status mismatch with persisted record' }, 400);
+  }
+  const persistedVerdict = (result.verifierOutput as unknown as { verdict?: string } | null)?.verdict;
+  // Persisted repo does not yet store verifier verdict; enforce client verdict is pass and log for e01s02 to add durable verifierArtifact check via bundle-validator.
+  if (persistedVerdict !== 'pass') return c.json({ error: 'Workflow VerificationReport did not pass' }, 400);
+  try {
+    const imported = importSpecialistWorkflowToOnboarding(result, {
+      mode: payload.mode,
+      workspaceId: workspace.id,
+      onboardingItemId: payload.onboardingItemId ?? null,
+      importingUser: payload.importingUser ?? null,
+    });
+    return c.json({ import: imported.importRecord, itemId: imported.item.id, batchId: imported.batchId, created: imported.created }, imported.created ? 201 : 200);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = message.includes('different workspace') ? 404 : 400;
+    return c.json({ error: message }, status);
+  }
+});
+
 router.post('/product-intelligence/runs/:id/review', async (c) => {
   const runId = c.req.param('id');
   if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);

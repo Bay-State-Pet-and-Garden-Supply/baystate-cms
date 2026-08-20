@@ -1318,6 +1318,10 @@ export interface PiImportRow {
   importedSourceIdsJson: string;
   importedEvidenceIdsJson: string;
   importedImageIdsJson: string;
+  workflowId: string | null;
+  capabilityInvocationIdsJson: string;
+  artifactHashesJson: string;
+  verifierProvenanceJson: string;
   createdAt: string;
 }
 
@@ -1332,6 +1336,10 @@ const IMPORT_SELECT = `
          imported_source_ids_json AS importedSourceIdsJson,
          imported_evidence_ids_json AS importedEvidenceIdsJson,
          imported_image_ids_json AS importedImageIdsJson,
+         workflow_id AS workflowId,
+         capability_invocation_ids_json AS capabilityInvocationIdsJson,
+         artifact_hashes_json AS artifactHashesJson,
+         verifier_provenance_json AS verifierProvenanceJson,
          created_at AS createdAt
   FROM product_intelligence_imports
 `;
@@ -1348,6 +1356,10 @@ export function insertPiImport(input: {
   importedSourceIdsJson?: string;
   importedEvidenceIdsJson?: string;
   importedImageIdsJson?: string;
+  workflowId?: string | null;
+  capabilityInvocationIdsJson?: string;
+  artifactHashesJson?: string;
+  verifierProvenanceJson?: string;
 }): PiImportRow {
   const db = getDb();
   const id = randomUUID();
@@ -1355,8 +1367,10 @@ export function insertPiImport(input: {
     `INSERT INTO product_intelligence_imports
        (id, run_id, onboarding_item_id, result_hash, mode, importing_user, status,
         field_selection_json, excluded_values_json, overridden_values_json,
-        imported_source_ids_json, imported_evidence_ids_json, imported_image_ids_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+        imported_source_ids_json, imported_evidence_ids_json, imported_image_ids_json,
+        workflow_id, capability_invocation_ids_json, artifact_hashes_json,
+        verifier_provenance_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id, input.runId, input.onboardingItemId, input.resultHash, input.mode,
       input.importingUser ?? null,
@@ -1366,6 +1380,10 @@ export function insertPiImport(input: {
       input.importedSourceIdsJson ?? '[]',
       input.importedEvidenceIdsJson ?? '[]',
       input.importedImageIdsJson ?? '[]',
+      input.workflowId ?? null,
+      input.capabilityInvocationIdsJson ?? '[]',
+      input.artifactHashesJson ?? '[]',
+      input.verifierProvenanceJson ?? '{}',
       now(),
     ],
   );
@@ -1382,6 +1400,16 @@ export function getPiImportByRunAndItem(runId: string, onboardingItemId: string)
   return db
     .query(`${IMPORT_SELECT} WHERE run_id = ? AND onboarding_item_id = ?`)
     .get(runId, onboardingItemId) as PiImportRow | undefined;
+}
+
+export function getPiImportByWorkflowAndItem(workflowId: string, onboardingItemId: string): PiImportRow | undefined {
+  const db = getDb();
+  return db.query(`${IMPORT_SELECT} WHERE workflow_id = ? AND onboarding_item_id = ?`).get(workflowId, onboardingItemId) as PiImportRow | undefined;
+}
+
+export function listPiImportsByWorkflow(workflowId: string): PiImportRow[] {
+  const db = getDb();
+  return db.query(`${IMPORT_SELECT} WHERE workflow_id = ? ORDER BY created_at ASC`).all(workflowId) as PiImportRow[];
 }
 
 export function listPiImportsByRun(runId: string): PiImportRow[] {

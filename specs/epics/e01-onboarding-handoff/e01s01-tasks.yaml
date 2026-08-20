@@ -1,0 +1,21 @@
+story_id: e01s01
+title: "Create/augment onboarding item from verified SpecialistWorkflowResult with preserved provenance"
+status: planned
+bcps: 8
+tasks:
+  - id: 1
+    description: "Extend src/product-intelligence/onboarding-import.ts to consume v2 SpecialistWorkflowResult artifacts (ProductSeed, DiscoveryBundle, ExtractionEvidenceBundle, ResolvedFactSet, CuratedProductDraft, VerificationReport) and create or augment an onboarding item (batch + item + import record) reusing PI-8 transactional pattern; persist workflow/run/capability/artifact hash/evidence-link/verifier provenance and importer/timestamp"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-intelligence-import.test.ts"
+    status: todo
+  - id: 2
+    description: "Wire server route for handoff (server/routes/product-intelligence.ts) — allow only terminal/review-eligible states, require VerificationReport pass to be eligible (but do not auto-approve catalog truth), enforce workspace ownership (404 cross-workspace), delegate to import service"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-intelligence-workflow.test.ts"
+    status: todo
+  - id: 3
+    description: "Ensure classification and image governance on imported facts — v2 classification feeds existing governed proposal/review/cohort paths (#30), images satisfy identity/rights (PI-6 commerceApproved) and never invent taxonomy/CategoryPage IDs"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/curator-specialist.test.ts src/tests/unit/verifier-specialist.test.ts"
+    status: todo
+  - id: 4
+    description: "Add/extend unit tests for create, augment, provenance linkage, and non-Agent onboarding regression — cover new vs existing onboarding item, artifact hash linkage, evidence refs, and that ordinary onboarding still works when Agent Lab not used"
+    verify: "bun run test:db --run src/tests/db/product-intelligence-import 2>&1 | tail -n 20"
+    status: todo

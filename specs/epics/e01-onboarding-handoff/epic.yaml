@@ -1,0 +1,18 @@
+id: e01
+title: "Agent Lab → Onboarding handoff — verified v2 import with provenance (#58)"
+wsjf: 13
+total_bcps: 13
+status: planned
+stories:
+  - id: e01s01
+    title: "Create/augment onboarding item from verified SpecialistWorkflowResult with preserved provenance"
+    bcps: 8
+    status: planned
+    spec: e01s01-import-provenance.md
+    tasks: e01s01-tasks.yaml
+  - id: e01s02
+    title: "Fail-closed guards — manual preservation, conflict visibility, idempotency, stale-hash handling"
+    bcps: 5
+    status: planned
+    spec: e01s02-import-guards.md
+    tasks: e01s02-tasks.yaml

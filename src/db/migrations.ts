@@ -2727,15 +2727,31 @@ export function runMigrations(): void {
             imported_source_ids_json TEXT NOT NULL DEFAULT '[]',
             imported_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
             imported_image_ids_json TEXT NOT NULL DEFAULT '[]',
+            workflow_id TEXT,
+            capability_invocation_ids_json TEXT NOT NULL DEFAULT '[]',
+            artifact_hashes_json TEXT NOT NULL DEFAULT '[]',
+            verifier_provenance_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             UNIQUE (run_id, onboarding_item_id)
           );
           CREATE INDEX IF NOT EXISTS idx_pi_imports_item ON product_intelligence_imports(onboarding_item_id);
           CREATE INDEX IF NOT EXISTS idx_pi_imports_run ON product_intelligence_imports(run_id);
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_pi_imports_workflow_item ON product_intelligence_imports(workflow_id, onboarding_item_id) WHERE workflow_id IS NOT NULL;
         `);
       })();
       db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_imports_schema_version', '1');");
       console.log('[Migrations] Product intelligence import schema migration complete.');
+    } else {
+      // v2 SpecialistWorkflowResult provenance columns were added after PI-8.
+      for (const statement of [
+        'ALTER TABLE product_intelligence_imports ADD COLUMN workflow_id TEXT',
+        "ALTER TABLE product_intelligence_imports ADD COLUMN capability_invocation_ids_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE product_intelligence_imports ADD COLUMN artifact_hashes_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE product_intelligence_imports ADD COLUMN verifier_provenance_json TEXT NOT NULL DEFAULT '{}'",
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_pi_imports_workflow_item ON product_intelligence_imports(workflow_id, onboarding_item_id) WHERE workflow_id IS NOT NULL',
+      ]) {
+        try { db.exec(statement); } catch { /* column already exists */ }
+      }
     }
   } catch (e) {
     console.error('[Migrations] Product intelligence import schema migration failed:', e);

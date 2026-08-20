@@ -1,0 +1,21 @@
+story_id: e01s02
+title: "Fail-closed guards — manual preservation, conflict visibility, idempotency, stale-hash handling"
+status: planned
+bcps: 5
+tasks:
+  - id: 1
+    description: "Never silently overwrite manual/reviewed onboarding values — record excluded/overridden fields, surface conflicts visibly after import, keep needs_human_review unresolved until human resolves"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-intelligence-import.test.ts -t 'manual|conflict|human_review'"
+    status: todo
+  - id: 2
+    description: "Idempotent + anti-replacement guards — same run import is idempotent, newer workflows never silently replace an earlier imported result (require explicit re-import), stale/mismatched artifact hashes fail-closed"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-intelligence-import.test.ts -t 'idempotent|stale|hash'"
+    status: todo
+  - id: 3
+    description: "Image and promotion guards — rejected/non-commerce-approved images are excluded, Agent Lab verification never directly creates approved catalog truth, promotion/export remains owned by normal onboarding/review path"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-intelligence-assets.test.ts src/tests/unit/product-intelligence-import.test.ts -t 'image|rights'"
+    status: todo
+  - id: 4
+    description: "Negative-path + regression tests — stale result, rejected image, idempotency, ordinary non-Agent onboarding path, and cross-workspace isolation for import endpoints"
+    verify: "bun run test:db --run src/tests/db/product-intelligence-import 2>&1 | tail -n 20"
+    status: todo
