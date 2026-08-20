@@ -235,11 +235,39 @@ export function SitemapHealthView() {
                   >
                     <td style={{ padding: '12px 16px' }}>
                       <div style={{ fontWeight: 600, color: '#0f172a' }}>{dom.domain}</div>
-                      {dom.brandAssociations && dom.brandAssociations.length > 0 && (
-                        <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '2px' }}>
-                          {dom.brandAssociations.map((b) => b.brandName).join(', ')}
-                        </div>
-                      )}
+                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginTop: '4px' }}>
+                        {dom.brandAssociations && dom.brandAssociations.length > 0 ? (
+                          dom.brandAssociations.map((b) => (
+                            <span
+                              key={b.id || b.brandName}
+                              style={{
+                                fontSize: '0.72rem',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                background: '#e0f2fe',
+                                color: '#0369a1',
+                                border: '1px solid #bae6fd',
+                                fontWeight: 600,
+                              }}
+                            >
+                              🏷️ {b.brandName}
+                            </span>
+                          ))
+                        ) : (
+                          <span
+                            style={{
+                              fontSize: '0.72rem',
+                              padding: '1px 6px',
+                              borderRadius: '4px',
+                              background: '#f8fafc',
+                              color: '#94a3b8',
+                              border: '1px dashed #cbd5e1',
+                            }}
+                          >
+                            Unassigned brand
+                          </span>
+                        )}
+                      </div>
                       {dom.attentionReasons && dom.attentionReasons.length > 0 && (
                         <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginTop: '6px' }}>
                           {dom.attentionReasons.map((reason) => (

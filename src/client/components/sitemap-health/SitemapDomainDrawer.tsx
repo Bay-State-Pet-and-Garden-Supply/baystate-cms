@@ -4,6 +4,8 @@ import {
   getSitemapDomainUrls,
   refreshSitemapDomain,
   testSitemapLookup,
+  deleteSitemapUrl,
+  deleteSitemapUrls,
 } from '../../onboarding-api';
 import type {
   SitemapDomainDetailResponse,
@@ -33,6 +35,11 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
   const [activeOnly, setActiveOnly] = useState(true);
   const [pageOffset, setPageOffset] = useState(0);
   const [urlsLoading, setUrlsLoading] = useState(false);
+
+  // URL deletion state
+  const [selectedUrlIds, setSelectedUrlIds] = useState<Set<string>>(new Set());
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   // Sandbox tab state
   const [testUpc, setTestUpc] = useState('');
@@ -80,6 +87,7 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
     if (activeTab === 'urls') {
       loadUrls(0);
       setPageOffset(0);
+      setSelectedUrlIds(new Set());
     }
   }, [activeTab, urlSearch, pageTypeFilter, activeOnly]);
 
@@ -95,6 +103,84 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
     } finally {
       setRefreshing(false);
     }
+  };
+
+  const handleDeleteSingle = async (item: BrandUrlItem) => {
+    const confirmMsg = `Remove this URL from the index?\n\n${item.url}`;
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      setDeletingIds((prev) => new Set(prev).add(item.id));
+      await deleteSitemapUrl(domain, item.id);
+      setSelectedUrlIds((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+      await loadUrls();
+      await loadDetail();
+      onRefreshComplete?.();
+    } catch (err) {
+      alert(`Failed to delete URL: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedUrlIds.size === 0) return;
+    const confirmMsg = `Are you sure you want to remove ${selectedUrlIds.size} selected URLs from the index?`;
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      setBatchDeleting(true);
+      const idsToDelete = Array.from(selectedUrlIds);
+      await deleteSitemapUrls(domain, idsToDelete);
+      setSelectedUrlIds(new Set());
+      await loadUrls();
+      await loadDetail();
+      onRefreshComplete?.();
+    } catch (err) {
+      alert(`Failed to delete selected URLs: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBatchDeleting(false);
+    }
+  };
+
+  const handleToggleSelectAllVisible = () => {
+    if (!urlsData || urlsData.urls.length === 0) return;
+    const visibleIds = urlsData.urls.map((u) => u.id);
+    const allSelected = visibleIds.every((id) => selectedUrlIds.has(id));
+
+    if (allSelected) {
+      setSelectedUrlIds((prev) => {
+        const next = new Set(prev);
+        for (const id of visibleIds) next.delete(id);
+        return next;
+      });
+    } else {
+      setSelectedUrlIds((prev) => {
+        const next = new Set(prev);
+        for (const id of visibleIds) next.add(id);
+        return next;
+      });
+    }
+  };
+
+  const handleToggleSelectRow = (id: string) => {
+    setSelectedUrlIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   };
 
   const handleRunTest = async (e: React.FormEvent) => {
@@ -115,6 +201,9 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
     }
   };
 
+  const allVisibleSelected =
+    Boolean(urlsData && urlsData.urls.length > 0 && urlsData.urls.every((u) => selectedUrlIds.has(u.id)));
+
   return (
     <div
       style={{
@@ -122,8 +211,8 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
         top: 0,
         right: 0,
         bottom: 0,
-        width: '780px',
-        maxWidth: '90vw',
+        width: '840px',
+        maxWidth: '92vw',
         background: '#ffffff',
         boxShadow: '-4px 0 24px rgba(0,0,0,0.15)',
         zIndex: 1000,
@@ -177,11 +266,41 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
               </span>
             )}
           </div>
-          {detail?.summary.brandAssociations && detail.summary.brandAssociations.length > 0 && (
-            <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '4px' }}>
-              Mapped Brands: {detail.summary.brandAssociations.map((b) => b.brandName).join(', ')}
-            </div>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
+            <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>Mapped Brands:</span>
+            {detail?.summary.brandAssociations && detail.summary.brandAssociations.length > 0 ? (
+              detail.summary.brandAssociations.map((b) => (
+                <span
+                  key={b.id || b.brandName}
+                  style={{
+                    fontSize: '0.75rem',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    background: '#e0f2fe',
+                    color: '#0369a1',
+                    border: '1px solid #bae6fd',
+                    fontWeight: 600,
+                  }}
+                >
+                  🏷️ {b.brandName}
+                </span>
+              ))
+            ) : (
+              <span
+                style={{
+                  fontSize: '0.75rem',
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  background: '#fef3c7',
+                  color: '#92400e',
+                  border: '1px dashed #fcd34d',
+                  fontWeight: 500,
+                }}
+              >
+                ⚠️ No brands mapped to this domain
+              </span>
+            )}
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
@@ -259,14 +378,15 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
         {!loading && activeTab === 'urls' && (
           <div>
             {/* Search and filters */}
-            <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
               <input
                 type="text"
-                placeholder="Search URL or title..."
+                placeholder="Search URL, title, or brand..."
                 value={urlSearch}
                 onChange={(e) => setUrlSearch(e.target.value)}
                 style={{
                   flex: 1,
+                  minWidth: '180px',
                   padding: '8px 12px',
                   borderRadius: '6px',
                   border: '1px solid #cbd5e1',
@@ -299,6 +419,59 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
               </label>
             </div>
 
+            {/* Batch actions bar */}
+            {selectedUrlIds.size > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: '10px 14px',
+                  marginBottom: '12px',
+                  background: '#fef2f2',
+                  border: '1px solid #fecaca',
+                  borderRadius: '6px',
+                }}
+              >
+                <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#991b1b' }}>
+                  {selectedUrlIds.size} URL{selectedUrlIds.size > 1 ? 's' : ''} selected
+                </span>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={() => setSelectedUrlIds(new Set())}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: '0.8rem',
+                      background: '#ffffff',
+                      color: '#475569',
+                      border: '1px solid #cbd5e1',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Deselect All
+                  </button>
+                  <button
+                    onClick={handleDeleteSelected}
+                    disabled={batchDeleting}
+                    style={{
+                      padding: '4px 12px',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                      background: '#dc2626',
+                      color: '#ffffff',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: batchDeleting ? 'not-allowed' : 'pointer',
+                      opacity: batchDeleting ? 0.7 : 1,
+                    }}
+                  >
+                    {batchDeleting ? 'Removing...' : `🗑️ Delete Selected (${selectedUrlIds.size})`}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* URLs Table */}
             {urlsLoading ? (
               <div style={{ color: '#64748b', padding: '20px 0' }}>Loading URLs...</div>
@@ -310,56 +483,163 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
               <div>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
                   <thead>
-                    <tr style={{ borderBottom: '2px solid #e2e8f0', textAlign: 'left', color: '#475569' }}>
-                      <th style={{ padding: '8px' }}>URL / Enriched Metadata</th>
-                      <th style={{ padding: '8px', width: '90px' }}>Type</th>
-                      <th style={{ padding: '8px', width: '110px' }}>Lastmod</th>
+                    <tr style={{ borderBottom: '2px solid #e2e8f0', textAlign: 'left', color: '#475569', background: '#f8fafc' }}>
+                      <th style={{ padding: '10px 8px', width: '36px', textAlign: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          onChange={handleToggleSelectAllVisible}
+                          title="Select / Deselect all visible URLs"
+                        />
+                      </th>
+                      <th style={{ padding: '10px 8px' }}>URL / Enriched Metadata</th>
+                      <th style={{ padding: '10px 8px', width: '120px' }}>Brand</th>
+                      <th style={{ padding: '10px 8px', width: '85px' }}>Type</th>
+                      <th style={{ padding: '10px 8px', width: '95px' }}>Lastmod</th>
+                      <th style={{ padding: '10px 8px', width: '90px', textAlign: 'right' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {urlsData.urls.map((u: BrandUrlItem) => (
-                      <tr key={u.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                        <td style={{ padding: '10px 8px' }}>
-                          <a
-                            href={u.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{
-                              color: '#2563eb',
-                              textDecoration: 'none',
-                              fontWeight: 500,
-                              wordBreak: 'break-all',
-                            }}
-                          >
-                            {u.url}
-                          </a>
-                          {(u.title || u.upc || u.sku) && (
-                            <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '4px' }}>
-                              {u.title && <span>Title: <strong>{u.title}</strong> </span>}
-                              {u.upc && <span>· UPC: <code style={{ background: '#f1f5f9', padding: '1px 4px' }}>{u.upc}</code> </span>}
-                              {u.sku && <span>· SKU: <code style={{ background: '#f1f5f9', padding: '1px 4px' }}>{u.sku}</code></span>}
-                            </div>
-                          )}
-                        </td>
-                        <td style={{ padding: '10px 8px' }}>
-                          <span
-                            style={{
-                              padding: '2px 6px',
-                              borderRadius: '4px',
-                              fontSize: '0.75rem',
-                              fontWeight: 500,
-                              background: u.pageType === 'product' ? '#eff6ff' : '#f1f5f9',
-                              color: u.pageType === 'product' ? '#1d4ed8' : '#475569',
-                            }}
-                          >
-                            {u.pageType}
-                          </span>
-                        </td>
-                        <td style={{ padding: '10px 8px', color: '#64748b', fontSize: '0.8rem' }}>
-                          {u.lastmod ? new Date(u.lastmod).toLocaleDateString() : '—'}
-                        </td>
-                      </tr>
-                    ))}
+                    {urlsData.urls.map((u: BrandUrlItem) => {
+                      const isSelected = selectedUrlIds.has(u.id);
+                      const isDeleting = deletingIds.has(u.id);
+                      const domainBrand = detail?.summary.brandAssociations?.[0]?.brandName;
+
+                      return (
+                        <tr
+                          key={u.id}
+                          style={{
+                            borderBottom: '1px solid #f1f5f9',
+                            background: isSelected ? '#eff6ff' : 'transparent',
+                          }}
+                        >
+                          <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleToggleSelectRow(u.id)}
+                            />
+                          </td>
+                          <td style={{ padding: '10px 8px' }}>
+                            <a
+                              href={u.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                color: '#2563eb',
+                                textDecoration: 'none',
+                                fontWeight: 500,
+                                wordBreak: 'break-all',
+                              }}
+                            >
+                              {u.url}
+                            </a>
+                            {(u.title || u.upc || u.sku || u.brand) && (
+                              <div
+                                style={{
+                                  fontSize: '0.75rem',
+                                  color: '#64748b',
+                                  marginTop: '4px',
+                                  display: 'flex',
+                                  gap: '8px',
+                                  flexWrap: 'wrap',
+                                }}
+                              >
+                                {u.title && <span>Title: <strong>{u.title}</strong></span>}
+                                {u.brand && (
+                                  <span>
+                                    Brand: <strong style={{ color: '#166534' }}>{u.brand}</strong>
+                                  </span>
+                                )}
+                                {u.upc && (
+                                  <span>
+                                    UPC: <code style={{ background: '#f1f5f9', padding: '1px 4px', borderRadius: '3px' }}>{u.upc}</code>
+                                  </span>
+                                )}
+                                {u.sku && (
+                                  <span>
+                                    SKU: <code style={{ background: '#f1f5f9', padding: '1px 4px', borderRadius: '3px' }}>{u.sku}</code>
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 8px' }}>
+                            {u.brand ? (
+                              <span
+                                style={{
+                                  padding: '2px 6px',
+                                  borderRadius: '4px',
+                                  fontSize: '0.75rem',
+                                  fontWeight: 600,
+                                  background: '#f0fdf4',
+                                  color: '#166534',
+                                  border: '1px solid #bbf7d0',
+                                  display: 'inline-block',
+                                }}
+                              >
+                                🏷️ {u.brand}
+                              </span>
+                            ) : domainBrand ? (
+                              <span
+                                title="Assigned via domain mapping"
+                                style={{
+                                  padding: '2px 6px',
+                                  borderRadius: '4px',
+                                  fontSize: '0.75rem',
+                                  fontWeight: 500,
+                                  background: '#f8fafc',
+                                  color: '#475569',
+                                  border: '1px solid #e2e8f0',
+                                  display: 'inline-block',
+                                }}
+                              >
+                                {domainBrand}
+                              </span>
+                            ) : (
+                              <span style={{ color: '#94a3b8', fontSize: '0.75rem' }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 8px' }}>
+                            <span
+                              style={{
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontSize: '0.75rem',
+                                fontWeight: 500,
+                                background: u.pageType === 'product' ? '#eff6ff' : '#f1f5f9',
+                                color: u.pageType === 'product' ? '#1d4ed8' : '#475569',
+                              }}
+                            >
+                              {u.pageType}
+                            </span>
+                          </td>
+                          <td style={{ padding: '10px 8px', color: '#64748b', fontSize: '0.8rem' }}>
+                            {u.lastmod ? new Date(u.lastmod).toLocaleDateString() : '—'}
+                          </td>
+                          <td style={{ padding: '10px 8px', textAlign: 'right' }}>
+                            <button
+                              onClick={() => handleDeleteSingle(u)}
+                              disabled={isDeleting}
+                              title="Remove URL from index"
+                              style={{
+                                padding: '3px 8px',
+                                fontSize: '0.75rem',
+                                fontWeight: 500,
+                                background: '#fee2e2',
+                                color: '#991b1b',
+                                border: '1px solid #fecaca',
+                                borderRadius: '4px',
+                                cursor: isDeleting ? 'not-allowed' : 'pointer',
+                                opacity: isDeleting ? 0.5 : 1,
+                              }}
+                            >
+                              {isDeleting ? '...' : '🗑️ Remove'}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
 
@@ -413,6 +693,7 @@ export function SitemapDomainDrawer({ domain, onClose, onRefreshComplete }: Site
             )}
           </div>
         )}
+
 
         {!loading && activeTab === 'sandbox' && (
           <div>

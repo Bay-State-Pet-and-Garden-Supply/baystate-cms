@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll } from 'vitest';
+import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
@@ -46,15 +46,18 @@ describe('Domain Diagnostics Aggregation Service', () => {
     }
   });
 
-  test('returns [] for an empty database without mutating anything', () => {
-    // Wipe all source tables to validate the empty case.
+  beforeEach(() => {
     const db = getDb();
     db.query('DELETE FROM extractor_profiles').run();
     db.query('DELETE FROM brand_sites').run();
     db.query('DELETE FROM domain_status').run();
     db.query('DELETE FROM sitemap_cache').run();
+    db.query('DELETE FROM brand_url_index').run();
+    db.query('DELETE FROM brand_url_fts').run();
     db.query('DELETE FROM profile_generations').run();
+  });
 
+  test('returns [] for an empty database without mutating anything', () => {
     const entries = buildDomainDiagnostics(pinnedNow);
     expect(entries).toEqual([]);
 

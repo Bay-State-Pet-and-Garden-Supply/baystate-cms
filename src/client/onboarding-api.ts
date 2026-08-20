@@ -1414,3 +1414,29 @@ export async function testSitemapLookup(
   });
 }
 
+export async function deleteSitemapUrl(
+  domain: string,
+  id: string,
+): Promise<{ ok: boolean; id: string; domain: string }> {
+  return request<{ ok: boolean; id: string; domain: string }>(
+    `/sitemaps/${encodeURIComponent(domain)}/urls/${encodeURIComponent(id)}`,
+    {
+      method: 'DELETE',
+    },
+  );
+}
+
+export async function deleteSitemapUrls(
+  domain: string,
+  ids: string[],
+): Promise<{ ok: boolean; deletedCount: number; domain: string }> {
+  return request<{ ok: boolean; deletedCount: number; domain: string }>(
+    `/sitemaps/${encodeURIComponent(domain)}/urls`,
+    {
+      method: 'DELETE',
+      body: JSON.stringify({ ids }),
+    },
+  );
+}
+
+

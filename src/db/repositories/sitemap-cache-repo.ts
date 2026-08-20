@@ -124,13 +124,23 @@ export function clearSitemapCache(): void {
 }
 
 /**
- * Read-only listing of every sitemap cache row, sorted alphabetically by domain.
+ * Read-only listing of every `sitemap_cache` row, sorted alphabetically
+ * by domain. Used by the diagnostics surface so it can show stale or
+ * malformed rows without triggering cache eviction.
+ *
+ * Unlike `getCachedSitemapUrls`, this function:
+ *   - never deletes expired rows
+ *   - never deletes rows with invalid `urls_json`
+ *   - returns the raw `fetched_at`/`expires_at`/`source_url` so the
+ *     caller can compute its own staleness flag.
+ *
+ * On a malformed `urls_json` blob, the row is returned with
+ * `urls: []` and `sitemapUrlsCount: 0` and a warning is logged;
+ * the function does not throw.
  */
 export function listAllSitemapCaches(): SitemapCacheRow[] {
   const db = getDb();
-
-  // Combine legacy cache rows and brand_url_index counts
-  const legacyRows = db.query(
+  const rows = db.query(
     'SELECT domain, urls_json, fetched_at, expires_at, source_url FROM sitemap_cache ORDER BY domain ASC',
   ).all() as Array<{
     domain: string;
@@ -140,42 +150,32 @@ export function listAllSitemapCaches(): SitemapCacheRow[] {
     source_url: string | null;
   }>;
 
-  const domainCounts = getAllDomainUrlCounts();
-  const domainSet = new Set<string>();
-
-  for (const r of legacyRows) domainSet.add(r.domain);
-  for (const d of Object.keys(domainCounts)) domainSet.add(d);
-
-  const sortedDomains = Array.from(domainSet).sort();
-
-  return sortedDomains.map((domain) => {
-    const legacy = legacyRows.find((r) => r.domain === domain);
-    const activeUrls = getActiveUrlsForDomain(domain);
-    let urls = activeUrls;
-
-    if (urls.length === 0 && legacy) {
-      try {
-        const parsed = JSON.parse(legacy.urls_json);
-        if (Array.isArray(parsed)) {
-          urls = parsed.filter((u): u is string => typeof u === 'string');
-        }
-      } catch {
-        urls = [];
+  return rows.map((row) => {
+    let urls: string[] = [];
+    try {
+      const parsed = JSON.parse(row.urls_json);
+      if (Array.isArray(parsed)) {
+        urls = parsed.filter((u): u is string => typeof u === 'string');
+      } else {
+        console.error(
+          `Cached sitemap urls_json for "${row.domain}" is not an array; reporting empty list.`,
+        );
       }
+    } catch (err) {
+      console.error(
+        `Failed to parse cached sitemap urls for domain "${row.domain}":`,
+        err,
+      );
     }
-
-    const fetchedAt = legacy?.fetched_at || new Date().toISOString();
-    const expiresAt = legacy?.expires_at || new Date(Date.now() + SITEMAP_CACHE_DEFAULT_TTL_MS).toISOString();
-    const sourceUrl = legacy?.source_url || null;
-
     return {
-      domain,
+      domain: row.domain,
       urls,
       sitemapUrlsCount: urls.length,
-      sitemapFetchedAt: fetchedAt,
-      sitemapExpiresAt: expiresAt,
-      sitemapSourceUrl: sourceUrl,
+      sitemapFetchedAt: row.fetched_at,
+      sitemapExpiresAt: row.expires_at,
+      sitemapSourceUrl: row.source_url,
     };
   });
 }
+
 

@@ -267,6 +267,21 @@ export default defineConfig({
       // e03s01 DB-backed shadow + additive (bun:sqlite — run under bun test via test:db)
       'src/tests/unit/e03s01-shadow.test.ts',
       'src/tests/unit/e03s01-additive.test.ts',
+      'src/tests/unit/e03s01-retry.test.ts',
+      // Epic #61 sitemap & brand URL index DB-backed suites
+      'src/tests/unit/brand-url-index-repo.test.ts',
+      'src/tests/unit/local-brand-url-finder.test.ts',
+      'src/tests/unit/sitemap-health-evaluator.test.ts',
+      'src/tests/unit/sitemap-routes.test.ts',
+      'src/tests/unit/source-discovery-sitemap-priority.test.ts',
+      // Page extractor / specialist workflow DB suites
+      'src/tests/unit/page-extractor-images.test.ts',
+      'src/tests/unit/page-extractor-profile-generation.test.ts',
+      'src/tests/unit/page-extractor-variant-inference.test.ts',
+      'src/tests/unit/profile-engineer-workflow-repo.test.ts',
+      'src/tests/unit/specialist-workflow-import.test.ts',
+      'src/tests/unit/specialist-workflow-repo.test.ts',
+      'src/tests/unit/product-intelligence/orchestrator.test.ts',
     ],
   },
 });

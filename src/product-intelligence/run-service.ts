@@ -51,6 +51,7 @@ import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
 import type { BundleImageCandidate } from './workflow/bundle';
 import { runDeterministicPreflight } from './preflight';
+import { captureSpecialistCodeCommit } from './specialists/artifacts';
 
 const PI_RESULT_SCHEMA_VERSION = 1;
 
@@ -459,17 +460,8 @@ export function cancelPiRun(id: string): boolean {
 
 /** Best-effort CMS code commit (git HEAD of this repository). */
 function captureCodeCommit(): string | null {
-  try {
-    const headPath = path.join(process.cwd(), '.git', 'HEAD');
-    const head = readFileSync(headPath, 'utf8').trim();
-    if (head.startsWith('ref:')) {
-      const refPath = path.join(process.cwd(), '.git', head.slice(5).trim());
-      return readFileSync(refPath, 'utf8').trim().slice(0, 40);
-    }
-    return head.slice(0, 40);
-  } catch {
-    return null;
-  }
+  const commit = captureSpecialistCodeCommit();
+  return commit ? commit.slice(0, 40) : null;
 }
 
 /**

@@ -171,4 +171,6 @@ function main(): void {
   console.log('curation-goldset-eval: OK — no regression');
 }
 
-main();
+if (import.meta.main) {
+  main();
+}

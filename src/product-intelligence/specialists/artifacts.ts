@@ -15,8 +15,9 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/48
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import { z } from 'zod';
 import { canonicalJsonStringify, hashCanonicalJson } from '../../shared/stable-id';
 
@@ -37,15 +38,45 @@ export function captureSpecialistCodeCommit(): string | null {
   ].find((value) => typeof value === 'string' && value.trim().length > 0)?.trim();
   if (configured) return configured.slice(0, 64);
   try {
-    const head = readFileSync(join(process.cwd(), '.git', 'HEAD'), 'utf8').trim();
+    const gitPath = join(process.cwd(), '.git');
+    if (!existsSync(gitPath)) return null;
+    let dotGitDir = gitPath;
+    const stat = statSync(gitPath);
+    if (stat.isFile()) {
+      const content = readFileSync(gitPath, 'utf8').trim();
+      if (content.startsWith('gitdir:')) {
+        dotGitDir = content.slice(7).trim();
+      }
+    }
+    const headPath = join(dotGitDir, 'HEAD');
+    if (!existsSync(headPath)) return null;
+    const head = readFileSync(headPath, 'utf8').trim();
     if (head.startsWith('ref:')) {
-      return readFileSync(join(process.cwd(), '.git', head.slice(5).trim()), 'utf8').trim().slice(0, 64) || null;
+      const refPath = head.slice(5).trim();
+      const directRef = join(dotGitDir, refPath);
+      if (existsSync(directRef)) {
+        return readFileSync(directRef, 'utf8').trim().slice(0, 64) || null;
+      }
+      const commondirFile = join(dotGitDir, 'commondir');
+      const commonDir = existsSync(commondirFile)
+        ? join(dotGitDir, readFileSync(commondirFile, 'utf8').trim())
+        : dotGitDir;
+      const commonRef = join(commonDir, refPath);
+      if (existsSync(commonRef)) {
+        return readFileSync(commonRef, 'utf8').trim().slice(0, 64) || null;
+      }
     }
     return head.slice(0, 64) || null;
   } catch {
-    return null;
+    try {
+      const gitRev = execSync('git rev-parse HEAD', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      return gitRev.slice(0, 64) || null;
+    } catch {
+      return null;
+    }
   }
 }
+
 
 export const SemverStringSchema = z
   .string()

@@ -492,3 +492,72 @@ export function getActiveUrlsForDomain(domain: string, pageType?: BrandUrlPageTy
     .all(normDomain) as Array<{ url: string }>;
   return rows.map((r) => r.url);
 }
+
+/**
+ * Delete a specific URL record by ID from the index and sync FTS5.
+ */
+export function deleteBrandUrlById(id: string): boolean {
+  const db = getDb();
+  return db.transaction(() => {
+    const row = db.query('SELECT rowid FROM brand_url_index WHERE id = ?').get(id) as { rowid: number } | undefined;
+    if (!row) return false;
+    try {
+      db.prepare('DELETE FROM brand_url_fts WHERE rowid = ?').run(row.rowid);
+    } catch {
+      // FTS cleanup error is non-fatal
+    }
+    const result = db.prepare('DELETE FROM brand_url_index WHERE id = ?').run(id);
+    return (result.changes ?? 0) > 0;
+  })();
+}
+
+/**
+ * Batch delete specific URL records by an array of IDs and sync FTS5.
+ */
+export function deleteBrandUrlsByIds(ids: string[]): number {
+  if (ids.length === 0) return 0;
+  const db = getDb();
+  return db.transaction(() => {
+    let deletedCount = 0;
+    const findStmt = db.prepare('SELECT rowid FROM brand_url_index WHERE id = ?');
+    const ftsDeleteStmt = db.prepare('DELETE FROM brand_url_fts WHERE rowid = ?');
+    const deleteStmt = db.prepare('DELETE FROM brand_url_index WHERE id = ?');
+
+    for (const id of ids) {
+      const row = findStmt.get(id) as { rowid: number } | undefined;
+      if (row) {
+        try {
+          ftsDeleteStmt.run(row.rowid);
+        } catch {
+          // FTS cleanup error is non-fatal
+        }
+        const res = deleteStmt.run(id);
+        if ((res.changes ?? 0) > 0) deletedCount++;
+      }
+    }
+    return deletedCount;
+  })();
+}
+
+/**
+ * Delete all URLs for a given domain and sync FTS5.
+ */
+export function deleteBrandUrlsByDomain(domain: string): number {
+  const db = getDb();
+  const normDomain = normalizeDomain(domain);
+  return db.transaction(() => {
+    const rows = db.query('SELECT rowid FROM brand_url_index WHERE domain = ?').all(normDomain) as Array<{ rowid: number }>;
+    if (rows.length === 0) return 0;
+    const ftsDeleteStmt = db.prepare('DELETE FROM brand_url_fts WHERE rowid = ?');
+    for (const row of rows) {
+      try {
+        ftsDeleteStmt.run(row.rowid);
+      } catch {
+        // ignore
+      }
+    }
+    const result = db.prepare('DELETE FROM brand_url_index WHERE domain = ?').run(normDomain);
+    return result.changes ?? 0;
+  })();
+}
+

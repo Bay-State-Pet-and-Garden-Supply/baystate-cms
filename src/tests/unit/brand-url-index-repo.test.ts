@@ -11,6 +11,9 @@ import {
   enrichUrlMetadata,
   getDomainUrlCounts,
   getActiveUrlsForDomain,
+  deleteBrandUrlById,
+  deleteBrandUrlsByIds,
+  deleteBrandUrlsByDomain,
 } from '../../db/repositories/brand-url-index-repo';
 import {
   recordRefreshRun,
@@ -179,6 +182,82 @@ describe('Brand URL Index & Sitemap Telemetry Repositories', () => {
       expect(searchRes.urls[0].url).toBe('https://acme.com/products/gamma');
     });
   });
+
+  describe('deleteBrandUrlById & deleteBrandUrlsByIds', () => {
+    it('should delete a single URL by ID and remove it from search/listing', () => {
+      reconcileSitemapUrls(
+        'delete-test.com',
+        [
+          { url: 'https://delete-test.com/products/keep-me' },
+          { url: 'https://delete-test.com/products/remove-me' },
+        ],
+        'https://delete-test.com/sitemap.xml',
+      );
+
+      const before = findUrlsByDomain('delete-test.com');
+      expect(before.urls).toHaveLength(2);
+      const toRemove = before.urls.find((u) => u.url.includes('remove-me'))!;
+
+      const success = deleteBrandUrlById(toRemove.id);
+      expect(success).toBe(true);
+
+      const after = findUrlsByDomain('delete-test.com');
+      expect(after.urls).toHaveLength(1);
+      expect(after.urls[0].url).toBe('https://delete-test.com/products/keep-me');
+      expect(after.total).toBe(1);
+
+      // FTS search should not find the deleted URL
+      const searchRes = searchUrlsLexical('delete-test.com', 'remove');
+      expect(searchRes).toHaveLength(0);
+    });
+
+    it('should batch delete multiple URLs by IDs', () => {
+      reconcileSitemapUrls(
+        'batch-delete.com',
+        [
+          { url: 'https://batch-delete.com/products/item1' },
+          { url: 'https://batch-delete.com/products/item2' },
+          { url: 'https://batch-delete.com/products/item3' },
+          { url: 'https://batch-delete.com/products/item4' },
+        ],
+        'https://batch-delete.com/sitemap.xml',
+      );
+
+      const all = findUrlsByDomain('batch-delete.com');
+      expect(all.urls).toHaveLength(4);
+
+      const idsToDelete = all.urls.filter((u) => u.url.includes('item1') || u.url.includes('item3')).map((u) => u.id);
+      const count = deleteBrandUrlsByIds(idsToDelete);
+      expect(count).toBe(2);
+
+      const remaining = findUrlsByDomain('batch-delete.com');
+      expect(remaining.urls).toHaveLength(2);
+      expect(remaining.total).toBe(2);
+      expect(remaining.urls.map((u) => u.url).sort()).toEqual([
+        'https://batch-delete.com/products/item2',
+        'https://batch-delete.com/products/item4',
+      ]);
+    });
+
+    it('should delete all URLs by domain', () => {
+      reconcileSitemapUrls(
+        'wipe-domain.com',
+        [
+          { url: 'https://wipe-domain.com/p1' },
+          { url: 'https://wipe-domain.com/p2' },
+        ],
+        'https://wipe-domain.com/sitemap.xml',
+      );
+
+      const count = deleteBrandUrlsByDomain('wipe-domain.com');
+      expect(count).toBe(2);
+
+      const remaining = findUrlsByDomain('wipe-domain.com');
+      expect(remaining.urls).toHaveLength(0);
+      expect(remaining.total).toBe(0);
+    });
+  });
+
 
   describe('Sitemap Telemetry Repository', () => {
     it('should record and retrieve refresh history runs', () => {

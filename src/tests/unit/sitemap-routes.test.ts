@@ -137,4 +137,64 @@ describe('Sitemap API Routes (/api/onboarding/sitemaps)', () => {
     expect(body.candidates[0].confidence).toBeGreaterThanOrEqual(0.95);
     expect(body.candidates[0].signals.upcMatched).toBe(true);
   });
+
+  it('DELETE /api/onboarding/sitemaps/:domain/urls/:id should delete a single URL', async () => {
+    reconcileSitemapUrls(
+      'delete-api.com',
+      [
+        { url: 'https://delete-api.com/products/item1' },
+        { url: 'https://delete-api.com/products/item2' },
+      ],
+      'https://delete-api.com/sitemap.xml',
+    );
+
+    const listRes = await app.request('/api/onboarding/sitemaps/delete-api.com/urls');
+    const listBody = await listRes.json();
+    expect(listBody.urls).toHaveLength(2);
+    const targetId = listBody.urls[0].id;
+
+    const delRes = await app.request(`/api/onboarding/sitemaps/delete-api.com/urls/${targetId}`, {
+      method: 'DELETE',
+    });
+    expect(delRes.status).toBe(200);
+    const delBody = await delRes.json();
+    expect(delBody.ok).toBe(true);
+    expect(delBody.id).toBe(targetId);
+
+    const afterRes = await app.request('/api/onboarding/sitemaps/delete-api.com/urls');
+    const afterBody = await afterRes.json();
+    expect(afterBody.urls).toHaveLength(1);
+  });
+
+  it('DELETE /api/onboarding/sitemaps/:domain/urls should batch delete URLs', async () => {
+    reconcileSitemapUrls(
+      'batch-delete-api.com',
+      [
+        { url: 'https://batch-delete-api.com/products/item1' },
+        { url: 'https://batch-delete-api.com/products/item2' },
+        { url: 'https://batch-delete-api.com/products/item3' },
+      ],
+      'https://batch-delete-api.com/sitemap.xml',
+    );
+
+    const listRes = await app.request('/api/onboarding/sitemaps/batch-delete-api.com/urls');
+    const listBody = await listRes.json();
+    const ids = listBody.urls.map((u: any) => u.id);
+
+    const delRes = await app.request('/api/onboarding/sitemaps/batch-delete-api.com/urls', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [ids[0], ids[1]] }),
+    });
+    expect(delRes.status).toBe(200);
+    const delBody = await delRes.json();
+    expect(delBody.ok).toBe(true);
+    expect(delBody.deletedCount).toBe(2);
+
+    const afterRes = await app.request('/api/onboarding/sitemaps/batch-delete-api.com/urls');
+    const afterBody = await afterRes.json();
+    expect(afterBody.urls).toHaveLength(1);
+    expect(afterBody.urls[0].id).toBe(ids[2]);
+  });
 });
+

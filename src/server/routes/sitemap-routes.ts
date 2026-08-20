@@ -6,6 +6,8 @@ import {
   findUrlsByDomain,
   getAllDomainUrlCounts,
   normalizeDomain,
+  deleteBrandUrlById,
+  deleteBrandUrlsByIds,
 } from '../../db/repositories/brand-url-index-repo';
 import {
   getAllLatestRefreshRuns,
@@ -302,3 +304,33 @@ sitemapRoutes.post('/onboarding/sitemaps/:domain/test-lookup', async (c) => {
 
   return c.json(response);
 });
+
+/**
+ * DELETE /api/onboarding/sitemaps/:domain/urls/:id
+ * Delete a specific URL from the domain's inventory.
+ */
+sitemapRoutes.delete('/onboarding/sitemaps/:domain/urls/:id', (c) => {
+  const domain = normalizeDomain(c.req.param('domain'));
+  const id = c.req.param('id');
+  const success = deleteBrandUrlById(id);
+  if (!success) {
+    return c.json({ error: 'URL record not found' }, 404);
+  }
+  return c.json({ ok: true, id, domain });
+});
+
+/**
+ * DELETE /api/onboarding/sitemaps/:domain/urls
+ * Batch delete URLs by ID array from the domain's inventory.
+ */
+sitemapRoutes.delete('/onboarding/sitemaps/:domain/urls', async (c) => {
+  const domain = normalizeDomain(c.req.param('domain'));
+  const body = (await c.req.json().catch(() => ({}))) as { ids?: string[] };
+  const ids = Array.isArray(body.ids) ? body.ids : [];
+  if (ids.length === 0) {
+    return c.json({ error: 'ids array is required and must not be empty' }, 400);
+  }
+  const deletedCount = deleteBrandUrlsByIds(ids);
+  return c.json({ ok: true, deletedCount, domain });
+});
+

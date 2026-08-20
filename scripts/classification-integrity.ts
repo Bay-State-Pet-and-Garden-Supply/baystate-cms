@@ -134,8 +134,9 @@ function modeAudit(args: Record<string, string | boolean>): void {
   // integrity audit gates the gold-set evaluation deterministically and propagates failure (not advisory).
   if (fs.existsSync('src/tests/fixtures/curation-goldset.json') && fs.existsSync('specs/metrics/curation-eval.json')) {
     try {
-      const proc = Bun.spawnSync(['bun', 'run', 'scripts/curation-goldset-eval.ts'], { stdout: 'inherit', stderr: 'inherit' });
+      const proc = Bun.spawnSync(['bun', 'run', 'scripts/curation-goldset-eval.ts'], { stdout: 'pipe', stderr: 'inherit' });
       if (proc.exitCode !== 0) {
+        console.error(proc.stdout?.toString());
         fail(`curation gold-set gate failed (exit ${proc.exitCode}) — see scripts/curation-goldset-eval.ts output above.`);
       }
     } catch (e) {
