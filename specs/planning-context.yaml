@@ -1,48 +1,45 @@
 # specs/planning-context.yaml — written by elaborate-spec; consumed by scope-work and slice-tasks
-feature_name: "Brand Domain Profile Workspace + Guided Setup"
+feature_name: "Template-aware Sitemap Profile Workbench"
 problem_statement: >
-  Adding a new brand's official domain is fragmented (add brand → add domain →
-  sitemap index → build profile), the missing-profile state is not enforced
-  upfront and only fails late in Extraction, and the current editor is an
-  inline form crammed inside the domain table with no LLM help and paste-a-URL
-  testing. Operators can drift into onboarding without a viable profile and lack
-  clear guidance or testing against real indexed products.
+  The current Profile Builder models extraction as editing a bag of CSS selectors
+  for a single page (SelectorInput + paste-outerHTML + advisory DOMParser eval).
+  Sitemap product pages are templated — a domain has 1..N product templates
+  (path + DOM structure) sharing one domain profile. Operators must think in CSS
+  and manually verify across arbitrary 3 samples, with fragmented surfaces
+  (deprecated overlay, modal, inline), a two-hop snapshot/HTML race, and an
+  activation gate that only tests title. The result is high friction, brittle
+  selectors, and late discovery of template-variant failures. The workbench
+  must become a low-friction, template-aware, visually-corrected recipe learner
+  that still respects sitemap inventory, 3-sample governance, and deterministic
+  verification.
 
 constraints:
-  - "Profile ownership is domain-scoped (extractor_profiles per domain); brands are associations shown in header. URL: /settings/domains/:domain/profile as a dedicated full page (not drawer/modal/overlay)."
-  - "Indexed products = brand_url_index (sitemap product URLs + title/UPC/SKU) via sitemap-routes.ts inventory API; not product_pages."
-  - "Guided upstream: brand → guarded official domain → discover/index product URLs → confirm 3 representative confirmed products (candidate vs confirmed) → Profile Workspace (header + readiness rail + build canvas + evidence rail + test matrix + history) → activate → deterministically release."
-  - "Enforcement parks official_page items at Discovery→Extraction as setup_required_profile (not failed) with a domain-level readiness task 'Build profile for example.com — unblocks N products'; award via existing release mechanism (onboarding-work-api.ts)."
-  - "Representative suite = 3 confirmed products minimum; persistent suite of 3-10 covering templates/variants/edges; explicit waiver with reason+actor if <3 product URLs exist."
-  - "Testing via same production static/rendered profile runner; activation gate: required title succeeds on every confirmed sample, no wrong-product/wrong-variant, no failing required field, image rule (two-sample + preview attestation) preserved, result bound to exact draft version + artifacts."
-  - "Immutable activated versions with domain active-version pointer (selectors, runtime/variant settings, sample IDs, artifact hashes, validation summary, model/config provenance, approver, reason); rollback moves pointer atomically and revalidates."
-  - "Human per-field approval mandatory: AI proposes selectors/alternatives, deterministic code validates (syntax, domain, match-count, visibility, cross-sample, identity, variant), human accepts/rejects/revises; model confidence never activates."
-  - "LLM tooling as task buttons (Generate draft from samples / Suggest alternatives / Explain failure / Revise from feedback), deterministic discovery first (JSON-LD/Shopify/WooCommerce), schema-validated candidates with evidence/warnings; cloud LLM permitted by default with disclosure badge, fail clearly if unavailable."
-  - "Existing mutable active profiles must re-pass the 3-sample gate (no grandfather); until then degrade to Degraded/Needs testing, extraction blocked via park."
-  - "Selector fails on 1 of 3 confirmed samples hard-blocks activation with expanded per-field reason (expected vs actual, provenance, artifact) and Revise action; regressions trigger on edits/drift but never auto-activate."
-  - "distributor_record items bypass profiles entirely (profile-free extraction) — must not be gated."
+  - "brand_url_index is sole sitemap inventory (page_type=product, active=1, FTS5); not product_pages. Candidate vs Confirmed distinction mandatory; counts/freshness via sitemap-inventory-service + domain-profile-state-repo."
+  - "Domain is ownership/versioning boundary, but a domain profile VERSION may contain multiple template-specific routes (oracle-approved A). Each route = path hint + rendered-DOM fingerprint + field recipes (JSON-LD/Shopify/WooCommerce preferred, CSS fallback + transforms). URL patterns seed clustering, DOM similarity establishes identity."
+  - "Conservative template clustering (Q2 A): auto-infer clusters from path+DOM, auto-suggest representatives maximizing cluster/variant/edge coverage; operator explicitly confirms/overrides clusters and reps."
+  - "Visual correction on synchronized captured artifact (Q3 A): single browser capture per sample (DOM + screenshot + runtime + hash); click on screenshot/DOM replay maps to element metadata and ranks candidate recipes; no live remote iframe (CSP/auth/mutation). Apply + highlight/test across every confirmed sample instantly."
+  - "Authoring loop: auto-detect → inspect extracted VALUES across samples → visually correct → deterministic matrix (production static/rendered runner) → activate. Operator identifies values, system generates/ranks recipes. Raw CSS under Advanced only."
+  - "Representative invariant: 3 confirmed minimum, waiver (reason >=8 chars + actor + hash, immutable) if <3 URLs exist. Matrix must pass every confirmed sample AND every included cluster via production runner before activation. Fix testsPass debt now (Q4): derive from persisted MatrixResult evidence, not active+3; fix immutable version persistence transactionally (profile-version-repo was in-memory) before UI redesign."
+  - "Enforcement and activation gate unchanged: park official_page at Discovery→Extraction as setup_required_profile with domain task (release via onboarding-work-api), fail-closed on wrong_product/wrong_variant/imageRule, distributor_record profile-free bypass (profile-blockers.ts)."
+  - "Single workspace surface at /settings/domains/:domain/profile (inline workbench); delete deprecated ProfileBuilderWorkspace overlay, modal modes and callers in Onboarding.tsx/OnboardingSettings.tsx, GenerateSelectorPopover paste-HTML path, independent HTML-fetch hop. Local DOM eval only as labeled instant feedback, not evidence."
+  - "LLM remains closed-world advisory (profile_generation task, allowFallback false, MissingLlmTaskConfigError, disclosure badge); model confidence never activates; prompt hashes captured."
+  - "Domain normalization single point (lower+strip www+strip scheme/path at repo boundary); per-domain immutable versions + atomic active pointer; sitemap reconcile txn invariants preserved."
 
 out_of_scope:
-  - "Sourcing/Discovery heuristic redesign"
-  - "Full pipeline board / Curation / Review / Promotion overhaul"
-  - "External merchant roles / permissions beyond workspace ownership"
-  - "Changes to product_pages (ShopSite Category Page assignments) or SKU→page mapping"
-  - "Open-ended chatbot UX; direct LLM save/activate paths"
+  - "Sourcing/Discovery heuristic redesign and distributor_record flow changes"
+  - "Full Curation/Review/Promotion overhaul beyond releasing parked items"
+  - "SKU→product_pages Category Page mapping changes"
+  - "External merchant roles/permissions beyond workspace ownership"
+  - "Open-ended chatbot UX or live-remote-iframe editing"
 
 key_decisions:
-  - decision: "Dedicated full-page workspace at /settings/domains/:domain/profile with sticky header, readiness rail (6 steps), grouped build canvas, evidence rail, full-width test matrix, and history"
-    rationale: "Replaces inline table form + two divergent modal/overlay builders; provides status, evidence, and governance in one place."
-  - decision: "Bounded scope = brand→domain→index→confirm→profile→release seam; broader onboarding pipeline stays out as follow-on epics"
-    rationale: "User chose interpretation 1 (bounded improvement) to keep spec tight and shippable."
-  - decision: "brand_url_index as the indexed-product source; candidates vs confirmed distinction"
-    rationale: "Oracle found product_pages has no URL/domain; brand_url_index + sitemap-routes already expose correct inventory."
-  - decision: "Park as setup_required_profile at Discovery→Extraction with domain task instead of late failure"
-    rationale: "Current enforcement fails after Extraction (job-queue.ts:1631) causing late, error-string-derived tasks; early park is clear and reversible."
-  - decision: "Require 3 confirmed samples; explicit waiver if fewer exist"
-    rationale: "User confirmed 3 (up from 2); ensures cross-template stability without silently lowering threshold."
-  - decision: "No grandfathering — existing active profiles must pass new gate"
-    rationale: "User decision #1; ensures quality bar applies uniformly; legacy shown as Active (legacy)/Degraded with regression recommended."
-  - decision: "Cloud LLM permitted by default with disclosure; no per-workspace consent gate"
-    rationale: "User decision #2; keeps Generate/Suggest usable out-of-the-box while remaining auditable."
-  - decision: "Hard-block activation on selector failure (expanded reason + Revise task)"
-    rationale: "User flagged Selector Fails as key failure; deterministic runner evidence must gate activation, not post-hoc degradation."
+  - decision: "Domain owns version, version routes per-template (multi-template profile). Path hint + DOM fingerprint + per-field recipes; structured data preferred, CSS fallback ranked and cross-sample verified."
+    rationale: "Oracle diagnosis: real task is learning recipes for every template, not editing selectors for one page — matches sitemap-templated discovery."
+  - decision: "Conservative auto-clustering (path + DOM similarity) with operator-confirmed reps (Q2 A) and capture-based visual correction (Q3 A)"
+    rationale: "Lowest friction that stays auditable; avoids aggressive merging and brittle live-iframe (CSP/auth). Single capture artifact eliminates snapshot/HTML race."
+  - decision: "Fix testsPass and immutable-version persistence debt in this epic (Q4)"
+    rationale: "Gate currently derives from active+3 and versions are in-memory; must be evidence-grounded and transactional before new UX ships."
+  - decision: "Replace field cards with extracted-value previews + 'Select on page' affordance; CSS under Advanced"
+    rationale: "Inverts selector-first interaction — operator points at value, system proposes recipes and verifies everywhere."
+  - decision: "Delete: ProfileBuilderWorkspace overlay, modal callers, GenerateSelectorPopover, paste-outerHTML path, independent HTML fetch. Keep local eval only as instant feedback."
+    rationale: "Removes fragmented, brittle paths per scout/oracle; leaves single workbench surface."

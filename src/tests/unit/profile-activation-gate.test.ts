@@ -37,3 +37,67 @@ describe('profile activation gate (e06s04)', () => {
     expect(canActivateVersion({ draftVersion: 'v5', passingVersion: 'v5' })).toBe(true);
   });
 });
+
+// story: e07s01 — evidence-gated activation
+import { describe as describe2, it as it2, expect as expect2 } from 'vitest';
+
+describe2('profile activation gate evidence (e07s01)', () => {
+  function matrix(ids: string[], hashes: string[]) {
+    return {
+      domain: 'example.com',
+      draftVersion: 'v6',
+      createdAt: new Date().toISOString(),
+      rows: ids.map((id, i) => ({
+        sampleId: id,
+        sampleUrl: `https://example.com/${id}`,
+        cells: [{ field: 'title', extracted: 'T', expected: 'T', provenance: 'test', artifactHash: hashes[i] ?? hashes[0], success: true, failureReason: null }],
+      })),
+    } as any;
+  }
+
+  it2('blocks with missing_matrix when matrixResult is null', async () => {
+    const { evaluateGate } = await import('../../onboarding/profile-activation-gate');
+    const r = evaluateGate({
+      requiredResults: [{ field: 'title', success: true }],
+      wrongProduct: false, wrongVariant: false, waiver: false, confirmedCount: 3, imageRuleOk: true,
+      matrixResult: null, expectedArtifactHashes: ['h1'], sampleIds: ['s1'],
+    });
+    expect2(r.allowed).toBe(false);
+    expect2(r.blockReason).toBe('missing_matrix');
+  });
+
+  it2('blocks with artifact_mismatch when hashes differ', async () => {
+    const { evaluateGate } = await import('../../onboarding/profile-activation-gate');
+    const m = matrix(['s1', 's2'], ['h1', 'h2']);
+    const r = evaluateGate({
+      requiredResults: [{ field: 'title', success: true }],
+      wrongProduct: false, wrongVariant: false, waiver: false, confirmedCount: 2, imageRuleOk: true,
+      matrixResult: m, expectedArtifactHashes: ['h1', 'h2', 'h4'], sampleIds: ['s1', 's2'],
+    });
+    expect2(r.allowed).toBe(false);
+    expect2(r.blockReason).toBe('artifact_mismatch');
+  });
+
+  it2('blocks with missing_samples when matrix does not cover all sampleIds', async () => {
+    const { evaluateGate } = await import('../../onboarding/profile-activation-gate');
+    const m = matrix(['s1', 's2'], ['h1', 'h2']);
+    const r = evaluateGate({
+      requiredResults: [{ field: 'title', success: true }],
+      wrongProduct: false, wrongVariant: false, waiver: false, confirmedCount: 3, imageRuleOk: true,
+      matrixResult: m, expectedArtifactHashes: ['h1', 'h2'], sampleIds: ['s1', 's2', 's3'],
+    });
+    expect2(r.allowed).toBe(false);
+    expect2(r.blockReason).toBe('missing_samples');
+  });
+
+  it2('allows when evidence matches (happy pass)', async () => {
+    const { evaluateGate } = await import('../../onboarding/profile-activation-gate');
+    const m = matrix(['s1', 's2', 's3'], ['h1', 'h2', 'h3']);
+    const r = evaluateGate({
+      requiredResults: [{ field: 'title', success: true }, { field: 'title', success: true }, { field: 'title', success: true }],
+      wrongProduct: false, wrongVariant: false, waiver: false, confirmedCount: 3, imageRuleOk: true,
+      matrixResult: m, expectedArtifactHashes: ['h1', 'h2', 'h3'], sampleIds: ['s1', 's2', 's3'],
+    });
+    expect2(r.allowed).toBe(true);
+  });
+});

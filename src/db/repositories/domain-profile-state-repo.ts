@@ -1,6 +1,13 @@
 // story: e06s01 — domain-scoped profile state accessor (server-derived header/readiness source)
-import { getDb } from '../connection';
+// story: e07s01 — evidence-gated testsPass via profile_versions + artifactHashes
+import { getDb, isDbInitialized } from '../connection';
 import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDomain';
+
+export interface TestsPassEvidence {
+  versionId: string;
+  artifactHashes: string[];
+  validatedAt: string | null;
+}
 
 export interface DomainProfileState {
   domain: string;
@@ -13,6 +20,7 @@ export interface DomainProfileState {
   freshness: string | null;
   blockedCount: number;
   hasProfile: boolean;
+  testsPassEvidence: TestsPassEvidence | null;
 }
 
 function countProducts(domain: string): { total: number; active: number; freshness: string | null } {
@@ -27,8 +35,6 @@ function countProducts(domain: string): { total: number; active: number; freshne
 }
 
 function getBlockedCount(_domain: string): number {
-  // e06s04 will implement real park count from onboarding_items with status setup_required_profile
-  // For shell, return 0 — header still shows blockedCount type and readiness can derive Degraded via hasProfile flag
   try {
     const db = getDb();
     const row = db
@@ -37,6 +43,26 @@ function getBlockedCount(_domain: string): number {
     return row?.c ?? 0;
   } catch {
     return 0;
+  }
+}
+
+function getActiveEvidence(domain: string): TestsPassEvidence | null {
+  if (!isDbInitialized()) return null;
+  try {
+    const db = getDb();
+    const active = db
+      .query('SELECT active_version_id FROM profile_active WHERE domain = ?')
+      .get(domain) as { active_version_id: string | null } | undefined;
+    if (!active?.active_version_id) return null;
+    const row = db
+      .query('SELECT artifact_hashes, created_at FROM profile_versions WHERE id = ?')
+      .get(active.active_version_id) as { artifact_hashes: string; created_at: string } | undefined;
+    if (!row) return null;
+    const hashes = JSON.parse(row.artifact_hashes) as string[];
+    if (!hashes || hashes.length === 0) return null;
+    return { versionId: active.active_version_id, artifactHashes: hashes, validatedAt: row.created_at };
+  } catch {
+    return null;
   }
 }
 
@@ -55,12 +81,49 @@ export function getDomainProfileState(rawDomain: string): DomainProfileState {
       freshness: null,
       blockedCount: 0,
       hasProfile: false,
+      testsPassEvidence: null,
     };
   }
   const db = getDb();
-  const profile = db
-    .query('SELECT updated_at, id FROM extractor_profiles WHERE domain = ?')
-    .get(normalizedDomain) as { updated_at: string; id: string } | undefined;
+  let activeVersion: string | null = null;
+  let updatedAt: string | null = null;
+  let hasProfile = false;
+  try {
+    const active = db
+      .query('SELECT active_version_id FROM profile_active WHERE domain = ?')
+      .get(normalizedDomain) as { active_version_id: string | null } | undefined;
+    if (active?.active_version_id) {
+      const row = db
+        .query('SELECT id, created_at FROM profile_versions WHERE id = ?')
+        .get(active.active_version_id) as { id: string; created_at: string } | undefined;
+      if (row) {
+        activeVersion = row.id;
+        updatedAt = row.created_at;
+        hasProfile = true;
+      }
+    }
+  } catch {}
+  if (!hasProfile) {
+    const profile = db
+      .query('SELECT updated_at, id FROM extractor_profiles WHERE domain = ?')
+      .get(normalizedDomain) as { updated_at: string; id: string } | undefined;
+    if (profile) {
+      activeVersion = profile.id;
+      updatedAt = profile.updated_at;
+      hasProfile = true;
+    }
+  }
+  const versionCount = (() => {
+    try {
+      const r = db
+        .query('SELECT COUNT(*) as c FROM profile_versions WHERE domain = ?')
+        .get(normalizedDomain) as { c: number } | undefined;
+      return r?.c ?? 0;
+    } catch {
+      return 0;
+    }
+  })();
+  if (versionCount > 0) hasProfile = true;
 
   const brandRows = db
     .query('SELECT brand_name FROM brand_sites WHERE domain = ? ORDER BY brand_name')
@@ -68,17 +131,19 @@ export function getDomainProfileState(rawDomain: string): DomainProfileState {
 
   const counts = countProducts(normalizedDomain);
   const blockedCount = getBlockedCount(normalizedDomain);
+  const testsPassEvidence = getActiveEvidence(normalizedDomain);
 
   return {
     domain: normalizedDomain,
     normalizedDomain,
     brandAssociations: brandRows.map((r) => r.brand_name),
-    activeVersion: profile ? profile.id : null,
-    updatedAt: profile?.updated_at ?? null,
+    activeVersion,
+    updatedAt,
     productCount: counts.total,
     activeProductCount: counts.active,
     freshness: counts.freshness,
     blockedCount,
-    hasProfile: !!profile,
+    hasProfile,
+    testsPassEvidence,
   };
 }

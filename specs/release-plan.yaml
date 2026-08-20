@@ -44,6 +44,12 @@ epics:
     bcps: 23
     capsule_dir: epics/e06-profile-workspace
     status: done
+  - id: e07
+    title: "Template-aware Sitemap Profile Workbench — multi-template recipes, conservative clustering, single capture visual correction, and consolidated workspace"
+    wsjf: 13
+    bcps: 29
+    capsule_dir: epics/e07-template-aware-workbench
+    status: planned
   - id: e00
     title: Bootstrap — bigpowers scaffolding
     wsjf: 0

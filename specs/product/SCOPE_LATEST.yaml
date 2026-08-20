@@ -1,63 +1,61 @@
-# specs/product/SCOPE_LATEST.yaml — bounded PRD for e06 Profile Workspace + Guided Setup
+# specs/product/SCOPE_LATEST.yaml — bounded PRD for e07 Template-aware Sitemap Profile Workbench
 # Spine: scope-work → slice-tasks → plan-work. This file is the scope boundary (what/why, not how).
-# Replaces prior e03/e24 placeholder scope — that increment is done. This SCOPE opens the next bounded increment.
+# Replaces e06 scope (landed v0.3.0) — e06 workspace stays, e07 reworks the extraction recipe abstraction per oracle.
 
-core_value: "Operators can set up a new brand's official domain and activate a reliable extractor profile in one guided flow, tested against real indexed products, without pasting URLs or failing late in extraction."
+core_value: "Operators build reliable extractor profiles for templated sitemap product pages by confirming template-aware suggestions and clicking values on a captured snapshot — without writing CSS — with every change verified against all templates before activation."
 
 summary: |
-  Setting up a new brand for official-page extraction is fragmented — brand, domain, sitemap index, and profile are configured in separate places, a missing profile is not enforced until an item fails late in Extraction, and the current editor is an inline form inside the domain table with no LLM help and paste-a-URL testing. Operators routinely drift into onboarding without a viable profile and lack clear readiness guidance.
+  The current Profile Builder (e06) treats extraction as editing a bag of CSS selectors for one page (SelectorInput + paste-outerHTML + advisory DOMParser eval). Brand product pages are templated — a domain has 1..N product templates distinguished by path shape + rendered DOM — and the single-selector model produces brittle profiles, late variant failures, and high friction. Surfaces are fragmented (deprecated ProfileBuilderWorkspace overlay, modal in OnboardingSettings/Onboarding, inline workspace) and the capture path races (snapshotPageForBuilder + separate fetchPageHtml).
 
-  This increment stitches that seam into one guided flow fronted by a dedicated, domain-centric Profile Workspace. The workspace surfaces readiness (domain verified → product URLs indexed → 3 representative products confirmed → draft generated → tests pass → human approval/activation), exposes per-field LLM proposals with deterministic validation, and runs a full-width test matrix against real indexed products sourced from brand_url_index (candidate = sitemap-only, confirmed = operator-confirmed). A single domain-level task — "Build profile for example.com — unblocks N products" — replaces scattered failure-derived blockers, and activation deterministically releases items that were parked at the Discovery→Extraction boundary as setup_required_profile.
+  This increment (e07) keeps e06's guided seam (brand → guarded domain → sitemap index → 3 confirmed representatives → workspace → park/release) but reworks the core abstraction: a domain profile version may contain multiple template-specific routes (path hint + DOM fingerprint + per-field recipes). Recipes prefer structured sources (JSON-LD, Shopify/WooCommerce) then stable CSS fallbacks + transforms, ranked and cross-sample verified. Clustering is conservative (path + DOM Jaccard) and suggests representatives maximizing coverage; the operator confirms/overrides. Correction is visual on a synchronized single capture artifact (DOM + screenshot + runtime + hash) — click a value → system ranks candidates and highlights/tests across every confirmed sample instantly. Raw CSS lives under Advanced. Activation is hard-blocked until the production runner passes every confirmed sample and every included cluster. Two persistence debts landed in e06 as Maps are fixed: immutable versions become transactional with an atomic active pointer, and testsPass derives from persisted MatrixResult evidence, not active+3.
 
-  Success is operator-observable: adding a brand with an official domain, indexing product URLs, confirming three representative products, generating and testing a draft, and activating the profile unblocks queued extraction without manual URL entry. Verification rests on readiness state, test evidence bound to an exact draft version, immutable version history with provenance, and a hard activation gate — not on model confidence or post-hoc degradation.
+  Live spike (earthanimal.com /products/* Shopify) proved template-aware prefix /products + DOM similarity clusters correctly; parked/hijacked domains (acmepet.com) proved inventory must be verifier-filtered before suggesting reps.
 
 in_scope:
-  - "e06s01 — Dedicated Profile Workspace (full page at /settings/domains/:domain/profile): domain-scoped workspace with header (brand associations, domain, active version, freshness, blocked count), left readiness rail, build canvas grouped by field, sticky evidence rail, and history; replaces inline table form + modal/overlay builders; entry via brand/domain checklist, domain inventory, extraction blocker task, and pipeline item"
-  - "e06s02 — Guided brand → domain → index → confirm flow: add/select brand, assign guarded official domain, discover/index brand_url_index product URLs, confirm 3 representative products from candidates with explicit waiver when fewer exist; sitemap/product inventory and candidate/confirmed distinction surfaced in the workspace"
-  - "e06s03 — LLM-assisted build + deterministic validation: task-button tooling (Generate draft from samples / Suggest alternatives / Explain failure / Revise from feedback) where deterministic discovery runs first and the LLM only proposes schema-validated selectors with evidence/warnings; per-field human accept/reject/revise; syntax/domain/match-count/visibility/cross-sample/identity/variant checks; fail clearly when no model route is available"
-  - "e06s04 — Indexed-product Test Matrix + activation gate + release: full-width matrix rows=confirmed products, cols=fields plus identity/variant checks, executed via production static/rendered runner, bound to exact draft version with retained artifacts; activation requires required title on every confirmed sample, no wrong-product/wrong-variant, no failing required field (image rule: two-sample + preview attestation); parked official_page items held as setup_required_profile advance deterministically on activation; distributor_record items bypass profiles entirely"
+  - "e07s01 — Fix persistence + evidence-gated activation: migrate profile-version-repo from in-memory Maps to transactional SQLite (profile_versions + profile_active, atomic active pointer + rollback), bind MatrixResult artifact_hashes to version hash, derive testsPass/readiness from persisted runner evidence (not state.active+3); revalidation on drift, distributor_record bypass preserved"
+  - "e07s02 — Conservative template clustering + representative suggestion: path-aware clustering (strip slug/ID → /products, /product, /p etc. + tag+class Jaccard 0.8 conservative), auto-suggest reps covering each cluster/variant/edge, operator confirm/override affordance; inventory filtered by sitemap-inventory-service freshness + page-verifier/sitemap-health before suggestion; waiver when <3 verified URLs"
+  - "e07s03 — Single capture artifact + visual correction: one Playwright capture per sample (serialized DOM + screenshot + runtime + hash, networkidle+1s), replay for click→element→ranked candidates (JSON-LD > [data-testid] > shopify-section > semantic > generic per selector-utils 6-tier), extracted-VALUE previews per field per sample, instant highlight/test across all samples; delete GenerateSelectorPopover paste-HTML and independent HTML-fetch hop; local DOM eval stays only as labeled instant feedback"
+  - "e07s04 — Workbench consolidation + hard-block release: collapse to single inline workbench at /settings/domains/:domain/profile (value previews + 'Select on page' affordance, Advanced for raw CSS), delete ProfileBuilderWorkspace overlay + modal callers in Onboarding.tsx/OnboardingSettings.tsx, keep readiness rail (Not configured·Draft·Needs testing·Ready for approval·Active·Degraded) server-derived, hard-block park as setup_required_profile → deterministic release via onboarding-work-api"
 
 in_scope_ids:
-  - e06s01
-  - e06s02
-  - e06s03
-  - e06s04
+  - e07s01
+  - e07s02
+  - e07s03
+  - e07s04
 
 out_of_scope:
-  - "Sourcing/Discovery heuristic redesign — deferred as separate product decision (why: not required to unify the profile seam; current discovery stays as-is, distributor-record fallback unchanged)"
-  - "Full pipeline board / Curation / Review / Promotion overhaul — deferred (why: downstream stages remain human-gated; this increment parks/releases at the extraction boundary only and does not change review/export authority)"
-  - "External merchant roles / permissions beyond workspace ownership — deferred (why: workspace is internal admin/power-user only; no new RBAC model needed)"
-  - "Changes to product_pages (SKU→ ShopSite Category Page assignments) — out (why: no URL/domain data; unrelated to extractor profiles; would expand scope to catalog publication)"
-  - "Open-ended chatbot UX or direct LLM save/activate paths — out (why: proposal-only governance + human per-field approval + model-confidence-never-activates is the safety contract; chatbot and auto-activation would bypass it)"
-  - "e24 capability implementation (future epic e24 deferred capability) — remains deferred pending its own elaborate-spec/ADR (why: explicitly bounded out of this seam; implementing now would be speculative)"
+  - "Sourcing/Discovery heuristic redesign and distributor_record profile-free flow changes — deferred (why: distributor_record already URL-null merch-depth; discovery stays, inventory still brand_url_index; separate product decision)"
+  - "Full Curation/Review/Promotion overhaul beyond releasing parked items — deferred (why: downstream stays human-gated; this epic parks/releases at extraction boundary only)"
+  - "SKU→product_pages Category Page assignment changes — out (why: no URL/domain data; unrelated to extractor recipes)"
+  - "External merchant roles/permissions beyond workspace ownership — deferred (why: internal power-user only; no new RBAC)"
+  - "Open-ended chatbot UX or live-remote-iframe editing — out (why: proposal-only governance + per-field approval + confidence-never-activates is the safety contract; CSP/auth/mutation make live iframe brittle — oracle recommends capture replay)"
 
 constraints:
-  - "Domain-scoped profiles (multiple brands may share one domain); workspace shows brand associations in breadcrumb/header and preserves return context via query state"
-  - "brand_url_index is the indexed-product source (sitemap product URLs + enriched metadata via sitemap-routes); not product_pages; candidate vs confirmed distinction must be surfaced"
-  - "Parking contract: official_page items park at Discovery→Extraction as setup_required_profile (single domain task) and release deterministically on activation via existing onboarding-work-api path; distributor_record bypasses profiles"
-  - "Representative suite: 3 confirmed products minimum (3-10 persistent suite covering templates/variants/edges); waiver with reason+actor when fewer exist; traceability requires exact draft version + retained artifact binding"
-  - "Immutable activated versions with domain active-version pointer (selectors, runtime/variant settings, sample IDs, artifact hashes, validation summary, model/config provenance, approver, reason); rollback moves pointer atomically and revalidates"
-  - "Human per-field approval mandatory; AI proposes, deterministic code validates; no existing active profiles are grandfathered — they must re-pass the gate (degrade until validated); regressions trigger on edits/drift but never auto-activate"
-  - "Cloud LLM permitted by default with disclosure; no per-workspace consent gate; every model/selector decision records provider/model/prompt/config and whether HTML left the machine"
-  - "Reuse, never duplicate: Profile governance (#45), brand_url_index/sitemap inventory, profile runner (trusted static/rendered), onboarding-work release, PI execution boundary where LLM path is exercised"
+  - "brand_url_index is sole sitemap inventory (page_type=product, active=1, FTS5); candidate vs confirmed distinction mandatory; counts/freshness via sitemap-inventory-service + domain-profile-state-repo"
+  - "Domain owns versioning but version may contain multiple template routes (path hint + DOM fingerprint + per-field recipes) — oracle-approved Q1 A; URL pattern seeds clustering, DOM similarity establishes identity"
+  - "Conservative clustering Q2 A: path+DOM Jaccard 0.8 + prefix guard; auto-suggest reps maximizing cluster/variant/edge coverage; operator confirms/overrides; filter by freshness + page-verifier before suggestion"
+  - "Single capture artifact Q3 A: DOM+screenshot+runtime+hash (networkidle+1s) replay for click; no live iframe; local eval is instant feedback only, production runner (static/rendered) is ground truth"
+  - "Authoring loop: auto-detect → inspect VALUES across samples → visually correct → deterministic matrix (production runner) → activate; operator identifies values, system ranks recipes; raw CSS under Advanced"
+  - "Representative invariant: 3 confirmed minimum, waiver (reason >=8 chars + actor + hash immutable) if <3 verified URLs; matrix must pass every confirmed sample AND every included cluster before activation; fix testsPass debt now Q4"
+  - "Enforcement: park official_page at Discovery→Extraction as setup_required_profile (single domain task) and release deterministically on activation via onboarding-work-api; distributor_record bypass via profile-blockers.ts"
+  - "Single inline workbench at /settings/domains/:domain/profile; delete deprecated overlay/modal/paste-HTML/independent-fetch; domain normalization single point (lower+strip www+strip scheme/path at repo boundary)"
+  - "LLM closed-world advisory only (profile_generation task, allowFallback false, MissingLlmTaskConfigError, disclosure badge); prompt hashes captured; confidence never activates"
   - "Runtime: Bun 1.3.5, TS 5.9, SQLite bun:sqlite, Hono 4, React 19/Vite 6; keep bun run typecheck && bunx vitest run && bun run test:db green; CI skips lint (advisory)"
-  - "Process: scope-work → slice-tasks → plan-work → build-epic per story; every in_scope item maps to an e06sNN per HARD GATE"
+  - "Reuse, never duplicate: brand_url_index/sitemap inventory, profile runner (trusted static/rendered), onboarding-work release, selector-utils 6-tier"
 
 success_criteria:
-  - "Operator can demo end-to-end without pasting a URL: add brand + guarded official domain → index finds product URLs → confirm 3 representative products → open /settings/domains/:domain/profile → Generate draft → test matrix green on all 3 → Activate → parked setup_required_profile items (≈14 in demo) release and extract successfully"
-  - "Enforcement observable: official_page items without an active profile park as setup_required_profile (distinct from failed) and surface one domain task 'Build profile for example.com — unblocks N products'; distributor_record items are not parked and proceed to profile-free extraction"
-  - "Activation gated: selector failing on 1 of 3 confirmed samples hard-blocks activation with per-field expanded reason (expected vs actual, provenance, artifact, failure reason) and a Revise action; passing run is bound to exact draft version and retained artifacts; waiver path observable when <3 URLs exist"
-  - "Workspace state + history observable: header/readiness rail reflect Not configured · Draft · Needs testing · Ready for approval · Active · Degraded; history shows immutable versions with actor/model/config, diffs, and activation/rollback events; health is server-derived (distinct from sitemap freshness, reachability, LLM availability, model confidence)"
-  - "Governance preserved: LLM output never directly saves or activates; per-field accept/reject/revise is required; provider/model/prompt/config recorded on every proposal; fallback to verified view on malformed plan"
+  - "Without writing CSS or pasting HTML, operator can confirm cluster-suggested 3+ representatives (or waiver) → see value previews per field across all samples → click a value on capture replay → candidate is re-ranked and highlighted/tested everywhere instantly → activate only when matrix passes every sample and every cluster"
+  - "Clustering observable: /products templates group correctly (earthanimal.com 3/3), parked/spam domains (acmepet.com) are filtered by verifier before suggestion, operator override (merge/split cluster) persists"
+  - "Persistence verifiable: version is immutable row with selector/runtime/sampleIds/artifactHashes/validationSummary/provenance; active pointer swaps atomically; testsPass/readiness derived from MatrixResult artifact binding, not active+3; restart does not lose versions"
+  - "Enforcement observable: official_page items without active profile park as setup_required_profile (distinct from failed) with one domain task 'Build profile for example.com — unblocks N products'; distributor_record items are not parked; activation releases parked items"
+  - "Governance preserved: per-field accept/reject/revise required; LLM proposals are schema-valid, carry evidence/warnings and prompt hash; raw CSS only in Advanced"
 
 references:
-  - "specs/planning-context.yaml — elaborate-spec output for Brand Domain Profile Workspace + Guided Setup (feature_name, constraints, out_of_scope, key_decisions)"
-  - "CONTEXT.md — pipeline stages + domain language (Category Page, Product Type, Stage Advancement, BrandUrlIndex, Cohort)"
-  - "specs/tech-architecture/tech-stack.md — runtime, DB (bun:sqlite), PI execution boundary, profile governance (#45)"
-  - "src/db/repositories/brand-url-index-repo.ts + src/server/routes/sitemap-routes.ts — indexed product inventory (correct source)"
-  - "src/onboarding/job-queue.ts:1631 + src/onboarding/extraction/profile-blockers.ts — current late-failure enforcement to be replaced by readiness park"
-  - "src/onboarding/profile-governance-service.ts + src/db/repositories/extractor-profile-repo.ts + src/onboarding/profile-runner-client.ts — proposal/revision governance, mutable active row, surrogate profileVersion"
-  - "src/client/components/profile-builder/{ProfileBuilder,hooks/useProfileBuilderController,components/{SaveBar,ValidationSamplesPanel,ValidationMatrix}} + src/client/components/ProfileBuilderWorkspace.tsx — current inline/modal/overlay builders to be consolidated"
-  - "src/server/routes/onboarding-routes.ts:2636 + src/server/services/profile-builder/generateSelectorsService.ts + src/shared/schemas/selector-generation.ts — current save/propose paths"
-  - "AGENTS.md § Onboarding Pipeline + Profile Builder (Extractor Profiles) — profile-per-domain, distributor_record is profile-free, VLM/OCR context"
-  - "specs/state.yaml + specs/release-plan.yaml — session SoT, v0.3.0 closed epic index"
+  - "specs/planning-context.yaml — elaborate-spec output for Template-aware Sitemap Profile Workbench (feature_name, constraints, out_of_scope, key_decisions Q1 A / Q2 A / Q3 A / Q4 fix)"
+  - "specs/archive/spikes/SPIKE-template-aware-profile-workbench.md — synthetic + live harness (earthanimal/acmepet/petmate) + capture/clustering/recipe findings"
+  - "CONTEXT.md + AGENTS.md § Onboarding Pipeline/Extractor Profiles — pipeline stages, brand_url_index vs product_pages, distributor_record profile-free"
+  - "specs/tech-architecture/tech-stack.md — runtime, DB (bun:sqlite), PI boundary"
+  - "src/db/repositories/brand-url-index-repo.ts + src/db/repositories/profile-version-repo.ts (Maps debt) + src/db/repositories/extractor-profile-repo.ts + src/onboarding/sitemap-inventory-service.ts + src/onboarding/profile-activation-gate.ts + src/onboarding/profile-runner-client.ts"
+  - "src/shared/selector-utils.ts (STABLE_DATA_ATTRS, SEMANTIC_HINT_SUBSTRINGS, buildStableSelector 6-tier) + src/onboarding/profile-generator.ts + src/client/components/profile-workspace/ProfileWorkspacePage.tsx:55 (testsPass drift)"
+  - "src/client/components/profile-builder/hooks/useProfileBuilderController.ts + src/client/components/profile-builder/components/{SelectorInput,GenerateSelectorPopover,BuildCanvas} + src/client/components/ProfileBuilderWorkspace.tsx (deprecated overlay)"
+  - "src/onboarding/page-verifier.ts + src/onboarding/sitemap-health-evaluator.ts — verification before clustering"

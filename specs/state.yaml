@@ -1,16 +1,16 @@
 # specs/state.yaml — session source of truth (bigpowers)
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
-active_flow: null
-active_epic_id: e06
-active_story_id: e06s04
+active_flow: build_epic
+active_epic_id: e07
+active_story_id: e07s01
 active_bug_id: null
 release:
   target_version: null
   last_tag: v0.3.0
   last_publish: "2026-08-20T08:44:00Z"
 epic_cycle:
-  current_step: null
+  current_step: 4
   next_skill: null
   completed_steps: [1, 2, 3, 4, 5, 6, 7, 8]
   audit_result: pass
