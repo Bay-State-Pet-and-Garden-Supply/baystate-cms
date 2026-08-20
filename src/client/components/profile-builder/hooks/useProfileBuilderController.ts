@@ -48,23 +48,51 @@ export type RankedRecipe = {
 };
 
 /**
- * Rank candidate recipes for a field given a capture (dom+html).
- * Prefers structured JSON-LD, then [data-testid], then shopify, then semantic, then generic.
- * Deterministic, no network.
+ * Rank candidate recipes for a field given a capture (dom+html) and optional clicked element text.
+ * Value-first: JSON-LD only outranks DOM when normalized value agrees with clicked value.
+ * Field semantics: map field to appropriate tag/hint and jsonld property (title->name, description->description, price->offers.price, etc.)
+ * Deterministic, no network. Includes Why this choice disclosure via score/stability.
  */
-export function rankCandidates(capture: { dom: string; html: string }, field: string): RankedRecipe[] {
+export function rankCandidates(capture: { dom: string; html: string }, field: string, clickedElementText?: string): RankedRecipe[] {
   const html = (capture.html ?? capture.dom ?? '') as string;
   const dom = (capture.dom ?? html) as string;
-  const candidates: RankedRecipe[] = [];
   const lower = html.toLowerCase();
-  // 1) JSON-LD — high
+  const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const clickedNorm = clickedElementText ? normalize(clickedElementText) : '';
+  const candidates: RankedRecipe[] = [];
+  // helper to extract jsonld value for field (best-effort)
+  let jsonLdValue: string | null = null;
   if (lower.includes('application/ld+json')) {
-    candidates.push({ selector: 'jsonld:Product.name', stability: 'high', source: 'jsonld', score: 100 });
+    try {
+      const $ = cheerio.load(dom);
+      $('script[type="application/ld+json"]').each((_, el) => {
+        try {
+          const txt = $(el).html() ?? '';
+          const json = JSON.parse(txt);
+          const obj = Array.isArray(json) ? json[0] : json;
+          let v: unknown = null;
+          if (field === 'title') v = (obj as any).name ?? (obj as any)['name'];
+          else if (field === 'description') v = (obj as any).description;
+          else if (field === 'price') v = (obj as any).offers?.price ?? (obj as any).price;
+          else if (field === 'brand') v = (obj as any).brand?.name ?? (obj as any).brand;
+          else if (field === 'image') v = Array.isArray((obj as any).image) ? (obj as any).image[0] : (obj as any).image;
+          else v = (obj as any).name;
+          if (v && !jsonLdValue) jsonLdValue = String(v).trim();
+        } catch {}
+      });
+    } catch {}
+  }
+  const jsonLdAgrees = clickedNorm && jsonLdValue ? normalize(jsonLdValue) === clickedNorm : false;
+  // 1) JSON-LD — high only when value agrees or no clicked text (preserve deterministic order)
+  if (lower.includes('application/ld+json')) {
+    const jsonSelector = field === 'title' ? 'jsonld:Product.name' : field === 'description' ? 'jsonld:Product.description' : field === 'price' ? 'jsonld:Product.offers.price' : 'jsonld:Product.name';
+    const score = jsonLdAgrees ? 100 : clickedNorm ? 55 : 100;
+    const stability = jsonLdAgrees || !clickedNorm ? 'high' : 'medium';
+    candidates.push({ selector: jsonSelector, stability: stability as RankedRecipe['stability'], source: 'jsonld', score });
   }
   // 2) [data-testid] etc. — high (use buildStableSelector if we can find an element with data-testid)
   const hasStableAttr = /data-testid|data-test|data-cy|data-qa/.test(lower);
   if (hasStableAttr) {
-    // try to build a real selector via cheerio for the first element with that attr
     try {
       const $ = cheerio.load(dom);
       const el = $('[data-testid],[data-test],[data-cy],[data-qa]').get(0) as unknown as import('domhandler').Element | undefined;
@@ -82,15 +110,23 @@ export function rankCandidates(capture: { dom: string; html: string }, field: st
   if (lower.includes('shopify') || lower.includes('cdn.shopify')) {
     candidates.push({ selector: '[id^="shopify-section"] h1', stability: 'medium', source: 'shopify', score: 70 });
   }
-  // 4) semantic class/id — medium (check semantic hints for field)
-  const semanticHints: Record<string, string> = { title: 'product-title', description: 'description', price: 'price', brand: 'brand', image: 'product-image' };
-  const hint = semanticHints[field] ?? 'title';
-  if (lower.includes(hint)) {
-    candidates.push({ selector: `h1.${hint}`, stability: 'medium', source: 'semantic', score: 60 });
+  // 4) semantic class/id — medium (field-aware tag)
+  const semanticHints: Record<string, { hint: string; tag: string }> = {
+    title: { hint: 'product-title', tag: 'h1' },
+    description: { hint: 'description', tag: 'div' },
+    price: { hint: 'price', tag: 'span' },
+    brand: { hint: 'brand', tag: 'span' },
+    image: { hint: 'product-image', tag: 'img' },
+  };
+  const sem = semanticHints[field] ?? { hint: 'product-title', tag: 'h1' };
+  if (lower.includes(sem.hint)) {
+    candidates.push({ selector: `${sem.tag}.${sem.hint}`, stability: 'medium', source: 'semantic', score: 60 });
+  } else if (field === 'title' && lower.includes('pdp-title')) {
+    candidates.push({ selector: 'h1.pdp-title', stability: 'medium', source: 'semantic', score: 60 });
   }
-  // 5) generic — low
-  candidates.push({ selector: 'h1', stability: 'low', source: 'generic', score: 10 });
-  // already scored in order high→low; ensure deterministic sort
+  // 5) generic — low (field-aware generic)
+  const genericTag = field === 'price' ? 'span' : field === 'image' ? 'img' : field === 'description' ? 'div' : 'h1';
+  candidates.push({ selector: genericTag, stability: 'low', source: 'generic', score: 10 });
   return candidates.sort((a, b) => b.score - a.score);
 }
 

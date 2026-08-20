@@ -48,6 +48,7 @@ describe('Batch Preflight & Controlled Release Lifecycle', () => {
       name: 'Weekly Catalog Upload',
       fileName: 'upload.xlsx',
       totalItems: 2,
+      executionState: 'draft',
     });
 
     expect(batch.executionState).toBe('draft');

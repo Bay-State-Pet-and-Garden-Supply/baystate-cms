@@ -11,6 +11,7 @@ import { ProfileBuilder } from '../profile-builder/ProfileBuilder';
 import type { DomainProfileState } from '../../../db/repositories/domain-profile-state-repo';
 import { deriveReadinessState } from '../../../onboarding/profile-readiness';
 import { SuitePanel } from './SuitePanel';
+import { InventoryPicker } from './InventoryPicker';
 
 export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }): React.ReactElement {
   const domain = normalizeBrandHubDomain(rawDomain);
@@ -70,6 +71,7 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
         productCount: 0,
       });
 
+  const [selectedTestUrl, setSelectedTestUrl] = useState<string | null>(null);
   const [gridVisible, setGridVisible] = useState(false);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -115,6 +117,8 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
           </div>
         </div>
         <div style={{ gridColumn: '3 / span 7', display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <InventoryPicker domain={domain} onPick={setSelectedTestUrl} />
+          {selectedTestUrl && <div style={{ fontSize: 12, color: 'var(--color-ledger-charcoal)' }}>Selected test page: {selectedTestUrl}</div>}
           <SuitePanel domain={domain} />
           <div data-workspace style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)', boxShadow: '0 1px 3px 0 rgba(33,20,20,0.06)' }}>
             <ProfileBuilder mode="inline" initialDomain={domain} onCancel={() => {}} />

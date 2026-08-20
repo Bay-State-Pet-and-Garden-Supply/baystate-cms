@@ -253,7 +253,7 @@ describe('Sourcing engine (ADR 0014 provider-neutral execution)', () => {
     updateConnection(conn.id, conn.workspaceId, { enabled: true });
     const conn2 = createConnection({ workspaceId: 'w1', distributorId: 'phillips', connectorType: 'api', secretRef: 'PHILLIPS_KEY'});
     updateConnection(conn2.id, conn2.workspaceId, { enabled: true });
-    upsertBrandAdvisoryProfile({ workspaceId: 'w1', brand: 'Nutro', preferredDistributorIds: ['phillips'] });
+    upsertBrandAdvisoryProfile({ workspaceId: 'w1', brand: 'Nutro', preferredDistributorIds: ['phillips'], sourcingPolicy: 'advisory' });
 
     // Both connections are still invoked (fall-open), phillips FIRST.
     await engine.runGeneration({

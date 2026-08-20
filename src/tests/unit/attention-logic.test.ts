@@ -97,6 +97,7 @@ describe('groupAttentionItems', () => {
   it('covers every canonical reason exactly once in order', () => {
     const reasons = ATTENTION_GROUP_ORDER.map((g) => g.reason);
     expect(reasons).toEqual([
+      'brand_not_provided',
       'verify_official_url',
       'no_official_url',
       'choose_official_url',
@@ -112,6 +113,7 @@ describe('groupAttentionItems', () => {
 
 describe('labels', () => {
   it('maps every reason to a human group label', () => {
+    expect(getAttentionGroupLabel('brand_not_provided')).toBe('Brand assignment required');
     expect(getAttentionGroupLabel('verify_official_url')).toBe('Verify official product page');
     expect(getAttentionGroupLabel('no_official_url')).toBe('Official product page not found');
     expect(getAttentionGroupLabel('choose_official_url')).toBe('Choose the correct product page');
@@ -124,6 +126,7 @@ describe('labels', () => {
   });
 
   it('maps every action to a plain-language action label', () => {
+    expect(getAttentionActionLabel('assign_brand')).toBe('Assign brand');
     expect(getAttentionActionLabel('verify_official_url')).toBe('Confirm the page');
     expect(getAttentionActionLabel('choose_official_url')).toBe('Choose a page');
     expect(getAttentionActionLabel('setup_extractor_profile')).toBe('Set up extraction');
@@ -135,6 +138,7 @@ describe('labels', () => {
   });
 
   it('exposes short chip labels for the filter row', () => {
+    expect(getAttentionGroupChip('brand_not_provided')).toBe('Needs brand');
     expect(getAttentionGroupChip('source_conflict')).toBe('Conflict');
     expect(getAttentionGroupChip(null)).toBe('Other');
   });
@@ -142,6 +146,7 @@ describe('labels', () => {
 
 describe('getAttentionConsequence', () => {
   it('answers "what happens next" deterministically per reason', () => {
+    expect(getAttentionConsequence('brand_not_provided')).toContain('Assign the brand to run distributor lookup');
     expect(getAttentionConsequence('verify_official_url')).toContain('extraction resumes automatically');
     expect(getAttentionConsequence('no_official_url')).toContain('official product page URL');
     expect(getAttentionConsequence('choose_official_url')).toContain('extraction resumes automatically');

@@ -387,7 +387,7 @@ export function claimItemsForProcessing(
      WHERE id IN (
        SELECT i.id FROM onboarding_items i
        JOIN onboarding_batches b ON i.batch_id = b.id
-       WHERE b.workspace_id = ? AND b.status = 'active' AND b.execution_state = 'running'
+       WHERE b.workspace_id = ? AND b.status = 'active' AND (b.execution_state = 'running' OR b.execution_state IS NULL)
        AND i.stage = ? AND i.stage_status = 'pending'
        AND (i.is_held = 0 OR i.is_held IS NULL)
        ${versionClause}

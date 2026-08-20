@@ -12,7 +12,7 @@
  * evidence decision) and processing failures (retry). Every mutation shows
  * explicit saving/success/error states; nothing is ever silently swallowed.
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import type { DomainReleaseResponse } from '../../../../shared/schemas/onboarding-work-state';
 import type { OnboardingEvidenceConflict } from '../../../../shared/schemas/distributor';
@@ -277,6 +277,117 @@ export function OfficialSiteResolutionWorkspace({
     }
   };
 
+  const hasBrand = Boolean(workState?.brand || item?.brandHint);
+
+  const suggestedBrandFromName = useMemo(() => {
+    const name = workState?.name ?? item?.name ?? '';
+    if (!name) return null;
+    const firstWord = name.split(/\s+/)[0]?.trim();
+    return firstWord && firstWord.length > 1 ? firstWord : null;
+  }, [workState?.name, item?.name]);
+
+  const renderBrandSection = () => (
+    <section
+      className="attn-section"
+      aria-label="Brand and official domain"
+      style={!hasBrand ? { border: '2px solid var(--color-card-border)', background: 'var(--color-white-surface)' } : undefined}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <h3 className="attn-section-title" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+          🏷️ {hasBrand ? 'Brand & official domain' : 'Brand Assignment Required'}
+        </h3>
+        {!hasBrand && (
+          <span
+            className="attn-badge attn-badge-danger"
+            style={{ background: '#fee2e2', color: '#991b1b', fontSize: '0.75rem', padding: '2px 8px' }}
+          >
+            Action Required
+          </span>
+        )}
+      </div>
+      <div className="attn-section-body">
+        <p style={{ margin: 0, fontFamily: 'var(--font-body)', fontSize: '0.8125rem', color: 'var(--color-mulch-brown)' }}>
+          {hasBrand
+            ? 'Assigning the official domain re-runs discovery scoped to it — the next search targets the brand site and can auto-confirm only mapped domains.'
+            : 'This product has no brand assigned yet. Assign a brand so discovery can target the brand’s official site, then map its official domain.'}
+        </p>
+
+        {!hasBrand && suggestedBrandFromName && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+            <span style={{ fontSize: '0.75rem', color: 'var(--color-mulch-brown)' }}>Suggested from product title:</span>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              style={{ padding: '2px 8px', fontSize: '0.75rem', borderColor: '#14532d', color: '#14532d', fontWeight: 600 }}
+              onClick={() => setBrandInput(suggestedBrandFromName)}
+            >
+              + Use "{suggestedBrandFromName}"
+            </button>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+          <label htmlFor="attn-brand" className="text-label" style={{ color: 'var(--color-mulch-brown)', fontWeight: 600 }}>
+            Brand name
+          </label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+            <input
+              id="attn-brand"
+              className="input"
+              placeholder="e.g. ACANA, Fromm, Nulo"
+              value={brandInput}
+              onChange={(e) => setBrandInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleAssignBrand();
+              }}
+              disabled={busy !== null}
+            />
+            <button
+              type="button"
+              className="btn btn-outline"
+              style={{
+                flexShrink: 0,
+                background: !hasBrand ? '#14532d' : undefined,
+                color: !hasBrand ? '#fff' : undefined,
+                borderColor: !hasBrand ? '#14532d' : undefined,
+                fontWeight: 600,
+              }}
+              onClick={() => void handleAssignBrand()}
+              disabled={busy !== null || brandInput.trim().length === 0}
+            >
+              {busy === 'assign-brand' ? 'Assigning…' : 'Assign Brand & Re-search'}
+            </button>
+          </div>
+          <label htmlFor="attn-domain" className="text-label" style={{ color: 'var(--color-mulch-brown)' }}>
+            Official domain (optional)
+          </label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+            <input
+              id="attn-domain"
+              className="input"
+              placeholder="e.g. frommfamily.com"
+              value={domainInput}
+              onChange={(e) => setDomainInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleAssignDomain();
+              }}
+              disabled={busy !== null}
+            />
+            <button
+              type="button"
+              className="btn btn-outline"
+              style={{ flexShrink: 0 }}
+              onClick={() => void handleAssignDomain()}
+              disabled={busy !== null || domainInput.trim().length === 0}
+            >
+              {busy === 'assign-domain' ? 'Mapping…' : 'Map Domain & Re-search'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+
   // ── Conflict resolution ──────────────────────────────────────────────────
 
   const handleResolveConflict = async (conflictId: string, body: Parameters<typeof resolveItemConflict>[2]) => {
@@ -479,83 +590,19 @@ export function OfficialSiteResolutionWorkspace({
         ) : null}
 
         {phase === 'url' ? (
-          <CandidateUrlPanel
-            candidates={sources}
-            itemName={workState?.name ?? item?.name ?? ''}
-            expectedName={item?.expectedName}
-            upc={workState?.upc ?? item?.upc ?? ''}
-            busy={busy === 'select-source' || busy === 'set-url' ? (busy as 'confirming' | 'saving-url') : null}
-            onConfirm={(source) => void handleConfirmCandidate(source)}
-            onUseManualUrl={handleManualUrl}
-          />
-        ) : null}
-
-        {/* ADR 0017 commitment 4: brand/domain attention actions. Discovery
-            cannot resolve an official source when the brand is missing or
-            unmapped — let the operator assign either and re-run guided. */}
-        {phase === 'url' ? (
-          <section className="attn-section" aria-label="Brand and official domain">
-            <h3 className="attn-section-title">Brand &amp; official domain</h3>
-            <div className="attn-section-body">
-              <p style={{ margin: 0, fontFamily: 'var(--font-body)', fontSize: '0.8125rem', color: 'var(--color-mulch-brown)' }}>
-                {workState?.brand || item?.brandHint
-                  ? 'Assigning the official domain re-runs discovery scoped to it — the next search targets the brand site and can auto-confirm only mapped domains.'
-                  : 'This product has no brand yet. Assign one so discovery can target the brand’s official site, then map its official domain.'}
-              </p>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-                <label htmlFor="attn-brand" className="text-label" style={{ color: 'var(--color-mulch-brown)' }}>
-                  Brand name
-                </label>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                  <input
-                    id="attn-brand"
-                    className="input"
-                    placeholder="e.g. Fromm"
-                    value={brandInput}
-                    onChange={(e) => setBrandInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void handleAssignBrand();
-                    }}
-                    disabled={busy !== null}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-outline"
-                    style={{ flexShrink: 0 }}
-                    onClick={() => void handleAssignBrand()}
-                    disabled={busy !== null || brandInput.trim().length === 0}
-                  >
-                    {busy === 'assign-brand' ? 'Assigning…' : 'Assign Brand & Re-search'}
-                  </button>
-                </div>
-                <label htmlFor="attn-domain" className="text-label" style={{ color: 'var(--color-mulch-brown)' }}>
-                  Official domain
-                </label>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                  <input
-                    id="attn-domain"
-                    className="input"
-                    placeholder="e.g. frommfamily.com"
-                    value={domainInput}
-                    onChange={(e) => setDomainInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void handleAssignDomain();
-                    }}
-                    disabled={busy !== null}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-outline"
-                    style={{ flexShrink: 0 }}
-                    onClick={() => void handleAssignDomain()}
-                    disabled={busy !== null || domainInput.trim().length === 0}
-                  >
-                    {busy === 'assign-domain' ? 'Mapping…' : 'Map Domain & Re-search'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
+          <>
+            {!hasBrand && renderBrandSection()}
+            <CandidateUrlPanel
+              candidates={sources}
+              itemName={workState?.name ?? item?.name ?? ''}
+              expectedName={item?.expectedName}
+              upc={workState?.upc ?? item?.upc ?? ''}
+              busy={busy === 'select-source' || busy === 'set-url' ? (busy as 'confirming' | 'saving-url') : null}
+              onConfirm={(source) => void handleConfirmCandidate(source)}
+              onUseManualUrl={handleManualUrl}
+            />
+            {hasBrand && renderBrandSection()}
+          </>
         ) : null}
 
         {phase === 'extractor' && domain ? (

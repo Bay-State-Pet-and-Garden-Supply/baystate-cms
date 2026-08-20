@@ -237,6 +237,24 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
     return build(item, row, cohort, { category: 'skipped', label: 'Skipped', detail: error });
   }
 
+  // Held products waiting on preflight / brand resolution
+  if (item.isHeld) {
+    if (item.heldReason === 'missing_brand' || !item.brandHint || item.brandHint.trim().length === 0) {
+      return attention(
+        'brand_not_provided',
+        'assign_brand',
+        'Brand assignment required',
+        'Product is held awaiting brand assignment before running.',
+      );
+    }
+    return attention(
+      'processing_failed',
+      'retry_processing',
+      'Product held',
+      item.heldReason ?? 'Product is held awaiting release.',
+    );
+  }
+
   switch (item.stage) {
     case 'promotion': {
       if (item.stageStatus === 'completed') {
@@ -370,6 +388,14 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
 
     case 'discovery': {
       if (item.stageStatus === 'needs_input') {
+        if (!item.brandHint || item.brandHint.trim().length === 0) {
+          return attention(
+            'brand_not_provided',
+            'assign_brand',
+            'Brand assignment required',
+            'Assign a brand so discovery can search the brand’s official site.',
+          );
+        }
         const candidates = ctx.candidateCountByItem.get(item.id) ?? 0;
         if (candidates > 0) {
           return attention('verify_official_url', 'verify_official_url', 'Verify official product page');

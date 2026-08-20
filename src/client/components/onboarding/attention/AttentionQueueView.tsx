@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { AttentionRow } from './AttentionRow';
+import { BrandAssignmentPanel } from './BrandAssignmentPanel';
 import { DomainBlockerPanel } from './DomainBlockerPanel';
 import { BrandDomainSetupPanel } from './BrandDomainSetupPanel';
 import { groupAttentionItems, getAttentionGroupChip } from './attention-logic';
@@ -147,6 +148,7 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
 
   return (
     <div className="attn-queue">
+      <BrandAssignmentPanel batchId={batchId} onBrandAssigned={refresh} />
       <BrandDomainSetupPanel batchId={batchId} />
       <DomainBlockerPanel batchId={batchId} />
       <div className="attn-chips" role="group" aria-label="Filter by attention type">

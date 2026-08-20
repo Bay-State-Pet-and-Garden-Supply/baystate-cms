@@ -66,6 +66,7 @@ export type WorkActivity = z.infer<typeof WorkActivityEnum>;
 
 /** Why automation stopped for a needs_attention item. */
 export const AttentionReasonEnum = z.enum([
+  'brand_not_provided',
   'verify_official_url',
   'no_official_url',
   'choose_official_url',
@@ -80,6 +81,7 @@ export type AttentionReason = z.infer<typeof AttentionReasonEnum>;
 
 /** The operator decision/action that resolves the blocker. */
 export const AttentionActionEnum = z.enum([
+  'assign_brand',
   'verify_official_url',
   'choose_official_url',
   'setup_extractor_profile',

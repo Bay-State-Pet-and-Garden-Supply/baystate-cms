@@ -1,4 +1,4 @@
-// story: e07s03
+// story: e07s03, oracle follow-up
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 
@@ -14,37 +14,33 @@ describe('profile-capture // story: e07s03', () => {
     vi.restoreAllMocks();
   });
 
-  function expectedHash(dom: string, runtime: string, extra = ''): string {
-    // hashCapture = dom + screenshotBase64 + runtime + url slice 16
-    return createHash('sha256').update(dom + extra + runtime + 'https://example.com/p/1').digest('hex').slice(0, 16);
-  }
-  function expectedHash2(dom: string, screenshot: string, runtime: string, url: string): string {
-    return createHash('sha256').update(dom + screenshot + runtime + url).digest('hex').slice(0, 16);
+  function expectedHash(dom: string, screenshot: string, runtime: string, url: string, elementsCount = 0): string {
+    return createHash('sha256').update(dom + screenshot + runtime + url + String(elementsCount)).digest('hex').slice(0, 16);
   }
 
-  it('static capture fetches html and returns hash sorted slice 12', async () => {
+  it('static capture fetches html and returns elements=[] viewport=null hash 16', async () => {
     const html = '<html><body><h1>Title</h1></body></html>';
-    global.fetch = vi.fn(async () =>
-      new Response(html, { status: 200, headers: { 'Content-Type': 'text/html' } }),
-    ) as unknown as typeof fetch;
-
+    global.fetch = vi.fn(async () => new Response(html, { status: 200, headers: { 'Content-Type': 'text/html' } })) as unknown as typeof fetch;
     const { captureProfilePage } = await import('../../onboarding/profile-capture.ts');
     const res = await captureProfilePage({ url: 'https://example.com/p/1', runtime: 'static' });
     expect(res.dom).toBe(html);
     expect(res.runtime).toBe('static');
-    expect(res.hash).toBe(expectedHash(html, 'static'));
+    expect(res.elements).toEqual([]);
+    expect(res.viewport).toBeNull();
+    expect(res.hash).toBe(expectedHash(html, '', 'static', 'https://example.com/p/1', 0));
     expect(res.hash).toMatch(/^[a-f0-9]{16}$/);
     expect(res.screenshotRef).toMatch(/baystate-captures/);
     expect(new Date(res.capturedAt).toISOString()).toBe(res.capturedAt);
-    // single call: fetch called once, no second hop
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('rendered capture uses playwright and returns screenshot + hash, single call', async () => {
+  it('rendered capture uses playwright and returns elements+viewport+hash 16', async () => {
     const dom = '<html><body><h1>Rendered</h1></body></html>';
     const fakeScreenshot = Buffer.from('pngdata').toString('base64');
-
-    // mock playwright module
+    const mockElements = [
+      { id: 'bs-0', tag: 'h1', text: 'Rendered', x: 20, y: 80, w: 400, h: 36, dataAttrs: [] },
+      { id: 'bs-1', tag: 'div', text: 'Rendered extra', x: 10, y: 70, w: 500, h: 480, dataAttrs: [] },
+    ];
     vi.doMock('playwright', () => ({
       chromium: {
         launch: vi.fn(async () => ({
@@ -52,7 +48,7 @@ describe('profile-capture // story: e07s03', () => {
             newPage: async () => ({
               goto: vi.fn(async () => {}),
               waitForTimeout: vi.fn(async () => {}),
-              evaluate: vi.fn(async () => dom),
+              evaluate: vi.fn(async () => ({ dom, elements: mockElements, viewport: { w: 1280, h: 720, deviceScaleFactor: 1 } })),
               screenshot: vi.fn(async () => Buffer.from('pngdata')),
               close: vi.fn(async () => {}),
               on: vi.fn(),
@@ -63,16 +59,28 @@ describe('profile-capture // story: e07s03', () => {
         })),
       },
     }));
-
-    // re-import after mock
     const { captureProfilePage } = await import('../../onboarding/profile-capture.ts');
     const res = await captureProfilePage({ url: 'https://example.com/p/2', runtime: 'rendered' });
     expect(res.dom).toBe(dom);
     expect(res.runtime).toBe('rendered');
-    expect(res.hash).toBe(expectedHash2(dom, fakeScreenshot, 'rendered', 'https://example.com/p/2'));
+    expect(res.elements).toEqual(mockElements);
+    expect(res.viewport).toEqual({ w: 1280, h: 720, deviceScaleFactor: 1 });
+    expect(res.hash).toBe(expectedHash(dom, fakeScreenshot, 'rendered', 'https://example.com/p/2', mockElements.length));
+    expect(res.hash).toMatch(/^[a-f0-9]{16}$/);
     expect(res.screenshotRef).toMatch(/baystate-captures/);
-    // hash is single artifact, sorted invariant holds for single-item array
-    expect([res.hash].sort()).toEqual([res.hash]);
+  });
+
+  it('hitTest returns smallest-area element containing point', async () => {
+    const { hitTest } = await import('../../onboarding/profile-capture.ts');
+    const elements = [
+      { id: 'bs-0', tag: 'h1', text: 'Title', x: 20, y: 80, w: 400, h: 36, dataAttrs: [] },
+      { id: 'bs-1', tag: 'div', text: 'Title wrapper', x: 10, y: 70, w: 500, h: 480, dataAttrs: [] },
+      { id: 'bs-2', tag: 'img', text: '', x: 20, y: 170, w: 320, h: 320, dataAttrs: [] },
+    ];
+    expect(hitTest(elements, 30, 95)).toBe('bs-0');
+    expect(hitTest(elements, 25, 135)).toBe('bs-1');
+    expect(hitTest(elements, 50, 200)).toBe('bs-2');
+    expect(hitTest(elements, 2000, 2000)).toBeNull();
   });
 
   it('static capture throws on fetch failure with context', async () => {

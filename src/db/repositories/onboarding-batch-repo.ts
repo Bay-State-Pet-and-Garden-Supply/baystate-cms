@@ -48,7 +48,7 @@ export function createBatch(data: {
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
-  const executionState = data.executionState || 'draft';
+  const executionState = data.executionState || 'running';
 
   db.query(
     `INSERT INTO onboarding_batches
