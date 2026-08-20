@@ -6,11 +6,11 @@
 import React, { useState } from 'react';
 import {
   toCuratorFactDisplays,
-  getProvenanceLinks,
   toExtractionProfileDisplays,
   escapeArtifactString,
   isUnsupportedClaim,
 } from '../../agent-lab/specialist-workspace-logic';
+import { getProvenanceLinks } from '../../agent-lab/specialist-workspace-provenance';
 import type { PiRunProjection } from '../../product-intelligence-api';
 
 interface Props {

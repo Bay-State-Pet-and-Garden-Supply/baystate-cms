@@ -6,7 +6,7 @@
  * Untrusted artifact strings are escaped before render by callers.
  */
 
-import type { PiEvidenceRow, PiSourceRow } from '../product-intelligence-api';
+import type { PiSourceRow } from '../product-intelligence-api';
 
 // ---------------------------------------------------------------------------
 // Types (client-side mirrors of server SpecialistWorkflowResult artifacts)
@@ -71,14 +71,6 @@ export interface VerifierVerdictDisplay {
   failingFields: string[];
   evidenceIds: string[];
   conflictFields: string[];
-}
-
-export interface ProvenanceLink {
-  resolvedFactField: string;
-  evidenceId: string;
-  sourceUrl: string | null;
-  method: string | null;
-  contentHash: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,35 +246,6 @@ export function toCuratorFactDisplays(curatedDraft: unknown, resolvedFactSet: un
     });
 }
 
-export function getProvenanceLinks(
-  curatorFacts: CuratorFactDisplay[],
-  evidence: PiEvidenceRow[],
-  sources: PiSourceRow[],
-): ProvenanceLink[] {
-  const evidenceById = new Map(evidence.map((e) => [e.id, e]));
-  const sourceById = new Map(sources.map((s) => [s.id, s]));
-  const links: ProvenanceLink[] = [];
-  for (const fact of curatorFacts) {
-    for (const eid of fact.evidenceIds) {
-      const ev = evidenceById.get(eid);
-      const source = ev ? sourceById.get(ev.sourceId) : undefined;
-      let contentHash: string | null = null;
-      try {
-        const meta = ev?.metadataJson ? JSON.parse(ev.metadataJson) as Record<string, unknown> : null;
-        contentHash = typeof meta?.contentHash === 'string' ? meta.contentHash : null;
-      } catch { /* ignore */ }
-      links.push({
-        resolvedFactField: fact.field,
-        evidenceId: eid,
-        sourceUrl: source?.url ?? ev?.snippet ?? null,
-        method: ev?.extractionMethod ?? null,
-        contentHash,
-      });
-    }
-  }
-  return links;
-}
-
 // ---------------------------------------------------------------------------
 // 7. Verifier verdict
 // ---------------------------------------------------------------------------
@@ -321,40 +284,3 @@ export function isUnsupportedClaim(value: string | null, evidenceCount: number, 
   return false;
 }
 
-// ---------------------------------------------------------------------------
-// 9. Policy snapshot (read-only, server owns policy)
-// ---------------------------------------------------------------------------
-
-export interface PolicySnapshotDisplay {
-  configId: string;
-  allowedTools: string[];
-  researchTools: string[];
-  allowedSourceDomains: string[];
-  modelRoute: { provider: string; model: string; thinkingLevel: string } | null;
-  maxToolCalls: number | null;
-  maxCostUsd: number | null;
-  deadlineMs: number | null;
-  isReadOnly: true;
-}
-
-export function toPolicySnapshotDisplay(policyJson: string): PolicySnapshotDisplay | null {
-  try {
-    const p = JSON.parse(policyJson) as Record<string, unknown>;
-    const modelRoute = p.modelRoute as Record<string, unknown> | null;
-    return {
-      configId: typeof p.configId === 'string' ? p.configId : '',
-      allowedTools: Array.isArray(p.allowedTools) ? (p.allowedTools as string[]) : [],
-      researchTools: Array.isArray(p.researchTools) ? (p.researchTools as string[]) : [],
-      allowedSourceDomains: Array.isArray(p.allowedSourceDomains) ? (p.allowedSourceDomains as string[]) : [],
-      modelRoute: modelRoute && typeof modelRoute.provider === 'string' && typeof modelRoute.model === 'string'
-        ? { provider: String(modelRoute.provider), model: String(modelRoute.model), thinkingLevel: String(modelRoute.thinkingLevel ?? 'medium') }
-        : null,
-      maxToolCalls: typeof p.maxToolCalls === 'number' ? p.maxToolCalls : null,
-      maxCostUsd: typeof p.maxCostUsd === 'number' ? p.maxCostUsd : null,
-      deadlineMs: typeof p.deadlineMs === 'number' ? p.deadlineMs : null,
-      isReadOnly: true as const,
-    };
-  } catch {
-    return null;
-  }
-}

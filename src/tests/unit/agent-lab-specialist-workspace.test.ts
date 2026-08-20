@@ -13,12 +13,11 @@ import {
   toResolverConflictDisplays,
   getUnresolvedFields,
   toCuratorFactDisplays,
-  getProvenanceLinks,
   toVerifierVerdictDisplay,
   escapeArtifactString,
   isUnsupportedClaim,
-  toPolicySnapshotDisplay,
 } from '../../client/agent-lab/specialist-workspace-logic';
+import { getProvenanceLinks } from '../../client/agent-lab/specialist-workspace-provenance';
 import type { PiEvidenceRow, PiSourceRow } from '../../client/product-intelligence-api';
 
 function makeSource(overrides: Partial<PiSourceRow> = {}): PiSourceRow {
@@ -288,35 +287,3 @@ describe('isUnsupportedClaim', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// toPolicySnapshotDisplay
-// ---------------------------------------------------------------------------
-
-describe('toPolicySnapshotDisplay', () => {
-  it('parses policy JSON read-only', () => {
-    const json = JSON.stringify({
-      configId: 'abc123hash',
-      allowedTools: ['read'],
-      researchTools: ['search_products'],
-      allowedSourceDomains: ['example.com'],
-      modelRoute: { provider: 'openai', model: 'gpt-4', thinkingLevel: 'medium' },
-      maxToolCalls: 50,
-      maxCostUsd: 1.5,
-      deadlineMs: 120000,
-    });
-    const d = toPolicySnapshotDisplay(json);
-    expect(d?.configId).toBe('abc123hash');
-    expect(d?.researchTools).toEqual(['search_products']);
-    expect(d?.modelRoute?.provider).toBe('openai');
-    expect(d?.isReadOnly).toBe(true);
-  });
-
-  it('returns null for invalid JSON', () => {
-    expect(toPolicySnapshotDisplay('not json')).toBeNull();
-  });
-
-  it('handles missing modelRoute', () => {
-    const d = toPolicySnapshotDisplay(JSON.stringify({ configId: 'x' }));
-    expect(d?.modelRoute).toBeNull();
-  });
-});

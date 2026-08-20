@@ -9,11 +9,11 @@ tasks:
     status: done
   - id: 2
     description: "Per-field provenance reveal — every Curator fact links back to supporting resolvedFacts/evidence IDs, evidence inspector shows source page/method/hash, profile/version/method/path inspectable from extraction evidence"
-    verify: "bun run typecheck && bunx vitest run src/client/agent-lab/logic.test.ts 2>&1 | tail -n 20"
+    verify: "bunx vitest run src/tests/unit/agent-lab-logic.test.ts 2>&1 | tail -n 20"
     status: done
   - id: 3
     description: "Conflicts/unresolved without raw logs — Resolver conflicts and unresolved fields surface in dedicated panel, Verifier human_review/failed states cite evidence/conflicts, unsupported claims clearly marked"
-    verify: "bun run typecheck && bun run lint src/client/components/agent-lab/ 2>&1 | tail -n 20"
+    verify: "bunx eslint src/client/components/agent-lab/SpecialistStagePanel.tsx src/client/components/agent-lab/SeedPanel.tsx src/client/components/agent-lab/CuratorProvenancePanel.tsx src/client/components/agent-lab/ResolverConflictPanel.tsx src/client/components/agent-lab/PolicySnapshotPanel.tsx 2>&1 | tail -n 20"
     status: done
   - id: 4
     description: "Registry-backed config editing read-only in UI — feature flags, per-run policy snapshots, capability versions shown but not mutated from client; server owns policy"

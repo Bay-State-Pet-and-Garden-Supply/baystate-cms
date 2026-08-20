@@ -10,9 +10,9 @@ release:
   last_tag: v0.1.0
   last_publish: null
 epic_cycle:
-  current_step: 6
-  next_skill: audit-code
-  completed_steps: [1, 2, 3, 4, 5]
+  current_step: 4
+  next_skill: develop-tdd
+  completed_steps: [1, 2, 3, 4, 5, "6(fail: conventions + verification commands)"]
   story_bcps: 8
 bug_cycle:
   current_step: null
@@ -21,7 +21,7 @@ git:
   branch: feat/e02-agent-lab-workspace
   hash: b891024
 handoff:
-  last_step_completed: "e02s01 verify-work — typecheck + 88/88 unit + bun test 14/14 policy + lint clean (task 4 verify fixed to bun test)"
+  last_step_completed: "e02s01 audit-code — looped to develop-tdd for file-size and verification-command blockers"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md

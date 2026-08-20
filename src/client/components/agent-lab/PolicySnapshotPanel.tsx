@@ -3,7 +3,8 @@
  * Server owns policy; client only displays. No PUT/POST.
  */
 import React from 'react';
-import { toPolicySnapshotDisplay, escapeArtifactString } from '../../agent-lab/specialist-workspace-logic';
+import { escapeArtifactString } from '../../agent-lab/specialist-workspace-logic';
+import { toPolicySnapshotDisplay } from '../../agent-lab/specialist-workspace-policy';
 import type { PiRunRow } from '../../product-intelligence-api';
 
 interface Props {
