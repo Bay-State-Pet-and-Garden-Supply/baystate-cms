@@ -4,7 +4,7 @@ import { getDomainProfileState } from '../../db/repositories/domain-profile-stat
 
 export const domainProfileStateRoutes = new Hono();
 
-domainProfileStateRoutes.get('/api/domains/:domain/profile-state', (c) => {
+domainProfileStateRoutes.get('/domains/:domain/profile-state', (c) => {
   const raw = c.req.param('domain') ?? '';
   const state = getDomainProfileState(raw);
   return c.json(state);

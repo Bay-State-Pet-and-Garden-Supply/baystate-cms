@@ -7,7 +7,7 @@ import { getSitemapInventory } from '../../onboarding/sitemap-inventory-service'
 
 export const representativeSuiteRoutes = new Hono();
 
-representativeSuiteRoutes.get('/api/domains/:domain/representative-suite', (c) => {
+representativeSuiteRoutes.get('/domains/:domain/representative-suite', (c) => {
   const domain = c.req.param('domain') ?? '';
   const suite = getRepresentativeSuite(domain);
   const inv = getSitemapInventory(domain);
@@ -19,7 +19,7 @@ const putSchema = z.object({
   actor: z.string().min(1),
 });
 
-representativeSuiteRoutes.put('/api/domains/:domain/representative-suite', async (c) => {
+representativeSuiteRoutes.put('/domains/:domain/representative-suite', async (c) => {
   const domain = c.req.param('domain') ?? '';
   const body = await c.req.json();
   const parsed = putSchema.safeParse(body);
@@ -38,13 +38,13 @@ const waiverSchema = z.object({
   actor: z.string().min(1),
 });
 
-representativeSuiteRoutes.get('/api/domains/:domain/waiver', (c) => {
+representativeSuiteRoutes.get('/domains/:domain/waiver', (c) => {
   const domain = c.req.param('domain') ?? '';
   const w = getWaiver(domain);
   return c.json({ waiver: w });
 });
 
-representativeSuiteRoutes.post('/api/domains/:domain/waiver', async (c) => {
+representativeSuiteRoutes.post('/domains/:domain/waiver', async (c) => {
   const domain = c.req.param('domain') ?? '';
   const body = await c.req.json();
   const parsed = waiverSchema.safeParse(body);
