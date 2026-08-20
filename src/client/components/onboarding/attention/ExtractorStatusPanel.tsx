@@ -2,16 +2,17 @@
  * Epic #46 Phase 4 — Extractor status panel.
  *
  * One continuous step after URL confirmation: does this domain have a usable
- * extractor? When not, the operator sets one up right here (Profile Builder
- * renders in place). On a usable profile, blocked products on the same domain
- * are released automatically and the result is reported.
+ * extractor? When not, the operator goes to the dedicated Profile Workspace
+ * (full page at /settings/domains/:domain/profile). On a usable profile,
+ * blocked products on the same domain are released automatically.
+ * // story: e06s04 — park as setup_required_profile, distributor bypass
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { DomainDiagnosticsEntry } from '../../../../shared/schemas/onboarding';
 import type { DomainReleaseResponse, AttentionReason } from '../../../../shared/schemas/onboarding-work-state';
 import { getDomainDiagnostics } from '../../../onboarding-api';
 import { releaseDomainItems } from '../../../onboarding-work-api';
-import ProfileBuilderWorkspace from '../../ProfileBuilderWorkspace';
+import { getProfileWorkspacePath } from '../../profile-workspace/route';
 import { deriveProfileReadiness, PROFILE_READINESS_LABELS, type ProfileReadinessState } from './attention-logic';
 
 interface ExtractorStatusPanelProps {
@@ -40,13 +41,12 @@ interface ReleaseState {
 export function ExtractorStatusPanel({
   domain,
   attentionReason,
-  seedItem,
+  seedItem: _seedItem,
   onRetry,
   onReleaseResult,
 }: ExtractorStatusPanelProps): React.ReactElement {
   const [entries, setEntries] = useState<DomainDiagnosticsEntry[] | null>(null);
   const [diagError, setDiagError] = useState<string | null>(null);
-  const [builderOpen, setBuilderOpen] = useState(false);
   const [release, setRelease] = useState<ReleaseState>({ status: 'idle', result: null, message: null });
 
   const releasedOnce = useRef(false);
@@ -92,21 +92,20 @@ export function ExtractorStatusPanel({
   const readiness = entries ? deriveProfileReadiness(domain, entries) : null;
   const state: ProfileReadinessState = readiness?.state ?? 'unknown';
 
-  // Auto-release once when a usable profile is detected (initial load or
-  // after the profile builder closes with a saved profile). Suppressed for
-  // `extraction_profile_failed` so the operator can decide retry-vs-setup
-  // instead of being preempted by a fresh scrape/release.
+  // Auto-release once when a usable profile is detected. Suppressed for
+  // `extraction_profile_failed` so the operator can decide retry-vs-setup.
   const retryFirst = attentionReason === 'extraction_profile_failed';
   useEffect(() => {
     if (retryFirst) return;
-    if (state === 'ready' && !releasedOnce.current && !builderOpen) {
+    if (state === 'ready' && !releasedOnce.current) {
       void doRelease();
     }
-  }, [state, builderOpen, doRelease, retryFirst]);
+  }, [state, doRelease, retryFirst]);
 
-  const handleBuilderClose = () => {
-    setBuilderOpen(false);
-    void loadDiagnostics();
+  const navigateToWorkspace = () => {
+    const path = getProfileWorkspacePath(domain, window.location.pathname + window.location.search);
+    window.history.pushState(null, '', path);
+    window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
   const bannerClass =
@@ -154,13 +153,13 @@ export function ExtractorStatusPanel({
                 Retry extraction
               </button>
             ) : null}
-            <button type="button" className="btn btn-outline" onClick={() => setBuilderOpen(true)}>
+            <button type="button" className="btn btn-outline" onClick={navigateToWorkspace}>
               Set Up Extraction
             </button>
             <span className="attn-mutating">
               {retryFirst
                 ? 'Retry first — if the profile itself is broken, setting it up again releases this domain together.'
-                : 'After saving, this product and other blocked products on this domain resume automatically.'}
+                : 'Opens the dedicated profile workspace — after saving, this product and other blocked products on this domain resume automatically.'}
             </span>
           </div>
         ) : (
@@ -205,17 +204,6 @@ export function ExtractorStatusPanel({
           </div>
         ) : null}
       </div>
-
-      {builderOpen ? (
-        <div className="attn-builder-overlay">
-          <ProfileBuilderWorkspace
-            domain={domain}
-            onClose={handleBuilderClose}
-            seedItem={seedItem ?? null}
-            diagnostics={readiness?.entry ?? null}
-          />
-        </div>
-      ) : null}
     </section>
   );
 }

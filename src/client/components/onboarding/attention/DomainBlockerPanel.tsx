@@ -3,9 +3,10 @@
  *
  * Instead of 14 indistinguishable item failures, the operator sees
  * "build profile for frommfamily.com — unblocks 4 products". Building the
- * profile (Profile Builder renders in place, same pattern as the per-domain
- * ExtractorStatusPanel) makes the domain-release sweep re-queue the blocked
- * items automatically; the panel refreshes and the row disappears.
+ * profile in the dedicated Profile Workspace (full page at /settings/domains/:domain/profile)
+ * makes the domain-release sweep re-queue the blocked items automatically; the
+ * panel refreshes and the row disappears.
+ * // story: e06s04 — park as setup_required_profile, domain task, distributor bypass
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type {
@@ -13,7 +14,7 @@ import type {
   ExtractorProfileBlockersResponse,
 } from '../../../../shared/schemas/onboarding-work-state';
 import { getExtractorProfileBlockers } from '../../../onboarding-work-api';
-import ProfileBuilderWorkspace from '../../ProfileBuilderWorkspace';
+import { getProfileWorkspacePath } from '../../profile-workspace/route';
 import './attention.css';
 
 interface DomainBlockerPanelProps {
@@ -23,7 +24,6 @@ interface DomainBlockerPanelProps {
 export function DomainBlockerPanel({ batchId }: DomainBlockerPanelProps): React.ReactElement | null {
   const [blockers, setBlockers] = useState<ExtractorProfileDomainBlocker[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [builderDomain, setBuilderDomain] = useState<string | null>(null);
 
   const mounted = useRef(true);
 
@@ -45,15 +45,6 @@ export function DomainBlockerPanel({ batchId }: DomainBlockerPanelProps): React.
     };
   }, [load]);
 
-  // GPT review (LOW): if the blocker for the open builder resolves while the
-  // builder is open (or on reload), drop the stale domain so a future blocker
-  // for the same domain can't reopen the overlay unexpectedly.
-  useEffect(() => {
-    if (builderDomain && blockers && !blockers.some(b => b.domain === builderDomain)) {
-      setBuilderDomain(null);
-    }
-  }, [builderDomain, blockers]);
-
   if (error) {
     return (
       <div className="attn-error" role="alert" style={{ margin: '0 0 12px' }}>
@@ -64,7 +55,11 @@ export function DomainBlockerPanel({ batchId }: DomainBlockerPanelProps): React.
 
   if (!blockers || blockers.length === 0) return null;
 
-  const builderBlocker = blockers.find(b => b.domain === builderDomain) ?? null;
+  const navigateToWorkspace = (domain: string) => {
+    const path = getProfileWorkspacePath(domain, window.location.pathname + window.location.search);
+    window.history.pushState(null, '', path);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  };
 
   return (
     <section className="attn-domain-queue" aria-label="Extractor profile setup queue">
@@ -97,35 +92,13 @@ export function DomainBlockerPanel({ batchId }: DomainBlockerPanelProps): React.
             <button
               type="button"
               className="btn btn-outline btn-sm"
-              onClick={() => setBuilderDomain(blocker.domain)}
+              onClick={() => navigateToWorkspace(blocker.domain)}
             >
               Build profile
             </button>
           </li>
         ))}
       </ul>
-
-      {builderBlocker && (
-        <div className="attn-builder-overlay">
-          <ProfileBuilderWorkspace
-            domain={builderBlocker.domain}
-            onClose={() => {
-              setBuilderDomain(null);
-              void load();
-            }}
-            seedItem={
-              builderBlocker.sampleItems[0]
-                ? {
-                    expectedName: builderBlocker.sampleItems[0].name ?? null,
-                    upc: builderBlocker.sampleItems[0].upc ?? null,
-                    brandHint: null,
-                  }
-                : null
-            }
-            diagnostics={null}
-          />
-        </div>
-      )}
     </section>
   );
 }
