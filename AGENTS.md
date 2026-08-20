@@ -83,3 +83,95 @@ The Product Intelligence program (epic #28) introduces Pi as a **bounded researc
 - **Policy enforcement (PI-5):** `src/product-intelligence/policy/` — every model, network, and budget decision passes the `PolicyGateway` (recorded with reason codes in `product_intelligence_policy_decisions`): `local_only` denies every remote model call and fallback, `cloud_models_only` allows only the routed model, SSRF protections block private/link-local destinations (DNS-resolved), protocols/ports are validated, redirects are re-validated hop-by-hop, response-size and content-type limits apply, and fallback models are never selected silently. Run policies are immutable snapshots (`configId` = SHA-256 of the policy; tampered snapshots refuse to start) with the prompt hash captured per run; the default policy grants no host-file tools (worker isolation) and model calls stay denied until a route is configured. Model cost is enforced server-side from session usage against `maxCostUsd`.
 - **Bounded research tools (PI-3):** `src/product-intelligence/tools/` wraps deterministic CMS capabilities (GTIN/catalog/onboarding lookups, web + sitemap discovery, page verification, variant resolution, deterministic page extraction behind the provider-neutral `PageExtractionContract`, packaging OCR, image inspection, taxonomy candidates) as 25 agent-facing tools with TypeBox schemas, stable versions, evidence ids, and explicit no-result/policy-denied outcomes. The `PiToolRegistry` enforces run+workspace ownership, the policy `researchTools` allowlist, per-run tool-call budgets, timeout, and cancellation before every dispatch; adapters never write approved catalog/ShopSite state and never return raw HTML or credentials. `extract_product_page` delegates to the extraction contract — PI-11 replaces the HTTP adapter with the deterministic ladder later.
 
+
+---
+
+<!-- BEGIN bigpowers:project -->
+## Project — bigpowers cockpit
+
+Read `CONVENTIONS.md` before any GitHub or `git` operation. `specs/` is the memory — all planning goes there.
+
+**Project:** Baystate CMS — standalone local CMS for ShopSite 15 stores (Git workspaces + SQLite + ShopSite CGI + bulk onboarding pipeline + optional Pi Agent Lab).
+**Stack:** Bun 1.3.5 + Hono 4 (API), React 19 + Vite 6 (SPA), SQLite (`bun:sqlite`), Git CLI, Tailwind + DESIGN.md "The General Store", Zod, Crawlee/Playwright, sharp, `@ai-sdk/openai`, Ollama VLM, Pi SDK 0.83.
+
+**Commands**
+
+| Action | Command |
+|--------|---------|
+| Run | `bun run dev` (API :3030 + Vite :5173) |
+| Test | `bun run test` (`vitest run && bun run test:db`) |
+| Build | `vite build && tsc --noEmit` |
+| Lint | `bun run lint` (`eslint . --ext .ts,.tsx`) |
+| Typecheck | `bun run typecheck` (`tsc --noEmit --skipLibCheck`) |
+| Preflight | `bun run typecheck && bun run test` (lint advisory; CI skips lint — see `.github/workflows/ci.yml`) |
+| CI | `gh pr checks` when a PR is open; otherwise `.github/workflows/ci.yml` on `main` |
+| Validate specs | `bash scripts/validate-specs-yaml.sh` |
+| Worker | `bun run worker:dev` / `bun run worker:start` |
+
+**Architecture (1–2 sentences):** `src/server` (Hono) + `src/client` (React/Vite) over `src/db/repositories` (SQLite) and Git workspaces as canonical approved catalog; `src/shopsite` (XML + CGI adapters with preserve-unknown-fields), `src/onboarding` (Sourcing→Discovery→Extraction→Curation→Review→Promotion) with `src/product-intelligence` bounded Pi execution behind `PolicyGateway` and feature flags.
+
+**Conventions (from CONVENTIONS.md — summary):**
+- Functions 4–20 lines, files <300 lines, SRP, explicit types, no duplication, early returns, named predicates, no magic literals.
+- TDD + F.I.R.S.T; every story needs `verify:`; `story: eNNsNN` traceability in code/tests.
+- Defensive code only for listed categories: retry (ShopSite/Sourcing/extraction/PI network), timeout (extraction/PI/VLM), graceful degradation (fallbacks, export-package, legacy executor).
+
+**Never:**
+- NEVER hardcode ShopSite credentials or tokens; NEVER commit `.env`, `*.db`, `.baystate-cms-dev-token`; ALWAYS redact logs via `src/shopsite/multipart-upload.ts`.
+- NEVER work directly on `main` — use `kickoff-branch` worktrees.
+- NEVER dismiss a red Preflight/CI as pre-existing/out of scope — fix-or-log via `quick-fix` → `fix-bug`.
+- NEVER edit generated targets (`.cursor/rules/`, `.pi/skills/`) — edit `skills/*/SKILL.md` sources.
+- NEVER create GitHub issues from automation — use `specs/bugs/`.
+- NEVER `Co-authored-by` footers.
+
+**Agent Rules:**
+- MUST use bigpowers skills (`scope-work`, `plan-work`, `develop-tdd`, `verify-work`, etc.) — no direct coding from vague prompts.
+- MUST read `specs/` before writing code. MUST write planning to `specs/` first.
+- MUST run tests after every change. Evidence over claims. One question beats a wrong assumption.
+
+Workflow mode in `specs/state.yaml` is `solo-git` (land via `scripts/land-branch.sh`); set to `team-pr` if the team wants `gh pr`.
+<!-- END bigpowers:project -->
+
+<!-- BEGIN bigpowers:context-routing -->
+## Context Routing
+
+Load subdirectory context **by file glob** — do not read the full doc tree up front.
+
+| Glob / trigger | Load first | Fallback |
+|----------------|------------|----------|
+| `specs/epics/**` | Capsule `epic.yaml` + active story `-tasks.yaml` | `specs/release-plan.yaml` |
+| `specs/product/**` | `SCOPE_LATEST.yaml`, `VISION_LATEST.yaml` | `specs/README.md` |
+| `specs/tech-architecture/**` | `tech-stack.md` + epic `eNN-TEST_PLAN_LATEST.md` if present | `CONVENTIONS.md` |
+| `CONTEXT.md` | authoritative domain language (Category Page, Product Type, etc.) | `specs/product/GLOSSARY_LATEST.yaml` |
+| `src/shopsite/**` | `product-normalizer.ts`, `xml-builder.ts` | `AGENTS.md` § ShopSite |
+| `src/onboarding/**` | `CONTEXT.md` pipeline stages | `AGENTS.md` § Onboarding Pipeline |
+| `src/product-intelligence/**` | `contracts.ts`, `flags.ts` | `AGENTS.md` § Product Intelligence |
+| Default / session start | This file → `CONVENTIONS.md` → `specs/state.yaml` | `survey-context` |
+<!-- END bigpowers:context-routing -->
+
+<!-- BEGIN bigpowers:learned-preferences -->
+## Learned User Preferences
+
+_Durable preferences discovered across sessions. Update via `session-state` — do not infer from chat alone._
+
+- (none yet — add via `session-state` when they crystallize)
+
+## Workspace Facts
+
+_Stable repo facts — prefer these over re-discovery._
+
+- Stack: Bun 1.3.5 / Hono 4 / React 19 / Vite 6 / SQLite / Git CLI / Pi SDK 0.83
+- Commands: `bun run dev` / `bun run test` / `bun run typecheck` / `bun run lint`
+- Preflight: `bun run typecheck && bun run test` (hard); `lint` advisory; CI skips lint on purpose
+- Planning SoT: `specs/state.yaml`, `specs/release-plan.yaml`, `specs/execution-status.yaml`
+- Story traceability: `// story: eNNsNN` in code/tests; `specs/bugs/registry.yaml` for bugs
+- Design: `DESIGN.md` "The General Store" (Uniform Green #14532D, Burgundy #760C19, Gold #F6DB12)
+<!-- END bigpowers:learned-preferences -->
+
+<!-- BEGIN bigpowers:tooling -->
+## Tooling
+
+Generated blocks — `setup-environment`, `guard-git`, `hook-commits` may append here.
+
+- `bigpowers` 2.87.5 skills available via `npm:bigpowers` in `~/.pi/agent/settings.json` (pi) — no separate `bigpowers setup` needed for pi.
+- Validate specs after any `specs/*.yaml` edit: `bash scripts/validate-specs-yaml.sh`.
+<!-- END bigpowers:tooling -->
