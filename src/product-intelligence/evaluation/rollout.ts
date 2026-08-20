@@ -167,6 +167,12 @@ export interface RolloutState {
   gates: RolloutGateResult[];
 }
 
+/** Returns true only after default-on stabilization (ADR 0029). */
+export interface LegacyRemovalDecision {
+  allowed: boolean;
+  reason: string;
+}
+
 export function currentRolloutState(report: PiAggregateReport | null = null): RolloutState {
   const config = getRolloutConfig();
   return {
@@ -175,4 +181,18 @@ export function currentRolloutState(report: PiAggregateReport | null = null): Ro
     thresholds: config.thresholds,
     gates: ROLLOUT_STAGES.filter((s) => s !== 'shadow_only').map((s) => evaluateRolloutGate(s, report)),
   };
+}
+
+/**
+ * e03s02 / ADR 0029: the monolithic legacy executor may only be removed once
+ * the rollout has reached the `automatic` stage AND the automatic gate passes
+ * on measured metrics (no kill switch, no insufficient samples, all thresholds
+ * met). Until then it stays in the codebase, deprecated but never deleted, and
+ * the shared PI runtime/governance layer is preserved at every stage.
+ */
+export function isLegacyRemovalAllowed(report: PiAggregateReport | null = null): boolean {
+  if (isPiKillSwitchEnabled()) return false;
+  const config = getRolloutConfig();
+  if (config.stage !== 'automatic') return false;
+  return evaluateRolloutGate('automatic', report).allowed;
 }

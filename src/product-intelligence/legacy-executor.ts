@@ -1,4 +1,6 @@
 /**
+ * @deprecated Shared monolithic PI executor — RETAINED, never deleted.
+ *
  * Legacy (deterministic, no-agent) Product Intelligence executor (PI-1).
  *
  * When Pi is disabled or unavailable, the router selects this executor. It is
@@ -7,10 +9,19 @@
  * fully functional when Pi is not installed or configured, while guaranteeing
  * that no result can be mistaken for agent research.
  *
+ * REMOVAL POLICY (e03s02 / ADR 0029): this executor is retained as the
+ * fail-closed fallback throughout the PI-9 rollout. It MAY only be removed
+ * after the rollout reaches the `automatic` stage and all gates pass under
+ * the documented thresholds — see `isLegacyRemovalAllowed()` in
+ * `evaluation/rollout.ts`. Until then it stays in the codebase, marked
+ * deprecated but never deleted, and the shared PI runtime/governance layer is
+ * preserved regardless of stage.
+ *
  * Future phases may extend this executor with deterministic search/sitemap
  * lookups — any such output must still carry evidence provenance.
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
+ * @see specs/adr/0029-e03-evals-shadow-rollout.md
  */
 import {
   LEGACY_EXECUTOR_NAME,
