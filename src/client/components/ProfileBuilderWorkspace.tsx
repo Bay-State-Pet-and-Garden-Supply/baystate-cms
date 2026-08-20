@@ -1,5 +1,5 @@
 /**
- * ProfileBuilderWorkspace.tsx — full-page overlay/modal for
+ * ProfileBuilderWorkspace.tsx — deprecated: use ProfileWorkspacePage (src/client/components/profile-workspace/ProfileWorkspacePage.tsx) — full-page overlay/modal for
  * domain-first profile building.
  *
  * Provides a tabbed workspace (Overview, Snapshot, Review)

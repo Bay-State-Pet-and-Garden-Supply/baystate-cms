@@ -24,6 +24,7 @@ import { SitemapHealthView } from './sitemap-health/SitemapHealthView';
 import { primaryOnboardingSettingsTabs, resolveOnboardingSettingsTab } from './onboarding-settings/tabRegistry';
 import type { OnboardingSettingsTabId } from './onboarding-settings/tabRegistry';
 import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDomain';
+import { getProfileWorkspacePath } from './profile-workspace/route';
 
 type OnboardingSettingsTab = OnboardingSettingsTabId;
 
@@ -832,14 +833,13 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       </div>
       </div>
 
-      {/* ── Profile Builder (inline) ── */}
+      {/* ── Profile Workspace link (e06s01) — dedicated page replaces inline builder ── */}
       {workspaceDomain && (
         <div style={{ marginBottom: 24, background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 20 }}>
-          <ProfileBuilder
-            mode="inline"
-            initialDomain={workspaceDomain}
-            onCancel={() => setWorkspaceDomain(null)}
-          />
+          <a href={getProfileWorkspacePath(workspaceDomain, window.location.search)} style={{ color: '#2563eb', fontWeight: 600 }}>
+            Open {workspaceDomain} profile workspace →
+          </a>
+          <button type="button" style={styles.secondaryBtn} onClick={() => setWorkspaceDomain(null)}>Close</button>
         </div>
       )}
     </div>

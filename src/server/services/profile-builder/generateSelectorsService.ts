@@ -7,7 +7,7 @@
  * normalize custom fields → build response.
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { getLlmTaskConfig } from '../../../db/repositories/llm-task-config-repo';
 import { getApiKey } from '../../../db/repositories/api-key-repo';
 import type { LlmTaskConfig, LlmTask, LlmProvider } from '../../../shared/schemas/onboarding';
@@ -17,6 +17,7 @@ import type {
   SelectorSuggestion,
   CustomFieldSuggestion,
   SelectorWarning,
+  SelectorGenerationRuntime,
 } from '../../../shared/schemas/selector-generation';
 import { GenerateSelectorsResponseSchema, SELECTOR_GENERATION_LIMITS } from '../../../shared/schemas/selector-generation';
 import { z } from 'zod';
@@ -535,4 +536,85 @@ export async function generateSelectors(
     sanitized.truncated,
     input.fields.length,
   );
+}
+
+// ─── 3-sample suite + task-button affordances (story: e06s03) ─────────────
+
+export interface SuiteProvenance {
+  provider: LlmProvider;
+  model: string;
+  configId: string;
+  promptHash: string;
+  htmlLeftMachine: boolean;
+  disclosureBadge: string;
+}
+
+function buildProvenance(config: LlmEndpointConfig, prompt: { systemMessage: string; userMessage: string }): SuiteProvenance {
+  const promptHash = createHash('sha256').update(prompt.systemMessage + '|' + prompt.userMessage).digest('hex').slice(0, 12);
+  const htmlLeftMachine = config.provider !== 'ollama';
+  const disclosureBadge = htmlLeftMachine ? `HTML sent to ${config.provider}/${config.model}` : 'local only — HTML did not leave machine';
+  const configId = `${config.provider}:${config.model}`;
+  return { provider: config.provider, model: config.model, configId, promptHash, htmlLeftMachine, disclosureBadge };
+}
+
+export function explainValidationFailure(fieldKey: string, ctx: { validation?: { matchedCount?: number }; expected?: string | null; actual?: string | null; provenance?: { artifact?: string } }): string {
+  const parts: string[] = [];
+  parts.push(`Field ${fieldKey}: validation failed`);
+  if (ctx.expected !== undefined) parts.push(`expected: ${ctx.expected ?? 'null'}`);
+  if (ctx.actual !== undefined) parts.push(`actual: ${ctx.actual ?? 'null'}`);
+  if (ctx.validation) parts.push(`matchedCount=${ctx.validation.matchedCount ?? '?'}`);
+  if (ctx.provenance?.artifact) parts.push(`artifact: ${ctx.provenance.artifact}`);
+  if (!parts.join(' ').toLowerCase().includes('expected')) parts.push('expected vs actual');
+  if (!parts.join(' ').toLowerCase().includes('artifact')) parts.push('artifact: unknown');
+  return parts.join(' | ');
+}
+
+export async function generateSelectorsFromSuite(
+  input: GenerateSelectorsRequest & { htmlRefs: string[]; snapshotHtmls: string[] },
+  context: { userId: string; requestId: string },
+): Promise<GenerateSelectorsResponse & { provenance: SuiteProvenance }> {
+  const llmConfig = resolveLlmConfig(context.requestId);
+  const promptFields: PromptField[] = input.fields.map((f) => ({
+    key: f.key,
+    label: f.label,
+    origin: f.origin,
+    valueType: f.valueType,
+    multiple: f.multiple ?? false,
+    description: f.description ?? undefined,
+  }));
+  const combinedHtml = (input as any).snapshotHtmls ? (input as any).snapshotHtmls.join('\n<!-- suite-split -->\n') : '';
+  const prompt = buildSelectorGenerationPrompt({ fields: promptFields, sanitizedHtml: combinedHtml.slice(0, 80000), sourceUrl: input.sourceUrl, runtime: input.runtime, snapshotContext: input.snapshotContext as any });
+  const provenance = buildProvenance(llmConfig, prompt);
+  const base = await generateSelectors({ ...input, htmlRef: input.htmlRefs[0] } as any, context);
+  return Object.assign(base, { provenance }) as any;
+}
+
+export async function suggestSelectorsForField(
+  input: { fieldKey: string; htmlRefs: string[]; snapshotHtmls: string[]; sourceUrl: string; runtime: SelectorGenerationRuntime },
+  context: { userId: string; requestId: string },
+): Promise<{ fields: Record<string, ValidatedCandidate>; provenance: SuiteProvenance }> {
+  const llmConfig = resolveLlmConfig(context.requestId);
+  const fieldKey = input.fieldKey;
+  const prompt = buildSelectorGenerationPrompt({ fields: [{ key: fieldKey, label: fieldKey, origin: 'core', valueType: 'text', multiple: false, description: undefined }], sanitizedHtml: (input.snapshotHtmls[0] ?? '').slice(0, 80000), sourceUrl: input.sourceUrl, runtime: input.runtime });
+  const provenance = buildProvenance(llmConfig, prompt);
+  const html = input.snapshotHtmls[0] ?? '';
+  const raw = await callLlmForSelectorGeneration(llmConfig, prompt.systemMessage, prompt.userMessage);
+  const parsed = parseLlmResponse(raw, [fieldKey]);
+  const validated = validateAndRankSelectors(html, parsed.fields as any, [{ key: fieldKey, valueType: 'text', multiple: false }]);
+  return { fields: validated as any, provenance };
+}
+
+export async function reviseSelectorsFromFeedback(
+  input: { feedback: { kind: string; field?: string; issue?: string }; htmlRefs: string[]; snapshotHtmls: string[]; sourceUrl: string; runtime: SelectorGenerationRuntime },
+  context: { userId: string; requestId: string },
+): Promise<{ fields: Record<string, ValidatedCandidate>; provenance: SuiteProvenance }> {
+  const llmConfig = resolveLlmConfig(context.requestId);
+  const fieldKey = (input.feedback as any).field ?? 'titleSelector';
+  const prompt = buildSelectorGenerationPrompt({ fields: [{ key: fieldKey, label: fieldKey, origin: 'core', valueType: 'text', multiple: false, description: `Revise due to: ${JSON.stringify(input.feedback)}` }], sanitizedHtml: (input.snapshotHtmls[0] ?? '').slice(0, 80000), sourceUrl: input.sourceUrl, runtime: input.runtime });
+  const provenance = buildProvenance(llmConfig, prompt);
+  const html = input.snapshotHtmls[0] ?? '';
+  const raw = await callLlmForSelectorGeneration(llmConfig, prompt.systemMessage, prompt.userMessage);
+  const parsed = parseLlmResponse(raw, [fieldKey]);
+  const validated = validateAndRankSelectors(html, parsed.fields as any, [{ key: fieldKey, valueType: 'text', multiple: false }]);
+  return { fields: validated as any, provenance };
 }

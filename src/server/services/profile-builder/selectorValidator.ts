@@ -485,3 +485,36 @@ function scoreValue(quality: ScoredResult['quality']): number {
     case 'unusable': return 1;
   }
 }
+
+// ─── Cross-sample suite helper (story: e06s03) ───────────────────────────
+// Validates the same fieldResults across multiple confirmed snapshots and
+// aggregates stability/cardinality warnings. For 3-sample suite, a selector
+// must pass on each html to be considered stable.
+export function validateAcrossConfirmedSuite(
+  htmls: string[],
+  fieldResults: Record<string, LlmFieldResult>,
+  fieldDefinitions: Array<{ key: string; valueType: string; multiple: boolean }>,
+): Record<string, ValidatedCandidate> {
+  if (htmls.length === 0) return {};
+  // Validate on first html as baseline, then cross-check stability on remaining
+  const baseline = validateAndRankSelectors(htmls[0], fieldResults, fieldDefinitions);
+  if (htmls.length === 1) return baseline;
+  // For each field, if baseline is suggested, verify it matches on other htmls; otherwise mark warning
+  for (const key of Object.keys(baseline)) {
+    const base = baseline[key];
+    if (base.status !== 'suggested') continue;
+    let stable = true;
+    for (let i = 1; i < htmls.length; i++) {
+      const r = validateAndRankSelectors(htmls[i], fieldResults, fieldDefinitions);
+      const other = r[key];
+      if (!other || other.status !== 'suggested' || other.validation.matchedCount !== base.validation.matchedCount) {
+        stable = false;
+        break;
+      }
+    }
+    if (!stable) {
+      base.warnings.push({ code: 'MULTIPLE_PRIMARY_MATCHES', severity: 'warning', message: 'Selector stability across confirmed suite is weak — differs across samples.', fieldKey: key });
+    }
+  }
+  return baseline;
+}

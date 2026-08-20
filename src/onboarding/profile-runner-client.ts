@@ -47,6 +47,7 @@ export type ProfileRunnerResult =
  * response without trusted title evidence, preserving fail-closed
  * semantics per ADR 0009.
  */
+export const runProfileForUrl = runProfileExtraction;
 export async function runProfileExtraction(
   options: ProfileRunnerOptions,
 ): Promise<ProfileRunnerResult> {

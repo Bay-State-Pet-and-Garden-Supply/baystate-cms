@@ -1,6 +1,6 @@
 story_id: e06s01
 title: "Dedicated Profile Workspace shell — domain-scoped page at /settings/domains/:domain/profile with header, readiness rail, and navigation"
-status: failing
+status: passing
 bcps: 5
 spec: e06s01-workspace-shell.md
 tasks:
@@ -8,7 +8,7 @@ tasks:
     description: "Create dedicated route /settings/domains/:domain/profile (domain-scoped, brands as associations in breadcrumb/header) with return-context via query state; replace inline table form in OnboardingSettings and modal in Onboarding — workspace header shows domain, brand associations, active version, freshness, blocked-item count; add Hono GET /api/domains/:domain/profile-state and repo accessor for domain profile state; wire navigation entries from domain inventory, brand checklist, blocker task, and pipeline item"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-workspace-route.test.ts src/tests/unit/domain-profile-state.test.ts 2>&1 | tail -n 30"
     risk: P1
-    status: failing
+    status: passing
     allure:
       severity: high
       categories:
@@ -18,7 +18,7 @@ tasks:
     description: "Implement left readiness rail (6 steps: domain verified → product URLs indexed → 3 confirmed → draft generated → tests pass → human approval/activation) with states Not configured · Draft · Needs testing · Ready for approval · Active · Degraded; header state derived server-side from extractor_profiles + brand_url_index + parked items + immutable versions; add UI snapshot + state derivation unit tests"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-readiness.test.ts src/tests/unit/profile-workspace-header.test.ts 2>&1 | tail -n 30"
     risk: P1
-    status: failing
+    status: passing
     allure:
       severity: high
       categories:
@@ -28,7 +28,7 @@ tasks:
     description: "Add evidence-rail placeholder + history section shell (immutable versions list with actor/model/config, diffs, activation/rollback events) and consolidate builders — remove divergent ProfileBuilderWorkspace overlay divergence, route workspace through single builder; ensure no drawer/modal regresses, workspace preserves query return context"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-workspace.test.ts 2>&1 | tail -n 30"
     risk: P2
-    status: failing
+    status: passing
     allure:
       severity: normal
       categories:

@@ -273,6 +273,10 @@ export default defineConfig({
       'src/tests/unit/local-brand-url-finder.test.ts',
       'src/tests/unit/sitemap-health-evaluator.test.ts',
       'src/tests/unit/sitemap-routes.test.ts',
+      'src/tests/unit/brand-url-index.test.ts',
+      'src/tests/unit/sitemap-inventory.test.ts',
+      'src/tests/unit/representative-suite.test.ts',
+      'src/tests/unit/profile-waiver.test.ts',
       'src/tests/unit/source-discovery-sitemap-priority.test.ts',
       // Page extractor / specialist workflow DB suites
       'src/tests/unit/page-extractor-images.test.ts',
