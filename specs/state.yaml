@@ -19,8 +19,8 @@ bug_cycle:
   current_step: null
   completed_steps: []
 git:
-  branch: feat/e03s02-rollout
-  hash: 9e2c685
+  branch: main
+  hash: 15b0b12
 handoff:
   last_step_completed: "e03s02 release-branch — landed to main"
   open_decisions: []
