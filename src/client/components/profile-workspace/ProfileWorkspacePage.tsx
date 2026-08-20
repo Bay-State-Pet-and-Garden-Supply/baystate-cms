@@ -46,15 +46,17 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
     void fetchSuite();
   }, [domain]);
 
+  // story: e07s01 — evidence-gated testsPass (artifactHashes bound to version, not active+3)
+  const evidencePass = !!state?.testsPassEvidence && state.testsPassEvidence.artifactHashes.length >= 3;
   const readiness = state
     ? deriveReadinessState({
         hasProfile: state.hasProfile,
         hasIndex: state.productCount > 0,
         hasDraft: !!state.activeVersion,
         confirmedCount: suiteConfirmed,
-        testsPass: !!state.activeVersion && suiteConfirmed >= 3,
-        isActive: !!state.activeVersion,
-        needsRevalidation: !state.activeVersion && state.productCount > 0,
+        testsPass: evidencePass && suiteConfirmed >= 3 && state.activeVersion === state.testsPassEvidence?.versionId,
+        isActive: !!state.activeVersion && evidencePass,
+        needsRevalidation: (!state.activeVersion || !evidencePass) && state.productCount > 0,
         productCount: state.productCount,
       })
     : deriveReadinessState({

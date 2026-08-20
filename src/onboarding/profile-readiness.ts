@@ -1,4 +1,4 @@
-// story: e06s01 — readiness rail state machine (server-derived, no grandfather)
+// story: e06s01, e07s01 — readiness rail state machine (server-derived, no grandfather; e07s01 Degraded when active but evidence-derived testsPass false)
 export type ReadinessOverall = 'Not configured' | 'Draft' | 'Needs testing' | 'Ready for approval' | 'Active' | 'Degraded';
 
 export interface ReadinessStep {
@@ -35,6 +35,10 @@ const STEP_LABELS = [
 // story: e06s01
 export function deriveReadinessState(input: ReadinessInput): ReadinessState {
   if (input.needsRevalidation && input.isActive) {
+    return buildState('Degraded', input);
+  }
+  // e07s01: active but evidence-derived testsPass false → Degraded (not Draft)
+  if (input.isActive && !input.testsPass) {
     return buildState('Degraded', input);
   }
   if (!input.hasProfile && !input.hasIndex) {

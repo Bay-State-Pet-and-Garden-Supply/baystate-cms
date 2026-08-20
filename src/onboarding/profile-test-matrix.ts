@@ -67,6 +67,15 @@ export function getMatrixResult(domain: string, draftVersion: string): MatrixRes
   return store.get(keyFor(domain, draftVersion)) ?? null;
 }
 
+export function getMatrixArtifactHashes(result: MatrixResult): string[] {
+  return [...new Set(result.rows.flatMap(r => r.cells.map(c => c.artifactHash)))].sort();
+}
+
+export function matrixCoversSamples(result: MatrixResult, sampleIds: string[]): boolean {
+  const seen = new Set(result.rows.map(r => r.sampleId));
+  return sampleIds.every(id => seen.has(id));
+}
+
 export function resetTestMatrixForTest(): void {
   store.clear();
 }

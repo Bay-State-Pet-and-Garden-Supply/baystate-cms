@@ -457,6 +457,79 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to add runtime column:', e);
   }
 
+  // e07s01: transactional immutable profile versions (replaces in-memory Maps)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS profile_versions (
+        id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        selectors TEXT NOT NULL,
+        runtime TEXT NOT NULL,
+        sample_ids TEXT NOT NULL,
+        artifact_hashes TEXT NOT NULL,
+        validation_summary TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        approver TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(domain, version)
+      );
+    `);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_profile_versions_domain ON profile_versions(domain);`);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS profile_active (
+        domain TEXT PRIMARY KEY,
+        active_version_id TEXT REFERENCES profile_versions(id) ON DELETE SET NULL
+      );
+    `);
+  } catch (e) {
+    console.error('[Migrations] Failed to create profile_versions / profile_active tables:', e);
+  }
+
+  // e07s01 seed: legacy extractor_profiles → profile_versions v1 (idempotent, degraded)
+  // story: e07s01 — do NOT set active; legacy remains Degraded until re-pass
+  try {
+    const hasExtractor = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='extractor_profiles'").get() as { name: string } | undefined;
+    if (hasExtractor) {
+      const legacyRows = db.query('SELECT domain, title_selector, price_selector, description_selector, brand_selector, images_selector, sitemap_product_url_pattern, custom_selectors_json, runtime FROM extractor_profiles').all() as Array<{
+        domain: string; title_selector: string | null; price_selector: string | null; description_selector: string | null; brand_selector: string | null; images_selector: string | null; sitemap_product_url_pattern: string | null; custom_selectors_json: string | null; runtime: string | null;
+      }>;
+      for (const r of legacyRows) {
+        const domain = (r.domain ?? '').toLowerCase().replace(/^www\./, '').trim();
+        if (!domain) continue;
+        const existing = db.query('SELECT COUNT(*) as c FROM profile_versions WHERE domain = ?').get(domain) as { c: number } | undefined;
+        if ((existing?.c ?? 0) > 0) continue;
+        const selectors: Record<string, unknown> = {};
+        if (r.title_selector) selectors['title_selector'] = r.title_selector;
+        if (r.price_selector) selectors['price_selector'] = r.price_selector;
+        if (r.description_selector) selectors['description_selector'] = r.description_selector;
+        if (r.brand_selector) selectors['brand_selector'] = r.brand_selector;
+        if (r.images_selector) selectors['images_selector'] = r.images_selector;
+        if (r.sitemap_product_url_pattern) selectors['sitemap_product_url_pattern'] = r.sitemap_product_url_pattern;
+        try { const cs = r.custom_selectors_json ? JSON.parse(r.custom_selectors_json) : {}; if (cs && typeof cs === 'object') Object.assign(selectors, cs); } catch { /* ignore malformed */ }
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        db.query('INSERT INTO profile_versions (id, domain, version, selectors, runtime, sample_ids, artifact_hashes, validation_summary, provenance, approver, reason, created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+          id,
+          domain,
+          JSON.stringify(selectors),
+          r.runtime ?? 'rendered',
+          JSON.stringify([]),
+          JSON.stringify([]),
+          JSON.stringify({ legacy: true }),
+          JSON.stringify({ provider: 'legacy-migration', model: 'migrate', configId: 'legacy' }),
+          'system',
+          'legacy-migration',
+          now,
+        );
+        console.log(`[Migrations] Seeded legacy profile_versions v1 for ${domain}`);
+      }
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to seed legacy profile_versions (non-fatal):', e);
+  }
+
   // Ensure onboarding_sources has metadata_json column
   try {
     const columns = db.query('PRAGMA table_info(onboarding_sources)').all() as Array<{ name: string }>;

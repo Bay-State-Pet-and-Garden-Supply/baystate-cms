@@ -23,7 +23,7 @@ vi.mock('../../db/connection', () => {
     prepare: () => ({ run: () => {}, get: () => null, all: () => [] }),
     transaction: (fn: () => unknown) => fn,
   };
-  return { getDb: () => fakeDb };
+  return { getDb: () => fakeDb, isDbInitialized: () => true };
 });
 
 // story: e06s01
