@@ -30,6 +30,8 @@ import { representativeSuiteRoutes } from './routes/representative-suite-routes'
 import { profileCaptureRoutes } from './routes/profile-capture-routes';
 import { profileActivationRoutes } from './routes/profile-activation-routes';
 import { inventoryPickerRoutes } from './routes/inventory-picker-routes';
+import { profileBuilderGenerateDraftRoutes } from './routes/profile-builder-generate-draft-routes';
+import { profileMatrixRoutes } from './routes/profile-matrix-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
@@ -102,6 +104,8 @@ app.route('/api', representativeSuiteRoutes);
 app.route('/api', profileCaptureRoutes);
 app.route('/api', profileActivationRoutes);
 app.route('/api', inventoryPickerRoutes);
+app.route('/api', profileBuilderGenerateDraftRoutes);
+app.route('/api', profileMatrixRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

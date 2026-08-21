@@ -229,6 +229,7 @@ export interface ProfileBuilderController {
   runValidation(): Promise<void>;
 
   generateSelectors(): Promise<void>;
+  generateDraftFromSuite(suiteUrls: string[]): Promise<void>;
   acceptSelectorSuggestion(fieldKey: string): void;
   rejectSelectorSuggestion(fieldKey: string): void;
   acceptCustomFieldSuggestion(key: string): void;

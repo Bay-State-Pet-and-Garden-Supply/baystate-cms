@@ -146,6 +146,23 @@ export function evaluateValuesInstant(capture: { html: string }, selector: strin
   }
 }
 
+async function fetchSuiteCaptures(urls: string[]): Promise<Array<{ url: string; html: string }>> {
+  const out: Array<{ url: string; html: string }> = [];
+  for (const u of urls) {
+    const r = await fetch('/api/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: u, runtime: 'rendered' }) });
+    const j = (await r.json()) as { ok: boolean; dom?: string };
+    if (r.ok && j.ok && j.dom) out.push({ url: u, html: j.dom });
+  }
+  return out;
+}
+
+async function postGenerateDraft(captures: Array<{ url: string; html: string }>, _domain: string): Promise<unknown> {
+  const r = await fetch('/api/profile-builder/generate-draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ suiteUrls: captures.map((c) => c.url), snapshotHtmls: captures.map((c) => c.html), sourceUrl: captures[0]?.url ?? '', runtime: 'rendered' }) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error ?? 'generate-draft failed');
+  return j;
+}
+
 /**
  * Normalize a domain string for matching:
  * lowercase, trim, strip leading www.
@@ -546,6 +563,20 @@ export function useProfileBuilderController(
     }
   }, [state.snapshot, state.draft.productUrl, state.draft.runtime]);
 
+  const generateDraftFromSuite = useCallback(async (suiteUrls: string[]) => {
+    if (suiteUrls.length === 0) return;
+    const urls = suiteUrls.slice(0, 3);
+    dispatch({ type: 'selectorGenerationStarted', payload: { htmlRef: urls[0], requestedFieldKeys: [] } });
+    try {
+      const captures = await fetchSuiteCaptures(urls);
+      const suiteRes = await postGenerateDraft(captures, state.draft.domain);
+      dispatch({ type: 'selectorGenerationSucceeded', payload: suiteRes });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Suite draft failed';
+      dispatch({ type: 'selectorGenerationFailed', payload: { code: 'SUITE_FAILED', message: msg, retryable: true } });
+    }
+  }, [state.draft.domain]);
+
   const acceptSelectorSuggestion = useCallback((fieldKey: string) => {
     dispatch({ type: 'selectorSuggestionAccepted', payload: { fieldKey } });
   }, []);
@@ -592,6 +623,7 @@ export function useProfileBuilderController(
       saveProfile,
       resetDraft,
       generateSelectors,
+      generateDraftFromSuite,
       acceptSelectorSuggestion,
       rejectSelectorSuggestion,
       acceptCustomFieldSuggestion,
@@ -619,6 +651,7 @@ export function useProfileBuilderController(
       saveProfile,
       resetDraft,
       generateSelectors,
+      generateDraftFromSuite,
       acceptSelectorSuggestion,
       rejectSelectorSuggestion,
       acceptCustomFieldSuggestion,
