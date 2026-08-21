@@ -1,6 +1,6 @@
 // story: e07s04 — POST /api/domains/:domain/profile/activate (cluster-aware fail-closed, deterministic release)
 import { Hono } from 'hono';
-import { getVersionById, setActiveVersion, createVersion } from '../../db/repositories/profile-version-repo';
+import { getVersionById, setActiveVersion, createVersion, listVersions } from '../../db/repositories/profile-version-repo';
 import { getMatrixResult } from '../../onboarding/profile-test-matrix';
 import { evaluateGate } from '../../onboarding/profile-activation-gate';
 import { getSuiteSuggestion } from '../../onboarding/suite-suggestion-service';
@@ -8,6 +8,11 @@ import { getDb } from '../../db/connection';
 import { hasValidWaiver } from '../../db/repositories/waiver-repo';
 
 export const profileActivationRoutes = new Hono();
+
+profileActivationRoutes.get('/domains/:domain/profile/versions', (c) => {
+  const domain = (c.req.param('domain') ?? '').toLowerCase().replace(/^www\./, '').trim();
+  try { return c.json(listVersions(domain)); } catch { return c.json([]); }
+});
 
 profileActivationRoutes.post('/profile-versions', async (c) => {
   const body = await c.req.json().catch(() => ({})) as any;

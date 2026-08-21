@@ -54,11 +54,13 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
 
   const suiteConfirmed = suiteResp?.suite.length ?? 0;
   const evidencePass = !!state?.testsPassEvidence && state.testsPassEvidence.artifactHashes.length >= 3;
+  // hasDraft = pending draft version exists, not activeVersion (fixes conflation)
+  const hasDraft = !!draftVersionId;
   const readiness = state
     ? deriveReadinessState({
         hasProfile: state.hasProfile,
         hasIndex: state.productCount > 0,
-        hasDraft: !!state.activeVersion,
+        hasDraft,
         confirmedCount: suiteConfirmed,
         testsPass: evidencePass && suiteConfirmed >= 3 && state.activeVersion === state.testsPassEvidence?.versionId,
         isActive: !!state.activeVersion && evidencePass,
@@ -117,6 +119,40 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
     const el = document.querySelector(`[data-field="${field}"]`) as HTMLElement | null;
     el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, []);
+
+  const [activateState, setActivateState] = useState<{ loading: boolean; blocker: string | null; reviseField: string | null }>({ loading: false, blocker: null, reviseField: null });
+  const [versionHistory, setVersionHistory] = useState<Array<{ id: string; version: number; approver: string; reason: string; provenance: { provider: string; model: string }; artifactHashes: string[]; createdAt: string }>>([]);
+  const [selectedCell, setSelectedCell] = useState<{ field: string; sampleId: string } | null>(null);
+
+  const fetchHistory = useCallback(async (): Promise<void> => {
+    try {
+      const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/versions`);
+      if (!r.ok) return;
+      const j = await r.json() as typeof versionHistory;
+      setVersionHistory(j);
+    } catch {}
+  }, [domain]);
+  useEffect(() => { void fetchHistory(); }, [fetchHistory]);
+
+  const handleActivate = useCallback(async (): Promise<void> => {
+    if (!draftVersionId) return;
+    setActivateState({ loading: true, blocker: null, reviseField: null });
+    try {
+      const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/activate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ versionId: draftVersionId }),
+      });
+      const j = await r.json() as { allowed?: boolean; blockReason?: string; reviseAction?: string; reason?: string };
+      if (!r.ok || !j.allowed) {
+        const field = j.reviseAction?.match(/Revise (\w+)/)?.[1] ?? null;
+        setActivateState({ loading: false, blocker: j.blockReason ?? j.reason ?? 'Activation blocked', reviseField: field });
+        if (field) handleRevise(field);
+        return;
+      }
+      setActivateState({ loading: false, blocker: null, reviseField: null });
+      await fetchState();
+      await fetchHistory();
+    } catch (e) { setActivateState({ loading: false, blocker: String(e), reviseField: null }); }
+  }, [domain, draftVersionId, handleRevise]);
 
   const handlePick = useCallback(async (url: string): Promise<void> => {
     setCaptureStatus(`Adding ${url} to suite…`);
@@ -206,8 +242,25 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
               {matrixLoading ? 'Running…' : 'Run Tests'}
             </button>
           </div>
-          <TestMatrix result={matrixResult} loading={matrixLoading} error={matrixError} onRevise={handleRevise} />
-          <HistoryShell />
+          <TestMatrix result={matrixResult} loading={matrixLoading} error={matrixError} onRevise={handleRevise} onSelectCell={setSelectedCell} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 'var(--space-2)', padding: '12px 16px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)' }}>
+            <div style={{ fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 600, color: readiness.overall === 'Ready for approval' ? 'var(--color-uniform-green)' : 'var(--color-mulch-brown)' }}>
+              {readiness.overall === 'Ready for approval' ? 'Ready to activate' : `Not ready — ${readiness.overall}`}
+            </div>
+            <button type="button" onClick={() => void handleActivate()} disabled={activateState.loading || readiness.overall !== 'Ready for approval'} style={{ marginLeft: 'auto', padding: '8px 16px', borderRadius: 'var(--rounded-md, 6px)', border: '1px solid var(--color-uniform-green)', background: readiness.overall === 'Ready for approval' ? 'var(--color-uniform-green)' : 'var(--color-feed-bag-cream)', color: readiness.overall === 'Ready for approval' ? 'var(--color-feed-bag-cream)' : 'var(--color-mulch-brown)', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 700, cursor: readiness.overall === 'Ready for approval' ? 'pointer' : 'not-allowed', opacity: activateState.loading ? 0.7 : 1 }}>
+              {activateState.loading ? 'Activating…' : 'Activate'}
+            </button>
+          </div>
+          {activateState.blocker && (
+            <div role="alert" style={{ padding: '8px 12px', borderRadius: 'var(--rounded-md, 6px)', border: '1px solid var(--color-signet-burgundy)', background: '#fee2e2', color: '#991b1b', fontFamily: 'var(--font-body)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span>{activateState.blocker}</span>
+              {activateState.reviseField && <button type="button" onClick={() => handleRevise(activateState.reviseField!)} style={{ marginLeft: 'auto', padding: '4px 10px', borderRadius: 999, border: '1px solid var(--color-signet-burgundy)', background: 'white', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Revise {activateState.reviseField}</button>}
+            </div>
+          )}
+          <details open style={{ marginTop: 'var(--space-2)', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)' }}>
+            <summary style={{ cursor: 'pointer', fontFamily: 'var(--font-display)', fontSize: '1rem', fontWeight: 700, color: 'var(--color-ledger-charcoal)' }}>History — {versionHistory.length} versions</summary>
+            <div style={{ marginTop: 'var(--space-2)' }}><HistoryShell versions={versionHistory} /></div>
+          </details>
           {returnPath ? (
             <a href={returnPath} onClick={(e) => { e.preventDefault(); window.history.pushState(null, '', returnPath); window.dispatchEvent(new PopStateEvent('popstate')); }} style={{ marginTop: 'var(--space-2)', display: 'inline-block', fontFamily: 'var(--font-body)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-uniform-green)', textDecoration: 'none', borderBottom: '1px solid var(--color-card-border)' }}>← Back</a>
           ) : (
@@ -216,7 +269,14 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
           <div style={{ marginTop: 'var(--space-1)', fontSize: 11, color: 'var(--color-mulch-brown)', fontFamily: 'var(--font-mono)', letterSpacing: '0.02em', fontVariantNumeric: 'tabular-nums' }}>Path: {getProfileWorkspacePath(domain, returnPath ?? undefined)}</div>
         </div>
         <div style={{ gridColumn: '10 / span 3' }}>
-          <div style={{ position: 'sticky', top: 16 }}><EvidenceRail capture={captureArtifact} /></div>
+          <div style={{ position: 'sticky', top: 16 }}>{(() => {
+            const cell = (() => {
+              if (!selectedCell || !matrixResult) return null;
+              for (const r of matrixResult.rows) if (r.sampleId === selectedCell.sampleId) for (const c of r.cells) if (c.field === selectedCell.field) return c;
+              return null;
+            })();
+            return <EvidenceRail capture={captureArtifact} matrixCell={cell} />;
+          })()}</div>
         </div>
       </div>
     </>

@@ -6,6 +6,7 @@ type Props = {
   loading: boolean;
   error: string | null;
   onRevise: (field: string) => void;
+  onSelectCell?: (cell: { field: string; sampleId: string } | null) => void;
 };
 
 function statusStyle(success: boolean): { bg: string; color: string; border: string } {
@@ -13,7 +14,7 @@ function statusStyle(success: boolean): { bg: string; color: string; border: str
   return { bg: 'var(--color-danger-bg)', color: 'var(--color-danger-text)', border: 'var(--color-danger-border)' };
 }
 
-export function TestMatrix({ result, loading, error, onRevise }: Props): React.ReactElement {
+export function TestMatrix({ result, loading, error, onRevise, onSelectCell }: Props): React.ReactElement {
   if (loading) {
     return <div style={{ padding: 12, fontFamily: 'var(--font-body)', fontSize: 12, color: 'var(--color-mulch-brown)' }}>Running production tests…</div>;
   }
@@ -48,7 +49,7 @@ export function TestMatrix({ result, loading, error, onRevise }: Props): React.R
                     <div style={{ fontWeight: 600, color: 'var(--color-ledger-charcoal)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.sampleUrl}</div>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.sampleId.slice(0, 32)}</div>
                   </td>
-                  <td style={{ padding: '10px 12px', borderBottom: '1px solid var(--color-card-border)', verticalAlign: 'top' }}>
+                  <td style={{ padding: '10px 12px', borderBottom: '1px solid var(--color-card-border)', verticalAlign: 'top', cursor: onSelectCell ? 'pointer' : 'default' }} onClick={() => onSelectCell?.({ field: cell.field, sampleId: row.sampleId })}>
                     <div style={{ fontWeight: 600, color: cell.success ? 'var(--color-ledger-charcoal)' : 'var(--color-danger-text)' }}>{cell.extracted ?? '—'}</div>
                     <div style={{ color: 'var(--color-mulch-brown)', fontSize: 11 }}>expected: {cell.expected}</div>
                     {cell.failureReason && <div style={{ marginTop: 4, color: 'var(--color-danger-text)', fontSize: 11 }}>{cell.failureReason}</div>}
