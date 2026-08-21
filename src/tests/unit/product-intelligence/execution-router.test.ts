@@ -2,7 +2,7 @@
  * Execution router tests (PI-1). Includes the integration-style test: a run
  * through the router with a fake executor performs zero external calls.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createExecutionRouter } from '../../../product-intelligence/execution-router';
 import { overrideProductIntelligenceFlags, resetProductIntelligenceFlagsOverride } from '../../../product-intelligence/flags';
 import { LEGACY_EXECUTOR_NAME, PI_EXECUTOR_NAME, type ProductResearchResult } from '../../../product-intelligence/contracts';
@@ -37,7 +37,15 @@ function fakePiExecutor(name = 'pi'): ProductIntelligenceExecutor {
 }
 
 describe('createExecutionRouter', () => {
-  afterEach(() => resetProductIntelligenceFlagsOverride());
+  beforeEach(() => {
+    resetProductIntelligenceFlagsOverride();
+    vi.stubEnv('BAYSTATE_CMS_PI_ENABLED', '');
+    vi.stubEnv('BAYSTATE_CMS_PRODUCT_INTELLIGENCE_ENABLED', '');
+  });
+  afterEach(() => {
+    resetProductIntelligenceFlagsOverride();
+    vi.unstubAllEnvs();
+  });
 
   it('selects the legacy executor when all flags are disabled (default)', async () => {
     const legacy = new LegacyProductIntelligenceExecutor();
@@ -127,7 +135,15 @@ describe('createExecutionRouter', () => {
 });
 
 describe('router integration with a fake executor (no external calls)', () => {
-  afterEach(() => resetProductIntelligenceFlagsOverride());
+  beforeEach(() => {
+    resetProductIntelligenceFlagsOverride();
+    vi.stubEnv('BAYSTATE_CMS_PI_ENABLED', '');
+    vi.stubEnv('BAYSTATE_CMS_PRODUCT_INTELLIGENCE_ENABLED', '');
+  });
+  afterEach(() => {
+    resetProductIntelligenceFlagsOverride();
+    vi.unstubAllEnvs();
+  });
 
   it('runs a submitted research through the router end-to-end', async () => {
     overrideProductIntelligenceFlags({ productIntelligenceEnabled: true, piEnabled: true });

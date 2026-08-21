@@ -2,7 +2,7 @@
  * Feature flag tests (PI-1): defaults are fail-closed; env parsing is strict;
  * runtime overrides work without a redeploy.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PRODUCT_INTELLIGENCE_FLAGS,
   getProductIntelligenceFlags,
@@ -62,7 +62,17 @@ describe('kill switch (PI-9)', () => {
 });
 
 describe('runtime override', () => {
-  afterEach(() => resetProductIntelligenceFlagsOverride());
+  beforeEach(() => {
+    resetProductIntelligenceFlagsOverride();
+    // Shell has PI env enabled (BAYSTATE_CMS_PI_ENABLED=true); stub to fail-closed for this suite
+    vi.stubEnv('BAYSTATE_CMS_PI_ENABLED', '');
+    vi.stubEnv('BAYSTATE_CMS_PRODUCT_INTELLIGENCE_ENABLED', '');
+    vi.stubEnv('BAYSTATE_CMS_PI_SHADOW_ONLY', '');
+  });
+  afterEach(() => {
+    resetProductIntelligenceFlagsOverride();
+    vi.unstubAllEnvs();
+  });
 
   it('applies and clears an in-memory override without a redeploy', () => {
     expect(getProductIntelligenceFlags().piEnabled).toBe(false);
