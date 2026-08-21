@@ -6,12 +6,12 @@ tasks:
   - id: e07s03t01
     description: "Single Playwright capture per sample (DOM + screenshot + runtime + hash, networkidle+1s) replacing snapshot+fetch race; artifact replay for click"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-runner-client.test.ts"
-    status: planned
+    status: passing
   - id: e07s03t02
     description: "Click→ranked recipes (JSON-LD > [data-testid] > shopify > semantic > generic per selector-utils) with extracted-VALUE previews per field per sample + instant highlight/test"
     verify: "bunx vitest run src/tests/unit/selector-utils.test.ts src/tests/unit/profile-builder-mapping.test.ts"
-    status: planned
+    status: passing
   - id: e07s03t03
     description: "Delete GenerateSelectorPopover paste-outerHTML + independent HTML-fetch hop; local DOM eval stays labeled instant feedback only"
     verify: "bun run typecheck && grep -r GenerateSelectorPopover src/client | wc -l | grep -q '^0$' && echo ok"
-    status: planned
+    status: passing
