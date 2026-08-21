@@ -80,13 +80,20 @@ export class DefaultSourcingEngine implements SourcingEngine {
     let fallbackConns: DistributorConnection[] = [];
 
     if (preferredIds.length > 0) {
-      const byDistributorId = new Map(connections.map((c) => [c.distributorId, c]));
+      const byDistributorId = new Map<string, DistributorConnection[]>();
+      for (const c of connections) {
+        const list = byDistributorId.get(c.distributorId) ?? [];
+        list.push(c);
+        byDistributorId.set(c.distributorId, list);
+      }
       const seen = new Set<string>();
       for (const distributorId of preferredIds) {
-        const connection = byDistributorId.get(distributorId);
-        if (connection && !seen.has(connection.id)) {
-          preferredConns.push(connection);
-          seen.add(connection.id);
+        const conns = byDistributorId.get(distributorId) ?? [];
+        for (const conn of conns) {
+          if (!seen.has(conn.id)) {
+            preferredConns.push(conn);
+            seen.add(conn.id);
+          }
         }
       }
       fallbackConns = connections.filter((c) => !seen.has(c.id));
@@ -118,7 +125,7 @@ export class DefaultSourcingEngine implements SourcingEngine {
       for (const result of resultsPref) {
         if (result.kind === 'attempt') {
           attempts.push(result.summary);
-          if (result.summary.outcome === 'found') {
+          if (result.summary.outcome === 'found' && (result as { qualified?: boolean }).qualified) {
             foundMatch = true;
           }
         } else {
@@ -256,6 +263,7 @@ export class DefaultSourcingEngine implements SourcingEngine {
     }
 
     const outcome: EvidenceLookupOutcome = validated && !invalidReason ? validated.outcome : 'source_error';
+    const qualified = validated?.outcome === 'found' && !!validated.record.name?.trim();
     const summary: SourcingGenerationAttemptSummary = {
       attemptId: '',
       connectionId: connection.id,
@@ -318,7 +326,7 @@ export class DefaultSourcingEngine implements SourcingEngine {
     summary.matchedIdentifier = identity?.matchedIdentifier ?? null;
     summary.errorCode = validated?.outcome === 'source_error' ? validated.code : invalidReason;
 
-    return { kind: 'attempt', summary };
+    return { kind: 'attempt', summary, qualified } as { kind: 'attempt'; summary: SourcingGenerationAttemptSummary; qualified: boolean };
   }
 
   /** Persist a bounded durable source_error attempt (skipped connections are still durable). */
@@ -366,14 +374,21 @@ function orderByBrandPreference(
   const preferred = getPreferredDistributorOrder(workspaceId, brand);
   if (!preferred || preferred.length === 0) return connections;
 
-  const byDistributorId = new Map(connections.map((c) => [c.distributorId, c]));
+  const byDistributorId = new Map<string, DistributorConnection[]>();
+  for (const c of connections) {
+    const list = byDistributorId.get(c.distributorId) ?? [];
+    list.push(c);
+    byDistributorId.set(c.distributorId, list);
+  }
   const preferredOrder: DistributorConnection[] = [];
   const seen = new Set<string>();
   for (const distributorId of preferred) {
-    const connection = byDistributorId.get(distributorId);
-    if (connection && !seen.has(connection.id)) {
-      preferredOrder.push(connection);
-      seen.add(connection.id);
+    const conns = byDistributorId.get(distributorId) ?? [];
+    for (const conn of conns) {
+      if (!seen.has(conn.id)) {
+        preferredOrder.push(conn);
+        seen.add(conn.id);
+      }
     }
   }
   const rest = connections.filter((c) => !seen.has(c.id));

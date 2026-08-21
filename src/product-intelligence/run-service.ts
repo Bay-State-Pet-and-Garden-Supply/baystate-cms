@@ -14,8 +14,6 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/19
  */
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
 import { createRequire } from 'node:module';
 import {
   PI_EXECUTOR_NAME,
@@ -44,9 +42,8 @@ import { PolicyDeniedError } from './policy';
 import { appendPiEvent, completePiStep, completePiToolCall, createPiRun, deletePiRunsOlderThan, getPiAssetsByIds, getPiResult, getPiRun, insertPiAsset, insertPiComparison, insertPiConflict, insertPiEvidence, insertPiResult, insertPiSource, insertPiStep, insertPiToolCall, latestPiEventSequence, listPiAssetsByRun, listPiComparisons, listPiConflicts, listPiEvents, listPiEvidence, listPiEvidenceByToolEvidenceId, listPiSources, listPiToolCalls, transitionPiRunStatus, type PiComparisonRow, type PiConflictRow, type PiEvidenceRow, type PiResultRow, type PiRunRow, type PiSourceRow, type PiToolCallRow } from '../db/repositories/product-intelligence-repo';
 import { sha256Hex } from '../shared/stable-id';
 import { verifyPolicySnapshot, assertReducingOverride, computePolicyConfigId } from './policy';
-import { buildResearchPrompt } from './pi/pi-prompt-builder';
 import { compileAgentPrompt } from './pi/compiled-prompt-builder';
-import { ensureBaselineVersion, getActiveVersion, getVersionSnapshot } from '../db/repositories/agent-version-repo';
+import { ensureBaselineVersion, getVersionSnapshot } from '../db/repositories/agent-version-repo';
 import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
 import type { BundleImageCandidate } from './workflow/bundle';

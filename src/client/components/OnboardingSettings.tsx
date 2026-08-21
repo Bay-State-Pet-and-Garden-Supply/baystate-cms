@@ -20,6 +20,7 @@ import { ViewHeader } from './common/ViewHeader';
 import { colors } from '../theme';
 import { DistributorConnectionsPanel } from './onboarding-settings/DistributorConnectionsPanel';
 import { SitemapHealthView } from './sitemap-health/SitemapHealthView';
+import { BrandStrategyView } from './brand-strategy/BrandStrategyView';
 import { primaryOnboardingSettingsTabs, resolveOnboardingSettingsTab } from './onboarding-settings/tabRegistry';
 import type { OnboardingSettingsTabId } from './onboarding-settings/tabRegistry';
 import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDomain';
@@ -767,13 +768,13 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       <div style={{ display: settingsTab === 'brands' ? 'block' : 'none' }}>
         <div style={{ marginBottom: 16 }}>
           <h2 style={{ fontSize: 20, fontWeight: 600, margin: '0 0 8px', color: '#111827' }}>
-            Brands — Domain Sitemap & Profile Hub
+            Brands & Sourcing Strategy Hub
           </h2>
           <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>
-            Unified brand domains — sitemap inventory alongside extractor profile status. Shared domain normalization; legacy profiles/sitemaps alias here.
+            Unified brand strategy — sourcing tier, official domain & sitemap health, and governed extractor readiness. Distributor-only brands surface as profile bypass eligible.
           </p>
         </div>
-        <SitemapHealthView onEditProfile={(domain) => navigateToProfileWorkspace(domain)} />
+        <BrandStrategyView />
       </div>
 
       <div style={{ display: settingsTab === 'distributors' ? 'block' : 'none' }}>
@@ -782,7 +783,8 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           Distributors
         </h2>
         <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 20px' }}>
-          Distributor connections and advisory brand profiles for the Sourcing stage (ADR 0014).
+          Connection infrastructure for Sourcing (ADR 0014) — brand routing moved to{' '}
+          <strong>Settings → Brands</strong>.
         </p>
         <DistributorConnectionsPanel engineEnabled={sourcingEngineEnabled} />
       </div>

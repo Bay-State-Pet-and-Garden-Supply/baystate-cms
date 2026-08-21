@@ -1355,6 +1355,7 @@ export interface BrandProfileView {
   brand: string;
   aliases: string[];
   preferredDistributorIds: string[];
+  sourcingPolicy: SourcingPolicy;
 }
 
 export type OnboardingConflictView = import('../shared/schemas/distributor').OnboardingEvidenceConflict;
@@ -1407,6 +1408,7 @@ export async function upsertBrandProfile(body: {
   brand: string;
   aliases?: string[];
   preferredDistributorIds?: string[];
+  sourcingPolicy?: SourcingPolicy;
 }): Promise<{ profile: BrandProfileView }> {
   return request<{ profile: BrandProfileView }>('/settings/brand-profiles', {
     method: 'POST',
@@ -1550,6 +1552,10 @@ export async function deleteSitemapDomain(
       method: 'DELETE',
     },
   );
+}
+
+export async function getBrandStrategies(): Promise<{ strategies: import('../shared/schemas/brand-strategy').BrandStrategy[] }> {
+  return request(`/brands/strategy`);
 }
 
 

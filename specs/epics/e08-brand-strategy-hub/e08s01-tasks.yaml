@@ -13,7 +13,7 @@ tasks:
       categories: ["Brand Strategy", "API"]
   - id: e08s01t02
     description: "Render minimal BrandStrategyView in Brands tab: Brand Identity + aliases (advisory), Sourcing tier as Preferred/Fallback tier pills (not sequential [1]->[2]), Official Domain column with 'No official site configured' and distributor-only rows as 'Profile bypass eligible when distributor evidence qualifies', plus explicit unmatched/ambiguous rows"
-    verify: "bunx vitest run src/tests/unit/brand-strategy-view.test.tsx src/tests/unit/onboarding-settings.test.tsx"
+    verify: "bunx vitest run src/tests/unit/brand-strategy-view.test.ts"
     risk: P0
     status: failing
     allure:
@@ -21,7 +21,7 @@ tasks:
       categories: ["Brand Strategy", "UI"]
   - id: e08s01t03
     description: "Add server singleton-workspace guard and normalized-brand contract tests (brand-site-repo lower+trim vs advisory verbatim vs runtime case-insensitive); add global retailer denylist page-level banner read-only (not per-row)"
-    verify: "bunx vitest run src/tests/unit/brand-strategy-view-model.test.ts src/tests/unit/distributor-repo.test.ts"
+    verify: "bunx vitest run src/tests/unit/workspace-singleton.test.ts src/tests/unit/brand-strategy-view.test.ts"
     risk: P1
     status: failing
     allure:

@@ -4,11 +4,7 @@ import {
   createDistributorConnection,
   updateDistributorConnection,
   getDistributors,
-  getBrandProfiles,
-  upsertBrandProfile,
-  deleteBrandProfile,
   type DistributorConnectionView,
-  type BrandProfileView,
 } from '../../onboarding-api';
 
 const styles: Record<string, React.CSSProperties> = {
@@ -64,36 +60,22 @@ const styles: Record<string, React.CSSProperties> = {
 
 const CONNECTOR_TYPES = ['api', 'ftp_catalog', 'csv', 'html_scraper', 'legacy_adapter'] as const;
 
-/**
- * Amendment B: Distributor Scraper (`html_scraper`) connections use
- * code-fixed storefront URLs, origins, selectors, login flows, and proxy
- * policy — there is no runtime override surface. When selected, the create
- * form hides the generic base-URL override and shows this explanation.
- */
 const HTML_SCRAPER_FIXED_CONFIG_NOTE =
   'Distributor Scrapers use code-fixed storefront URL, origins, selectors, login flow, and proxy policy — no base-URL override is offered.';
 
 interface Props {
-  /** Engine capability flag from /onboarding/capabilities. */
   engineEnabled: boolean;
-  /** Amendment A: stable non-secret configuration reason (shown in the banner). */
   configurationReason?: string | null;
-  /** Test seam: render the create form open (default false). */
   initiallyOpen?: boolean;
-  /** Test seam: render connections from props instead of fetching. */
   initialConnections?: DistributorConnectionView[];
-  /** Test seam: render the enable-confirmation step for this connection id. */
   initiallyConfirmingId?: string | null;
 }
 
 /**
- * Distributor connections + advisory brand profiles settings surface (ADR
- * 0014). Connections store only a `secret_ref` (an opaque reference to an
- * env var or api_keys service) — raw credentials never appear here. The
- * server reports `secretConfigured`; the reference itself is masked.
- *
- * Amendment A: connections are ALWAYS created disabled; enabling is a
- * separate explicit PATCH after fixture/credential/health checks.
+ * Distributor connections infrastructure panel (ADR 0014).
+ * Advisory brand routing has been moved to the Brands & Sourcing Strategy Hub
+ * (e08s03 parity-gated cleanup) — this surface now shows only connection
+ * CRUD + health/enable + secretConfigured. Brand routing moved to Settings → Brands.
  */
 export function DistributorConnectionsPanel({
   engineEnabled,
@@ -104,11 +86,9 @@ export function DistributorConnectionsPanel({
 }: Props) {
   const [connections, setConnections] = useState<DistributorConnectionView[]>(initialConnections);
   const [distributors, setDistributors] = useState<Array<{ id: string; name: string; status: string }>>([]);
-  const [profiles, setProfiles] = useState<BrandProfileView[]>([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  // Create form state
   const [showForm, setShowForm] = useState(initiallyOpen);
   const [distributorId, setDistributorId] = useState('');
   const [connectorType, setConnectorType] = useState<string>('api');
@@ -116,26 +96,16 @@ export function DistributorConnectionsPanel({
   const [baseUrl, setBaseUrl] = useState('');
   const [configJson, setConfigJson] = useState('');
   const [authorityJson, setAuthorityJson] = useState('');
-  const [newBrand, setNewBrand] = useState('');
-  const [newAliases, setNewAliases] = useState('');
-  const [newPreferred, setNewPreferred] = useState('');
-  // Per-card edit state
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editConfigJson, setEditConfigJson] = useState('');
   const [editAuthorityJson, setEditAuthorityJson] = useState('');
-  // Amendment A: enable confirmation step (separate explicit PATCH).
   const [confirmingEnableId, setConfirmingEnableId] = useState<string | null>(initiallyConfirmingId);
 
   async function refresh() {
     try {
-      const [conns, dists, brands] = await Promise.all([
-        getDistributorConnections(),
-        getDistributors(),
-        getBrandProfiles(),
-      ]);
+      const [conns, dists] = await Promise.all([getDistributorConnections(), getDistributors()]);
       setConnections(conns.connections);
       setDistributors(dists.distributors);
-      setProfiles(brands.profiles);
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load distributor settings');
@@ -152,13 +122,9 @@ export function DistributorConnectionsPanel({
     try {
       const configuration: Record<string, unknown> = {};
       if (baseUrl.trim()) configuration.baseUrl = baseUrl.trim();
-      if (configJson.trim()) {
-        Object.assign(configuration, JSON.parse(configJson) as Record<string, unknown>);
-      }
+      if (configJson.trim()) Object.assign(configuration, JSON.parse(configJson) as Record<string, unknown>);
       let authorityPolicy: Record<string, unknown> | undefined;
-      if (authorityJson.trim()) {
-        authorityPolicy = JSON.parse(authorityJson) as Record<string, unknown>;
-      }
+      if (authorityJson.trim()) authorityPolicy = JSON.parse(authorityJson) as Record<string, unknown>;
       await createDistributorConnection({
         distributorId,
         connectorType: connectorType as DistributorConnectionView['connectorType'],
@@ -220,41 +186,14 @@ export function DistributorConnectionsPanel({
     }
   }
 
-  async function handleUpsertProfile(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newBrand.trim()) return;
-    try {
-      await upsertBrandProfile({
-        brand: newBrand.trim(),
-        aliases: newAliases.split(',').map((s) => s.trim()).filter(Boolean),
-        preferredDistributorIds: newPreferred.split(',').map((s) => s.trim()).filter(Boolean),
-      });
-      setNewBrand('');
-      setNewAliases('');
-      setNewPreferred('');
-      await refresh();
-    } catch (e2) {
-      setError(e2 instanceof Error ? e2.message : 'Failed to save brand profile');
-    }
-  }
-
-  async function handleDeleteProfile(brand: string) {
-    try {
-      await deleteBrandProfile(brand);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete brand profile');
-    }
-  }
-
   return (
     <div>
       {!engineEnabled && (
         <div style={styles.banner}>
           ⚠ Sourcing engine is <strong>disabled</strong> —{' '}
           {configurationReason ? `${configurationReason}. ` : 'distributor lookups do not run. '}
-          Connections can still be configured here (the capability flag{' '}
-          <code>BAYSTATE_CMS_SOURCING_ENABLED</code> must be enabled for the worker to use them).
+          Connections can still be configured here (the capability flag <code>BAYSTATE_CMS_SOURCING_ENABLED</code> must be
+          enabled for the worker to use them).
         </div>
       )}
 
@@ -341,8 +280,7 @@ export function DistributorConnectionsPanel({
             </div>
             <div style={styles.hint}>Raw credentials are never stored — only a reference is saved and resolved server-side.</div>
             <div style={styles.hint}>
-              Connections are created <strong>disabled</strong> and activated only after fixture,
-              credential, and health checks pass.
+              Connections are created <strong>disabled</strong> and activated only after fixture, credential, and health checks pass.
             </div>
             <div style={{ marginTop: 10 }}>
               <button type="submit" style={styles.button}>
@@ -373,22 +311,16 @@ export function DistributorConnectionsPanel({
               <span
                 style={{
                   ...styles.badge,
-                  background: conn.secretRequired
-                    ? conn.secretConfigured ? '#d1e7dd' : '#f8d7da'
-                    : '#e9ecef',
-                  color: conn.secretRequired
-                    ? conn.secretConfigured ? '#0f5132' : '#721c24'
-                    : '#495057',
+                  background: conn.secretRequired ? (conn.secretConfigured ? '#d1e7dd' : '#f8d7da') : '#e9ecef',
+                  color: conn.secretRequired ? (conn.secretConfigured ? '#0f5132' : '#721c24') : '#495057',
                 }}
               >
-                {conn.secretRequired
-                  ? conn.secretConfigured ? 'secret configured' : 'secret missing'
-                  : 'no secret required'}
+                {conn.secretRequired ? (conn.secretConfigured ? 'secret configured' : 'secret missing') : 'no secret required'}
               </span>
             </div>
             <div style={styles.hint}>
-              Base URL: {typeof conn.configuration?.baseUrl === 'string' ? conn.configuration.baseUrl : '(default)'} ·{' '}
-              Created {new Date(conn.createdAt).toLocaleString()}
+              Base URL: {typeof conn.configuration?.baseUrl === 'string' ? conn.configuration.baseUrl : '(default)'} · Created{' '}
+              {new Date(conn.createdAt).toLocaleString()}
             </div>
             {editingId === conn.id && (
               <div style={{ marginTop: 8 }}>
@@ -444,9 +376,7 @@ export function DistributorConnectionsPanel({
                   color: '#664d03',
                 }}
               >
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  ⚠ Enable this connection for distributor lookups?
-                </div>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠ Enable this connection for distributor lookups?</div>
                 Verify fixture, credential, and health checks completed before activating.
                 <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
                   <button style={styles.button} onClick={() => handleConfirmEnable(conn)}>
@@ -460,48 +390,9 @@ export function DistributorConnectionsPanel({
             )}
           </div>
         ))}
-      </div>
-
-      <div style={styles.section}>
-        <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>Advisory Brand Profiles</h3>
-        <form onSubmit={handleUpsertProfile} style={styles.card}>
-          <div style={styles.row}>
-            <span style={styles.label}>Brand</span>
-            <input style={styles.input} placeholder="Nutro" value={newBrand} onChange={(e) => setNewBrand(e.target.value)} />
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Aliases</span>
-            <input style={styles.input} placeholder="nutro, nutro max (comma separated)" value={newAliases} onChange={(e) => setNewAliases(e.target.value)} />
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Preferred order</span>
-            <input style={styles.input} placeholder="phillips, bci (comma separated)" value={newPreferred} onChange={(e) => setNewPreferred(e.target.value)} />
-          </div>
-          <div style={styles.hint}>Advisory only — a missing profile never blocks lookups and never implies not_stocked.</div>
-          <div style={{ marginTop: 10 }}>
-            <button type="submit" style={styles.button}>
-              Save profile
-            </button>
-          </div>
-        </form>
-
-        {profiles.length === 0 && <div style={{ color: '#6c757d', fontSize: 13 }}>No brand profiles configured.</div>}
-        {profiles.map((p) => (
-          <div key={p.id} style={styles.card}>
-            <div style={styles.row}>
-              <strong style={{ fontSize: 14 }}>{p.brand}</strong>
-              <span style={{ fontSize: 12, color: '#6c757d' }}>
-                {p.aliases.length > 0 ? `aliases: ${p.aliases.join(', ')}` : 'no aliases'} · order:{' '}
-                {p.preferredDistributorIds.length > 0 ? p.preferredDistributorIds.join(' → ') : '(fall-open)'}
-              </span>
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <button style={styles.dangerButton} onClick={() => handleDeleteProfile(p.brand)}>
-                Delete
-              </button>
-            </div>
-          </div>
-        ))}
+        <div style={{ ...styles.hint, marginTop: 12, fontStyle: 'italic' }}>
+          Brand routing moved to <strong>Settings → Brands</strong> (Brands & Sourcing Strategy Hub).
+        </div>
       </div>
     </div>
   );

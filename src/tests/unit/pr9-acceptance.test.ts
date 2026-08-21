@@ -622,6 +622,12 @@ function decideAllProposals(item: OnboardingItem): void {
 }
 
 describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract, member-local profile, migration test (issue #30)', () => {
+  afterEach(() => {
+    resetCohortCurationFlagsOverride();
+    clearCohortCoordinationCache();
+    clearCohortPageCoordinationCache();
+  });
+
   it('coherent cohort => PASS + review-ready (all members semanticValidation passed; the review gate passes a decided member)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
@@ -968,6 +974,8 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
       rows: Array<{ itemId: string; curationJson: string; parsed: Record<string, unknown> }>;
       events: Array<{ itemId: string; data: Record<string, unknown> }>;
     }> => {
+      clearCohortCoordinationCache();
+      clearCohortPageCoordinationCache();
       const { workspaceId, workspacePath: wsPath } = newWorkspace();
       const { items } = prepareActiveV2Workspace(workspaceId, wsPath, {
         '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Acme' }),
@@ -1090,6 +1098,12 @@ function r2CoherentMember(overrides: Record<string, unknown> = {}) {
 }
 
 describe('PR9 review R2 — active review authority gate + coordinated correspondence + canonical Brand identity (issue #30)', () => {
+  afterEach(() => {
+    resetCohortCurationFlagsOverride();
+    clearCohortCoordinationCache();
+    clearCohortPageCoordinationCache();
+  });
+
   it('R2-A: a completed cohort child is NOT reviewable while its parent is running (parent_not_completed)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
