@@ -1,0 +1,30 @@
+story_id: e08s02
+title: "Vertical management slice — Advisory editor moved into Hub + enrichment"
+status: planned
+bcps: 8
+depends_on: e08s01
+tasks:
+  - id: e08s02t01
+    description: "Move Advisory Brand Profiles editor into Brands Hub (create/edit/delete brand strategy rows); fix distributor-routes to include sourcingPolicy in responses and accept it on create/update; fix onboarding-api client to send/receive sourcingPolicy (advisory | preferred_then_fallback | preferred_only)"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/distributor-routes.test.ts src/tests/unit/distributor-repo.test.ts"
+    risk: P0
+    status: failing
+    allure:
+      severity: critical
+      categories: ["Brand Strategy", "API"]
+  - id: e08s02t02
+    description: "Enrich BrandStrategyView rows with sitemap health drill-in (counts/freshness/last refresh via sitemap-inventory-service) and governed extraction readiness (domain-profile-state active version + evidence) plus per-row link to Profile Workspace at /settings/domains/:domain/profile; depends on e07s04 readiness contract"
+    verify: "bunx vitest run src/tests/unit/brand-strategy-view.test.tsx src/tests/unit/sitemap-inventory.test.ts"
+    risk: P1
+    status: failing
+    allure:
+      severity: high
+      categories: ["Brand Strategy", "UI"]
+  - id: e08s02t03
+    description: "Add engine org-fanout conformance fix: distributor organization preference fans out to ALL enabled connections per distributor (not single Map entry), with dual-connector (phillips + phillips_storefront) regression test; document tiered-concurrent Preferred/Fallback semantics in UI copy as 'Preferred tier / Fallback tier'"
+    verify: "bunx vitest run src/tests/unit/sourcing-engine.test.ts src/tests/unit/sourcing-engine-dual-connector.test.ts"
+    risk: P0
+    status: failing
+    allure:
+      severity: critical
+      categories: ["Sourcing", "Correctness"]

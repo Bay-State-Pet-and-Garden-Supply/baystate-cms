@@ -1,0 +1,22 @@
+story_id: e08s03
+title: "Parity-gated cleanup — Distributors infra-only and tab routing"
+status: planned
+bcps: 3
+depends_on: e08s02
+tasks:
+  - id: e08s03t01
+    description: "Remove Advisory Brand Profiles form from DistributorConnectionsPanel only after e08s02 proves create/edit/delete parity in Brands Hub; keep only connector CRUD + health/enable + secretConfigured, update empty-state copy to point to Brands tab"
+    verify: "bunx vitest run src/tests/unit/distributor-connections-panel.test.tsx"
+    risk: P1
+    status: failing
+    allure:
+      severity: high
+      categories: ["Brand Strategy", "Cleanup"]
+  - id: e08s03t02
+    description: "Finalize OnboardingSettings tabRegistry copy/routing: Brands = Strategy Hub, Sitemaps = raw inventory, Distributors = Connection Infrastructure; enforce single-store global singleton workspace selection, fail-closed diagnostic if multiple legacy workspaces found; keep domain normalization single-point"
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/tab-registry.test.ts src/tests/unit/onboarding-settings.test.tsx"
+    risk: P2
+    status: failing
+    allure:
+      severity: normal
+      categories: ["Brand Strategy", "UI"]

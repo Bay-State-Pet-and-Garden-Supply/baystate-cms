@@ -50,6 +50,12 @@ epics:
     bcps: 29
     capsule_dir: epics/e07-template-aware-workbench
     status: planned
+  - id: e08
+    title: "Brand Sourcing, Discovery & Extraction Strategy Hub — unified aggregation, Brands Master Grid, and Distributors infra-only cleanup"
+    wsjf: 13
+    bcps: 19
+    capsule_dir: epics/e08-brand-strategy-hub
+    status: planned
   - id: e00
     title: Bootstrap — bigpowers scaffolding
     wsjf: 0

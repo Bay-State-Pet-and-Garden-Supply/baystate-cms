@@ -1,45 +1,49 @@
 # specs/planning-context.yaml — written by elaborate-spec; consumed by scope-work and slice-tasks
-feature_name: "Template-aware Sitemap Profile Workbench"
+feature_name: "Brand Sourcing, Discovery & Extraction Strategy Hub"
 problem_statement: >
-  The current Profile Builder models extraction as editing a bag of CSS selectors
-  for a single page (SelectorInput + paste-outerHTML + advisory DOMParser eval).
-  Sitemap product pages are templated — a domain has 1..N product templates
-  (path + DOM structure) sharing one domain profile. Operators must think in CSS
-  and manually verify across arbitrary 3 samples, with fragmented surfaces
-  (deprecated overlay, modal, inline), a two-hop snapshot/HTML race, and an
-  activation gate that only tests title. The result is high friction, brittle
-  selectors, and late discovery of template-variant failures. The workbench
-  must become a low-friction, template-aware, visually-corrected recipe learner
-  that still respects sitemap inventory, 3-sample governance, and deterministic
-  verification.
+  Onboarding settings suffers a configuration split-brain: the Brands tab is a
+  domain-keyed sitemap index (SitemapHealthView) with zero distributor visibility,
+  while the only distributor-routing config (Advisory Brand Profiles — aliases +
+  preferredDistributorIds + sourcingPolicy) is hidden at the bottom of the
+  Distributors tab below connector credentials. BatchPreflightModal already
+  configures Brand + Domain + Distributor priority in one step, but there is no
+  persistent Settings surface to inspect, tune, or audit that brand strategy before
+  the next import. ADR 0014 sourcing is default-ON (distributor_record_to_extraction
+  skips Discovery profile-free; fallback_to_discovery is tiered), and ADR 0017
+  mandates Brand Resolution decide legitimate source strategies (brand → official
+  domain | distributor_record | retailer_page). Without a brand-level strategy
+  view, distributor-only brands are invisible, and the operator cannot enforce or
+  audit per-brand legitimate sources.
 
 constraints:
-  - "brand_url_index is sole sitemap inventory (page_type=product, active=1, FTS5); not product_pages. Candidate vs Confirmed distinction mandatory; counts/freshness via sitemap-inventory-service + domain-profile-state-repo."
-  - "Domain is ownership/versioning boundary, but a domain profile VERSION may contain multiple template-specific routes (oracle-approved A). Each route = path hint + rendered-DOM fingerprint + field recipes (JSON-LD/Shopify/WooCommerce preferred, CSS fallback + transforms). URL patterns seed clustering, DOM similarity establishes identity."
-  - "Conservative template clustering (Q2 A): auto-infer clusters from path+DOM, auto-suggest representatives maximizing cluster/variant/edge coverage; operator explicitly confirms/overrides clusters and reps."
-  - "Visual correction on synchronized captured artifact (Q3 A): single browser capture per sample (DOM + screenshot + runtime + hash); click on screenshot/DOM replay maps to element metadata and ranks candidate recipes; no live remote iframe (CSP/auth/mutation). Apply + highlight/test across every confirmed sample instantly."
-  - "Authoring loop: auto-detect → inspect extracted VALUES across samples → visually correct → deterministic matrix (production static/rendered runner) → activate. Operator identifies values, system generates/ranks recipes. Raw CSS under Advanced only."
-  - "Representative invariant: 3 confirmed minimum, waiver (reason >=8 chars + actor + hash, immutable) if <3 URLs exist. Matrix must pass every confirmed sample AND every included cluster via production runner before activation. Fix testsPass debt now (Q4): derive from persisted MatrixResult evidence, not active+3; fix immutable version persistence transactionally (profile-version-repo was in-memory) before UI redesign."
-  - "Enforcement and activation gate unchanged: park official_page at Discovery→Extraction as setup_required_profile with domain task (release via onboarding-work-api), fail-closed on wrong_product/wrong_variant/imageRule, distributor_record profile-free bypass (profile-blockers.ts)."
-  - "Single workspace surface at /settings/domains/:domain/profile (inline workbench); delete deprecated ProfileBuilderWorkspace overlay, modal modes and callers in Onboarding.tsx/OnboardingSettings.tsx, GenerateSelectorPopover paste-HTML path, independent HTML-fetch hop. Local DOM eval only as labeled instant feedback, not evidence."
-  - "LLM remains closed-world advisory (profile_generation task, allowFallback false, MissingLlmTaskConfigError, disclosure badge); model confidence never activates; prompt hashes captured."
-  - "Domain normalization single point (lower+strip www+strip scheme/path at repo boundary); per-domain immutable versions + atomic active pointer; sitemap reconcile txn invariants preserved."
+  - "Aggregation view only in v1 — no new canonical brands table/migration. Hub is a read join of brand_sites + brand_advisory_profiles + extractor_profiles + brand_url_index/sitemap telemetry; writes delegate to existing repos (brand-site-repo, distributor-repo, extractor-profile-repo). brand_sites guard (first-mapping-wins) and advisory profiles stay as they are; ambiguous/unmatched brand strings are surfaced explicitly, not silently merged."
+  - "Sourcing policy enum stays as runtime implements: advisory | preferred_then_fallback | preferred_only (src/shared/schemas/distributor.ts). distributor_only and bypass_sourcing are NOT added in this epic — they would require ADR 0014 amendment and import routing changes. Distributor-only is expressed as preferred_only + 'No official site configured' (no domain), with conditional 'Profile-Free' wording for qualified distributor_record results."
+  - "Priority semantics stay tiered-concurrent as engine implements (src/onboarding/sourcing/engine.ts:75-119): preferred tier runs concurrently, fallback tier only if preferred yields no qualified distributor_record. Hub renders ordered pills but does not change to strict sequential [1]->[2]->[3]; strict sequential would raise latency and change evidence/conflict behavior."
+  - "Ranking target is distributor organization (distributorId), not provider route (connectorType+distributorId). A distributor may have multiple connectors (e.g. phillips API + phillips_storefront html_scraper per Amendment B); ranking the org fans out to all enabled connections for that distributor."
+  - "Single-store app — Hub is global, not workspace-scoped. Workspaces are deprecated; existing workspace_id columns in brand_advisory_profiles/distributor_connections are legacy read-only. No workspace-scoped migration in this epic."
+  - "Extraction readiness uses governed domain-profile-state-repo (active version + test evidence / MatrixResult), not selector-presence view-model (missing|partial|complete). Extraction is profile-free only when sourcing yields a qualified distributor_record that routes distributor_record_to_extraction; otherwise official-site extraction requires a profile."
+  - "Retailer denylist stays global code policy (src/onboarding/discovery/retailer-domain-list.ts) and is shown read-only. No per-brand retailer authority editing in this epic (deferred to ADR 0017 Phase 3). brand_url_index remains sole sitemap inventory (page_type=product, active=1)."
+  - "Scope bound to Settings UI convergence: Brands tab becomes Brand Strategy Master Grid, Distributors tab becomes pure Connection Infrastructure. BatchPreflightModal→Hub persistence, per-brand retailer edits, and Sourcing/Discovery heuristic redesign are deferred."
 
 out_of_scope:
-  - "Sourcing/Discovery heuristic redesign and distributor_record flow changes"
+  - "New canonical brands table, brand identity migration, or alias-resolution canonicalization"
+  - "Strict sequential distributor priority or new Sourcing policies (distributor_only, bypass_sourcing) and default-ON contract changes"
+  - "Per-brand retailer/approved_retailer authority editing or dynamic retailer detection (ADR 0017 Phase 2-3)"
+  - "Full BatchPreflight → Strategy Hub writeback/persistence in v1 (read-mirror first)"
+  - "Sourcing/Discovery heuristic redesign and distributor_record flow changes beyond surfacing existing routing"
   - "Full Curation/Review/Promotion overhaul beyond releasing parked items"
-  - "SKU→product_pages Category Page mapping changes"
-  - "External merchant roles/permissions beyond workspace ownership"
-  - "Open-ended chatbot UX or live-remote-iframe editing"
+  - "Workspace/merchant role/permission model reintroduction"
 
 key_decisions:
-  - decision: "Domain owns version, version routes per-template (multi-template profile). Path hint + DOM fingerprint + per-field recipes; structured data preferred, CSS fallback ranked and cross-sample verified."
-    rationale: "Oracle diagnosis: real task is learning recipes for every template, not editing selectors for one page — matches sitemap-templated discovery."
-  - decision: "Conservative auto-clustering (path + DOM similarity) with operator-confirmed reps (Q2 A) and capture-based visual correction (Q3 A)"
-    rationale: "Lowest friction that stays auditable; avoids aggressive merging and brittle live-iframe (CSP/auth). Single capture artifact eliminates snapshot/HTML race."
-  - decision: "Fix testsPass and immutable-version persistence debt in this epic (Q4)"
-    rationale: "Gate currently derives from active+3 and versions are in-memory; must be evidence-grounded and transactional before new UX ships."
-  - decision: "Replace field cards with extracted-value previews + 'Select on page' affordance; CSS under Advanced"
-    rationale: "Inverts selector-first interaction — operator points at value, system proposes recipes and verifies everywhere."
-  - decision: "Delete: ProfileBuilderWorkspace overlay, modal callers, GenerateSelectorPopover, paste-outerHTML path, independent HTML fetch. Keep local eval only as instant feedback."
-    rationale: "Removes fragmented, brittle paths per scout/oracle; leaves single workbench surface."
+  - decision: "Hub is a read aggregation (brand strategy row → sourcing tier + 0..N official domains → per-domain sitemap + governed profile readiness), not a new aggregate table"
+    rationale: "Oracle verdict: Proceed with modifications as projection delegating writes — preserves Brand→Domain boundary per ADR 0017, avoids silent joins on free-text brand names, and proves operator value in a minimal slice without migration."
+  - decision: "Keep SourcingPolicy enum as-is (advisory, preferred_then_fallback, preferred_only); represent distributor-only via preferred_only + no domain"
+    rationale: "Proposed distributor_only/bypass_sourcing do not match runtime semantics and would require ADR 0014 amendment + import routing change; v1 avoids that scope."
+  - decision: "Ranking is distributor org with tiered-concurrent execution (preferred tier concurrent, fallback tier conditional)"
+    rationale: "Matches engine.ts grouping; ordered pills communicate preference without overstating strict sequential behavior or changing latency/conflict semantics."
+  - decision: "Single-store global Hub; workspaces treated as deprecated legacy"
+    rationale: "Operator confirmed app is for one store only — no workspace-scoped leakage concern; keeps first slice global and simple."
+  - decision: "Governance: profile status from domain-profile-state-repo active version + evidence; retailer denylist global read-only"
+    rationale: "Selector-presence would conflict with CONTEXT Profile Health and e07 deterministic matrix gate; per-brand retailer edits belong to ADR 0017 Phase 3."
+  - decision: "Minimal vertical slice first: move Advisory Brand Profiles from DistributorConnectionsPanel to Brands tab; extend brand-profile API to round-trip sourcingPolicy; render per-brand tier + domains/sitemap health + governed readiness with links to existing Profile Workspace; strip Distributors tab to infrastructure only"
+    rationale: "Smallest blast radius that fixes split-brain, surfaces distributor-only brands, and exposes identity mismatches before committing to canonical brand model."

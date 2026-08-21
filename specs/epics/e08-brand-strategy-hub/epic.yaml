@@ -1,0 +1,27 @@
+id: e08
+title: "Brand Sourcing, Discovery & Extraction Strategy Hub — unified aggregation, Brands Master Grid, and Distributors infra-only cleanup"
+wsjf: 13
+total_bcps: 19
+status: planned
+delta: MODIFIED
+depends_on: e07s04
+notes: "e08 UI enrichment depends on e07 governed readiness + OnboardingSettings ownership; do not implement concurrently with e07"
+stories:
+  - id: e08s01
+    title: "Vertical audit slice — Brand Strategy projection + minimal Brands grid"
+    bcps: 8
+    status: planned
+    spec: e08s01-strategy-api.md
+    tasks: e08s01-tasks.yaml
+  - id: e08s02
+    title: "Vertical management slice — Advisory editor moved into Hub + enrichment"
+    bcps: 8
+    status: planned
+    spec: e08s02-master-grid.md
+    tasks: e08s02-tasks.yaml
+  - id: e08s03
+    title: "Parity-gated cleanup — Distributors infra-only and tab routing"
+    bcps: 3
+    status: planned
+    spec: e08s03-infra-cleanup.md
+    tasks: e08s03-tasks.yaml
