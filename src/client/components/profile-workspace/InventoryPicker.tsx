@@ -39,6 +39,7 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
   const [page, setPage] = useState(1);
   const [advancedUrl, setAdvancedUrl] = useState('');
   const [status, setStatus] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
   const clusters = (suiteResp?.clusters ?? []) as Array<{ prefix: string; count: number }>;
   const suggested = (suiteResp?.suggested ?? []) as string[];
   const confirmed = (suiteResp?.suite ?? []) as string[];
@@ -61,6 +62,13 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
 
   useEffect(() => { void fetchPicker('', '', 1); }, [fetchPicker]);
   useEffect(() => { debouncedFetch(query, cluster); }, [query, cluster, debouncedFetch]);
+  // Default to /products (or whatever product pattern is configured) — picker should only show product URLs for testing
+  useEffect(() => {
+    if (!cluster && clusters.length > 0) {
+      const productCluster = clusters.find((c) => c.prefix.includes('product')) ?? clusters[0];
+      if (productCluster) setCluster(productCluster.prefix);
+    }
+  }, [clusters, cluster]);
 
   async function handlePick(url: string): Promise<void> {
     setStatus(`Picked ${new URL(url).pathname} — confirming…`);
@@ -166,8 +174,19 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
         </div>
       )}
 
+      {!showAll && (
+        <button type="button" onClick={() => setShowAll(true)} style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--rounded-md, 6px)', border: '1px dashed var(--color-card-border)', background: 'rgba(250,249,242,0.6)', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 600, color: 'var(--color-mulch-brown)', cursor: 'pointer' }}>
+          Show all {total.toLocaleString()} pages — filtered to {cluster || '/products'} ({items.length} shown)
+        </button>
+      )}
+      {showAll && (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Search filtered pages</span>
+            <button type="button" onClick={() => setShowAll(false)} style={{ background: 'none', border: 'none', color: 'var(--color-uniform-green)', fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }}>Collapse</button>
+          </div>
       <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Search all found pages</span>
+        <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Search filtered pages</span>
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -243,6 +262,8 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
         </div>
         <div style={{ marginTop: 8, fontFamily: 'var(--font-body)', fontSize: 11, lineHeight: 1.5, color: 'var(--color-mulch-brown)' }}>Ad hoc URLs are verified and captured like any template page, but are marked ad hoc — they don’t change your confirmed suite until you confirm them.</div>
       </details>
+        </>
+      )}
     </div>
   );
 }
