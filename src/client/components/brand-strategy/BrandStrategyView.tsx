@@ -63,7 +63,7 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
   const [creating, setCreating] = useState(false);
   const [newBrandInput, setNewBrandInput] = useState('');
   const [aliasesInput, setAliasesInput] = useState('');
-  const [preferredInput, setPreferredInput] = useState('');
+  const [preferredInput, setPreferredInput] = useState<string[]>([]);
   const [policyInput, setPolicyInput] = useState<BrandStrategy['sourcingPolicy']>('preferred_then_fallback');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -94,7 +94,7 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
     setEditing(s);
     setCreating(false);
     setAliasesInput(s.aliases.join(', '));
-    setPreferredInput(s.preferredDistributorIds.join(', '));
+    setPreferredInput([...s.preferredDistributorIds]);
     setPolicyInput(s.sourcingPolicy);
     setSaveError(null);
   }
@@ -104,7 +104,7 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
     setEditing(null);
     setNewBrandInput('');
     setAliasesInput('');
-    setPreferredInput('');
+    setPreferredInput([]);
     setPolicyInput('preferred_then_fallback');
     setSaveError(null);
   }
@@ -119,7 +119,7 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
     setSaveError(null);
     try {
       const aliases = aliasesInput.split(',').map((v) => v.trim()).filter(Boolean);
-      const preferredDistributorIds = preferredInput.split(',').map((v) => v.trim()).filter(Boolean);
+      const preferredDistributorIds = [...preferredInput];
       await upsertBrandProfile({ brand: target.brandKey.trim(), aliases, preferredDistributorIds, sourcingPolicy: policyInput });
       const r = await fetch('/api/onboarding/brands/strategy');
       if (!r.ok) {
@@ -227,10 +227,33 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
                 <input value={aliasesInput} onChange={(e) => setAliasesInput(e.target.value)} style={{ width: '100%', marginTop: 4, border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontSize: 13 }} placeholder="alias1, alias2" />
                 <span style={{ fontSize: 11, color: '#6b7280' }}>Advisory only — not used for matching</span>
               </label>
-              <label style={{ fontSize: 12, color: '#374151' }}>Preferred distributors (comma-separated ids)
-                <input value={preferredInput} onChange={(e) => setPreferredInput(e.target.value)} style={{ width: '100%', marginTop: 4, border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontSize: 13 }} placeholder="phillips, bradley" />
-                {distributors.length > 0 && <span style={{ fontSize: 11, color: '#6b7280' }}>Enabled: {distributors.map((d) => d.id).join(', ')}</span>}
-              </label>
+              <div style={{ fontSize: 12, color: '#374151' }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Preferred distributors</div>
+                {distributors.length === 0 ? (
+                  <span style={{ fontSize: 11, color: '#6b7280' }}>No enabled distributors — add a connection in Distributors tab first.</span>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, border: '1px solid #d1d5db', borderRadius: 6, padding: '8px', maxHeight: 140, overflowY: 'auto', background: '#f9fafb' }}>
+                    {distributors.map((d) => (
+                      <label key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={preferredInput.includes(d.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setPreferredInput([...preferredInput, d.id]);
+                            else setPreferredInput(preferredInput.filter((id) => id !== d.id));
+                          }}
+                        />
+                        <span style={{ fontWeight: 500 }}>{d.name}</span>
+                        <span style={{ color: '#6b7280', fontSize: 11 }}>({d.id})</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {preferredInput.length === 0 && <span style={{ fontSize: 11, color: '#6b7280', marginTop: 4, display: 'block' }}>No preferred — all enabled distributors will be queried (All Enabled).</span>}
+                {preferredInput.filter((id) => !distributors.some((d) => d.id === id)).length > 0 && (
+                  <span style={{ fontSize: 11, color: '#b45309', marginTop: 4, display: 'block' }}>Stale: {preferredInput.filter((id) => !distributors.some((d) => d.id === id)).join(', ')} — no longer enabled.</span>
+                )}
+              </div>
               <label style={{ fontSize: 12, color: '#374151' }}>Sourcing policy
                 <select value={policyInput} onChange={(e) => setPolicyInput(e.target.value as BrandStrategy['sourcingPolicy'])} style={{ width: '100%', marginTop: 4, border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontSize: 13 }}>
                   <option value="advisory">advisory</option>
