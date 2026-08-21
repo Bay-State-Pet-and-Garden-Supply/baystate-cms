@@ -24,8 +24,8 @@ function hasOverride(overrides: unknown[] | undefined, key: string): boolean {
   return overrides.some((o) => (o as Record<string, string>).clusterKey === key);
 }
 
-export function SuitePanel({ domain }: { domain: string }) {
-  const [data, setData] = useState<SuiteResp | null>(null);
+export function SuitePanel({ domain, suiteResp: propSuiteResp, onRefresh: propRefresh }: { domain: string; suiteResp?: SuiteResp | null; onRefresh?: () => void | Promise<void> }) {
+  const [data, setData] = useState<SuiteResp | null>(propSuiteResp ?? null);
   const [waiverReason, setWaiverReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [waiverSuccess, setWaiverSuccess] = useState<string | null>(null);
@@ -54,8 +54,10 @@ export function SuitePanel({ domain }: { domain: string }) {
   };
 
   useEffect(() => {
+    if (propSuiteResp !== undefined) { setData(propSuiteResp); return; }
     void load();
-  }, [domain]);
+  }, [domain, propSuiteResp]);
+  useEffect(() => { if (propSuiteResp !== undefined && propSuiteResp) setData(propSuiteResp); }, [propSuiteResp]);
 
   if (!domain) return null;
   if (error)
@@ -97,7 +99,7 @@ export function SuitePanel({ domain }: { domain: string }) {
       } else {
         setWaiverSuccess(`Waiver recorded — "${waiverReason.trim()}"`);
         setWaiverReason('');
-        await load();
+        if (propRefresh) await propRefresh(); else await load();
       }
     } catch (e) {
       setError(String(e));
@@ -118,7 +120,7 @@ export function SuitePanel({ domain }: { domain: string }) {
         body: JSON.stringify({ urls, actor: 'operator' }),
       });
       if (!res.ok) setError(await res.text());
-      else await load();
+      else if (propRefresh) await propRefresh(); else await load();
     } finally {
       setSubmitting(false);
     }
@@ -135,7 +137,7 @@ export function SuitePanel({ domain }: { domain: string }) {
       if (!res.ok) setError(await res.text());
       else {
         setOverrideMsg(`${action} ${clusterKey} recorded`);
-        await load();
+        if (propRefresh) await propRefresh(); else await load();
       }
     } catch (e) {
       setError(String(e));

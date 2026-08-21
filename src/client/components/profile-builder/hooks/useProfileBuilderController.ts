@@ -218,19 +218,26 @@ export function useProfileBuilderController(
     if (seededRef.current) return;
     const url = state.draft.productUrl;
     if (!url || state.samples.length > 0) return;
-    // Wait until profiles are loaded before seeding
     if (state.requests.loadProfiles.loading) return;
     seededRef.current = true;
-    dispatch({
-      type: 'sample/add',
-      sample: {
-        id: generateId(),
-        url,
-        confirmed: true,
-        expectedName: state.draft.titleSelector || undefined,
-      },
-    });
+    dispatch({ type: 'sample/add', sample: { id: generateId(), url, confirmed: true, expectedName: state.draft.titleSelector || undefined } });
   }, [state.draft.productUrl, state.samples.length, state.requests.loadProfiles.loading]);
+
+  // e08 tracer — workspace-driven initialProductUrl / initialCapture (canonical capture per sample)
+  useEffect(() => {
+    const url = (props as unknown as { initialProductUrl?: string }).initialProductUrl;
+    if (!url || url === state.draft.productUrl) return;
+    dispatch({ type: 'productUrl/set', url });
+    seededRef.current = false;
+  }, [ (props as unknown as { initialProductUrl?: string }).initialProductUrl, state.draft.productUrl]);
+
+  useEffect(() => {
+    const cap = (props as unknown as { initialCapture?: { dom: string; screenshotBase64: string; runtime: string; hash: string; capturedAt: string; url: string } | null }).initialCapture;
+    if (!cap || !cap.dom) return;
+    if (cap.url !== state.draft.productUrl) dispatch({ type: 'productUrl/set', url: cap.url });
+    dispatch({ type: 'snapshot/succeeded', snapshot: { url: cap.url, dom: cap.dom, screenshotBase64: cap.screenshotBase64, screenshotRef: null, runtime: cap.runtime, hash: cap.hash, capturedAt: cap.capturedAt } as unknown as never });
+    dispatch({ type: 'pageHtml/set', html: cap.dom });
+  }, [ (props as unknown as { initialCapture?: unknown }).initialCapture]);
 
   // ── Domain setter ───────────────────────────────────────────────────────
   const setDomain = useCallback((domain: string) => {

@@ -3,7 +3,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { templateAwarePrefix } from '../../../onboarding/template-clustering';
 
 type PickerItem = { url: string; title: string; cluster: string; lastSeen: string };
-type Props = { domain: string; onPick: (url: string) => void };
+type SuiteRespLite = { suite: string[]; clusters?: Array<{ prefix: string; count: number }>; suggested?: string[] } | null;
+type Props = { domain: string; onPick: (url: string) => void | Promise<void>; suiteResp?: SuiteRespLite; onRefreshSuite?: () => void | Promise<void> };
 
 function debounce<T extends (...a: never[]) => void>(fn: T, ms: number): T {
   let t: ReturnType<typeof setTimeout> | null = null;
@@ -30,28 +31,17 @@ function clusterLabel(prefix: string, count: number): string {
   return `${prefix} · ${count.toLocaleString()} pages`;
 }
 
-export function InventoryPicker({ domain, onPick }: Props): React.ReactElement {
+export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.ReactElement {
   const [query, setQuery] = useState('');
   const [cluster, setCluster] = useState('');
   const [items, setItems] = useState<PickerItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [suggested, setSuggested] = useState<string[]>([]);
-  const [clusters, setClusters] = useState<Array<{ prefix: string; count: number }>>([]);
-  const [confirmed, setConfirmed] = useState<string[]>([]);
   const [advancedUrl, setAdvancedUrl] = useState('');
   const [status, setStatus] = useState<string | null>(null);
-
-  const loadClusters = useCallback(async () => {
-    try {
-      const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/representative-suite`);
-      if (!r.ok) return;
-      const j = await r.json();
-      if (Array.isArray(j.suggested)) setSuggested(j.suggested);
-      if (Array.isArray(j.clusters)) setClusters(j.clusters.map((c: { prefix: string; count: number }) => ({ prefix: c.prefix, count: c.count })));
-      if (Array.isArray(j.suite)) setConfirmed(j.suite);
-    } catch {}
-  }, [domain]);
+  const clusters = (suiteResp?.clusters ?? []) as Array<{ prefix: string; count: number }>;
+  const suggested = (suiteResp?.suggested ?? []) as string[];
+  const confirmed = (suiteResp?.suite ?? []) as string[];
 
   const fetchPicker = useCallback(async (q: string, cl: string, p: number) => {
     const params = new URLSearchParams();
@@ -69,47 +59,12 @@ export function InventoryPicker({ domain, onPick }: Props): React.ReactElement {
 
   const debouncedFetch = useCallback(debounce((q: string, cl: string) => { void fetchPicker(q, cl, 1); }, 300) as unknown as (q: string, cl: string) => void, [fetchPicker]);
 
-  useEffect(() => { void loadClusters(); void fetchPicker('', '', 1); }, [loadClusters, fetchPicker]);
+  useEffect(() => { void fetchPicker('', '', 1); }, [fetchPicker]);
   useEffect(() => { debouncedFetch(query, cluster); }, [query, cluster, debouncedFetch]);
 
-  async function verifyAndCapture(url: string): Promise<boolean> {
-    setStatus(`Verifying ${new URL(url).pathname}…`);
-    try {
-      const head = await fetch(url, { method: 'HEAD' }).catch(() => null);
-      if (head && head.status === 404) return false;
-    } catch {}
-    setStatus(`Capturing ${new URL(url).hostname.replace(/^www\./, '')}…`);
-    try {
-      const cap = await fetch('/api/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, runtime: 'rendered' }) });
-      if (!cap.ok) {
-        const t = await cap.text();
-        setStatus(`Capture failed — ${t.slice(0, 80)}`);
-        return true;
-      }
-    } catch (e) {
-      setStatus(String(e));
-      return true;
-    }
-    setStatus(null);
-    return true;
-  }
-
   async function handlePick(url: string): Promise<void> {
-    const ok = await verifyAndCapture(url);
-    if (!ok) {
-      setStatus(`404 — trying next in ${cluster || 'same template'}…`);
-      const sameCluster = templateAwarePrefix(new URL(url).pathname);
-      const fallback = items.find((it) => it.url !== url && it.cluster === sameCluster) ?? items.find((it) => it.url !== url);
-      if (fallback) {
-        setStatus(`404 — fallback to ${new URL(fallback.url).pathname}`);
-        onPick(fallback.url);
-        void verifyAndCapture(fallback.url);
-        return;
-      }
-      setStatus('No fallback — pick another template');
-      return;
-    }
-    onPick(url);
+    setStatus(`Picked ${new URL(url).pathname} — confirming…`);
+    try { await onPick(url); setStatus(null); } catch (e) { setStatus(String(e)); }
   }
 
   function sameDomain(url: string): boolean {

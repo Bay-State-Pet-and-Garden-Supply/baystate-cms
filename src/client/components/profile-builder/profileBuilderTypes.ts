@@ -172,9 +172,19 @@ export interface ProfileBuilderState {
 
 // ─── Public Component Props ─────────────────────────────────────────────────
 
+export interface CaptureArtifactLite {
+  dom: string;
+  screenshotBase64: string;
+  runtime: string;
+  hash: string;
+  capturedAt: string;
+  url: string;
+}
+
 export interface ProfileBuilderProps {
   initialDomain?: string;
   initialProductUrl?: string;
+  initialCapture?: CaptureArtifactLite | null;
   mode?: 'inline' | 'modal';
   onSaved?: (profile: ExtractorProfile) => void;
   onCancel?: () => void;
