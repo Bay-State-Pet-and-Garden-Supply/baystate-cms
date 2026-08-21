@@ -169,6 +169,7 @@ route.get('/onboarding/settings/brand-profiles', (c) => {
     brand: p.brand,
     aliases: p.aliases,
     preferredDistributorIds: p.preferredDistributorIds,
+    sourcingPolicy: p.sourcingPolicy,
   }));
   return c.json({ profiles });
 });
@@ -200,6 +201,7 @@ route.post('/onboarding/settings/brand-profiles', async (c) => {
         brand: profile.brand,
         aliases: profile.aliases,
         preferredDistributorIds: profile.preferredDistributorIds,
+        sourcingPolicy: profile.sourcingPolicy,
       },
     }, 201);
   } catch (err) {

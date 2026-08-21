@@ -80,13 +80,20 @@ export class DefaultSourcingEngine implements SourcingEngine {
     let fallbackConns: DistributorConnection[] = [];
 
     if (preferredIds.length > 0) {
-      const byDistributorId = new Map(connections.map((c) => [c.distributorId, c]));
+      const byDistributorId = new Map<string, DistributorConnection[]>();
+      for (const c of connections) {
+        const list = byDistributorId.get(c.distributorId) ?? [];
+        list.push(c);
+        byDistributorId.set(c.distributorId, list);
+      }
       const seen = new Set<string>();
       for (const distributorId of preferredIds) {
-        const connection = byDistributorId.get(distributorId);
-        if (connection && !seen.has(connection.id)) {
-          preferredConns.push(connection);
-          seen.add(connection.id);
+        const conns = byDistributorId.get(distributorId) ?? [];
+        for (const conn of conns) {
+          if (!seen.has(conn.id)) {
+            preferredConns.push(conn);
+            seen.add(conn.id);
+          }
         }
       }
       fallbackConns = connections.filter((c) => !seen.has(c.id));
@@ -366,14 +373,21 @@ function orderByBrandPreference(
   const preferred = getPreferredDistributorOrder(workspaceId, brand);
   if (!preferred || preferred.length === 0) return connections;
 
-  const byDistributorId = new Map(connections.map((c) => [c.distributorId, c]));
+  const byDistributorId = new Map<string, DistributorConnection[]>();
+  for (const c of connections) {
+    const list = byDistributorId.get(c.distributorId) ?? [];
+    list.push(c);
+    byDistributorId.set(c.distributorId, list);
+  }
   const preferredOrder: DistributorConnection[] = [];
   const seen = new Set<string>();
   for (const distributorId of preferred) {
-    const connection = byDistributorId.get(distributorId);
-    if (connection && !seen.has(connection.id)) {
-      preferredOrder.push(connection);
-      seen.add(connection.id);
+    const conns = byDistributorId.get(distributorId) ?? [];
+    for (const conn of conns) {
+      if (!seen.has(conn.id)) {
+        preferredOrder.push(conn);
+        seen.add(conn.id);
+      }
     }
   }
   const rest = connections.filter((c) => !seen.has(c.id));
