@@ -18,6 +18,20 @@ development_status:
   e05s01: done
   e05s02: done
   e05s03: done
+  e06: done
+  e06s01: done
+  e06s02: done
+  e06s03: done
+  e06s04: done
+  e07: planned
+  e07s01: planned
+  e07s02: planned
+  e07s03: planned
+  e07s04: planned
+  e08: done
+  e08s01: done
+  e08s02: done
+  e08s03: done
 # story timestamps (build_epic survey-context writes started_at; release-branch writes completed_at)
 stories:
   e02s01:

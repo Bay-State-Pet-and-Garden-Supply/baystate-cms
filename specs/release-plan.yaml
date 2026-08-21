@@ -55,7 +55,7 @@ epics:
     wsjf: 13
     bcps: 19
     capsule_dir: epics/e08-brand-strategy-hub
-    status: planned
+    status: done
   - id: e00
     title: Bootstrap — bigpowers scaffolding
     wsjf: 0

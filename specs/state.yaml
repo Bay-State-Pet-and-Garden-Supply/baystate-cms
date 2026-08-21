@@ -2,8 +2,8 @@
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
 active_flow: build_epic
-active_epic_id: e07
-active_story_id: e07s01
+active_epic_id: e08
+active_story_id: null
 active_bug_id: null
 release:
   target_version: null
@@ -20,10 +20,11 @@ bug_cycle:
   completed_steps: []
 git:
   branch: main
-  hash: 7996f58
+  hash: f7c1044
 handoff:
-  last_step_completed: "e06 Profile Workspace landed (4 stories, 23 BCP + 2 polish): dedicated page, indexed-product harness (no manual URL), LLM task buttons, 3-sample gate, park→release, Needs Attention → workspace wired, impeccable grid+tokens+Hierarchy polish"
-  open_decisions: []
+  last_step_completed: "e08 Brand Strategy Hub landed (3 stories, 19 BCP): aggregation projection + Brands Master Grid (Preferred/Fallback tiers, distributor-only eligible) + Distributors infra-only — landed on main as f7c1044 ahead of e07 (depends on e07s04); 6 review blockers patched, typecheck green, 43 e08 tests green"
+  open_decisions:
+    - "e07 remains planned (29 BCP) — e08 enrichment waits on e07s04 governed readiness contract; do not implement concurrently without merge churn"
   required_reading:
     - CONVENTIONS.md
     - AGENTS.md
