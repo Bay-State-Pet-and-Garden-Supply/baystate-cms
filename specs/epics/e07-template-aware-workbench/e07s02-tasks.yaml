@@ -6,12 +6,12 @@ tasks:
   - id: e07s02t01
     description: "Implement template-aware clustering (strip slug/ID → /products + tag+class Jaccard 0.8 + prefix guard) on brand_url_index product URLs"
     verify: "bunx vitest run src/tests/unit/template-clustering.test.ts"
-    status: planned
+    status: passing
   - id: e07s02t02
     description: "Filter inventory by freshness + page-verifier/sitemap-health before suggestion; auto-suggest reps covering each cluster/variant/edge"
     verify: "bunx vitest run src/tests/unit/sitemap-inventory-service.test.ts src/tests/unit/page-verifier.test.ts"
-    status: planned
+    status: passing
   - id: e07s02t03
     description: "Workspace UI: cluster chips + suggested reps + operator confirm/override (merge/split) + waiver when <3 verified URLs, bound to suite"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-workspace.test.ts"
-    status: planned
+    status: passing
