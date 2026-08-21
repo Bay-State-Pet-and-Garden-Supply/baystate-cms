@@ -586,6 +586,38 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to seed legacy profile_versions (non-fatal):', e);
   }
 
+  // e08 Test slice: durable profile matrix runs (replaces in-memory Map)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS profile_matrix_runs (
+        id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        artifact_hashes TEXT NOT NULL
+      );
+    `);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_profile_matrix_runs_domain_version ON profile_matrix_runs(domain, version_id);`);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS profile_matrix_cells (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES profile_matrix_runs(id) ON DELETE CASCADE,
+        sample_url TEXT NOT NULL,
+        sample_id TEXT NOT NULL,
+        field TEXT NOT NULL,
+        extracted TEXT,
+        expected TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        artifact_hash TEXT NOT NULL,
+        success INTEGER NOT NULL,
+        failure_reason TEXT
+      );
+    `);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_profile_matrix_cells_run ON profile_matrix_cells(run_id);`);
+  } catch (e) {
+    console.error('[Migrations] Failed to create profile_matrix tables:', e);
+  }
+
   // Ensure onboarding_sources has metadata_json column
   try {
     const columns = db.query('PRAGMA table_info(onboarding_sources)').all() as Array<{ name: string }>;

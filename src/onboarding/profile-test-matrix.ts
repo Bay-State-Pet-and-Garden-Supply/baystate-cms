@@ -1,4 +1,18 @@
-// story: e06s04
+// story: e08 Test slice — durable matrix (DB + Map fallback)
+import { randomUUID } from 'node:crypto';
+
+function getDbSafe(): any {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('../db/connection').getDb();
+  } catch { throw new Error('DB not available'); }
+}
+function isDbInitializedSafe(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('../db/connection').isDbInitialized();
+  } catch { return false; }
+}
 
 export interface MatrixSample {
   id: string;
@@ -35,6 +49,14 @@ function keyFor(domain: string, version: string): string {
   return `${domain.toLowerCase().replace(/^www\./, '').trim()}::${version}`;
 }
 
+function normalizeDomain(d: string): string {
+  return d.toLowerCase().replace(/^www\./, '').trim();
+}
+
+function useDb(): boolean {
+  return isDbInitializedSafe();
+}
+
 export async function runMatrix(input: {
   domain: string;
   draftVersion: string;
@@ -58,13 +80,46 @@ export async function runMatrix(input: {
       }],
     });
   }
-  const result: MatrixResult = { domain: input.domain, draftVersion: input.draftVersion, rows, createdAt: new Date().toISOString() };
+  const result: MatrixResult = { domain: normalizeDomain(input.domain), draftVersion: input.draftVersion, rows, createdAt: new Date().toISOString() };
   store.set(keyFor(input.domain, input.draftVersion), result);
+  if (useDb()) persistResult(result);
   return result;
 }
 
+function persistResult(result: MatrixResult): void {
+  try {
+    const db = getDbSafe();
+    const runId = randomUUID();
+    const hashes = getMatrixArtifactHashes(result);
+    db.transaction(() => {
+      db.query('INSERT OR REPLACE INTO profile_matrix_runs (id, domain, version_id, created_at, artifact_hashes) VALUES (?, ?, ?, ?, ?)').run(runId, result.domain, result.draftVersion, result.createdAt, JSON.stringify(hashes));
+      for (const row of result.rows) for (const cell of row.cells) {
+        db.query('INSERT INTO profile_matrix_cells (id, run_id, sample_url, sample_id, field, extracted, expected, provenance, artifact_hash, success, failure_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(randomUUID(), runId, row.sampleUrl, row.sampleId, cell.field, cell.extracted, cell.expected, cell.provenance, cell.artifactHash, cell.success ? 1 : 0, cell.failureReason);
+      }
+    })();
+  } catch {}
+}
+
 export function getMatrixResult(domain: string, draftVersion: string): MatrixResult | null {
-  return store.get(keyFor(domain, draftVersion)) ?? null;
+  const cached = store.get(keyFor(domain, draftVersion));
+  if (cached) return cached;
+  if (!useDb()) return null;
+  try {
+    const db = getDbSafe();
+    const norm = normalizeDomain(domain);
+    const run = db.query('SELECT * FROM profile_matrix_runs WHERE domain = ? AND version_id = ? ORDER BY created_at DESC LIMIT 1').get(norm, draftVersion) as { id: string; domain: string; version_id: string; created_at: string } | undefined;
+    if (!run) return null;
+    const cells = db.query('SELECT * FROM profile_matrix_cells WHERE run_id = ?').all(run.id) as Array<{ sample_url: string; sample_id: string; field: string; extracted: string | null; expected: string; provenance: string; artifact_hash: string; success: number; failure_reason: string | null; }>;
+    const bySample = new Map<string, MatrixRow>();
+    for (const c of cells) {
+      let row = bySample.get(c.sample_id);
+      if (!row) { row = { sampleId: c.sample_id, sampleUrl: c.sample_url, cells: [] }; bySample.set(c.sample_id, row); }
+      row.cells.push({ field: c.field, extracted: c.extracted, expected: c.expected, provenance: c.provenance, artifactHash: c.artifact_hash, success: !!c.success, failureReason: c.failure_reason });
+    }
+    const result: MatrixResult = { domain: run.domain, draftVersion: run.version_id, rows: [...bySample.values()], createdAt: run.created_at };
+    store.set(keyFor(domain, draftVersion), result);
+    return result;
+  } catch { return null; }
 }
 
 export function getMatrixArtifactHashes(result: MatrixResult): string[] {
@@ -78,4 +133,6 @@ export function matrixCoversSamples(result: MatrixResult, sampleIds: string[]): 
 
 export function resetTestMatrixForTest(): void {
   store.clear();
+  if (!useDb()) return;
+  try { const db = getDbSafe(); db.exec('DELETE FROM profile_matrix_cells'); db.exec('DELETE FROM profile_matrix_runs'); } catch {}
 }

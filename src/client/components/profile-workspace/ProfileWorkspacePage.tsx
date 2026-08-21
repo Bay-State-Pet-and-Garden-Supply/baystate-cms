@@ -11,6 +11,8 @@ import type { DomainProfileState } from '../../../db/repositories/domain-profile
 import { deriveReadinessState } from '../../../onboarding/profile-readiness';
 import { SuitePanel } from './SuitePanel';
 import { InventoryPicker } from './InventoryPicker';
+import { TestMatrix } from './TestMatrix';
+import type { MatrixResult } from '../../../onboarding/profile-test-matrix';
 
 type SuiteResp = { suite: string[]; inventory: { candidateCount: number; confirmedCount: number; freshness: string | null }; clusters?: Array<{ prefix: string; count: number; key: string; fingerprint: string; suggestedUrl: string }>; suggested?: string[] };
 type CaptureArtifact = { dom: string; screenshotBase64: string; runtime: string; hash: string; capturedAt: string; url: string } | null;
@@ -22,6 +24,10 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
   const [suiteResp, setSuiteResp] = useState<SuiteResp | null>(null);
   const [captureArtifact, setCaptureArtifact] = useState<CaptureArtifact>(null);
   const [captureStatus, setCaptureStatus] = useState<string | null>(null);
+  const [matrixResult, setMatrixResult] = useState<MatrixResult | null>(null);
+  const [matrixLoading, setMatrixLoading] = useState(false);
+  const [matrixError, setMatrixError] = useState<string | null>(null);
+  const [draftVersionId, setDraftVersionId] = useState<string | null>(null);
   const returnPath = typeof window !== 'undefined' ? parseReturnPath(window.location.search) : null;
 
   const fetchState = async (): Promise<void> => {
@@ -68,6 +74,48 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
     const h = (e: KeyboardEvent): void => { if (e.ctrlKey && e.key.toLowerCase() === 'g') { e.preventDefault(); setGridVisible((v) => !v); } };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
+  }, []);
+
+  const loadDraftVersion = useCallback(async (): Promise<void> => {
+    try {
+      const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/versions`);
+      if (!r.ok) return;
+      const vs = await r.json() as Array<{ id: string }>;
+      if (vs.length > 0) setDraftVersionId(vs[vs.length - 1].id);
+    } catch {}
+  }, [domain]);
+
+  const loadMatrix = useCallback(async (versionId: string): Promise<void> => {
+    try {
+      const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/matrix/${encodeURIComponent(versionId)}`);
+      if (!r.ok) { setMatrixResult(null); return; }
+      const j = await r.json() as MatrixResult;
+      setMatrixResult(j);
+    } catch { setMatrixResult(null); }
+  }, [domain]);
+
+  useEffect(() => { void loadDraftVersion(); }, [loadDraftVersion]);
+  useEffect(() => { if (draftVersionId) void loadMatrix(draftVersionId); }, [draftVersionId, loadMatrix]);
+
+  const handleRunTests = useCallback(async (): Promise<void> => {
+    if (!draftVersionId) { setMatrixError('Build a draft first — no version to test'); return; }
+    if (suiteConfirmed < 3) { setMatrixError('Need 3 confirmed samples to run tests'); return; }
+    setMatrixLoading(true);
+    setMatrixError(null);
+    try {
+      const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/test-matrix`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ versionId: draftVersionId }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+      setMatrixResult(j as MatrixResult);
+    } catch (e) { setMatrixError(String(e)); }
+    setMatrixLoading(false);
+  }, [domain, draftVersionId, suiteConfirmed]);
+
+  const handleRevise = useCallback((field: string): void => {
+    const el = document.querySelector(`[data-field="${field}"]`) as HTMLElement | null;
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, []);
 
   const handlePick = useCallback(async (url: string): Promise<void> => {
@@ -135,6 +183,30 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
           <div data-workspace style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)', boxShadow: '0 1px 3px 0 rgba(33,20,20,0.06)' }}>
             <ProfileBuilder mode="inline" initialDomain={domain} initialProductUrl={captureArtifact?.url ?? undefined} initialCapture={captureArtifact} onCancel={() => {}} />
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 'var(--space-2)' }}>
+            <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Production Tests — evidence for Activate</div>
+            <button
+              type="button"
+              onClick={() => void handleRunTests()}
+              disabled={!draftVersionId || suiteConfirmed < 3 || matrixLoading}
+              title={!draftVersionId ? 'Build a draft first' : suiteConfirmed < 3 ? 'Need 3 confirmed samples' : 'Run production tests across confirmed suite'}
+              style={{
+                padding: '8px 16px',
+                borderRadius: 'var(--rounded-md, 6px)',
+                border: '1px solid var(--color-uniform-green)',
+                background: !draftVersionId || suiteConfirmed < 3 ? 'var(--color-feed-bag-cream)' : 'var(--color-uniform-green)',
+                color: !draftVersionId || suiteConfirmed < 3 ? 'var(--color-mulch-brown)' : 'var(--color-feed-bag-cream)',
+                fontFamily: 'var(--font-body)',
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: !draftVersionId || suiteConfirmed < 3 ? 'not-allowed' : 'pointer',
+                opacity: matrixLoading ? 0.7 : 1,
+              }}
+            >
+              {matrixLoading ? 'Running…' : 'Run Tests'}
+            </button>
+          </div>
+          <TestMatrix result={matrixResult} loading={matrixLoading} error={matrixError} onRevise={handleRevise} />
           <HistoryShell />
           {returnPath ? (
             <a href={returnPath} onClick={(e) => { e.preventDefault(); window.history.pushState(null, '', returnPath); window.dispatchEvent(new PopStateEvent('popstate')); }} style={{ marginTop: 'var(--space-2)', display: 'inline-block', fontFamily: 'var(--font-body)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-uniform-green)', textDecoration: 'none', borderBottom: '1px solid var(--color-card-border)' }}>← Back</a>
