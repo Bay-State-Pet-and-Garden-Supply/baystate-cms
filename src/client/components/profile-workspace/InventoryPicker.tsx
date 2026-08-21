@@ -1,6 +1,7 @@
 // story: e07s02 + oracle picker S1 — General Store (Operate) — no Tailwind, inline styles + CSS variables
 import { useEffect, useState, useCallback } from 'react';
 import { templateAwarePrefix } from '../../../onboarding/template-clustering';
+import { getExtractorProfiles } from '../../onboarding-api';
 
 type PickerItem = { url: string; title: string; cluster: string; lastSeen: string };
 type SuiteRespLite = { suite: string[]; clusters?: Array<{ prefix: string; count: number }>; suggested?: string[] } | null;
@@ -39,7 +40,8 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
   const [page, setPage] = useState(1);
   const [advancedUrl, setAdvancedUrl] = useState('');
   const [status, setStatus] = useState<string | null>(null);
-  const [showAll, setShowAll] = useState(false);
+  const [showAll, setShowAll] = useState(true);
+  const [storedPattern, setStoredPattern] = useState<string | null>(null);
   const clusters = (suiteResp?.clusters ?? []) as Array<{ prefix: string; count: number }>;
   const suggested = (suiteResp?.suggested ?? []) as string[];
   const confirmed = (suiteResp?.suite ?? []) as string[];
@@ -49,7 +51,7 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
     if (q) params.set('query', q);
     if (cl) params.set('cluster', cl);
     params.set('page', String(p));
-    params.set('limit', '20');
+    params.set('limit', '10');
     const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/inventory-picker?${params}`);
     if (!r.ok) return;
     const j = await r.json();
@@ -62,13 +64,35 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
 
   useEffect(() => { void fetchPicker('', '', 1); }, [fetchPicker]);
   useEffect(() => { debouncedFetch(query, cluster); }, [query, cluster, debouncedFetch]);
-  // Default to /products (or whatever product pattern is configured) — picker should only show product URLs for testing
   useEffect(() => {
-    if (!cluster && clusters.length > 0) {
-      const productCluster = clusters.find((c) => c.prefix.includes('product')) ?? clusters[0];
-      if (productCluster) setCluster(productCluster.prefix);
+    let cancelled = false;
+    getExtractorProfiles().then((r) => {
+      if (cancelled) return;
+      const found = (r.extractorProfiles as Array<{ domain: string; sitemapProductUrlPattern?: string | null }>).find((p) => p.domain === domain || p.domain === domain.replace(/^www\./, '') || domain.includes(p.domain));
+      const raw = found?.sitemapProductUrlPattern;
+      if (raw) {
+        try {
+          const path = raw.startsWith('http') ? new URL(raw).pathname : raw;
+          const seg = path.split('/').filter(Boolean)[0];
+          const pref = seg ? `/${seg}` : path;
+          const normalized = templateAwarePrefix(pref.startsWith('/') ? `https://x${pref}/x` : `https://x/${pref}/x`);
+          if (normalized) setStoredPattern(normalized);
+          else setStoredPattern(pref);
+        } catch { setStoredPattern(raw); }
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [domain]);
+  // Default to stored pattern (e.g. /products) — picker should only show product URLs for testing
+  useEffect(() => {
+    if (!cluster) {
+      if (storedPattern) { setCluster(storedPattern); return; }
+      if (clusters.length > 0) {
+        const productCluster = clusters.find((c) => c.prefix.includes('product')) ?? clusters[0];
+        if (productCluster) setCluster(productCluster.prefix);
+      }
     }
-  }, [clusters, cluster]);
+  }, [clusters, cluster, storedPattern]);
 
   async function handlePick(url: string): Promise<void> {
     setStatus(`Picked ${new URL(url).pathname} — confirming…`);
