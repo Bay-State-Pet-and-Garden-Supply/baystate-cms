@@ -2,7 +2,7 @@
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
 active_flow: build_epic
-active_epic_id: e08
+active_epic_id: e07
 active_story_id: null
 active_bug_id: null
 release:
@@ -20,11 +20,10 @@ bug_cycle:
   completed_steps: []
 git:
   branch: main
-  hash: f7c1044
+  hash: 16e1f2a
 handoff:
-  last_step_completed: "e08 Brand Strategy Hub landed (3 stories, 19 BCP): aggregation projection + Brands Master Grid (Preferred/Fallback tiers, distributor-only eligible) + Distributors infra-only — landed on main as f7c1044 ahead of e07 (depends on e07s04); 6 review blockers patched, typecheck green, 43 e08 tests green"
-  open_decisions:
-    - "e07 remains planned (29 BCP) — e08 enrichment waits on e07s04 governed readiness contract; do not implement concurrently without merge churn"
+  last_step_completed: "e07 Template-aware Sitemap Profile Workbench landed (4 stories, 29 BCP): persistence + clustering + capture + consolidation — landed on main as 16e1f2a, satisfying e08 dependency; e08 already landed as f7c1044 — both done, inversion resolved"
+  open_decisions: []
   required_reading:
     - CONVENTIONS.md
     - AGENTS.md
