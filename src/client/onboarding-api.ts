@@ -188,12 +188,35 @@ export async function configureBrand(
   data: {
     brand: string;
     domain?: string;
+    urlPattern?: string;
     preferredDistributorIds?: string[];
     sourcingPolicy?: SourcingPolicy;
   },
 ): Promise<{ success: boolean; preflight: BatchPreflightResponse }> {
   return request<{ success: boolean; preflight: BatchPreflightResponse }>(
     `/batches/${batchId}/configure-brand`,
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    },
+  );
+}
+
+export async function savePreflightDraft(
+  batchId: string,
+  data: {
+    brandAssignments?: Array<{ itemIds: string[]; brand: string }>;
+    brandConfigs?: Array<{
+      brand: string;
+      domain?: string;
+      urlPattern?: string;
+      preferredDistributorIds?: string[];
+      sourcingPolicy?: SourcingPolicy;
+    }>;
+  },
+): Promise<{ success: boolean; preflight: BatchPreflightResponse }> {
+  return request<{ success: boolean; preflight: BatchPreflightResponse }>(
+    `/batches/${batchId}/save-preflight-draft`,
     {
       method: 'POST',
       body: JSON.stringify(data),

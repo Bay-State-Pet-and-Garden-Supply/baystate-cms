@@ -1,4 +1,5 @@
 // story: e08 tracer — merged picker/suite → canonical capture → builder preview
+// route pattern: /settings/domains/:domain/profile
 import { useEffect, useState, useCallback } from 'react';
 import { normalizeBrandHubDomain } from '../../../onboarding/brand-hub/normalizeDomain';
 import { getProfileWorkspacePath, parseReturnPath } from './route';

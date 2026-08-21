@@ -1761,12 +1761,21 @@ export type ProfileBlockedItem = z.infer<typeof ProfileBlockedItemSchema>;
 
 // ─── Batch Preflight & Controlled Release ─────────────────────────────────────
 
+export const PreflightSampleProductSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  upc: z.string().nullable().optional(),
+  sku: z.string().nullable().optional(),
+});
+export type PreflightSampleProduct = z.infer<typeof PreflightSampleProductSchema>;
+
 export const PreflightBrandGroupSchema = z.object({
   key: z.string(),
   suggestedBrand: z.string().nullable(),
   itemCount: z.number().int(),
   itemIds: z.array(z.string()),
   sampleProductNames: z.array(z.string()),
+  sampleProducts: z.array(PreflightSampleProductSchema).optional(),
 });
 export type PreflightBrandGroup = z.infer<typeof PreflightBrandGroupSchema>;
 
@@ -1774,6 +1783,9 @@ export const PreflightDomainBlockerSchema = z.object({
   brand: z.string(),
   itemCount: z.number().int(),
   itemIds: z.array(z.string()),
+  urlPattern: z.string().nullable().optional(),
+  sampleProductNames: z.array(z.string()).optional(),
+  sampleProducts: z.array(PreflightSampleProductSchema).optional(),
 });
 export type PreflightDomainBlocker = z.infer<typeof PreflightDomainBlockerSchema>;
 
@@ -1783,6 +1795,8 @@ export const PreflightRoutingBlockerSchema = z.object({
   itemIds: z.array(z.string()),
   preferredDistributorIds: z.array(z.string()).default(() => []),
   sourcingPolicy: z.enum(['advisory', 'preferred_then_fallback', 'preferred_only']).default('preferred_then_fallback'),
+  sampleProductNames: z.array(z.string()).optional(),
+  sampleProducts: z.array(PreflightSampleProductSchema).optional(),
 });
 export type PreflightRoutingBlocker = z.infer<typeof PreflightRoutingBlockerSchema>;
 
@@ -1827,6 +1841,7 @@ export const BatchPreflightResponseSchema = z.object({
   metrics: BatchPreflightMetricsSchema,
   blockers: BatchPreflightBlockersSchema,
   availableDistributors: z.array(PreflightAvailableDistributorSchema),
+  knownBrands: z.array(z.string()).optional(),
 });
 export type BatchPreflightResponse = z.infer<typeof BatchPreflightResponseSchema>;
 

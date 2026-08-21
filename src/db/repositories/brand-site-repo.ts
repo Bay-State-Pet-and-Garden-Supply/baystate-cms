@@ -34,7 +34,13 @@ export function upsertBrandSite(
   const db = getDb();
   const now = new Date().toISOString();
   const normalizedBrand = brandName.toLowerCase().trim();
-  const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
+  const normalizedDomain = domain
+    .toLowerCase()
+    .trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .split('/')[0]
+    .trim();
 
   const existing = db.query(
     'SELECT * FROM brand_sites WHERE brand_name = ? AND domain = ?',

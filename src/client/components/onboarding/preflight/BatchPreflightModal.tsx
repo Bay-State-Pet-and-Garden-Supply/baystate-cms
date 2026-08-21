@@ -1,16 +1,20 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import './batch-preflight-modal.css';
 import {
   getBatchPreflight,
   startBatch,
   assignBrandGroup,
   configureBrand,
+  savePreflightDraft,
 } from '../../../onboarding-api';
+import { normalizeBrandHubDomain, extractDomainAndPattern } from '../../../../onboarding/brand-hub/normalizeDomain';
 import type {
   BatchPreflightResponse,
   PreflightBrandGroup,
   PreflightDomainBlocker,
   PreflightRoutingBlocker,
   SourcingPolicy,
+  BrandSite,
 } from '../../../../shared/schemas/onboarding';
 
 interface BatchPreflightModalProps {
@@ -18,13 +22,151 @@ interface BatchPreflightModalProps {
   isOpen: boolean;
   onClose: () => void;
   onBatchStarted?: () => void;
+  catalogBrands?: string[];
+  cachedBrandSites?: BrandSite[];
 }
+
+/**
+ * Searchable brand dropdown selector that offers autocomplete against known & catalog brands
+ * while allowing custom brand entry, styled in "The General Store" aesthetic.
+ */
+interface BrandSelectorProps {
+  value: string;
+  onChange: (val: string) => void;
+  knownBrands: string[];
+  placeholder?: string;
+  disabled?: boolean;
+}
+
+const PreflightBrandSelector: React.FC<BrandSelectorProps> = ({
+  value,
+  onChange,
+  knownBrands,
+  placeholder = 'Select or type brand...',
+  disabled = false,
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState(value);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setQuery(value);
+  }, [value]);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const filteredBrands = knownBrands.filter((b) =>
+    b.toLowerCase().includes((query || '').toLowerCase().trim())
+  );
+
+  const exactMatch = knownBrands.find(
+    (b) => b.toLowerCase() === (query || '').toLowerCase().trim()
+  );
+
+  return (
+    <div ref={wrapperRef} className="preflight-brand-selector-wrap">
+      <div style={{ position: 'relative' }}>
+        <input
+          type="text"
+          value={isOpen ? query : value}
+          disabled={disabled}
+          placeholder={placeholder}
+          onFocus={() => {
+            setQuery(value);
+            setIsOpen(true);
+          }}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            onChange(e.target.value);
+          }}
+          className="preflight-input"
+          style={{ paddingRight: value ? '1.5rem' : '0.75rem' }}
+        />
+        {value && !disabled && (
+          <button
+            type="button"
+            onClick={() => {
+              onChange('');
+              setQuery('');
+            }}
+            style={{
+              position: 'absolute',
+              right: '0.5rem',
+              top: '50%',
+              transform: 'translateY(-50%)',
+              background: 'none',
+              border: 'none',
+              color: '#6B3A18',
+              cursor: 'pointer',
+              fontSize: '0.875rem',
+              lineHeight: 1,
+            }}
+            title="Clear"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      {isOpen && !disabled && (
+        <div className="preflight-brand-dropdown">
+          {query.trim() && !exactMatch && (
+            <button
+              type="button"
+              onClick={() => {
+                onChange(query.trim());
+                setIsOpen(false);
+              }}
+              className="preflight-brand-option-create"
+            >
+              <span>✨</span>
+              <span>Use &quot;{query.trim()}&quot;</span>
+            </button>
+          )}
+
+          {filteredBrands.length === 0 && !query.trim() && (
+            <div style={{ padding: '0.5rem 0.75rem', color: '#6B3A18', fontStyle: 'italic' }}>
+              No existing brands found. Type to enter brand.
+            </div>
+          )}
+
+          {filteredBrands.map((brand) => (
+            <button
+              key={brand}
+              type="button"
+              onClick={() => {
+                onChange(brand);
+                setIsOpen(false);
+              }}
+              className={`preflight-brand-option ${brand.toLowerCase() === value.toLowerCase() ? 'selected' : ''}`}
+            >
+              <span>{brand}</span>
+              {brand.toLowerCase() === value.toLowerCase() && (
+                <span style={{ color: '#14532D', fontSize: '0.75rem' }}>✓</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
   batchId,
   isOpen,
   onClose,
   onBatchStarted,
+  catalogBrands = [],
+  cachedBrandSites = [],
 }) => {
   const [preflight, setPreflight] = useState<BatchPreflightResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -35,7 +177,9 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
   // Form states per card
   const [brandInputs, setBrandInputs] = useState<Record<string, string>>({});
   const [domainInputs, setDomainInputs] = useState<Record<string, string>>({});
+  const [patternInputs, setPatternInputs] = useState<Record<string, string>>({});
   const [routingPreferences, setRoutingPreferences] = useState<Record<string, { distributorIds: string[]; policy: SourcingPolicy }>>({});
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
   const fetchPreflight = useCallback(async () => {
     try {
@@ -50,6 +194,14 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
         bInputs[g.key] = g.suggestedBrand || '';
       });
       setBrandInputs(bInputs);
+
+      const pInputs: Record<string, string> = {};
+      data.blockers.missingDomainBrands.forEach((d) => {
+        if (d.urlPattern) {
+          pInputs[d.brand] = d.urlPattern;
+        }
+      });
+      setPatternInputs(pInputs);
 
       const rPrefs: Record<string, { distributorIds: string[]; policy: SourcingPolicy }> = {};
       data.blockers.unroutedBrands.forEach((b) => {
@@ -74,10 +226,92 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Aggregate all available brands from preflight response, catalogBrands, and cachedBrandSites
+  const allKnownBrands: string[] = Array.from(
+    new Set([
+      ...(preflight?.knownBrands || []),
+      ...catalogBrands,
+      ...cachedBrandSites.map((s) => s.brandName),
+    ].filter(Boolean).map((b) => b.trim()))
+  ).sort((a, b) => a.localeCompare(b));
+
+  const gatherPendingDraftPayload = () => {
+    if (!preflight) return { brandAssignments: [], brandConfigs: [] };
+
+    // 1. Brand assignments for groups that have a non-empty input
+    const brandAssignments: Array<{ itemIds: string[]; brand: string }> = [];
+    preflight.blockers.needsBrandGroups.forEach((group) => {
+      const input = (brandInputs[group.key] || '').trim();
+      if (input) {
+        brandAssignments.push({
+          itemIds: group.itemIds,
+          brand: input,
+        });
+      }
+    });
+
+    // 2. Brand configs: domains + urlPatterns + routing
+    const brandConfigsMap = new Map<string, {
+      brand: string;
+      domain?: string;
+      urlPattern?: string;
+      preferredDistributorIds?: string[];
+      sourcingPolicy?: SourcingPolicy;
+    }>();
+
+    // Domains
+    Object.entries(domainInputs).forEach(([brand, domain]) => {
+      if (domain.trim()) {
+        const existing = brandConfigsMap.get(brand) || { brand };
+        existing.domain = domain.trim();
+        if (patternInputs[brand]?.trim()) {
+          existing.urlPattern = patternInputs[brand].trim();
+        }
+        brandConfigsMap.set(brand, existing);
+      }
+    });
+
+    // Routing
+    Object.entries(routingPreferences).forEach(([brand, pref]) => {
+      const existing = brandConfigsMap.get(brand) || { brand };
+      existing.preferredDistributorIds = pref.distributorIds;
+      existing.sourcingPolicy = pref.policy;
+      brandConfigsMap.set(brand, existing);
+    });
+
+    return {
+      brandAssignments,
+      brandConfigs: Array.from(brandConfigsMap.values()),
+    };
+  };
+
+  const handleSaveDraftAndClose = async () => {
+    try {
+      setActionLoading('save_draft');
+      setError(null);
+      const payload = gatherPendingDraftPayload();
+
+      if (payload.brandAssignments.length > 0 || payload.brandConfigs.length > 0) {
+        await savePreflightDraft(batchId, payload);
+      }
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleStartBatch = async (mode: 'ready_only' | 'all') => {
     try {
       setActionLoading(`start_${mode}`);
       setError(null);
+      // First persist any pending draft settings so no configurations are lost
+      const payload = gatherPendingDraftPayload();
+      if (payload.brandAssignments.length > 0 || payload.brandConfigs.length > 0) {
+        await savePreflightDraft(batchId, payload);
+      }
+
       await startBatch(batchId, mode);
       setSuccessMessage(mode === 'ready_only' ? 'Batch started with ready products!' : 'Batch started with all products!');
       if (onBatchStarted) {
@@ -96,7 +330,7 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
   const handleAssignBrand = async (group: PreflightBrandGroup) => {
     const brand = (brandInputs[group.key] || group.suggestedBrand || '').trim();
     if (!brand) {
-      alert('Please enter a brand name');
+      alert('Please select or enter a brand name');
       return;
     }
     try {
@@ -104,50 +338,7 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
       setError(null);
       const res = await assignBrandGroup(batchId, group.itemIds, brand);
       setPreflight(res.preflight);
-      setSuccessMessage(`Assigned brand "${brand}" to ${group.itemCount} products`);
-      setTimeout(() => setSuccessMessage(null), 3000);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleSaveDomain = async (blocker: PreflightDomainBlocker) => {
-    const domain = (domainInputs[blocker.brand] || '').trim();
-    if (!domain) {
-      alert('Please enter an official domain');
-      return;
-    }
-    try {
-      setActionLoading(`domain_${blocker.brand}`);
-      setError(null);
-      const res = await configureBrand(batchId, { brand: blocker.brand, domain });
-      setPreflight(res.preflight);
-      setSuccessMessage(`Saved domain "${domain}" for ${blocker.brand}`);
-      setTimeout(() => setSuccessMessage(null), 3000);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleSaveRouting = async (blocker: PreflightRoutingBlocker) => {
-    const pref = routingPreferences[blocker.brand] || {
-      distributorIds: blocker.preferredDistributorIds,
-      policy: blocker.sourcingPolicy,
-    };
-    try {
-      setActionLoading(`routing_${blocker.brand}`);
-      setError(null);
-      const res = await configureBrand(batchId, {
-        brand: blocker.brand,
-        preferredDistributorIds: pref.distributorIds,
-        sourcingPolicy: pref.policy,
-      });
-      setPreflight(res.preflight);
-      setSuccessMessage(`Saved distributor routing for ${blocker.brand}`);
+      setSuccessMessage(`Assigned brand "${brand}" to ${group.itemCount} product${group.itemCount === 1 ? '' : 's'}`);
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -161,28 +352,23 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
     : 0;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-[#211414]/50 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg shadow-xl border border-[#E8E6D9] w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden text-[#211414] animate-in fade-in zoom-in duration-150 font-sans">
+    <div className="preflight-overlay">
+      <div className="preflight-modal">
         
         {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-[#E8E6D9] bg-[#FAF9F2] flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-md bg-[#14532D] flex items-center justify-center text-[#FAF9F2] font-serif font-bold text-sm shadow-xs">
-              BP
+        <div className="preflight-header">
+          <div className="preflight-header-left">
+            <div className="preflight-header-icon">
+              📋
             </div>
             <div>
-              <h2 className="text-lg font-bold font-serif text-[#211414] leading-tight tracking-tight">
+              <h2 className="preflight-header-title">
                 Batch Preflight & Execution Review
               </h2>
-              <div className="text-xs text-[#6B3A18] mt-0.5 flex items-center gap-2">
-                <span>Batch: <strong className="text-[#211414] font-semibold">{preflight?.batchName || batchId}</strong></span>
+              <div className="preflight-header-meta">
+                <span>Batch: <strong style={{ color: '#211414' }}>{preflight?.batchName || batchId}</strong></span>
                 {preflight && (
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                    preflight.executionState === 'running' ? 'bg-[#d1fae5] text-[#14532d] border border-[#a7f3d0]' :
-                    preflight.executionState === 'paused' ? 'bg-[#fef3c7] text-[#78350f] border border-[#fde68a]' :
-                    preflight.executionState === 'completed' ? 'bg-[#e0f2fe] text-[#0369a1] border border-[#bae6fd]' :
-                    'bg-[#f3f4f6] text-[#4b5563] border border-[#e5e7eb]'
-                  }`}>
+                  <span className={`preflight-state-badge ${preflight.executionState}`}>
                     {preflight.executionState}
                   </span>
                 )}
@@ -190,58 +376,59 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
             </div>
           </div>
           <button
-            onClick={onClose}
-            className="text-[#6B3A18] hover:text-[#211414] hover:bg-[#E8E6D9]/50 transition-colors p-1.5 rounded-md"
-            title="Close"
+            onClick={handleSaveDraftAndClose}
+            disabled={actionLoading !== null}
+            className="preflight-close-btn"
+            title="Save & Close"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg style={{ width: '1.25rem', height: '1.25rem' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-[#FAF9F2]/30">
+        <div className="preflight-body">
           {error && (
-            <div className="p-3.5 bg-[#fee2e2] border border-[#fca5a5] rounded-md text-xs text-[#760c19] font-medium flex items-center justify-between shadow-xs">
+            <div className="preflight-alert-error">
               <span>{error}</span>
-              <button onClick={() => setError(null)} className="text-[#760c19] hover:opacity-75 font-bold ml-2">×</button>
+              <button onClick={() => setError(null)} style={{ background: 'none', border: 'none', color: '#760c19', fontWeight: 'bold', cursor: 'pointer' }}>×</button>
             </div>
           )}
 
           {successMessage && (
-            <div className="p-3.5 bg-[#d1fae5] border border-[#a7f3d0] rounded-md text-xs text-[#14532d] font-semibold flex items-center justify-between shadow-xs animate-in fade-in">
+            <div className="preflight-alert-success">
               <span>✓ {successMessage}</span>
-              <button onClick={() => setSuccessMessage(null)} className="text-[#14532d] hover:opacity-75 font-bold ml-2">×</button>
+              <button onClick={() => setSuccessMessage(null)} style={{ background: 'none', border: 'none', color: '#14532d', fontWeight: 'bold', cursor: 'pointer' }}>×</button>
             </div>
           )}
 
           {loading && !preflight ? (
-            <div className="py-16 text-center text-[#6B3A18]">
-              <div className="inline-block w-8 h-8 border-3 border-[#14532D] border-t-transparent rounded-full animate-spin mb-3"></div>
-              <p className="text-sm font-medium font-serif">Analyzing batch readiness and brand profiles...</p>
+            <div style={{ padding: '4rem 1rem', textAlign: 'center', color: '#6B3A18' }}>
+              <div style={{ display: 'inline-block', width: '2rem', height: '2rem', border: '3px solid #14532D', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite', marginBottom: '0.75rem' }}></div>
+              <p style={{ fontFamily: 'Arvo, Georgia, serif', fontSize: '0.875rem', fontWeight: 600, color: '#211414' }}>Analyzing batch readiness and brand profiles...</p>
             </div>
           ) : preflight ? (
             <>
               {/* Readiness Summary Banner (The General Store Hero Card) */}
-              <div className="bg-[#14532D] text-[#FAF9F2] rounded-lg p-5 shadow-sm border border-[#0B3D22] relative overflow-hidden">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="preflight-hero">
+                <div className="preflight-hero-top">
                   <div>
-                    <div className="text-[11px] uppercase tracking-wider font-semibold text-[#FAF9F2]/80">
+                    <div className="preflight-hero-eyebrow">
                       Execution Readiness
                     </div>
-                    <div className="text-2xl font-bold font-serif tracking-tight mt-0.5 text-white">
-                      {preflight.readyCount} <span className="text-sm font-normal text-[#FAF9F2]/80 font-sans">of</span> {preflight.totalItems} products ready to run
+                    <div className="preflight-hero-headline">
+                      {preflight.readyCount} <span>of</span> {preflight.totalItems} products ready to run
                     </div>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="preflight-hero-actions">
                     <button
                       onClick={() => handleStartBatch('ready_only')}
                       disabled={preflight.readyCount === 0 || actionLoading !== null}
-                      className="px-4 py-2.5 bg-[#F6DB12] hover:bg-[#ebd00e] active:bg-[#d8bf09] text-[#211414] font-bold text-xs rounded-sm shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                      className="preflight-btn-gold"
                     >
                       {actionLoading === 'start_ready_only' ? (
-                        <div className="w-4 h-4 border-2 border-[#211414] border-t-transparent rounded-full animate-spin"></div>
+                        <span>Starting...</span>
                       ) : (
                         <span>▶ Start {preflight.readyCount} Ready Products</span>
                       )}
@@ -249,7 +436,7 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
                     <button
                       onClick={() => handleStartBatch('all')}
                       disabled={actionLoading !== null || preflight.totalItems === 0}
-                      className="px-3.5 py-2.5 bg-[#FAF9F2]/10 hover:bg-[#FAF9F2]/20 active:bg-[#0B3D22] text-[#FAF9F2] font-medium text-xs rounded-sm border border-[#FAF9F2]/30 transition-colors disabled:opacity-50"
+                      className="preflight-btn-hero-secondary"
                       title="Release all items including unassigned/held items"
                     >
                       {actionLoading === 'start_all' ? 'Starting...' : 'Start All Anyway'}
@@ -258,122 +445,204 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
                 </div>
 
                 {/* Progress bar */}
-                <div className="mt-4">
-                  <div className="w-full bg-[#0B3D22] rounded-full h-2 overflow-hidden border border-[#FAF9F2]/15">
+                <div>
+                  <div className="preflight-progress-track">
                     <div
-                      className="bg-[#F6DB12] h-full rounded-full transition-all duration-300"
+                      className="preflight-progress-fill"
                       style={{ width: `${readyPercent}%` }}
                     />
                   </div>
                 </div>
 
                 {/* Metrics 3-Col Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4 pt-4 border-t border-[#FAF9F2]/15 text-xs">
-                  <div className="bg-[#0B3D22]/60 rounded-md p-3 border border-[#FAF9F2]/10">
-                    <div className="text-[#FAF9F2]/80 text-[11px] font-medium">Brands Resolved:</div>
-                    <div className="mt-1 flex items-baseline gap-1.5">
-                      <span className="font-bold text-base text-white">{preflight.metrics.brandResolvedPercent}%</span>
-                      <span className="text-[#FAF9F2]/70 text-[11px]">({preflight.metrics.brandResolvedCount}/{preflight.totalItems})</span>
+                <div className="preflight-metrics-grid">
+                  <div className="preflight-metric-card">
+                    <div className="preflight-metric-label">Brand Resolution:</div>
+                    <div className="preflight-metric-value-row">
+                      <span className="preflight-metric-percent">{preflight.metrics.brandResolvedPercent}%</span>
+                      <span className="preflight-metric-count">({preflight.metrics.brandResolvedCount}/{preflight.totalItems})</span>
                     </div>
-                    {preflight.metrics.ambiguousBrandCount + preflight.metrics.missingBrandCount > 0 && (
-                      <div className="text-[11px] text-[#F6DB12] font-semibold mt-1 flex items-center gap-1">
+                    {preflight.metrics.ambiguousBrandCount + preflight.metrics.missingBrandCount > 0 ? (
+                      <div className="preflight-metric-warn">
                         <span>⚠</span>
                         <span>{preflight.metrics.ambiguousBrandCount + preflight.metrics.missingBrandCount} unassigned</span>
                       </div>
+                    ) : (
+                      <div className="preflight-metric-ok">✓ All brands identified</div>
                     )}
                   </div>
-                  <div className="bg-[#0B3D22]/60 rounded-md p-3 border border-[#FAF9F2]/10">
-                    <div className="text-[#FAF9F2]/80 text-[11px] font-medium">Official Domains:</div>
-                    <div className="mt-1 flex items-baseline gap-1.5">
-                      <span className="font-bold text-base text-white">{preflight.metrics.domainMappedPercent}%</span>
-                      <span className="text-[#FAF9F2]/70 text-[11px]">({preflight.metrics.domainMappedCount}/{preflight.totalItems})</span>
+                  <div className="preflight-metric-card">
+                    <div className="preflight-metric-label">Official Domains:</div>
+                    <div className="preflight-metric-value-row">
+                      <span className="preflight-metric-percent">{preflight.metrics.domainMappedPercent}%</span>
+                      <span className="preflight-metric-count">({preflight.metrics.domainMappedCount}/{preflight.totalItems})</span>
                     </div>
-                    {preflight.metrics.missingDomainBrandCount > 0 && (
-                      <div className="text-[11px] text-[#F6DB12] font-semibold mt-1 flex items-center gap-1">
+                    {preflight.metrics.missingDomainBrandCount > 0 ? (
+                      <div className="preflight-metric-warn">
                         <span>⚠</span>
                         <span>{preflight.metrics.missingDomainBrandCount} missing website</span>
                       </div>
+                    ) : (
+                      <div className="preflight-metric-ok">✓ All domains configured</div>
                     )}
                   </div>
-                  <div className="bg-[#0B3D22]/60 rounded-md p-3 border border-[#FAF9F2]/10">
-                    <div className="text-[#FAF9F2]/80 text-[11px] font-medium">Distributor Routing:</div>
-                    <div className="mt-1 flex items-baseline gap-1.5">
-                      <span className="font-bold text-base text-white">{preflight.metrics.distributorRoutedPercent}%</span>
-                      <span className="text-[#FAF9F2]/70 text-[11px]">({preflight.metrics.distributorRoutedCount}/{preflight.totalItems})</span>
+                  <div className="preflight-metric-card">
+                    <div className="preflight-metric-label">Distributor Sourcing:</div>
+                    <div className="preflight-metric-value-row">
+                      <span className="preflight-metric-percent">{preflight.metrics.distributorRoutedPercent}%</span>
+                      <span className="preflight-metric-count">({preflight.metrics.distributorRoutedCount}/{preflight.totalItems})</span>
                     </div>
-                    {preflight.metrics.unroutedBrandCount > 0 && (
-                      <div className="text-[11px] text-[#FAF9F2]/80 mt-1">
+                    {preflight.metrics.unroutedBrandCount > 0 ? (
+                      <div style={{ fontSize: '0.6875rem', color: 'rgba(250, 249, 242, 0.8)', marginTop: '0.125rem' }}>
                         ℹ {preflight.metrics.unroutedBrandCount} brands unrouted (advisory)
                       </div>
+                    ) : (
+                      <div className="preflight-metric-ok">✓ Routing active</div>
                     )}
                   </div>
                 </div>
               </div>
 
               {/* Blocker & Configuration Sections */}
-              <div className="space-y-5">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
 
                 {/* Section 1: Needs Brand Assignment (Signet Burgundy Highlight) */}
                 {preflight.blockers.needsBrandGroups.length > 0 && (
-                  <div className="bg-white border border-[#E8E6D9] rounded-lg p-5 shadow-xs space-y-3">
-                    <div className="flex items-center justify-between pb-2 border-b border-[#E8E6D9]/60">
-                      <div className="flex items-center gap-2">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#760C19]"></span>
-                        <h3 className="text-sm font-bold font-serif text-[#211414] uppercase tracking-wider">
+                  <div className="preflight-section-card">
+                    <div className="preflight-section-header">
+                      <div className="preflight-section-title-wrap">
+                        <span className="preflight-pill-dot burgundy"></span>
+                        <h3 className="preflight-section-title">
                           Needs Brand Assignment ({preflight.blockers.needsBrandGroups.length} groups)
                         </h3>
                       </div>
-                      <span className="text-xs text-[#760C19] bg-[#fee2e2] px-2.5 py-0.5 rounded-full font-bold border border-[#fca5a5]">
+                      <span className="preflight-badge-alert">
                         Action Required
                       </span>
                     </div>
 
-                    <p className="text-xs text-[#6B3A18]">
-                      Products without brands cannot query distributor catalogs or discover official sites. Assign brands to unblock automation.
+                    <p className="preflight-section-desc">
+                      Products without assigned brands cannot query distributor catalogs or discover official brand websites. Select or enter a brand to unblock automation.
                     </p>
 
-                    <div className="space-y-3 pt-1">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                       {preflight.blockers.needsBrandGroups.map((group) => {
                         const currentInput = brandInputs[group.key] ?? group.suggestedBrand ?? '';
                         const isActionRunning = actionLoading === `assign_${group.key}`;
+                        
+                        // Suggestion chip options (suggested brand + any close matches)
+                        const quickChips: string[] = [];
+                        if (group.suggestedBrand && !quickChips.includes(group.suggestedBrand)) {
+                          quickChips.push(group.suggestedBrand);
+                        }
+                        allKnownBrands.slice(0, 3).forEach((b) => {
+                          if (!quickChips.includes(b) && quickChips.length < 4) {
+                            quickChips.push(b);
+                          }
+                        });
+
                         return (
-                          <div
-                            key={group.key}
-                            className="bg-[#FAF9F2]/60 border border-[#E8E6D9] rounded-md p-3.5 shadow-2xs flex flex-col md:flex-row md:items-center justify-between gap-3"
-                          >
-                            <div className="space-y-1.5 max-w-lg">
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-semibold text-[#6B3A18]">Suggested Brand:</span>
-                                <span className="text-xs font-bold text-[#14532D] bg-white border border-[#E8E6D9] px-2 py-0.5 rounded">
-                                  {group.suggestedBrand || 'Unassigned'}
-                                </span>
-                                <span className="text-xs font-bold text-[#760C19] bg-[#fee2e2] px-2 py-0.5 rounded-full border border-[#fca5a5]">
-                                  {group.itemCount} {group.itemCount === 1 ? 'product' : 'products'}
-                                </span>
-                              </div>
-                              {group.sampleProductNames.length > 0 && (
-                                <div className="text-xs text-[#6B3A18] italic truncate">
-                                  Samples: {group.sampleProductNames.join(' · ')}
+                          <div key={group.key} className="preflight-cluster-item">
+                            <div className="preflight-cluster-top">
+                              <div className="preflight-cluster-info">
+                                <div className="preflight-cluster-badges">
+                                  <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#6B3A18' }}>Suggested:</span>
+                                  {group.suggestedBrand ? (
+                                    <span className="preflight-suggested-tag">
+                                      {group.suggestedBrand}
+                                    </span>
+                                  ) : (
+                                    <span style={{ fontSize: '0.75rem', fontStyle: 'italic', color: '#6B3A18' }}>None detected</span>
+                                  )}
+                                  <span className="preflight-count-tag">
+                                    {group.itemCount} {group.itemCount === 1 ? 'product' : 'products'}
+                                  </span>
                                 </div>
-                              )}
+                                {group.sampleProducts && group.sampleProducts.length > 0 ? (
+                                  <div className="preflight-sample-list">
+                                    {(expandedGroups[group.key]
+                                      ? group.sampleProducts
+                                      : group.sampleProducts.slice(0, 2)
+                                    ).map((prod) => (
+                                      <div key={prod.id} className="preflight-sample-row">
+                                        {prod.upc ? (
+                                          <span className="preflight-upc-badge">
+                                            UPC: {prod.upc}
+                                          </span>
+                                        ) : prod.sku ? (
+                                          <span className="preflight-sku-badge">
+                                            SKU: {prod.sku}
+                                          </span>
+                                        ) : (
+                                          <span className="preflight-no-upc-badge">No UPC</span>
+                                        )}
+                                        <span className="preflight-sample-name" title={prod.name}>
+                                          {prod.name}
+                                        </span>
+                                      </div>
+                                    ))}
+                                    {group.sampleProducts.length > 2 && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setExpandedGroups((prev) => ({
+                                            ...prev,
+                                            [group.key]: !prev[group.key],
+                                          }))
+                                        }
+                                        className="preflight-expand-btn"
+                                      >
+                                        {expandedGroups[group.key]
+                                          ? '▴ Show fewer products'
+                                          : `▾ Show all ${group.sampleProducts.length} sample products with UPCs`}
+                                      </button>
+                                    )}
+                                  </div>
+                                ) : group.sampleProductNames.length > 0 ? (
+                                  <div className="preflight-samples">
+                                    Samples: {group.sampleProductNames.join(' · ')}
+                                  </div>
+                                ) : null}
+                              </div>
+
+                              <div className="preflight-cluster-controls">
+                                <PreflightBrandSelector
+                                  value={currentInput}
+                                  onChange={(newBrand) => {
+                                    setBrandInputs({ ...brandInputs, [group.key]: newBrand });
+                                  }}
+                                  knownBrands={allKnownBrands}
+                                  placeholder="Select or enter brand..."
+                                  disabled={isActionRunning}
+                                />
+                                <button
+                                  onClick={() => handleAssignBrand(group)}
+                                  disabled={isActionRunning || !currentInput.trim()}
+                                  className="preflight-btn-primary"
+                                >
+                                  {isActionRunning ? 'Assigning...' : `Assign all ${group.itemCount}`}
+                                </button>
+                              </div>
                             </div>
 
-                            <div className="flex items-center gap-2 w-full md:w-auto">
-                              <input
-                                type="text"
-                                value={currentInput}
-                                onChange={(e) => setBrandInputs({ ...brandInputs, [group.key]: e.target.value })}
-                                placeholder="Enter brand name"
-                                className="px-3 py-1.5 text-xs bg-white border border-[#E8E6D9] rounded-sm focus:ring-1 focus:ring-[#14532D] focus:border-[#14532D] text-[#211414] flex-1 md:w-48"
-                              />
-                              <button
-                                onClick={() => handleAssignBrand(group)}
-                                disabled={isActionRunning || !currentInput.trim()}
-                                className="px-3.5 py-1.5 bg-[#14532D] hover:bg-[#0B3D22] text-[#FAF9F2] text-xs font-bold rounded-sm shadow-xs transition-colors whitespace-nowrap disabled:opacity-50"
-                              >
-                                {isActionRunning ? 'Assigning...' : `Assign all ${group.itemCount}`}
-                              </button>
-                            </div>
+                            {/* Quick selection chips */}
+                            {quickChips.length > 0 && (
+                              <div className="preflight-quick-chips">
+                                <span className="preflight-quick-chip-label">Quick pick:</span>
+                                {quickChips.map((chip) => (
+                                  <button
+                                    key={chip}
+                                    type="button"
+                                    onClick={() => {
+                                      setBrandInputs({ ...brandInputs, [group.key]: chip });
+                                    }}
+                                    className={`preflight-chip-btn ${currentInput.toLowerCase() === chip.toLowerCase() ? 'active' : ''}`}
+                                  >
+                                    + {chip}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -383,53 +652,158 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
 
                 {/* Section 2: Missing Official Domains (Muted Gold Highlight) */}
                 {preflight.blockers.missingDomainBrands.length > 0 && (
-                  <div className="bg-white border border-[#E8E6D9] rounded-lg p-5 shadow-xs space-y-3">
-                    <div className="flex items-center justify-between pb-2 border-b border-[#E8E6D9]/60">
-                      <div className="flex items-center gap-2">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#E9B520]"></span>
-                        <h3 className="text-sm font-bold font-serif text-[#211414] uppercase tracking-wider">
+                  <div className="preflight-section-card">
+                    <div className="preflight-section-header">
+                      <div className="preflight-section-title-wrap">
+                        <span className="preflight-pill-dot gold"></span>
+                        <h3 className="preflight-section-title">
                           Missing Official Domain ({preflight.blockers.missingDomainBrands.length} brands)
                         </h3>
                       </div>
-                      <span className="text-xs text-[#78350f] bg-[#fef3c7] px-2.5 py-0.5 rounded-full font-semibold border border-[#fde68a]">
-                        Discovery Stage Target
+                      <span className="preflight-badge-target">
+                        Discovery Target · Auto-saved
                       </span>
                     </div>
 
-                    <p className="text-xs text-[#6B3A18]">
-                      Providing the manufacturer website ensures discovery finds official product pages for scraping.
+                    <p className="preflight-section-desc">
+                      Providing the manufacturer website ensures official product page discovery and extraction succeed. Entered domains are saved automatically.
                     </p>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                       {preflight.blockers.missingDomainBrands.map((blocker) => {
                         const currentInput = domainInputs[blocker.brand] ?? '';
-                        const isActionRunning = actionLoading === `domain_${blocker.brand}`;
+                        const firstProductName = blocker.sampleProducts?.[0]?.name || blocker.sampleProductNames?.[0] || '';
+                        const searchQuery = `${blocker.brand} ${firstProductName} official website`.trim();
+                        const googleSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+
                         return (
                           <div
                             key={blocker.brand}
-                            className="bg-[#FAF9F2]/60 border border-[#E8E6D9] rounded-md p-3 shadow-2xs flex flex-col justify-between gap-2.5"
+                            style={{
+                              backgroundColor: 'rgba(250, 249, 242, 0.75)',
+                              border: '1px solid #E8E6D9',
+                              borderRadius: '6px',
+                              padding: '0.875rem',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '0.625rem',
+                            }}
                           >
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-bold text-[#211414]">{blocker.brand}</span>
-                              <span className="text-xs text-[#6B3A18] bg-white border border-[#E8E6D9] px-2 py-0.5 rounded">
-                                {blocker.itemCount} products
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="text"
-                                value={currentInput}
-                                onChange={(e) => setDomainInputs({ ...domainInputs, [blocker.brand]: e.target.value })}
-                                placeholder="e.g. brandname.com"
-                                className="px-3 py-1 text-xs bg-white border border-[#E8E6D9] rounded-sm focus:ring-1 focus:ring-[#14532D] focus:border-[#14532D] text-[#211414] flex-1"
-                              />
-                              <button
-                                onClick={() => handleSaveDomain(blocker)}
-                                disabled={isActionRunning || !currentInput.trim()}
-                                className="px-3 py-1 bg-[#14532D] hover:bg-[#0B3D22] text-[#FAF9F2] text-xs font-bold rounded-sm shadow-xs transition-colors whitespace-nowrap disabled:opacity-50"
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#211414', fontFamily: 'Arvo, Georgia, serif' }}>
+                                  {blocker.brand}
+                                </span>
+                                <span style={{ fontSize: '0.75rem', color: '#6B3A18', backgroundColor: '#FFFFFF', border: '1px solid #E8E6D9', padding: '0.125rem 0.5rem', borderRadius: '4px' }}>
+                                  {blocker.itemCount} {blocker.itemCount === 1 ? 'product' : 'products'}
+                                </span>
+                              </div>
+                              <a
+                                href={googleSearchUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="preflight-search-link"
+                                title={`Search Google for ${blocker.brand} official site`}
                               >
-                                {isActionRunning ? 'Saving...' : 'Save Site'}
-                              </button>
+                                🔍 Search Google ↗
+                              </a>
+                            </div>
+
+                            {/* Sample products list */}
+                            {blocker.sampleProducts && blocker.sampleProducts.length > 0 ? (
+                              <div className="preflight-sample-list">
+                                {(expandedGroups[`domain_${blocker.brand}`]
+                                  ? blocker.sampleProducts
+                                  : blocker.sampleProducts.slice(0, 2)
+                                ).map((prod) => (
+                                  <div key={prod.id} className="preflight-sample-row">
+                                    {prod.upc ? (
+                                      <span className="preflight-upc-badge">UPC: {prod.upc}</span>
+                                    ) : prod.sku ? (
+                                      <span className="preflight-sku-badge">SKU: {prod.sku}</span>
+                                    ) : (
+                                      <span className="preflight-no-upc-badge">No UPC</span>
+                                    )}
+                                    <span className="preflight-sample-name" title={prod.name}>
+                                      {prod.name}
+                                    </span>
+                                  </div>
+                                ))}
+                                {blocker.sampleProducts.length > 2 && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setExpandedGroups((prev) => ({
+                                        ...prev,
+                                        [`domain_${blocker.brand}`]: !prev[`domain_${blocker.brand}`],
+                                      }))
+                                    }
+                                    className="preflight-expand-btn"
+                                  >
+                                    {expandedGroups[`domain_${blocker.brand}`]
+                                      ? '▴ Show fewer products'
+                                      : `▾ Show all ${blocker.sampleProducts.length} sample products with UPCs`}
+                                  </button>
+                                )}
+                              </div>
+                            ) : blocker.sampleProductNames && blocker.sampleProductNames.length > 0 ? (
+                              <div className="preflight-samples">
+                                Samples: {blocker.sampleProductNames.join(' · ')}
+                              </div>
+                            ) : null}
+
+                            <div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.5rem' }}>
+                                <div>
+                                  <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#6B3A18', display: 'block', marginBottom: '0.25rem' }}>
+                                    Official Website Domain:
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={currentInput}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      // Auto-extract domain and optional product URL path pattern
+                                      if (raw.includes('http://') || raw.includes('https://') || (raw.includes('/') && raw.length > 8)) {
+                                        const { domain: cleaned, urlPattern } = extractDomainAndPattern(raw);
+                                        setDomainInputs({ ...domainInputs, [blocker.brand]: cleaned });
+                                        if (urlPattern) {
+                                          setPatternInputs({ ...patternInputs, [blocker.brand]: urlPattern });
+                                        }
+                                      } else {
+                                        setDomainInputs({ ...domainInputs, [blocker.brand]: raw });
+                                      }
+                                    }}
+                                    onBlur={() => {
+                                      if (currentInput.trim()) {
+                                        const { domain: cleaned, urlPattern } = extractDomainAndPattern(currentInput);
+                                        setDomainInputs({ ...domainInputs, [blocker.brand]: cleaned });
+                                        if (urlPattern && !patternInputs[blocker.brand]) {
+                                          setPatternInputs({ ...patternInputs, [blocker.brand]: urlPattern });
+                                        }
+                                      }
+                                    }}
+                                    placeholder="Paste URL or domain (e.g. brand.com)"
+                                    className="preflight-input"
+                                  />
+                                </div>
+
+                                <div>
+                                  <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#6B3A18', display: 'block', marginBottom: '0.25rem' }}>
+                                    Sitemap Product URL Pattern:
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={patternInputs[blocker.brand] ?? blocker.urlPattern ?? ''}
+                                    onChange={(e) => {
+                                      setPatternInputs({ ...patternInputs, [blocker.brand]: e.target.value });
+                                    }}
+                                    placeholder="e.g. /brand-product/ or /products/"
+                                    className="preflight-input"
+                                    style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.75rem' }}
+                                  />
+                                </div>
+                              </div>
                             </div>
                           </div>
                         );
@@ -438,67 +812,123 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
                   </div>
                 )}
 
-                {/* Section 3: Distributor Routing Config (Uniform Green Highlight) */}
+                {/* Section 3: Distributor Sourcing Policy (Uniform Green Highlight) */}
                 {preflight.blockers.unroutedBrands.length > 0 && preflight.availableDistributors.length > 0 && (
-                  <div className="bg-white border border-[#E8E6D9] rounded-lg p-5 shadow-xs space-y-3">
-                    <div className="flex items-center justify-between pb-2 border-b border-[#E8E6D9]/60">
-                      <div className="flex items-center gap-2">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#14532D]"></span>
-                        <h3 className="text-sm font-bold font-serif text-[#211414] uppercase tracking-wider">
+                  <div className="preflight-section-card">
+                    <div className="preflight-section-header">
+                      <div className="preflight-section-title-wrap">
+                        <span className="preflight-pill-dot green"></span>
+                        <h3 className="preflight-section-title">
                           Distributor Sourcing Policy ({preflight.blockers.unroutedBrands.length} brands)
                         </h3>
                       </div>
-                      <span className="text-xs text-[#6B3A18] bg-[#FAF9F2] border border-[#E8E6D9] px-2.5 py-0.5 rounded-full font-semibold">
-                        Advisory / Optional
+                      <span className="preflight-badge-advisory">
+                        Advisory · Auto-saved
                       </span>
                     </div>
 
-                    <div className="space-y-3 pt-1">
+                    <p className="preflight-section-desc">
+                      Select preferred distributors and fallback routing policies per brand. Selections are automatically saved when you close or start the batch.
+                    </p>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                       {preflight.blockers.unroutedBrands.map((blocker) => {
                         const currentPref = routingPreferences[blocker.brand] || {
                           distributorIds: blocker.preferredDistributorIds,
                           policy: blocker.sourcingPolicy,
                         };
-                        const isActionRunning = actionLoading === `routing_${blocker.brand}`;
 
                         return (
                           <div
                             key={blocker.brand}
-                            className="bg-[#FAF9F2]/60 border border-[#E8E6D9] rounded-md p-3.5 shadow-2xs space-y-2.5"
+                            style={{
+                              backgroundColor: 'rgba(250, 249, 242, 0.75)',
+                              border: '1px solid #E8E6D9',
+                              borderRadius: '6px',
+                              padding: '0.875rem',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '0.625rem',
+                            }}
                           >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-bold text-[#211414]">{blocker.brand}</span>
-                                <span className="text-xs text-[#6B3A18] bg-white border border-[#E8E6D9] px-2 py-0.5 rounded">
-                                  {blocker.itemCount} products
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#211414', fontFamily: 'Arvo, Georgia, serif' }}>{blocker.brand}</span>
+                                <span style={{ fontSize: '0.75rem', color: '#6B3A18', backgroundColor: '#FFFFFF', border: '1px solid #E8E6D9', padding: '0.125rem 0.5rem', borderRadius: '4px' }}>
+                                  {blocker.itemCount} {blocker.itemCount === 1 ? 'product' : 'products'}
                                 </span>
                               </div>
-                              <button
-                                onClick={() => handleSaveRouting(blocker)}
-                                disabled={isActionRunning}
-                                className="px-3 py-1 bg-[#14532D] hover:bg-[#0B3D22] text-[#FAF9F2] text-xs font-bold rounded-sm shadow-xs transition-colors disabled:opacity-50"
-                              >
-                                {isActionRunning ? 'Saving...' : 'Save Routing'}
-                              </button>
                             </div>
 
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-[#E8E6D9]/60">
+                            {/* Sample products preview for context */}
+                            {blocker.sampleProducts && blocker.sampleProducts.length > 0 ? (
+                              <div className="preflight-sample-list">
+                                {(expandedGroups[`routing_${blocker.brand}`]
+                                  ? blocker.sampleProducts
+                                  : blocker.sampleProducts.slice(0, 2)
+                                ).map((prod) => (
+                                  <div key={prod.id} className="preflight-sample-row">
+                                    {prod.upc ? (
+                                      <span className="preflight-upc-badge">UPC: {prod.upc}</span>
+                                    ) : prod.sku ? (
+                                      <span className="preflight-sku-badge">SKU: {prod.sku}</span>
+                                    ) : (
+                                      <span className="preflight-no-upc-badge">No UPC</span>
+                                    )}
+                                    <span className="preflight-sample-name" title={prod.name}>
+                                      {prod.name}
+                                    </span>
+                                  </div>
+                                ))}
+                                {blocker.sampleProducts.length > 2 && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setExpandedGroups((prev) => ({
+                                        ...prev,
+                                        [`routing_${blocker.brand}`]: !prev[`routing_${blocker.brand}`],
+                                      }))
+                                    }
+                                    className="preflight-expand-btn"
+                                  >
+                                    {expandedGroups[`routing_${blocker.brand}`]
+                                      ? '▴ Show fewer products'
+                                      : `▾ Show all ${blocker.sampleProducts.length} sample products with UPCs`}
+                                  </button>
+                                )}
+                              </div>
+                            ) : blocker.sampleProductNames && blocker.sampleProductNames.length > 0 ? (
+                              <div className="preflight-samples">
+                                Samples: {blocker.sampleProductNames.join(' · ')}
+                              </div>
+                            ) : null}
+
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid rgba(232, 230, 217, 0.6)' }}>
                               {/* Distributor selection checkboxes */}
                               <div>
-                                <label className="text-[11px] font-semibold text-[#6B3A18] block mb-1">
+                                <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#6B3A18', display: 'block', marginBottom: '0.25rem' }}>
                                   Preferred Distributors:
                                 </label>
-                                <div className="flex flex-wrap gap-2">
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.375rem' }}>
                                   {preflight.availableDistributors.map((dist) => {
                                     const isChecked = currentPref.distributorIds.includes(dist.distributorId);
                                     return (
                                       <label
                                         key={dist.id}
-                                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs cursor-pointer border transition-colors ${
-                                          isChecked
-                                            ? 'bg-[#d1fae5] border-[#14532D] text-[#14532D] font-bold'
-                                            : 'bg-white border-[#E8E6D9] text-[#6B3A18] hover:bg-[#FAF9F2]'
-                                        }`}
+                                        style={{
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: '0.375rem',
+                                          padding: '0.25rem 0.625rem',
+                                          borderRadius: '4px',
+                                          fontSize: '0.75rem',
+                                          cursor: 'pointer',
+                                          border: `1px solid ${isChecked ? '#14532D' : '#E8E6D9'}`,
+                                          backgroundColor: isChecked ? '#d1fae5' : '#FFFFFF',
+                                          color: isChecked ? '#14532D' : '#6B3A18',
+                                          fontWeight: isChecked ? 700 : 400,
+                                          transition: 'all 0.15s',
+                                        }}
                                       >
                                         <input
                                           type="checkbox"
@@ -515,7 +945,7 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
                                               },
                                             });
                                           }}
-                                          className="rounded text-[#14532D] focus:ring-[#14532D]"
+                                          style={{ accentColor: '#14532D' }}
                                         />
                                         <span>{dist.distributorId}</span>
                                       </label>
@@ -526,7 +956,7 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
 
                               {/* Policy select */}
                               <div>
-                                <label className="text-[11px] font-semibold text-[#6B3A18] block mb-1">
+                                <label style={{ fontSize: '0.6875rem', fontWeight: 600, color: '#6B3A18', display: 'block', marginBottom: '0.25rem' }}>
                                   Routing Policy:
                                 </label>
                                 <select
@@ -540,7 +970,7 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
                                       },
                                     });
                                   }}
-                                  className="w-full text-xs px-2.5 py-1.5 border border-[#E8E6D9] rounded-sm bg-white text-[#211414] focus:ring-1 focus:ring-[#14532D]"
+                                  className="preflight-input"
                                 >
                                   <option value="preferred_then_fallback">
                                     Preferred first, then fallback (Recommended)
@@ -563,28 +993,30 @@ export const BatchPreflightModal: React.FC<BatchPreflightModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-6 py-4 border-t border-[#E8E6D9] bg-[#FAF9F2] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[#6B3A18]">
+        <div className="preflight-footer">
           <div>
             {preflight?.heldCount ? (
               <span>
-                <strong className="text-[#760C19] font-bold">{preflight.heldCount} products</strong> will remain held until brands are assigned.
+                <strong style={{ color: '#760C19', fontWeight: 700 }}>{preflight.heldCount} products</strong> will remain held until brands are assigned.
               </span>
             ) : (
-              <span className="text-[#14532D] font-medium">All products are configured and ready to run.</span>
+              <span style={{ color: '#14532D', fontWeight: 600 }}>All products are configured and ready to run.</span>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <button
-              onClick={onClose}
-              className="px-4 py-2 border border-[#E8E6D9] bg-white text-[#211414] hover:bg-[#FAF9F2] rounded-sm font-semibold transition-colors"
+              onClick={handleSaveDraftAndClose}
+              disabled={actionLoading !== null}
+              className="preflight-btn-secondary"
             >
-              Keep as Draft / Close
+              {actionLoading === 'save_draft' ? 'Saving Draft...' : 'Save Draft & Close'}
             </button>
             {preflight && preflight.readyCount > 0 && (
               <button
                 onClick={() => handleStartBatch('ready_only')}
                 disabled={actionLoading !== null}
-                className="px-4 py-2 bg-[#14532D] hover:bg-[#0B3D22] text-[#FAF9F2] font-bold rounded-sm shadow-xs transition-colors"
+                className="preflight-btn-primary"
+                style={{ padding: '0.5rem 1rem' }}
               >
                 Start {preflight.readyCount} Ready Products
               </button>

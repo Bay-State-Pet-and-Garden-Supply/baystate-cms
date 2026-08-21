@@ -44,6 +44,7 @@ import {
 import { analyzeBatchPreflight } from '../../onboarding/preflight-service';
 import { upsertBrandAdvisoryProfile } from '../../db/repositories/distributor-repo';
 import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
+import { extractDomainAndPattern } from '../../onboarding/brand-hub/normalizeDomain';
 import type { PipelineStage, SourcingPolicy } from '../../shared/schemas/onboarding';
 import { ResolveSourcingRequestSchema, FallbackSourcingItemsRequestSchema } from '../../shared/schemas/onboarding';
 import { getSourcingFlags } from '../../onboarding/flags';
@@ -832,16 +833,23 @@ route.post('/onboarding/batches/:id/configure-brand', async (c) => {
     return c.json({ error: 'Batch not found' }, 404);
   }
 
-  const { brand, domain, preferredDistributorIds, sourcingPolicy } = await c.req.json();
+  const { brand, domain, urlPattern, preferredDistributorIds, sourcingPolicy } = await c.req.json();
   if (!brand?.trim()) {
     return c.json({ error: 'brand is required' }, 400);
   }
 
   const trimmedBrand = brand.trim();
 
-  // 1. Domain config if provided
+  // 1. Domain & URL pattern config if provided
   if (domain && domain.trim()) {
-    upsertBrandSite(trimmedBrand, domain.trim());
+    const { domain: cleanDomain, urlPattern: extractedPattern } = extractDomainAndPattern(domain);
+    const finalPattern = urlPattern || extractedPattern || null;
+    if (cleanDomain) {
+      upsertBrandSite(trimmedBrand, cleanDomain, finalPattern);
+      if (finalPattern) {
+        upsertProfile(cleanDomain, { sitemapProductUrlPattern: finalPattern });
+      }
+    }
   }
 
   // 2. Distributor routing if provided
@@ -852,6 +860,79 @@ route.post('/onboarding/batches/:id/configure-brand', async (c) => {
       preferredDistributorIds: preferredDistributorIds ?? [],
       sourcingPolicy: sourcingPolicy ?? 'preferred_then_fallback',
     });
+  }
+
+  const preflight = analyzeBatchPreflight(workspace.id, batchId);
+  return c.json({ success: true, preflight });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/save-preflight-draft
+ * Saves all pending preflight changes (brand assignments, domains, distributor routing)
+ * without transitioning the batch execution state out of draft.
+ */
+route.post('/onboarding/batches/:id/save-preflight-draft', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  const body = await c.req.json();
+  const { brandAssignments, brandConfigs } = body as {
+    brandAssignments?: Array<{ itemIds: string[]; brand: string }>;
+    brandConfigs?: Array<{
+      brand: string;
+      domain?: string;
+      urlPattern?: string;
+      preferredDistributorIds?: string[];
+      sourcingPolicy?: SourcingPolicy;
+    }>;
+  };
+
+  // 1. Process brand assignments
+  if (brandAssignments && Array.isArray(brandAssignments)) {
+    for (const assignment of brandAssignments) {
+      if (assignment.itemIds?.length && assignment.brand?.trim()) {
+        const trimmedBrand = assignment.brand.trim();
+        bulkAssignBrandToItems(batchId, assignment.itemIds, trimmedBrand);
+        releaseBatchItems(batchId, assignment.itemIds);
+        for (const itemId of assignment.itemIds) {
+          onboardingEvents.emitItemStatus(batchId, itemId, 'pending', { brandHint: trimmedBrand });
+        }
+      }
+    }
+  }
+
+  // 2. Process brand domain, urlPattern & distributor routing configurations
+  if (brandConfigs && Array.isArray(brandConfigs)) {
+    for (const config of brandConfigs) {
+      if (config.brand?.trim()) {
+        const trimmedBrand = config.brand.trim();
+        if (config.domain && config.domain.trim()) {
+          const { domain: cleanDomain, urlPattern: extractedPattern } = extractDomainAndPattern(config.domain);
+          const finalPattern = config.urlPattern || extractedPattern || null;
+          if (cleanDomain) {
+            upsertBrandSite(trimmedBrand, cleanDomain, finalPattern);
+            if (finalPattern) {
+              upsertProfile(cleanDomain, { sitemapProductUrlPattern: finalPattern });
+            }
+          }
+        }
+        if (config.preferredDistributorIds !== undefined || config.sourcingPolicy !== undefined) {
+          upsertBrandAdvisoryProfile({
+            workspaceId: workspace.id,
+            brand: trimmedBrand,
+            preferredDistributorIds: config.preferredDistributorIds ?? [],
+            sourcingPolicy: config.sourcingPolicy ?? 'preferred_then_fallback',
+          });
+        }
+      }
+    }
   }
 
   const preflight = analyzeBatchPreflight(workspace.id, batchId);
