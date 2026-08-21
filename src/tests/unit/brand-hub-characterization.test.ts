@@ -2,11 +2,12 @@
 import { describe, it, expect } from 'vitest';
 
 describe('brand hub characterization — tab shell + unified add + discovery ladder (e35s10)', () => {
-  it('resolves legacy settingsTab profiles|sitemaps to brands via tabRegistry', async () => {
+  it('resolves legacy settingsTab profiles to brands via tabRegistry (sitemaps stays distinct per e08)', async () => {
     const { resolveOnboardingSettingsTab } = await import('../../client/components/onboarding-settings/tabRegistry');
     expect(resolveOnboardingSettingsTab('profiles')).toBe('brands');
-    expect(resolveOnboardingSettingsTab('sitemaps')).toBe('brands');
+    expect(resolveOnboardingSettingsTab('sitemaps')).toBe('sitemaps');
     expect(resolveOnboardingSettingsTab('  profiles  ')).toBe('brands');
+    expect(resolveOnboardingSettingsTab('  sitemaps  ')).toBe('sitemaps');
     expect(resolveOnboardingSettingsTab('brands')).toBe('brands');
   });
 
