@@ -2,30 +2,30 @@ id: e07
 title: "Template-aware Sitemap Profile Workbench — multi-template recipes, conservative clustering, single capture visual correction, and consolidated workspace"
 wsjf: 13
 total_bcps: 29
-status: planned
+status: done
 delta: MODIFIED
 stories:
   - id: e07s01
     title: "Fix persistence + evidence-gated activation — transactional immutable versions and MatrixResult-bound testsPass"
     bcps: 8
-    status: planned
+    status: done
     spec: e07s01-persistence-gate.md
     tasks: e07s01-tasks.yaml
   - id: e07s02
     title: "Conservative template clustering + representative suggestion — path+DOM verifier-filtered auto-suggest with operator override"
     bcps: 8
-    status: planned
+    status: done
     spec: e07s02-clustering.md
     tasks: e07s02-tasks.yaml
   - id: e07s03
     title: "Single capture artifact + visual correction — click-to-ranked recipes with value previews across all samples"
     bcps: 8
-    status: planned
+    status: done
     spec: e07s03-capture-visual.md
     tasks: e07s03-tasks.yaml
   - id: e07s04
     title: "Workbench consolidation + hard-block release — single inline surface, Advanced CSS, park/release, delete deprecated"
     bcps: 5
-    status: planned
+    status: done
     spec: e07s04-consolidation.md
     tasks: e07s04-tasks.yaml

@@ -6,12 +6,12 @@ tasks:
   - id: e07s04t01
     description: "Collapse to single inline workbench at /settings/domains/:domain/profile (value previews + Select on page, Advanced collapsible for raw CSS)"
     verify: "bun run typecheck && bunx vitest run src/tests/unit/profile-workspace.test.ts"
-    status: planned
+    status: passing
   - id: e07s04t02
     description: "Delete ProfileBuilderWorkspace overlay + modal callers in Onboarding.tsx/OnboardingSettings.tsx; preserve readiness rail + distributor_record bypass"
     verify: "grep -r ProfileBuilderWorkspace src | wc -l | grep -q '^0$' && bun run typecheck"
-    status: planned
+    status: passing
   - id: e07s04t03
     description: "Hard-block park as setup_required_profile → deterministic release via onboarding-work-api; matrix must pass every sample + every cluster before activation (fail-closed wrong_product/wrong_variant/imageRule)"
     verify: "bunx vitest run src/tests/unit/profile-activation-gate.test.ts src/tests/unit/onboarding-work-state.test.ts"
-    status: planned
+    status: passing
