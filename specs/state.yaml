@@ -2,13 +2,13 @@
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
 active_flow: build_epic
-active_epic_id: e07
+active_epic_id: null
 active_story_id: null
 active_bug_id: null
 release:
   target_version: null
-  last_tag: v0.3.0
-  last_publish: "2026-08-20T08:44:00Z"
+  last_tag: v0.4.0
+  last_publish: "2026-08-21T12:22:35Z"
 epic_cycle:
   current_step: 4
   next_skill: null
@@ -20,9 +20,9 @@ bug_cycle:
   completed_steps: []
 git:
   branch: main
-  hash: 16e1f2a
+  hash: 0c20592
 handoff:
-  last_step_completed: "e07 Template-aware Sitemap Profile Workbench landed (4 stories, 29 BCP): persistence + clustering + capture + consolidation — landed on main as 16e1f2a, satisfying e08 dependency; e08 already landed as f7c1044 — both done, inversion resolved"
+  last_step_completed: "v0.4.0 released (48 BCP) — e07 Workbench (29) + e08 Strategy Hub (19) landed together, inversion resolved, 10 blockers patched, typecheck green — https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/releases/tag/v0.4.0"
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
