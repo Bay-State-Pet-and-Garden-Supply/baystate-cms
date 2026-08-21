@@ -21,6 +21,7 @@ export interface DeriveParams {
   advisoryProfiles: Array<{ brand: string; aliases: string[]; preferredDistributorIds: string[]; sourcingPolicy: BrandStrategy['sourcingPolicy'] }>;
   sitemapByDomain?: Map<string, { totalUrls: number; lastRefreshAt: string | null; activeCount: number }>;
   readinessByDomain?: Map<string, BrandStrategy['extractorReadiness']>;
+  enabledDistributorIds?: string[];
 }
 
 export function deriveBrandStrategies(params: DeriveParams, readinessFallback?: (domain: string) => BrandStrategy['extractorReadiness']): BrandStrategy[] {
@@ -47,6 +48,7 @@ export function deriveBrandStrategies(params: DeriveParams, readinessFallback?: 
     sitesByExact.set(key, list);
   }
 
+  const enabledIds = params.enabledDistributorIds ?? [];
   const result: BrandStrategy[] = [];
   for (const exact of [...exactKeys].sort()) {
     const advisory = profileByExact.get(exact) ?? null;
@@ -64,16 +66,19 @@ export function deriveBrandStrategies(params: DeriveParams, readinessFallback?: 
       };
     });
 
-    let extractorReadiness: BrandStrategy['extractorReadiness'];
-    if (officialDomains.length === 0) extractorReadiness = 'profile_bypass_eligible';
-    else {
-      const first = officialDomains[0].domain;
-      extractorReadiness = params.readinessByDomain?.get(first) ?? (readinessFallback ? readinessFallback(first) : 'not_configured');
-    }
-
     const aliases = advisory?.aliases ?? [];
     const preferredDistributorIds = advisory?.preferredDistributorIds ?? [];
     const sourcingPolicy = advisory?.sourcingPolicy ?? 'advisory';
+
+    let extractorReadiness: BrandStrategy['extractorReadiness'];
+    if (officialDomains.length === 0) {
+      const hasPreferred = preferredDistributorIds.length > 0;
+      const isEligible = sourcingPolicy === 'preferred_only' || hasPreferred;
+      extractorReadiness = isEligible ? 'profile_bypass_eligible' : 'not_configured';
+    } else {
+      const first = officialDomains[0].domain;
+      extractorReadiness = params.readinessByDomain?.get(first) ?? (readinessFallback ? readinessFallback(first) : 'not_configured');
+    }
 
     const diagKey = normalizeDiagnostic(exact);
     const collisions = (diagnosticIndex.get(diagKey) ?? []).filter((k) => k !== exact);
@@ -81,13 +86,16 @@ export function deriveBrandStrategies(params: DeriveParams, readinessFallback?: 
 
     const unmatched = !advisory || sites.length === 0;
 
+    const displayBrand = advisory?.brand ?? params.brandSites.find((s) => normalizeExact(s.brandName) === exact)?.brandName ?? exact;
+    const fallbackTier = enabledIds.filter((id) => !preferredDistributorIds.includes(id));
+
     result.push({
-      brandKey: exact,
+      brandKey: displayBrand,
       normalizedBrand: exact,
       aliases,
       preferredDistributorIds,
       sourcingPolicy,
-      fallbackTier: [],
+      fallbackTier,
       officialDomains,
       extractorReadiness,
       ambiguous,

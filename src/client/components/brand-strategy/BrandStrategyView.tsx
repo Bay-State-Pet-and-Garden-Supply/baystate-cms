@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { KNOWN_RETAILER_OR_DISTRIBUTOR_DOMAINS } from '../../../onboarding/discovery/retailer-domain-list';
 import type { BrandStrategy } from '../../../shared/schemas/brand-strategy';
 import { getProfileWorkspacePath } from '../profile-workspace/route';
-import { upsertBrandProfile, getDistributors } from '../../onboarding-api';
+import { upsertBrandProfile, deleteBrandProfile, getDistributors } from '../../onboarding-api';
 
 type Props = {
   strategies?: BrandStrategy[];
@@ -60,6 +60,8 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
   const [fetching, setFetching] = useState(!initial);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<BrandStrategy | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newBrandInput, setNewBrandInput] = useState('');
   const [aliasesInput, setAliasesInput] = useState('');
   const [preferredInput, setPreferredInput] = useState('');
   const [policyInput, setPolicyInput] = useState<BrandStrategy['sourcingPolicy']>('preferred_then_fallback');
@@ -90,27 +92,61 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
 
   function openEdit(s: BrandStrategy) {
     setEditing(s);
+    setCreating(false);
     setAliasesInput(s.aliases.join(', '));
     setPreferredInput(s.preferredDistributorIds.join(', '));
     setPolicyInput(s.sourcingPolicy);
     setSaveError(null);
   }
 
+  function openCreate() {
+    setCreating(true);
+    setEditing(null);
+    setNewBrandInput('');
+    setAliasesInput('');
+    setPreferredInput('');
+    setPolicyInput('preferred_then_fallback');
+    setSaveError(null);
+  }
+
   async function handleSave() {
-    if (!editing) return;
+    const target = editing ?? (creating ? { brandKey: newBrandInput.trim() } as BrandStrategy : null);
+    if (!target || !target.brandKey.trim()) {
+      setSaveError('Brand name is required');
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
       const aliases = aliasesInput.split(',').map((v) => v.trim()).filter(Boolean);
       const preferredDistributorIds = preferredInput.split(',').map((v) => v.trim()).filter(Boolean);
-      await upsertBrandProfile({ brand: editing.brandKey, aliases, preferredDistributorIds, sourcingPolicy: policyInput });
-      const res = await fetch('/api/onboarding/brands/strategy').then((r) => r.json());
+      await upsertBrandProfile({ brand: target.brandKey.trim(), aliases, preferredDistributorIds, sourcingPolicy: policyInput });
+      const r = await fetch('/api/onboarding/brands/strategy');
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error ?? `HTTP ${r.status}`);
+      }
+      const res = await r.json();
       setStrategies(res.strategies ?? []);
       setEditing(null);
+      setCreating(false);
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleDelete(s: BrandStrategy) {
+    if (!confirm(`Delete strategy for "${s.brandKey}"?`)) return;
+    try {
+      await deleteBrandProfile(s.brandKey);
+      const r = await fetch('/api/onboarding/brands/strategy');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const res = await r.json();
+      setStrategies(res.strategies ?? []);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -124,6 +160,9 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
         Global retailer denylist active — discovery will not persist provisional domains on these hosts ({KNOWN_RETAILER_OR_DISTRIBUTOR_DOMAINS.size} hosts)
       </div>
 
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <button onClick={openCreate} style={{ background: '#14532d', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 12px', fontSize: 12, cursor: 'pointer' }}>+ New Brand Strategy</button>
+      </div>
       <div style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: 8, background: '#fff' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
@@ -145,7 +184,7 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
                   <div style={{ fontWeight: 600, color: '#111827' }}>{s.brandKey}</div>
                   {s.aliases.length > 0 && <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>{s.aliases.map((a) => <span key={a} style={{ background: '#f3f4f6', borderRadius: 999, padding: '1px 7px', fontSize: 11, color: '#4b5563' }}>{a}</span>)}</div>}
                   {s.ambiguous.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: '#92400e' }}>⚠ Ambiguous: {s.ambiguous.map((a) => `${a.candidateBrand} (${a.reason})`).join(', ')}</div>}
-                  {s.unmatched && s.officialDomains.length === 0 && s.aliases.length === 0 && <div style={{ marginTop: 4, fontSize: 11, color: '#6b7280' }}>Unmatched advisory</div>}
+                  {s.unmatched && <div style={{ marginTop: 4, fontSize: 11, color: '#6b7280' }}>{s.officialDomains.length === 0 && !s.aliases.length ? 'Unmatched advisory' : s.officialDomains.length === 0 ? 'No advisory profile' : 'No official domain'}</div>}
                 </td>
                 <td style={{ padding: '12px' }}><TierPills strategy={s} /></td>
                 <td style={{ padding: '12px' }}>
@@ -164,8 +203,9 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
                   )}
                 </td>
                 <td style={{ padding: '12px' }}><ReadinessBadge strategy={s} /></td>
-                <td style={{ padding: '12px' }}>
+                <td style={{ padding: '12px', display: 'flex', gap: 6 }}>
                   <button onClick={() => openEdit(s)} style={{ background: '#fff', border: '1px solid #d1d5db', borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer' }}>Edit strategy</button>
+                  <button onClick={() => handleDelete(s)} style={{ background: '#fff', border: '1px solid #fecaca', borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer', color: '#991b1b' }}>Delete</button>
                 </td>
               </tr>
             ))}
@@ -173,11 +213,16 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
         </table>
       </div>
 
-      {editing && (
+      {(editing || creating) && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}>
           <div style={{ background: '#fff', borderRadius: 12, padding: 20, width: 520, maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.15)' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 600 }}>Edit strategy — {editing.brandKey}</h3>
+            <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 600 }}>{creating ? 'New brand strategy' : `Edit strategy — ${editing?.brandKey}`}</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {creating && (
+                <label style={{ fontSize: 12, color: '#374151' }}>Brand name
+                  <input value={newBrandInput} onChange={(e) => setNewBrandInput(e.target.value)} style={{ width: '100%', marginTop: 4, border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontSize: 13 }} placeholder="Fromm" />
+                </label>
+              )}
               <label style={{ fontSize: 12, color: '#374151' }}>Aliases (comma-separated)
                 <input value={aliasesInput} onChange={(e) => setAliasesInput(e.target.value)} style={{ width: '100%', marginTop: 4, border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontSize: 13 }} placeholder="alias1, alias2" />
                 <span style={{ fontSize: 11, color: '#6b7280' }}>Advisory only — not used for matching</span>
@@ -195,7 +240,7 @@ export function BrandStrategyView({ strategies: initial, loading }: Props) {
               </label>
               {saveError && <div style={{ color: '#991b1b', fontSize: 12 }}>{saveError}</div>}
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
-                <button onClick={() => setEditing(null)} style={{ border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 14px', fontSize: 13, background: '#fff', cursor: 'pointer' }}>Cancel</button>
+                <button onClick={() => { setEditing(null); setCreating(false); }} style={{ border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 14px', fontSize: 13, background: '#fff', cursor: 'pointer' }}>Cancel</button>
                 <button onClick={handleSave} disabled={saving} style={{ background: '#14532d', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', fontSize: 13, cursor: 'pointer', opacity: saving ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
               </div>
             </div>

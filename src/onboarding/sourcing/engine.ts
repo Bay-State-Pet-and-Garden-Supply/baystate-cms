@@ -125,7 +125,7 @@ export class DefaultSourcingEngine implements SourcingEngine {
       for (const result of resultsPref) {
         if (result.kind === 'attempt') {
           attempts.push(result.summary);
-          if (result.summary.outcome === 'found') {
+          if (result.summary.outcome === 'found' && (result as { qualified?: boolean }).qualified) {
             foundMatch = true;
           }
         } else {
@@ -263,6 +263,7 @@ export class DefaultSourcingEngine implements SourcingEngine {
     }
 
     const outcome: EvidenceLookupOutcome = validated && !invalidReason ? validated.outcome : 'source_error';
+    const qualified = validated?.outcome === 'found' && !!validated.record.name?.trim();
     const summary: SourcingGenerationAttemptSummary = {
       attemptId: '',
       connectionId: connection.id,
@@ -325,7 +326,7 @@ export class DefaultSourcingEngine implements SourcingEngine {
     summary.matchedIdentifier = identity?.matchedIdentifier ?? null;
     summary.errorCode = validated?.outcome === 'source_error' ? validated.code : invalidReason;
 
-    return { kind: 'attempt', summary };
+    return { kind: 'attempt', summary, qualified } as { kind: 'attempt'; summary: SourcingGenerationAttemptSummary; qualified: boolean };
   }
 
   /** Persist a bounded durable source_error attempt (skipped connections are still durable). */

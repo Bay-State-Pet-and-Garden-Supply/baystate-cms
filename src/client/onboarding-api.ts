@@ -1555,7 +1555,7 @@ export async function deleteSitemapDomain(
 }
 
 export async function getBrandStrategies(): Promise<{ strategies: import('../shared/schemas/brand-strategy').BrandStrategy[] }> {
-  return request(`/onboarding/brands/strategy`);
+  return request(`/brands/strategy`);
 }
 
 
