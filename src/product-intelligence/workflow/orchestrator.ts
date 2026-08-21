@@ -456,6 +456,11 @@ export class InMemoryProfileWorkflowLock implements ProfileEngineerWorkflowLock 
 export function resolveDefaultProfileLock(options?: { allowInMemoryFallback?: boolean }): ProfileEngineerWorkflowLock {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { isDbInitialized } = require('../../db/connection');
+    if (!isDbInitialized()) {
+      return new InMemoryProfileWorkflowLock();
+    }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const repo = require('../../db/repositories/profile-engineer-workflow-repo');
     if (typeof repo.profileEngineerWorkflowLock === 'function') {
       return repo.profileEngineerWorkflowLock();
@@ -472,6 +477,11 @@ export function resolveDefaultProfileLock(options?: { allowInMemoryFallback?: bo
 
 export function resolveDefaultWorkflowPersistence(options?: { allowInMemoryFallback?: boolean }): SpecialistWorkflowPersistenceRepository {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { isDbInitialized } = require('../../db/connection');
+    if (!isDbInitialized()) {
+      return new InMemoryWorkflowPersistenceRepository();
+    }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const repo = require('../../db/repositories/specialist-workflow-repo');
     if (typeof repo.specialistWorkflowPersistence === 'function') {
@@ -2531,10 +2541,14 @@ export class SpecialistOrchestrator {
           for (const h of Array.from(active.values())) {
             try {
               budgetBroker.commit(h, null, 0);
-            } catch {}
+            } catch {
+              // ignore rollback error
+            }
           }
         }
-      } catch {}
+      } catch {
+        // ignore broker cleanup error
+      }
       recordEvent('orchestrator', 'unhandled_exception', 'failed', 0, errMsg);
       const state = await persistState('failed', 'orchestrator', errMsg);
       return {

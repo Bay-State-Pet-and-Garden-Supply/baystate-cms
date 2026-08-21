@@ -13,90 +13,65 @@
  * without network access and without `bun:sqlite`.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-const {
-  insertProfileGeneration,
-  updateProfileGenerationStatus,
-  getLlmConfig,
-  callLlm,
-} = vi.hoisted(() => {
-  return {
-    insertProfileGeneration: vi.fn((_input: unknown) => ({
-      id: 'gen-123',
-      domain: 'example.com',
-      sourceUrl: 'https://example.com/products/sample',
-      expectedName: 'SAMPLE PRODUCT',
-      brandHint: null,
-      selectors: {},
-      fieldSamples: null,
-      validation: null,
-      status: 'proposed' as const,
-      confidence: 0,
-      llmProvider: 'mock',
-      llmModel: 'mock',
-      errorMessage: null,
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-      promotedAt: null,
-    })),
-    updateProfileGenerationStatus: vi.fn(() => null),
-    getLlmConfig: vi.fn(() => ({
-      provider: 'mock',
-      apiKey: 'mock',
-      baseUrl: 'https://mock.invalid',
-      model: 'mock-model',
-    })),
-    callLlm: vi.fn(async () =>
-      JSON.stringify({
-        titleSelector: 'h1.ai-generated-title',
-        descriptionSelector: 'p.ai-generated-description',
-        brandSelector: '.ai-generated-brand',
-        imagesSelector: '.ai-generated-images img',
-      }),
-    ),
-    getLlmConfigForTask: vi.fn(() => ({
-      provider: 'mock',
-      apiKey: 'mock',
-      baseUrl: 'https://mock.invalid',
-      model: 'mock-model',
-    })),
-    callLlmForTask: vi.fn(async () =>
-      JSON.stringify({
-        titleSelector: 'h1.ai-generated-title',
-        descriptionSelector: 'p.ai-generated-description',
-        brandSelector: '.ai-generated-brand',
-        imagesSelector: '.ai-generated-images img',
-      }),
-    ),
-    MissingLlmTaskConfigError: class MissingLlmTaskConfigError extends Error {},
-    PROFILE_TASKS_REQUIRE_EXPLICIT: new Set(['profile_generation', 'profile_revision']),
-  };
-});
+const insertProfileGeneration = mock((_input: unknown) => ({
+  id: 'gen-123',
+  domain: 'example.com',
+  sourceUrl: 'https://example.com/products/sample',
+  expectedName: 'SAMPLE PRODUCT',
+  brandHint: null,
+  selectors: {},
+  fieldSamples: null,
+  validation: null,
+  status: 'proposed' as const,
+  confidence: 0,
+  llmProvider: 'mock',
+  llmModel: 'mock',
+  errorMessage: null,
+  createdAt: '2026-01-01T00:00:00Z',
+  updatedAt: '2026-01-01T00:00:00Z',
+  promotedAt: null,
+}));
+const updateProfileGenerationStatus = mock(() => null);
+const getLlmConfig = mock(() => ({
+  provider: 'mock',
+  apiKey: 'mock',
+  baseUrl: 'https://mock.invalid',
+  model: 'mock-model',
+}));
+const callLlm = mock(async () =>
+  JSON.stringify({
+    titleSelector: 'h1.ai-generated-title',
+    descriptionSelector: 'p.ai-generated-description',
+    brandSelector: '.ai-generated-brand',
+    imagesSelector: '.ai-generated-images img',
+  }),
+);
 
-vi.mock('../../db/repositories/extractor-profile-repo', () => ({
-  findProfileByDomain: vi.fn(() => null),
+mock.module('../../db/repositories/extractor-profile-repo', () => ({
+  findProfileByDomain: mock(() => null),
 }));
-vi.mock('../../db/repositories/brand-site-repo', () => ({
-  findBrandSites: vi.fn(() => []),
+mock.module('../../db/repositories/brand-site-repo', () => ({
+  findBrandSites: mock(() => []),
 }));
-vi.mock('../../db/repositories/domain-status-repo', () => ({
-  recordDomainStatus: vi.fn(),
+mock.module('../../db/repositories/domain-status-repo', () => ({
+  recordDomainStatus: mock(),
 }));
-vi.mock('../../db/repositories/profile-generation-repo', () => ({
+mock.module('../../db/repositories/profile-generation-repo', () => ({
   insertProfileGeneration,
   updateProfileGenerationStatus,
 }));
-vi.mock('../../onboarding/llm-client', () => ({
+mock.module('../../onboarding/llm-client', () => ({
   getLlmConfig,
   callLlm,
-  getLlmConfigForTask: vi.fn(() => ({
+  getLlmConfigForTask: mock(() => ({
     provider: 'mock',
     apiKey: 'mock',
     baseUrl: 'https://mock.invalid',
     model: 'mock-model',
   })),
-  callLlmForTask: vi.fn(async () =>
+  callLlmForTask: mock(async () =>
     JSON.stringify({
       titleSelector: 'h1.ai-generated-title',
       descriptionSelector: 'p.ai-generated-description',
@@ -109,6 +84,8 @@ vi.mock('../../onboarding/llm-client', () => ({
 }));
 
 import { extractProductData } from '../../onboarding/page-extractor';
+
+const originalFetch = globalThis.fetch;
 
 // Note: this HTML intentionally has NO description and NO brand in the
 // deterministic layers (no og:description, no product:brand, no
@@ -141,13 +118,10 @@ const HTML_WITH_AI_SELECTORS = `<!doctype html>
 </html>`;
 
 function stubFetch(html: string): void {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => new Response(html, {
-      status: 200,
-      headers: { 'content-type': 'text/html; charset=utf-8' },
-    })),
-  );
+  globalThis.fetch = (async () => new Response(html, {
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+  })) as any;
 }
 
 describe('page-extractor profile generation (decision 20: proposal-only)', () => {
@@ -168,7 +142,7 @@ describe('page-extractor profile generation (decision 20: proposal-only)', () =>
     } else {
       process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = originalEnv;
     }
-    vi.unstubAllGlobals();
+    globalThis.fetch = originalFetch;
   });
 
   it('does not apply generated selectors to the current extraction result', async () => {

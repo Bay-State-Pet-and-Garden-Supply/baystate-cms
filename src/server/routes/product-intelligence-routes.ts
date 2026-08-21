@@ -45,17 +45,13 @@ import {
   listVersionSnapshots,
   promoteCandidateVersion,
   recordTeachingEvent,
-  updateCandidateLifecycleStatus,
 } from '../../db/repositories/agent-version-repo';
 import {
-  createEvaluationSnapshot,
-  getEvaluationCases,
   getEvaluationSnapshot,
   getEvaluationWithCases,
   listEvaluationSnapshots,
 } from '../../db/repositories/agent-evaluation-repo';
 import { runPairedEvaluation } from '../../product-intelligence/evaluation/evaluation-orchestrator';
-import { evaluateAgentPromotionGate } from '../../product-intelligence/evaluation/agent-promotion-gate';
 import {
   AgentCorrectionSchema,
   AgentPromotionRequestSchema,

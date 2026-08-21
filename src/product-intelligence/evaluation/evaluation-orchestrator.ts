@@ -5,7 +5,6 @@
  * persists paired agent_evaluation_cases and aggregate agent_evaluation_snapshots,
  * and assesses the agent promotion gate.
  */
-import { getDb } from '../../db/connection';
 import {
   getDatasetForWorkspace,
   getExamples,

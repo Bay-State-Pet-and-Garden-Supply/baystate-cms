@@ -1,36 +1,19 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { ExtractorProfile } from '../../db/repositories/extractor-profile-repo';
-
-vi.mock('../../db/repositories/extractor-profile-repo', () => ({
-  findProfileByDomain: vi.fn(),
-}));
-vi.mock('../../db/repositories/brand-site-repo', () => ({
-  findBrandSites: vi.fn(() => []),
-}));
-vi.mock('../../db/repositories/domain-status-repo', () => ({
-  recordDomainStatus: vi.fn(),
-}));
-vi.mock('../../db/repositories/profile-generation-repo', () => ({
-  insertProfileGeneration: vi.fn(),
-  updateProfileGenerationStatus: vi.fn(),
-}));
-vi.mock('../../onboarding/llm-client', () => ({
-  getLlmConfig: vi.fn(),
-  callLlm: vi.fn(),
-}));
-
 import { extractViaHttpDetailed } from '../../onboarding/page-extractor';
 
+const originalFetch = globalThis.fetch;
+
 function stubHtml(html: string): void {
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(html, {
+  globalThis.fetch = (async () => new Response(html, {
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8' },
-  })));
+  })) as any;
 }
 
 describe('page extractor image scoping', () => {
   afterEach(() => {
-    vi.unstubAllGlobals();
+    globalThis.fetch = originalFetch;
   });
 
   it('does not treat global recommendation srcsets as product additional images', async () => {
