@@ -175,6 +175,9 @@ export function SuitePanel({ domain, suiteResp: propSuiteResp, onRefresh: propRe
       {waiverSuccess && <div role="status" style={{ margin: 'var(--space-2) var(--space-2) 0', padding: '8px 12px', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)' }}><span style={{ background: 'var(--color-signet-burgundy)', color: 'var(--color-feed-bag-cream)', padding: '2px 6px', borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', fontWeight: 600, marginRight: 8 }}>Waiver</span>{waiverSuccess}</div>}
       {overrideMsg && <div role="status" style={{ margin: 'var(--space-2) var(--space-2) 0', padding: '8px 12px', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-uniform-green)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.8rem' }}>{overrideMsg}</div>}
       <div style={{ padding: 'var(--space-2)' }}>
+        <details style={{ marginBottom: 'var(--space-2)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', background: 'rgba(250,249,242,0.4)' }}>
+          <summary style={{ cursor: 'pointer', padding: '8px 10px', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-ledger-charcoal)', listStyle: 'none' }}>Advanced — Sitemap details (debug) · {candidateCount} found · {clusters.length} templates</summary>
+          <div style={{ padding: '10px', borderTop: '1px solid var(--color-card-border)' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
           <div style={{ background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '8px 10px' }}>
             <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Found on site</div>
@@ -215,6 +218,8 @@ export function SuitePanel({ domain, suiteResp: propSuiteResp, onRefresh: propRe
             </div>
           </div>
         )}
+          </div>
+        </details>
         {suggested.length > 0 && (
           <div style={{ marginBottom: 'var(--space-2)', padding: '8px 10px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)' }}>
             <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)', marginBottom: 6 }}>Suggested reps (one per cluster)</div>
