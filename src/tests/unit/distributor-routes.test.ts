@@ -251,8 +251,7 @@ describe('Distributor settings routes (ADR 0014)', () => {
     });
     expect(badPatch.status).toBe(400);
 
-    // Cross-workspace isolation: a connection owned by a SECOND workspace
-    // cannot be patched from the active (first-inserted) workspace → 404.
+    // e08s03 singleton enforcement: multiple workspaces now fail-closed 409 (not cross-workspace 404).
     insertWorkspace(workspacePayload(FOREIGN_WS_ID, 'Workspace Two'));
     const { createConnection, updateConnection } = await import('../../db/repositories/distributor-repo');
     const foreignConn = createConnection({
@@ -260,8 +259,6 @@ describe('Distributor settings routes (ADR 0014)', () => {
       distributorId: 'phillips',
       connectorType: 'api',
     });
-    // Amendment A: creation is always disabled; enablement is a separate
-    // workspace-scoped update (operator health check).
     expect(foreignConn.enabled).toBe(false);
     updateConnection(foreignConn.id, FOREIGN_WS_ID, { enabled: true });
     const crossRes = await distributorRoutes.request(`/onboarding/settings/connections/${foreignConn.id}`, {
@@ -269,18 +266,18 @@ describe('Distributor settings routes (ADR 0014)', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: false }),
     });
-    expect(crossRes.status).toBe(404);
-    // The foreign row was not mutated.
+    expect(crossRes.status).toBe(409);
+    expect((await crossRes.clone().json()).error).toContain('multiple_workspaces');
     const foreignRow = getDb().query('SELECT enabled FROM distributor_connections WHERE id = ?').get(foreignConn.id) as { enabled: number };
     expect(foreignRow.enabled).toBe(1);
 
-    // A bogus id in the active workspace → 404.
+    // With multiple workspaces, even a bogus id is 409 (singleton fail-closed takes precedence).
     const missingRes = await distributorRoutes.request('/onboarding/settings/connections/conn-does-not-exist', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: false }),
     });
-    expect(missingRes.status).toBe(404);
+    expect(missingRes.status).toBe(409);
   });
 
   test('GET distributors reflects distributors auto-created by connections', async () => {

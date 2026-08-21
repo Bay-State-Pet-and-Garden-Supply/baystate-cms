@@ -97,11 +97,12 @@ describe('DistributorConnectionsPanel', () => {
     expect(html.toLowerCase()).not.toContain('secret value');
   });
 
-  it('renders the advisory brand profile section with the fall-open hint', () => {
+  it('is infra-only: advisory brand profiles moved to Brands Hub (no advisory form, pointer copy present)', () => {
     const html = renderToStaticMarkup(<DistributorConnectionsPanel engineEnabled={true} />);
-    expect(html).toContain('Advisory Brand Profiles');
-    expect(html).toContain('Advisory only');
-    expect(html).toContain('never implies not_stocked');
+    expect(html).not.toContain('Advisory Brand Profiles');
+    expect(html).not.toContain('never implies not_stocked');
+    expect(html).toContain('Brand routing moved to');
+    expect(html).toContain('Settings → Brands');
   });
 });
 

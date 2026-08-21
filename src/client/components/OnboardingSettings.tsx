@@ -783,7 +783,8 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
           Distributors
         </h2>
         <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 20px' }}>
-          Distributor connections and advisory brand profiles for the Sourcing stage (ADR 0014).
+          Connection infrastructure for Sourcing (ADR 0014) — brand routing moved to{' '}
+          <strong>Settings → Brands</strong>.
         </p>
         <DistributorConnectionsPanel engineEnabled={sourcingEngineEnabled} />
       </div>

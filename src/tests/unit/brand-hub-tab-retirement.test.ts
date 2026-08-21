@@ -6,25 +6,24 @@ import {
   resolveOnboardingSettingsTab,
 } from '../../client/components/onboarding-settings/tabRegistry';
 
-describe('brand hub tab retirement — legacy profiles|sitemaps alias to brands', () => {
-  it('primary tabs are only general|curation|brands|distributors (legacy retired from bar)', () => {
+describe('brand hub tab retirement — legacy profiles alias to brands (e08s03: sitemaps is primary)', () => {
+  it('primary tabs are general|curation|brands|sitemaps|distributors (sitemaps promoted, profiles retired)', () => {
     const primaryIds = primaryOnboardingSettingsTabs().map((t) => t.id);
-    expect(primaryIds).toEqual(['general', 'curation', 'brands', 'distributors']);
+    expect(primaryIds).toEqual(['general', 'curation', 'brands', 'sitemaps', 'distributors']);
     expect(primaryIds).not.toContain('profiles');
-    expect(primaryIds).not.toContain('sitemaps');
+    expect(primaryIds).toContain('sitemaps');
   });
 
-  it('ONBOARDING_SETTINGS_TABS no longer contains legacy entries (alias-only via resolver)', () => {
-    // shrink-wrapped: legacy tabs removed from registry; alias via LEGACY_TO_BRANDS only
+  it('ONBOARDING_SETTINGS_TABS no longer contains legacy profiles (alias-only via resolver)', () => {
     const allIds = ONBOARDING_SETTINGS_TABS.map((t) => t.id);
     expect(allIds).not.toContain('profiles');
-    expect(allIds).not.toContain('sitemaps');
+    expect(allIds).toContain('sitemaps');
     expect(allIds).toContain('brands');
   });
 
-  it('resolveOnboardingSettingsTab maps legacy to brands before state init', () => {
+  it('resolveOnboardingSettingsTab maps legacy profiles to brands; sitemaps is now primary', () => {
     expect(resolveOnboardingSettingsTab('profiles')).toBe('brands');
-    expect(resolveOnboardingSettingsTab('sitemaps')).toBe('brands');
+    expect(resolveOnboardingSettingsTab('sitemaps')).toBe('sitemaps');
     expect(resolveOnboardingSettingsTab('  profiles  ')).toBe('brands');
     expect(resolveOnboardingSettingsTab('brands')).toBe('brands');
   });

@@ -1,4 +1,5 @@
 // story: e35s10 — single source for onboarding settings tab shell (Brands merge)
+// story: e08s03 — tab labels finalized: Brands = Strategy Hub, Sitemaps = raw inventory, Distributors = Connections infra
 export type OnboardingSettingsTabId = 'general' | 'curation' | 'profiles' | 'sitemaps' | 'distributors' | 'brands';
 
 export interface OnboardingSettingsTabDef {
@@ -6,17 +7,16 @@ export interface OnboardingSettingsTabDef {
   label: string;
 }
 
-// story: e35s10 — shrink-wrapped registry; only primary tabs defined (legacy alias via resolver)
 export const ONBOARDING_SETTINGS_TABS: readonly OnboardingSettingsTabDef[] = [
   { id: 'general', label: 'General' },
   { id: 'curation', label: 'Curation' },
-  { id: 'brands', label: 'Brands' },
+  { id: 'brands', label: 'Brands & Sourcing Strategy Hub' },
+  { id: 'sitemaps', label: 'Sitemaps & Brand URL Index' },
   { id: 'distributors', label: 'Distributors' },
 ] as const;
 
 const LEGACY_TO_BRANDS: Record<string, OnboardingSettingsTabId> = {
   profiles: 'brands',
-  sitemaps: 'brands',
 };
 
 export function isOnboardingSettingsTabId(value: string): value is OnboardingSettingsTabId {

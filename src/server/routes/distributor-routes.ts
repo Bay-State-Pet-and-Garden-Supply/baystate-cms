@@ -9,7 +9,7 @@ import {
   listBrandAdvisoryProfiles,
   deleteBrandAdvisoryProfile,
 } from '../../db/repositories/distributor-repo';
-import { findWorkspace } from '../../db/repositories/workspace-repo';
+import { getServerSingletonWorkspace, MultipleWorkspacesError } from '../../db/repositories/workspace-singleton';
 import {
   InsertDistributorConnectionSchema,
   UpdateDistributorConnectionSchema,
@@ -60,19 +60,28 @@ function toConnectionView(connection: DistributorConnection): DistributorConnect
   };
 }
 
-function requireWorkspace(): ReturnType<typeof findWorkspace> | null {
-  const workspace = findWorkspace();
-  if (!workspace) {
-    return null;
+function requireWorkspace(): ReturnType<typeof getServerSingletonWorkspace> | null {
+  try {
+    return getServerSingletonWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) throw err;
+    throw err;
   }
-  return workspace;
 }
 
 // ─── Distributors ──────────────────────────────────────────────────────────────
 
 // GET /api/onboarding/settings/distributors
 route.get('/onboarding/settings/distributors', (c) => {
-  const workspace = requireWorkspace();
+  let workspace;
+  try {
+    workspace = requireWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) {
+      return c.json({ error: 'multiple_workspaces', workspaces: err.workspaces.map((w) => w.id), message: err.message }, 409);
+    }
+    throw err;
+  }
   if (!workspace) {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
@@ -88,7 +97,15 @@ route.get('/onboarding/settings/distributors', (c) => {
 
 // GET /api/onboarding/settings/connections
 route.get('/onboarding/settings/connections', (c) => {
-  const workspace = requireWorkspace();
+  let workspace;
+  try {
+    workspace = requireWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) {
+      return c.json({ error: 'multiple_workspaces', workspaces: err.workspaces.map((w) => w.id), message: err.message }, 409);
+    }
+    throw err;
+  }
   if (!workspace) {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
@@ -100,7 +117,15 @@ route.get('/onboarding/settings/connections', (c) => {
 // Body = InsertDistributorConnectionSchema WITHOUT workspaceId — the active
 // workspace is derived server-side and overrides any client-supplied value.
 route.post('/onboarding/settings/connections', async (c) => {
-  const workspace = requireWorkspace();
+  let workspace;
+  try {
+    workspace = requireWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) {
+      return c.json({ error: 'multiple_workspaces', workspaces: err.workspaces.map((w) => w.id), message: err.message }, 409);
+    }
+    throw err;
+  }
   if (!workspace) {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
@@ -128,7 +153,15 @@ route.post('/onboarding/settings/connections', async (c) => {
 // Body = UpdateDistributorConnectionSchema; workspace-scoped (a connection id
 // outside the active workspace is a 404, never a mutation).
 route.patch('/onboarding/settings/connections/:id', async (c) => {
-  const workspace = requireWorkspace();
+  let workspace;
+  try {
+    workspace = requireWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) {
+      return c.json({ error: 'multiple_workspaces', workspaces: err.workspaces.map((w) => w.id), message: err.message }, 409);
+    }
+    throw err;
+  }
   if (!workspace) {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
@@ -160,7 +193,15 @@ route.patch('/onboarding/settings/connections/:id', async (c) => {
 
 // GET /api/onboarding/settings/brand-profiles
 route.get('/onboarding/settings/brand-profiles', (c) => {
-  const workspace = requireWorkspace();
+  let workspace;
+  try {
+    workspace = requireWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) {
+      return c.json({ error: 'multiple_workspaces', workspaces: err.workspaces.map((w) => w.id), message: err.message }, 409);
+    }
+    throw err;
+  }
   if (!workspace) {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
@@ -177,7 +218,15 @@ route.get('/onboarding/settings/brand-profiles', (c) => {
 // POST /api/onboarding/settings/brand-profiles
 // Body = { brand, aliases?, preferredDistributorIds? } — workspace derived server-side.
 route.post('/onboarding/settings/brand-profiles', async (c) => {
-  const workspace = requireWorkspace();
+  let workspace;
+  try {
+    workspace = requireWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) {
+      return c.json({ error: 'multiple_workspaces', workspaces: err.workspaces.map((w) => w.id), message: err.message }, 409);
+    }
+    throw err;
+  }
   if (!workspace) {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
@@ -211,7 +260,15 @@ route.post('/onboarding/settings/brand-profiles', async (c) => {
 
 // DELETE /api/onboarding/settings/brand-profiles/:brand
 route.delete('/onboarding/settings/brand-profiles/:brand', (c) => {
-  const workspace = requireWorkspace();
+  let workspace;
+  try {
+    workspace = requireWorkspace();
+  } catch (err) {
+    if (err instanceof MultipleWorkspacesError) {
+      return c.json({ error: 'multiple_workspaces', workspaces: err.workspaces.map((w) => w.id), message: err.message }, 409);
+    }
+    throw err;
+  }
   if (!workspace) {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
