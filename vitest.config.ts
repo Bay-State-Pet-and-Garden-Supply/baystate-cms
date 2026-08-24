@@ -66,11 +66,21 @@ export default defineConfig({
       'src/tests/unit/llm-client-task-routing.test.ts',
       // bun:sqlite suites missing from the excludes at 0e9a242 (vitest
       // cannot collect them); registered in package.json test:db
+      'src/tests/unit/packaging-ocr-stage.test.ts',
+      'src/tests/unit/packaging-ocr-shadow.test.ts',
+      'src/tests/unit/packaging-ocr-consumer-wiring.test.ts',
       'src/tests/unit/provider-connection-routing.test.ts',
       'src/tests/unit/vlm-client.test.ts',
       'src/tests/unit/profile-governance-service.test.ts',
       'src/tests/unit/domain-diagnostics-service.test.ts',
       'src/tests/unit/packaging-ocr.test.ts',
+      // P1-T1 structured OCR attempt results — transitively imports bun:sqlite
+      // repositories (run under bun test via test:db)
+      'src/tests/unit/packaging-ocr-attempt.test.ts',
+      // P3-T1/T2 packaging-OCR eval harness + repetition mitigation — bun:sqlite
+      // transitive imports (run under bun test via test:db)
+      'src/tests/unit/ocr-eval-harness.test.ts',
+      'src/tests/unit/packaging-ocr-repetition.test.ts',
       // New Phase 1-8 DB-backed tests
       'src/tests/unit/brand-integration.test.ts',
       'src/tests/unit/detail-enrichment-integration.test.ts',

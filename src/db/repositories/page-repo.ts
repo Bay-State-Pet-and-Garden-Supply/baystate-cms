@@ -213,6 +213,18 @@ export function getProductPageAssignments(productSku: string): Array<{ pageId: s
   return rows.map(r => ({ pageId: r.page_id ? String(r.page_id) : null, pageName: String(r.page_name) }));
 }
 
+/**
+ * Distinct assigned page names across ALL products — the catalog-wide name
+ * list behind the legacy hard-coded page-name suggestion fallback in
+ * product-curator (packaging-ocr overhaul P2-T5 repository cleanup of the
+ * inline `SELECT DISTINCT page_name FROM product_pages` query).
+ */
+export function listDistinctProductPageNames(): string[] {
+  const db = getDb();
+  const rows = db.query('SELECT DISTINCT page_name FROM product_pages').all() as Array<{ page_name: string }>;
+  return rows.map(r => r.page_name);
+}
+
 export function clearProductPages(productSku: string): void {
   const db = getDb();
   db.run('DELETE FROM product_pages WHERE product_sku = ?', [productSku]);

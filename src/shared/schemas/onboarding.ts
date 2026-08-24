@@ -138,6 +138,35 @@ export const DistributorImageApprovalSchema = z.object({
 });
 export type DistributorImageApproval = z.infer<typeof DistributorImageApprovalSchema>;
 
+/**
+ * Stable OCR failure-reason taxonomy (packaging-OCR overhaul P1-T1).
+ *
+ * Defined in the SHARED layer because it is persisted inside
+ * OcrAttemptOutcomeSchema and consumed by src/onboarding OCR modules;
+ * src/shared must never import from src/onboarding, so the enum values live
+ * here and src/onboarding/ocr-failure-reasons.ts derives its message map and
+ * helpers from this schema.
+ */
+export const OcrFailureReasonEnum = z.enum([
+  'not_configured',
+  'policy_denied',
+  'plan_incompatible',
+  'no_image',
+  'image_fetch_failed',
+  'image_http_error',
+  'image_too_small',
+  'image_svg_unsupported',
+  'timeout',
+  'http_error',
+  'transport_error',
+  'empty_response',
+  'unparseable_json',
+  'schema_coercion_failed',
+  'circuit_open',
+  'audit_terminal_write_failed',
+]);
+export type OcrFailureReason = z.infer<typeof OcrFailureReasonEnum>;
+
 export const OcrAttemptOutcomeStatusEnum = z.enum(['succeeded', 'failed', 'skipped', 'no_image', 'disabled']);
 export type OcrAttemptOutcomeStatus = z.infer<typeof OcrAttemptOutcomeStatusEnum>;
 
@@ -150,6 +179,14 @@ export const OcrAttemptOutcomeSchema = z.object({
   reason: z.string().nullable().optional(),
   imageCount: z.number().optional(),
   error: z.string().nullable().optional(),
+  /** P1-T1: structured failure reason for the LOCAL VLM leg (null when succeeded/skipped). */
+  localFailureReason: OcrFailureReasonEnum.nullish(),
+  /** P1-T1: structured failure reason for the CLOUD VLM leg (null when succeeded/skipped). */
+  cloudFailureReason: OcrFailureReasonEnum.nullish(),
+  /** P1-T1: number of transport attempts made (>= 1 when an attempt ran). */
+  attempts: z.number().int().positive().optional(),
+  /** P1-T3 (reserved): stored OCR data predates the current frozen plan digest. */
+  stale: z.boolean().optional(),
 });
 export type OcrAttemptOutcome = z.infer<typeof OcrAttemptOutcomeSchema>;
 

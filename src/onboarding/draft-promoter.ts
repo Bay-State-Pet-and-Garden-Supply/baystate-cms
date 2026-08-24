@@ -616,9 +616,9 @@ export async function promoteItems(
           );
         })
         .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
           console.warn(
-            `[DraftPromoter] Distributor imagery verification failed for ${item.upc} (non-blocking): ` +
-              `${err instanceof Error ? err.message : String(err)}`,
+            `[DraftPromoter] Distributor imagery verification failed for item ${item.id} (${item.upc}) (non-blocking): ${msg}`,
           );
         });
     }

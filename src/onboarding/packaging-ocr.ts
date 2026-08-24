@@ -13,13 +13,26 @@
 
 import { getVlmConfig, callVlm, callVlmWithDispatcher, type VlmConfig } from './vlm-client';
 import { isLoopbackBaseUrl, redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
+import { getOcrStageFlags } from '../classification/ocr-stage-flags';
 import { isPrivateLanHost } from '../ai/provider-connections';
+import {
+  OCR_FAILURE_REASON_MESSAGES,
+  isTransientOcrFailure,
+  type OcrFailureReason,
+} from './ocr-failure-reasons';
+import {
+  buildCircuitBreakerKey,
+  checkCircuit,
+  recordSuccess,
+  recordTransportFailure,
+} from './vlm-circuit-breaker';
 import {
   computePromptHashes,
   MODEL_CALL_STATUS,
   COST_BASIS,
   type ModelCallContext,
 } from '../classification/model-operation-registry';
+import { HeartbeatLostError } from '../classification/heartbeat-errors';
 import {
   assertModelPlanCompatible,
   getModelExecutionPlanEntry,
@@ -84,11 +97,26 @@ function isRemoteUrl(value: string): boolean {
 }
 
 /**
- * Fetch a remote image and return its base64-encoded contents.
+ * Structured image-load outcome so every load failure carries a coded reason
+ * (P1-T1). `base64` is null exactly when `failure` is present.
+ */
+interface ImageLoadOutcome {
+  base64: string | null;
+  failure?: {
+    reasonCode: OcrFailureReason;
+    /** Pre-redacted detail (no raw URL/host interpolation). */
+    message: string;
+    httpStatus?: number;
+  };
+}
+
+/**
+ * Fetch a remote image and return its base64-encoded contents with a coded
+ * failure classification.
  * `fetchFn` defaults to the global fetch (onboarding pipeline unchanged);
  * PI callers may pass a policy-gateway-bound fetch (P0-1).
  */
-async function fetchRemoteImageAsBase64(url: string, fetchFn: NetworkFetch = fetch): Promise<string | null> {
+async function fetchRemoteImageOutcome(url: string, fetchFn: NetworkFetch = fetch): Promise<ImageLoadOutcome> {
   try {
     const response = await fetchFn(url, {
       headers: {
@@ -100,29 +128,104 @@ async function fetchRemoteImageAsBase64(url: string, fetchFn: NetworkFetch = fet
     });
 
     if (!response.ok) {
-      console.warn(`[PackagingOcr] HTTP ${response.status} fetching remote image: ${url}`);
-      return null;
+      console.warn(`[PackagingOcr] HTTP ${response.status} fetching remote image: ${redactImageUrl(url)}`);
+      return {
+        base64: null,
+        failure: {
+          reasonCode: 'image_http_error',
+          message: `Image fetch returned HTTP ${response.status}.`,
+          httpStatus: response.status,
+        },
+      };
     }
 
     const contentType = response.headers.get('content-type') ?? '';
     if (contentType.includes('svg')) {
-      console.warn(`[PackagingOcr] Skipping SVG image: ${url}`);
-      return null;
+      console.warn(`[PackagingOcr] Skipping SVG image: ${redactImageUrl(url)}`);
+      return {
+        base64: null,
+        failure: { reasonCode: 'image_svg_unsupported', message: 'Remote image is SVG; unsupported for OCR.' },
+      };
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
 
     // Skip tiny files (likely icons/spacers)
     if (buffer.length < 1024) {
-      console.warn(`[PackagingOcr] Image too small (${buffer.length}b), skipping: ${url}`);
-      return null;
+      console.warn(`[PackagingOcr] Image too small (${buffer.length}b), skipping: ${redactImageUrl(url)}`);
+      return {
+        base64: null,
+        failure: { reasonCode: 'image_too_small', message: `Image too small (${buffer.length} bytes) to run OCR.` },
+      };
     }
 
-    return buffer.toString('base64');
+    return { base64: buffer.toString('base64') };
   } catch (err: any) {
     console.warn(`[PackagingOcr] Failed to fetch remote image ${redactImageUrl(url)}: ${redactTransportText(err.message)}`);
-    return null;
+    return {
+      base64: null,
+      failure: {
+        reasonCode: 'image_fetch_failed',
+        message: `Image fetch failed before an HTTP response: ${redactTransportText(err.message)}`,
+      },
+    };
   }
+}
+
+/**
+ * Load a product image as base64 WITH a coded failure classification,
+ * supporting both local paths and remote URLs. Priority and fallback order
+ * are identical to `loadProductImageAsBase64` (which wraps this).
+ */
+async function loadImageWithReason(
+  imageUrl: string,
+  workspacePath?: string,
+  imageLocalPath?: string | null,
+  fetchFn: NetworkFetch = fetch,
+): Promise<ImageLoadOutcome> {
+  const readLocalFile = async (resolved: string): Promise<ImageLoadOutcome | null> => {
+    try {
+      const fs = await import('fs');
+      if (fs.existsSync(resolved)) {
+        const buffer = fs.readFileSync(resolved);
+        if (buffer.length >= 1024) {
+          return { base64: buffer.toString('base64') };
+        }
+        console.warn(`[PackagingOcr] Local image too small (${buffer.length}b): ${resolved}`);
+        return {
+          base64: null,
+          failure: { reasonCode: 'image_too_small', message: `Local image too small (${buffer.length} bytes) to run OCR.` },
+        };
+      }
+    } catch {
+      // Fall through to next strategy
+    }
+    return null;
+  };
+
+  // Try local path first (for items where images were downloaded)
+  if (imageLocalPath && workspacePath) {
+    const resolved = pathResolve(workspacePath, imageLocalPath);
+    const local = await readLocalFile(resolved);
+    if (local) return local;
+  }
+
+  // Try resolving the image URL as a local path if it's not a remote URL
+  if (!isRemoteUrl(imageUrl) && workspacePath) {
+    const resolved = pathResolve(workspacePath, imageUrl);
+    const local = await readLocalFile(resolved);
+    if (local) return local;
+  }
+
+  // Remote URL — fetch in-memory
+  if (isRemoteUrl(imageUrl)) {
+    return fetchRemoteImageOutcome(imageUrl, fetchFn);
+  }
+
+  return {
+    base64: null,
+    failure: { reasonCode: 'no_image', message: OCR_FAILURE_REASON_MESSAGES.no_image },
+  };
 }
 
 /**
@@ -140,45 +243,8 @@ export async function loadProductImageAsBase64(
   imageLocalPath?: string | null,
   fetchFn: NetworkFetch = fetch,
 ): Promise<string | null> {
-  // Try local path first (for items where images were downloaded)
-  if (imageLocalPath && workspacePath) {
-    const resolved = pathResolve(workspacePath, imageLocalPath);
-    try {
-      const fs = await import('fs');
-      if (fs.existsSync(resolved)) {
-        const buffer = fs.readFileSync(resolved);
-        if (buffer.length >= 1024) {
-          return buffer.toString('base64');
-        }
-        console.warn(`[PackagingOcr] Local image too small (${buffer.length}b): ${resolved}`);
-      }
-    } catch {
-      // Fall through to remote fetch
-    }
-  }
-
-  // Try resolving the image URL as a local path if it's not a remote URL
-  if (!isRemoteUrl(imageUrl) && workspacePath) {
-    const resolved = pathResolve(workspacePath, imageUrl);
-    try {
-      const fs = await import('fs');
-      if (fs.existsSync(resolved)) {
-        const buffer = fs.readFileSync(resolved);
-        if (buffer.length >= 1024) {
-          return buffer.toString('base64');
-        }
-      }
-    } catch {
-      // Fall through to remote fetch
-    }
-  }
-
-  // Remote URL — fetch in-memory
-  if (isRemoteUrl(imageUrl)) {
-    return fetchRemoteImageAsBase64(imageUrl, fetchFn);
-  }
-
-  return null;
+  const outcome = await loadImageWithReason(imageUrl, workspacePath, imageLocalPath, fetchFn);
+  return outcome.base64;
 }
 
 // ─── Parser ─────────────────────────────────────────────────────────────────────
@@ -370,6 +436,14 @@ export interface ExtractPackagingOcrParams {
   /** Frozen model-policy digest bound to the snapshot (for the audit row). */
   modelPolicyDigest?: string | null;
   /**
+   * P3-T1 evaluation-harness seam: explicit local-VLM route used INSTEAD of
+   * `getVlmConfig()` on the legacy (non-run-bound) path. Only honored when
+   * no runtime snapshot is present — run-bound calls always bind to their
+   * frozen plan entry. Used by the ocr-eval harness to point the real OCR
+   * core at each candidate model without mutating stored settings.
+   */
+  vlmConfigOverride?: VlmConfig | null;
+  /**
    * Ownership assertion for run-bound cohort OCR (PR3 hardening C). When
    * provided, it is invoked IMMEDIATELY BEFORE every terminal model-call
    * update (`completeModelCall` / `markTerminal`) — a rejected assertion
@@ -383,26 +457,154 @@ export interface ExtractPackagingOcrParams {
 }
 
 /**
- * Run VLM OCR on a product packaging image and return structured data.
+ * Structured OCR attempt result (P1-T1).
  *
- * This is the single entry point for all packaging OCR. It:
- * 1. Loads the image (local path or remote URL)
- * 2. Calls the local VLM with a comprehensive JSON prompt
- * 3. Parses and validates the response
- * 4. Returns structured PackagingOcrData or null
- *
- * Returns null (does not throw) when:
- * - VLM is not configured
- * - Image cannot be loaded
- * - Parsing fails after recovery attempts
+ * - `ok: true`  → parsed + validated OCR data bound to the downloaded bytes.
+ * - `ok: false` → exactly one coded failure from the OcrFailureReason
+ *   taxonomy, with a PRE-REDACTED human-readable message (never a raw URL),
+ *   the HTTP status when the failure was transport-level, and the durable
+ *   audit callId when a started row exists. A failure NEVER throws across
+ *   the pipeline boundary (contract-violation guards excepted).
  */
-export async function extractPackagingOcr(
+export type PackagingOcrAttempt =
+  | { ok: true; data: PackagingOcrData & { contentHash: string | null }; attempts: number }
+  | {
+      ok: false;
+      reasonCode: OcrFailureReason;
+      redactedMessage: string;
+      httpStatus?: number;
+      callId?: string | null;
+      attempts: number;
+    };
+
+// ─── Repetition-tail mitigation (P3-T2) ─────────────────────────────────────
+
+/** Frequency penalty applied to the single repetition-retry attempt. */
+export const REPETITION_RETRY_FREQUENCY_PENALTY = 0.3;
+
+/** Texts shorter than this never trigger the repetition heuristic. */
+const REPETITION_MIN_TAIL_CHARS = 60;
+
+/** Maximum token n-gram length probed by the repetition heuristic. */
+const REPETITION_MAX_NGRAM = 12;
+
+/** Consecutive repeats of one n-gram that count as a repetition tail. */
+const REPETITION_REPEAT_COUNT = 3;
+
+/**
+ * Consecutive repeats required when the repeated unit is a SINGLE token.
+ * Post-review fixup (P3-T2): legitimately repeated printed lines can place
+ * two or three identical consecutive words on a label (e.g. "boom boom boom"
+ * or an ingredient echo), so a lone token must repeat ≥6 times before the
+ * heuristic fires. Multi-token units (n≥2) keep the stricter structural
+ * signal at 3 consecutive repeats — an n-gram phrase repeating 3× in a row
+ * is essentially never legitimate printed text.
+ */
+const REPETITION_SINGLE_TOKEN_REPEAT_COUNT = 6;
+
+/**
+ * Detect a degenerate "repetition tail" in a VLM response: within the last
+ * ~200 characters, some token n-gram repeats consecutively — multi-token
+ * n-grams at ≥3 repeats, single tokens at ≥6 repeats (see
+ * REPETITION_SINGLE_TOKEN_REPEAT_COUNT for why they differ). Short texts
+ * never trigger.
+ * Pure function — unit-tested in src/tests/unit/packaging-ocr-repetition.test.ts.
+ */
+export function detectRepetitionTail(text: string): boolean {
+  if (!text || text.trim().length < REPETITION_MIN_TAIL_CHARS) return false;
+  const tail = text.slice(-200);
+  const tokens = tail.split(/\s+/).filter(Boolean);
+  if (tokens.length < REPETITION_REPEAT_COUNT) return false;
+  const maxN = Math.max(1, Math.min(REPETITION_MAX_NGRAM, Math.floor(tokens.length / REPETITION_REPEAT_COUNT)));
+  for (let n = maxN; n >= 1; n--) {
+    const repeatsNeeded = n === 1 ? REPETITION_SINGLE_TOKEN_REPEAT_COUNT : REPETITION_REPEAT_COUNT;
+    for (let i = 0; i + repeatsNeeded * n <= tokens.length; i++) {
+      let allEqual = true;
+      for (let k = 1; k < repeatsNeeded && allEqual; k++) {
+        for (let j = 0; j < n; j++) {
+          if (tokens[i + j] !== tokens[i + k * n + j]) {
+            allEqual = false;
+            break;
+          }
+        }
+      }
+      if (allEqual) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Classify a thrown VLM transport error into the failure taxonomy,
+ * preserving the existing AbortError/TimeoutError handling (callVlm wraps
+ * AbortSignal timeouts into a "timed out" message). Messages are redacted
+ * before being embedded in results or audit rows.
+ */
+function classifyVlmError(err: unknown): {
+  reasonCode: OcrFailureReason;
+  redactedMessage: string;
+  httpStatus?: number;
+} {
+  const errorName = err instanceof Error ? err.name : '';
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  const message = redactTransportText(rawMessage);
+
+  if (errorName === 'AbortError' || errorName === 'TimeoutError' || /\btimed out\b/i.test(message)) {
+    return { reasonCode: 'timeout', redactedMessage: message };
+  }
+  if (/empty response/i.test(message)) {
+    return { reasonCode: 'empty_response', redactedMessage: message };
+  }
+  const redirectStatus = message.match(/HTTP redirect \((\d{3})\)/);
+  if (redirectStatus) {
+    return { reasonCode: 'http_error', redactedMessage: message, httpStatus: Number(redirectStatus[1]) };
+  }
+  const statusMatch = message.match(/VLM request failed:\s*(\d{3})/);
+  if (statusMatch) {
+    return { reasonCode: 'http_error', redactedMessage: message, httpStatus: Number(statusMatch[1]) };
+  }
+  return { reasonCode: 'transport_error', redactedMessage: message };
+}
+
+/**
+ * Run one structured packaging-OCR attempt and return a coded result.
+ *
+ * This is the single core entry point for all packaging OCR. It:
+ * 1. Resolves the VLM route (frozen run-bound route or legacy settings)
+ * 2. Checks the circuit breaker (BEFORE any started audit row)
+ * 3. Loads the image (local path or remote URL)
+ * 4. Calls the local VLM with a comprehensive JSON prompt (bounded retry
+ *    around the TRANSPORT ONLY when the packaging-OCR retry flag is enabled
+ *    (BAYSTATE_CMS_OCR_RETRIES_ENABLED via getOcrStageFlags)
+ * 5. Parses and validates the response
+ *
+ * Failure contract: every terminal path emits exactly one reason code and
+ * never throws across the pipeline boundary. Run-bound calls still write
+ * insertModelCallStart before any transport and a terminal audit row on
+ * every path (exactly once, even across retries).
+ */
+export async function runPackagingOcrAttempt(
   params: ExtractPackagingOcrParams,
-): Promise<(PackagingOcrData & { contentHash: string | null }) | null> {
+): Promise<PackagingOcrAttempt> {
   const { imageUrl, workspacePath, imageLocalPath, imageSourceUrl, sku, fetchFn, modelFetchFn } = params;
 
   const auditCtx = params.modelCall ?? null;
   const runBound = Boolean(params.snapshot);
+
+  /** Coded failure constructor — every terminal path funnels through here. */
+  const fail = (
+    reasonCode: OcrFailureReason,
+    redactedMessage: string,
+    opts?: { httpStatus?: number; callId?: string | null },
+    attempts = 0,
+  ): PackagingOcrAttempt => ({
+    ok: false,
+    reasonCode,
+    redactedMessage,
+    ...(opts?.httpStatus !== undefined ? { httpStatus: opts.httpStatus } : {}),
+    ...(opts?.callId ? { callId: opts.callId } : {}),
+    attempts,
+  });
 
   // Boundary-level parity with the cloud VLM transport: a supplied audit
   // context WITHOUT a runtime snapshot cannot be validated against a frozen
@@ -447,7 +649,7 @@ export async function extractPackagingOcr(
         MODEL_CALL_STATUS.policyDenied,
         'Local VLM route denied: no frozen local VLM route in the run snapshot plan.',
       );
-      return null;
+      return fail('policy_denied', 'Local VLM route denied: no frozen local VLM route in the run snapshot plan.');
     }
     // A caller-supplied route that disagrees with the frozen plan entry is a
     // tampering signal — deny rather than trust the caller.
@@ -459,7 +661,7 @@ export async function extractPackagingOcr(
         MODEL_CALL_STATUS.policyDenied,
         'Local VLM route denied: supplied route does not match the frozen plan entry.',
       );
-      return null;
+      return fail('policy_denied', 'Local VLM route denied: supplied route does not match the frozen plan entry.');
     }
     let isPermittedEndpoint = isLoopbackBaseUrl(frozen.baseUrl);
     if (!isPermittedEndpoint && (params.snapshot?.modelPolicy?.imageDataSharing === 'trusted_lan_allowed' || params.snapshot?.modelPolicy?.imageDataSharing === 'cloud_allowed')) {
@@ -477,16 +679,39 @@ export async function extractPackagingOcr(
         MODEL_CALL_STATUS.policyDenied,
         `Local VLM route denied: frozen base URL ${redactImageUrl(frozen.baseUrl)} is not loopback or permitted trusted LAN.`,
       );
-      return null;
+      return fail(
+        'policy_denied',
+        `Local VLM route denied: frozen base URL ${redactImageUrl(frozen.baseUrl)} is not loopback or permitted trusted LAN.`,
+      );
     }
     vlmConfig = { baseUrl: frozen.baseUrl, model: frozen.model, enabled: true };
     routeLocality = isLoopbackBaseUrl(frozen.baseUrl) ? 'local' : 'trusted_lan';
   } else {
-    vlmConfig = getVlmConfig();
+    vlmConfig = params.vlmConfigOverride ?? getVlmConfig();
     if (!vlmConfig?.enabled) {
-      console.log(`[PackagingOcr] VLM not enabled — skipping OCR for ${sku ?? imageUrl}`);
-      return null;
+      console.log(`[PackagingOcr] VLM not enabled — skipping OCR for ${sku ?? redactImageUrl(imageUrl ?? '')}`);
+      return fail('not_configured', OCR_FAILURE_REASON_MESSAGES.not_configured);
     }
+  }
+
+  // P3-T2 greedy-decoding default: OCR attempts send temperature 0 (less
+  // hallucination/prattle than sampled decoding) unless the caller's
+  // VlmConfig.options explicitly overrides it.
+  if (vlmConfig.options?.temperature === undefined) {
+    vlmConfig = { ...vlmConfig, options: { ...vlmConfig.options, temperature: 0 } };
+  }
+
+  // P1-T2 circuit breaker — checked BEFORE insertModelCallStart so an open
+  // circuit yields a coded `circuit_open` result with NO started audit row.
+  // Keyed by baseUrl|model so frozen run-bound routes get their own bucket.
+  // A granted half-open probe that exits early on a non-transport failure
+  // (e.g. image load) self-heals via the probe lease in the breaker.
+  const breakerKey = buildCircuitBreakerKey(vlmConfig.baseUrl, vlmConfig.model);
+  const circuit = checkCircuit(breakerKey);
+  if (!circuit.allowed) {
+    const message = `${OCR_FAILURE_REASON_MESSAGES.circuit_open} (state=${circuit.state}, route=${redactImageUrl(vlmConfig.baseUrl)}|${vlmConfig.model}).`;
+    console.warn(`[PackagingOcr] Circuit breaker open — skipping OCR for ${sku ?? redactImageUrl(imageUrl ?? '')}`);
+    return fail('circuit_open', message);
   }
 
   // Durable audit for run-bound local VLM calls (issue #17 E): insert the
@@ -513,23 +738,28 @@ export async function extractPackagingOcr(
     });
   }
 
-  // Load the image
-  const base64Image = await loadProductImageAsBase64(imageUrl, workspacePath, imageLocalPath, fetchFn);
-  if (!base64Image) {
-    console.warn(`[PackagingOcr] Could not load image for OCR: ${imageUrl}`);
+  // Load the image (P1-T1: coded classification for every load failure)
+  const imageOutcome = await loadImageWithReason(imageUrl, workspacePath, imageLocalPath, fetchFn);
+  if (!imageOutcome.base64 || imageOutcome.failure) {
+    const failure = imageOutcome.failure ?? {
+      reasonCode: 'no_image' as OcrFailureReason,
+      message: OCR_FAILURE_REASON_MESSAGES.no_image,
+    };
+    console.warn(`[PackagingOcr] Could not load image for OCR (${failure.reasonCode}): ${redactImageUrl(imageUrl ?? '')}`);
     if (callId) {
       // PR3 hardening C: assert ownership before the terminal update.
       params.assertHeld?.();
       completeModelCall(callId, {
         status: MODEL_CALL_STATUS.failed,
         durationMs: 0,
-        errorMessage: 'Could not load image for OCR.',
+        errorMessage: failure.message,
         estimatedCostUsd: routeLocality === 'local' ? 0 : null,
         costBasis: routeLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
       });
     }
-    return null;
+    return fail(failure.reasonCode, failure.message, { httpStatus: failure.httpStatus, callId });
   }
+  const base64Image = imageOutcome.base64;
 
   // Round-4: byte-hash binding — the SHA-256 of the EXACT downloaded bytes.
   // OCR facts are bound to this hash so image A's facts can never authorize
@@ -558,37 +788,130 @@ export async function extractPackagingOcr(
   };
 
   // Call VLM
-  console.log(`[PackagingOcr] Running OCR on ${sku ?? imageUrl} using ${vlmConfig.model}`);
-  let rawResponse: string;
+  console.log(`[PackagingOcr] Running OCR on ${sku ?? redactImageUrl(imageUrl ?? '')} using ${vlmConfig.model}`);
+  // Bounded retry around the TRANSPORT ONLY (P1-T1). Parse,
+  // coercion, and image failures are never retried. The durable audit
+  // terminal write happens ONCE after the loop resolves so a retried
+  // transient failure never produces a second audit row.
+  // Post-review fixup 7a: the gate consults `getOcrStageFlags()` (which
+  // re-reads BAYSTATE_CMS_OCR_RETRIES_ENABLED per call, preserving env
+  // behavior) instead of the raw env — enabling in-memory overrides without
+  // a redeploy. No import cycle: ocr-stage-flags.ts imports nothing from
+  // src/onboarding.
+  const retriesEnabled = getOcrStageFlags().packagingOcrRetriesEnabled;
+  const maxTransportAttempts = retriesEnabled ? 2 : 1;
+  let transportAttempts = 0;
+  let rawResponse: string | null = null;
   let executedVlmTarget: { connectionId: string; modelId: string } | null = null;
-  try {
-    if (!runBound && !modelFetchFn && !fetchFn) {
-      // Live OCR through the AI Compute visionOcr dispatcher: executes the
-      // configured fallback and enforces the image data-sharing policy.
-      // Frozen (run-bound) and gateway-bound (Product Intelligence) calls
-      // keep the exact-endpoint direct invocation below.
-      const dispatched = await callVlmWithDispatcher(PACKAGING_OCR_PROMPT, base64Image);
-      rawResponse = dispatched.content;
-      executedVlmTarget = dispatched.executedTarget;
-    } else {
-      rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn);
-    }
-  } catch (err: any) {
-    if (!terminalWritten && callId) {
-      try {
-        markTerminal(MODEL_CALL_STATUS.failed, redactTransportText(err.message));
-      } catch {
-        // best-effort; the primary warning still uses the redacted reason
+  while (transportAttempts < maxTransportAttempts) {
+    transportAttempts += 1;
+    try {
+      if (!runBound && !modelFetchFn && !fetchFn) {
+        // Live OCR through the AI Compute visionOcr dispatcher: executes the
+        // configured fallback and enforces the image data-sharing policy.
+        // Frozen (run-bound) and gateway-bound (Product Intelligence) calls
+        // keep the exact-endpoint direct invocation below.
+        // Post-review fixup 6: sampling options (greedy temperature 0)
+        // thread through into the dispatcher request body instead of being
+        // silently dropped as dispatcher-owned.
+        const dispatched = await callVlmWithDispatcher(PACKAGING_OCR_PROMPT, base64Image, vlmConfig.options);
+        rawResponse = dispatched.content;
+        executedVlmTarget = dispatched.executedTarget;
+      } else {
+        rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn);
       }
+      recordSuccess(breakerKey);
+      break;
+    } catch (err: any) {
+      const classified = classifyVlmError(err);
+      // Only TRANSIENT transport-class failures feed the circuit breaker —
+      // parse, coercion, and DETERMINISTIC response errors must never deny
+      // a route. `isTransientOcrFailure` gates on the coded reason AND the
+      // HTTP status: timeout/transport_error are always transient;
+      // http_error counts only for 429/5xx. Deterministic 400/404/3xx
+      // anti-SSRF failures therefore neither trip the breaker nor get retried.
+      if (isTransientOcrFailure(classified.reasonCode, classified.httpStatus)) {
+        recordTransportFailure(breakerKey);
+      }
+      if (
+        retriesEnabled &&
+        transportAttempts < maxTransportAttempts &&
+        isTransientOcrFailure(classified.reasonCode, classified.httpStatus)
+      ) {
+        console.warn(
+          `[PackagingOcr] Transient VLM failure (${classified.reasonCode}); retrying ` +
+          `attempt ${transportAttempts + 1}/${maxTransportAttempts} for ${sku ?? redactImageUrl(imageUrl ?? '')}`,
+        );
+        continue;
+      }
+      if (!terminalWritten && callId) {
+        try {
+          markTerminal(MODEL_CALL_STATUS.failed, classified.redactedMessage);
+        } catch (terminalErr) {
+          // PR3 hardening C: ownership loss MUST propagate out of this
+          // attempt so a stale owner stops processing further images/cloud
+          // legs and writes no further started rows.
+          if (terminalErr instanceof HeartbeatLostError) throw terminalErr;
+          // best-effort; the primary warning still uses the redacted reason
+        }
+      }
+      console.warn(`[PackagingOcr] VLM call failed for ${sku ?? redactImageUrl(imageUrl ?? '')}: ${classified.redactedMessage}`);
+      return fail(classified.reasonCode, classified.redactedMessage, { httpStatus: classified.httpStatus, callId }, transportAttempts);
     }
-    console.warn(`[PackagingOcr] VLM call failed for ${sku ?? redactImageUrl(imageUrl ?? '')}: ${redactTransportText(err.message)}`);
-    return null;
+  }
+
+  // P3-T2 hallucination mitigation: when the response ends in a degenerate
+  // repetition tail AND retries are enabled (packagingOcrRetriesEnabled),
+  // retry ONCE with a frequency penalty. Success-with-retry is recorded via
+  // an additive parser metadata note (`retried_repetition`) and the raised
+  // attempts count — no schema change.
+  let retriedRepetition = false;
+  if (
+    retriesEnabled &&
+    rawResponse &&
+    detectRepetitionTail(rawResponse)
+  ) {
+    // Post-review fixup 3: retain the ORIGINAL response — a penalized retry
+    // that throws or returns unparseable text must not discard a first
+    // response we can still try to parse; we fall back to it.
+    transportAttempts += 1;
+    console.warn(`[PackagingOcr] Repetition tail detected; retrying once with frequency_penalty=${REPETITION_RETRY_FREQUENCY_PENALTY} for ${sku ?? redactImageUrl(imageUrl ?? '')}`);
+    const penaltyConfig: VlmConfig = {
+      ...vlmConfig,
+      options: { ...vlmConfig.options, temperature: 0, frequencyPenalty: REPETITION_RETRY_FREQUENCY_PENALTY },
+    };
+    try {
+      let retryResponse: string;
+      if (executedVlmTarget) {
+        // Dispatcher path: the retry is a fresh sampled call through the
+        // same dispatcher, now carrying the greedy + penalty options.
+        const dispatched = await callVlmWithDispatcher(PACKAGING_OCR_PROMPT, base64Image, penaltyConfig.options);
+        executedVlmTarget = dispatched.executedTarget;
+        retryResponse = dispatched.content;
+      } else {
+        retryResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, penaltyConfig, modelFetchFn ?? fetchFn);
+      }
+      if (retryResponse.length >= 3 && parseJsonFromVlmResponse(retryResponse)) {
+        rawResponse = retryResponse;
+        retriedRepetition = true;
+      } else {
+        // Retry returned empty/unparseable garbage — keep rawResponse as-is
+        // and let the normal parser decide (it falls through to the original).
+        console.warn(`[PackagingOcr] Repetition retry returned an unparseable response; using the original response for ${sku ?? redactImageUrl(imageUrl ?? '')}`);
+      }
+    } catch (err: any) {
+      if (err instanceof HeartbeatLostError) throw err;
+      const classified = classifyVlmError(err);
+      // Transport failure on the penalized retry is NOT terminal — fall
+      // back to the original response rather than failing the item.
+      console.warn(`[PackagingOcr] Repetition retry failed for ${sku ?? redactImageUrl(imageUrl ?? '')}: ${classified.redactedMessage}; using the original response`);
+    }
   }
 
   if (!rawResponse || rawResponse.length < 3) {
     if (callId) markTerminal(MODEL_CALL_STATUS.failed, 'Empty or too-short response from local VLM.');
-    console.warn(`[PackagingOcr] Empty or too-short response from VLM for ${sku ?? imageUrl}`);
-    return null;
+    console.warn(`[PackagingOcr] Empty or too-short response from VLM for ${sku ?? redactImageUrl(imageUrl ?? '')}`);
+    return fail('empty_response', OCR_FAILURE_REASON_MESSAGES.empty_response, { callId }, transportAttempts);
   }
 
   // Parse
@@ -596,8 +919,8 @@ export async function extractPackagingOcr(
   const parsed = parseJsonFromVlmResponse(rawResponse);
   if (!parsed) {
     if (callId) markTerminal(MODEL_CALL_STATUS.failed, 'Could not parse JSON from local VLM response.');
-    console.warn(`[PackagingOcr] Could not parse JSON from VLM response for ${sku ?? imageUrl}`);
-    return null;
+    console.warn(`[PackagingOcr] Could not parse JSON from VLM response for ${sku ?? redactImageUrl(imageUrl ?? '')}`);
+    return fail('unparseable_json', OCR_FAILURE_REASON_MESSAGES.unparseable_json, { callId }, transportAttempts);
   }
 
   // Coerce and validate
@@ -606,7 +929,8 @@ export async function extractPackagingOcr(
     imageLocalPath: imageLocalPath ?? null,
     model: executedVlmTarget ? `${executedVlmTarget.connectionId}:${executedVlmTarget.modelId}` : vlmConfig.model,
     extractedAt: new Date().toISOString(),
-    parser: 'packaging-ocr.ts',
+    // P3-T2: additive note when a repetition-tail retry produced this data.
+    parser: retriedRepetition ? 'packaging-ocr.ts (retried_repetition)' : 'packaging-ocr.ts',
     rawResponseExcerpt: responseExcerpt,
     ...(callId ? { modelCallIds: [callId] } : {}),
   };
@@ -614,8 +938,8 @@ export async function extractPackagingOcr(
   const result = coercePackagingOcrData(parsed, metadata);
   if (!result) {
     if (callId) markTerminal(MODEL_CALL_STATUS.failed, 'Schema coercion failed for local VLM response.');
-    console.warn(`[PackagingOcr] Schema coercion failed for ${sku ?? imageUrl}`);
-    return null;
+    console.warn(`[PackagingOcr] Schema coercion failed for ${sku ?? redactImageUrl(imageUrl ?? '')}`);
+    return fail('schema_coercion_failed', OCR_FAILURE_REASON_MESSAGES.schema_coercion_failed, { callId }, transportAttempts);
   }
 
   // Success: the terminal row must be durable before the result is returned.
@@ -623,7 +947,7 @@ export async function extractPackagingOcr(
     const terminalDurable = markTerminal(MODEL_CALL_STATUS.success);
     if (!terminalDurable) {
       console.error(`[PackagingOcr] Local VLM call ${callId} terminal update failed; discarding OCR output.`);
-      return null;
+      return fail('audit_terminal_write_failed', OCR_FAILURE_REASON_MESSAGES.audit_terminal_write_failed, { callId }, transportAttempts);
     }
   }
 
@@ -632,12 +956,25 @@ export async function extractPackagingOcr(
   ).length;
 
   console.log(
-    `[PackagingOcr] ✓ OCR complete for ${sku ?? imageUrl}: ${fieldCount} fields populated ` +
+    `[PackagingOcr] ✓ OCR complete for ${sku ?? redactImageUrl(imageUrl ?? '')}: ${fieldCount} fields populated ` +
     `(productName="${result.productName ?? 'N/A'}", species=[${result.species.join(', ')}], ` +
     `form="${result.productForm ?? 'N/A'}", labels=[${result.dietaryLabels.join(', ')}])`,
   );
 
-  return { ...result, contentHash };
+  return { ok: true, data: { ...result, contentHash }, attempts: transportAttempts };
+}
+
+/**
+ * Legacy single-result adapter (P1-T1): exact same signature as before the
+ * structured-attempt refactor, so ALL existing callers compile unchanged and
+ * still receive `null` on any failure. New callers should use
+ * `runPackagingOcrAttempt` for the coded failure taxonomy.
+ */
+export async function extractPackagingOcr(
+  params: ExtractPackagingOcrParams,
+): Promise<(PackagingOcrData & { contentHash: string | null }) | null> {
+  const result = await runPackagingOcrAttempt(params);
+  return result.ok ? result.data : null;
 }
 
 // ─── OCR result merging (multi-image support) ────────────────────────────────
@@ -738,6 +1075,12 @@ export function mergeOcrResults(results: PackagingOcrData[]): PackagingOcrData {
     (mergedMetadata as { modelCallIds?: string[] }).modelCallIds = [...callIdUnion];
   }
   merged.metadata = mergedMetadata;
+
+  // Byte-hash binding must survive the merge: callers bind OCR facts to
+  // `contentHash` (the SHA-256 of the downloaded primary-image bytes), so a
+  // multi-image merge carries the PRIMARY image's hash forward instead of
+  // silently dropping it.
+  merged.contentHash = (results[0] as any).contentHash ?? null;
 
   return merged as PackagingOcrData;
 }

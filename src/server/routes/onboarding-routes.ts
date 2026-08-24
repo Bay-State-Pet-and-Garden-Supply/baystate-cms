@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { getLocalRuntimeStatus } from '../../ai/local-runtime-coordinator';
+import { OLLAMA_VLM_SERVICE_NAME, DEFAULT_LOCAL_VISION_MODEL } from '../../ai/vision-model-defaults';
 import { streamSSE } from 'hono/streaming';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -46,7 +47,7 @@ import { upsertBrandAdvisoryProfile } from '../../db/repositories/distributor-re
 import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { extractDomainAndPattern } from '../../onboarding/brand-hub/normalizeDomain';
 import type { PipelineStage, SourcingPolicy } from '../../shared/schemas/onboarding';
-import { ResolveSourcingRequestSchema, FallbackSourcingItemsRequestSchema } from '../../shared/schemas/onboarding';
+import { ResolveSourcingRequestSchema, FallbackSourcingItemsRequestSchema, MediaSelectionRequestSchema } from '../../shared/schemas/onboarding';
 import { getSourcingFlags } from '../../onboarding/flags';
 import {
   deriveSourcingEntryStage,
@@ -216,7 +217,12 @@ import {
   getValidatedOnboardingRun,
 } from '../../db/repositories/classification-run-repo';
 import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
-import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
+import { validateReviewCompletionGate, validateItemCategoryPagesAssigned } from '../../classification/review-completion-gate';
+import {
+  buildReviewCompletenessContext,
+  evaluateReviewCompleteness,
+  type ReviewCompletenessBlockerCode,
+} from '../../classification/review-completeness';
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { SubmitProposalDecisionsRequestSchema } from '../../shared/schemas/classification';
 import { getDb } from '../../db/connection';
@@ -1432,6 +1438,25 @@ route.post('/onboarding/items/skip-bulk', async (c) => {
  *
  * Body: { itemIds: string[] }
  */
+
+/** Shared Phase-1 completeness gate for legacy + classified items (e10s01). */
+function reviewCompletenessFailure(
+  item: Parameters<typeof buildReviewCompletenessContext>[0],
+  workspace: { id: string; workspacePath: string },
+): { reason: string; blockers: ReviewCompletenessBlockerCode[] } | null {
+  const result = evaluateReviewCompleteness(
+    buildReviewCompletenessContext(item, {
+      workspaceId: workspace.id,
+      workspacePath: workspace.workspacePath,
+    }),
+  );
+  if (result.ready) return null;
+  return {
+    reason: `Missing mandatory fields: ${result.blockers.join(', ')}`,
+    blockers: result.blockers,
+  };
+}
+
 route.post('/onboarding/items/review-complete', async (c) => {
   const workspace = findWorkspace();
   if (!workspace) {
@@ -1448,7 +1473,7 @@ route.post('/onboarding/items/review-complete', async (c) => {
   }
 
   const db = getDb();
-  const failures: Array<{ itemId: string; reason: string }> = [];
+  const failures: Array<{ itemId: string; reason: string; blockers?: string[] }> = [];
   const legacyIds: string[] = [];
   const classifiedIds: string[] = [];
   const batchIdByItemId = new Map<string, string>();
@@ -1479,7 +1504,28 @@ route.post('/onboarding/items/review-complete', async (c) => {
 
     const runId = item.curationData?.classificationRunId;
     if (!runId) {
-      // Legacy items without classification data pass through
+      // Legacy items without classification data pass through the run gate,
+      // but the universal Category Page requirement still applies — an item
+      // without an assigned (verified) Category Page is never review-ready.
+      const legacyPagesGate = validateItemCategoryPagesAssigned({
+        workspaceId: workspace.id,
+        curationData: item.curationData,
+      });
+      if (legacyPagesGate && !legacyPagesGate.ok) {
+        // Structured code carried alongside the reason so the client readiness
+        // panel can surface it post-rejection instead of an empty blocker set.
+        failures.push({ itemId: id, reason: `${legacyPagesGate.code}: ${legacyPagesGate.reason}`, blockers: [legacyPagesGate.code] });
+        continue;
+      }
+      // Story e10s01 — Phase-1 review-completeness gate (fail closed):
+      // the promotion mandatory checklist is enforced BEFORE durable review
+      // is recorded. Legacy and classified items face the SAME checklist;
+      // the promoter keeps its own checks downstream (defense in depth).
+      const legacyCompletenessFailure = reviewCompletenessFailure(item, workspace);
+      if (legacyCompletenessFailure) {
+        failures.push({ itemId: id, ...legacyCompletenessFailure });
+        continue;
+      }
       legacyIds.push(id);
       continue;
     }
@@ -1494,7 +1540,19 @@ route.post('/onboarding/items/review-complete', async (c) => {
       activeRunId: runId,
     });
     if (!gate.ok) {
-      failures.push({ itemId: id, reason: gate.reason });
+      // Run-gate codes (page_decision_*, title_validation_*, …) are not
+      // completeness blockers, but carrying them structurally lets
+      // parseBlockersFromRejection surface SOMETHING actionable instead of [].
+      failures.push({ itemId: id, reason: gate.reason, blockers: [gate.code] });
+      continue;
+    }
+
+    // Story e10s01 — Phase-1 review-completeness gate for classified items
+    // (same checklist as legacy; runs AFTER the run/decision gates so its
+    // codes describe an otherwise-reviewable item).
+    const completenessFailure = reviewCompletenessFailure(item, workspace);
+    if (completenessFailure) {
+      failures.push({ itemId: id, ...completenessFailure });
       continue;
     }
 
@@ -1816,6 +1874,27 @@ route.get('/onboarding/items/:id', async (c) => {
     };
   })();
 
+  // Story e10s01 — authoritative review-completeness status so the client
+  // renders live blocker/warning codes from the SAME logic the
+  // review-complete gate enforces (client snapshot is advisory; the server
+  // gate remains authoritative).
+  const completeness = (() => {
+    try {
+      const workspace = findWorkspace();
+      if (!workspace) return undefined;
+      return evaluateReviewCompleteness(
+        buildReviewCompletenessContext(
+          { ...item, extractionData: (extractionData ?? null) as Record<string, unknown> | null },
+          { workspaceId: workspace.id, workspacePath: workspace.workspacePath },
+        ),
+      );
+    } catch {
+      // Evaluation must never break the detail projection; the client falls
+      // back to its advisory derivation and review-complete stays authoritative.
+      return undefined;
+    }
+  })();
+
   return c.json({
     item: hydratedItem,
     sources,
@@ -1826,6 +1905,7 @@ route.get('/onboarding/items/:id', async (c) => {
     consistencyWarnings,
     semanticValidation: semanticSurface.mode === 'active' ? semanticSurface.semanticValidation : undefined,
     sourcingQualificationView,
+    ...(completeness ? { completeness } : {}),
   });
 });
 
@@ -1864,6 +1944,43 @@ route.put('/onboarding/items/:id', async (c) => {
     );
   }
 
+  // e10s02 adjudication: distributor inventory is upstream-managed — the
+  // review UI renders quantity read-only and never sends the key; reject
+  // direct attempts rather than silently writing (fail-closed parity with
+  // the extraction_data guard above). Price stays writable for BOTH source
+  // types: item.price is the promoter's ONLY distributor price authority
+  // (draft-promoter.ts ~777), so the reviewer must be able to set it when
+  // an import omitted it.
+  if (item.sourceType === 'distributor_record' && body.quantity !== undefined) {
+    return c.json(
+      { error: 'Distributor record inventory is managed upstream; quantity cannot be edited here.' },
+      400,
+    );
+  }
+
+  // Fail closed on negative commerce values — the promoter would otherwise
+  // write them verbatim into the approved draft. Validation runs AFTER
+  // stripping currency symbols/whitespace (same cleaning as the promotion
+  // price chain) so forms like "$-5" or "- $5" cannot smuggle a negative
+  // value past a leading-character check.
+  if (typeof body.price === 'string') {
+    const cleanedPrice = body.price.replace(/[$\s,]/g, '').trim();
+    if (
+      cleanedPrice.startsWith('-') ||
+      (cleanedPrice !== '' && Number.isFinite(Number(cleanedPrice)) && Number(cleanedPrice) < 0)
+    ) {
+      return c.json({ error: 'Price cannot be negative.' }, 400);
+    }
+  }
+  if (
+    body.quantity !== undefined &&
+    body.quantity !== null &&
+    Number.isFinite(Number(body.quantity)) &&
+    Number(body.quantity) < 0
+  ) {
+    return c.json({ error: 'Quantity cannot be negative.' }, 400);
+  }
+
   // MD round-7 (defect 1b): ROW-level immutability. A PRESERVED
   // distributor_record extraction row is audit-only even after an official
   // fallback (item.sourceType is now official_page, so the guard above no
@@ -1887,6 +2004,15 @@ route.put('/onboarding/items/:id', async (c) => {
     }
     if (body.price !== undefined) {
       db.query('UPDATE onboarding_items SET price = ? WHERE id = ?').run(body.price, itemId);
+    }
+    // e10s02 (review full-field form, plan §3 row 4): quantity is reviewer-
+    // editable for official-page items. Integer-or-null; garbage clears to
+    // null rather than storing a malformed value.
+    if (body.quantity !== undefined) {
+      const parsedQuantity =
+        body.quantity === null ? null : Number.parseInt(String(body.quantity), 10);
+      const safeQuantity = parsedQuantity !== null && Number.isNaN(parsedQuantity) ? null : parsedQuantity;
+      db.query('UPDATE onboarding_items SET quantity = ? WHERE id = ?').run(safeQuantity, itemId);
     }
     if (body.source_url !== undefined) {
       db.query('UPDATE onboarding_items SET source_url = ? WHERE id = ?').run(body.source_url, itemId);
@@ -1922,6 +2048,11 @@ route.put('/onboarding/items/:id', async (c) => {
       // item without a valid run. Only a validated persisted run may restore
       // canonical state below.
       const nextCurationData: Record<string, any> = withoutRunOwnedCurationData(body.curation_data);
+      // e10s04: reviewedMedia is written ONLY by PUT /items/:id/media after
+      // candidate-set validation. A generic listing save must neither overwrite
+      // nor erase it — strip any client-supplied value and carry the persisted
+      // selection forward (mirrors the run-owned-key restoration below).
+      delete nextCurationData.reviewedMedia;
       if (nextCurationData.curatedWeight !== undefined) {
         nextCurationData.curatedWeight = convertToLbs(nextCurationData.curatedWeight);
       }
@@ -1936,6 +2067,13 @@ route.put('/onboarding/items/:id', async (c) => {
         nextCurationData.classificationHistory = [];
       }
 
+      const priorReviewedMedia = (
+        item.curationData as { reviewedMedia?: unknown } | null | undefined
+      )?.reviewedMedia;
+      if (priorReviewedMedia !== undefined && priorReviewedMedia !== null) {
+        nextCurationData.reviewedMedia = priorReviewedMedia;
+      }
+
       db.query('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?').run(
         JSON.stringify(nextCurationData),
         itemId,
@@ -1947,7 +2085,7 @@ route.put('/onboarding/items/:id', async (c) => {
   // review (and clears any approval). The edited fields affect the approved
   // output — the item must be re-reviewed and is never bulk-approvable while
   // invalidated. No-op when the item was never reviewed.
-  const consequentialKeys = ['name', 'price', 'brandHint', 'source_url', 'extraction_data', 'curation_data'] as const;
+  const consequentialKeys = ['name', 'price', 'quantity', 'brandHint', 'source_url', 'extraction_data', 'curation_data'] as const;
   const isConsequentialEdit = consequentialKeys.some(key => body[key] !== undefined);
   // Epic #46 audit fix (fix 3): an APPROVED promotion-stage item whose
   // output was edited must return to an actionable review state — its
@@ -1967,6 +2105,153 @@ route.put('/onboarding/items/:id', async (c) => {
         reason: 'reapproval_required',
       });
     }
+  }
+
+  return c.json({ success: true });
+});
+
+/**
+ * PUT /api/onboarding/items/:id/media (story e10s04)
+ * Persist the reviewer's media selection into `curation_data.reviewedMedia`.
+ *
+ * Validation contract (spec §Surface + OVERWRITE consequences):
+ * - every requested URL must belong to the candidate-set UNION: the item's
+ *   current extraction candidates PLUS previously persisted reviewedMedia
+ *   entries — after an overwrite save, prior selections remain valid
+ *   candidates even when absent from extraction data; foreign URLs are 400.
+ * - distributor-record items: selection is limited to already-approved
+ *   display images (rights-attested approvals); commerce approval stays
+ *   governed by PI-6 computeCommerceApproved, never by reviewer assertion.
+ * - persistence rides curation_data_json wholesale, preserving run-owned
+ *   keys (spread of the existing parsed object).
+ * - consequential edit: invalidates durable review via the SAME
+ *   markReviewInvalidated('consequential_edit') path as generic PUT, and
+ *   reopens approved promotion items for re-approval.
+ */
+route.put('/onboarding/items/:id/media', async (c) => {
+  const itemId = c.req.param('id');
+  const parsedBody = MediaSelectionRequestSchema.safeParse(await c.req.json());
+  if (!parsedBody.success) {
+    return c.json({ error: 'Invalid media selection payload.', issues: parsedBody.error.issues }, 400);
+  }
+  const selection = parsedBody.data;
+
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Item not found' }, 404);
+  }
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
+
+  const extractionData = (item.extractionData ?? {}) as {
+    primaryImage?: unknown;
+    additionalImages?: unknown;
+    distributorImageApprovals?: Array<{ imageUrl?: unknown }> | null;
+  };
+  const isDistributorSource = item.sourceType === 'distributor_record';
+  const approvedDistributorUrls = (extractionData.distributorImageApprovals ?? [])
+    .map((a) => a.imageUrl)
+    .filter((u): u is string => typeof u === 'string' && u.length > 0);
+
+  // Candidate universe = extraction candidates ∪ previously persisted entries
+  // (OVERWRITE consequence: earlier selections stay valid across saves).
+  const prior = (item.curationData as { reviewedMedia?: { primaryImage?: string | null; orderedAdditional?: string[]; suppressed?: string[] } | null } | null | undefined)?.reviewedMedia ?? null;
+  const universe = new Set<string>();
+  if (!isDistributorSource) {
+    if (typeof extractionData.primaryImage === 'string' && extractionData.primaryImage.length > 0) {
+      universe.add(extractionData.primaryImage);
+    }
+    for (const url of ((extractionData.additionalImages as unknown) as string[] | null | undefined) ?? []) {
+      if (typeof url === 'string' && url.length > 0) universe.add(url);
+    }
+  } else {
+    for (const url of approvedDistributorUrls) universe.add(url);
+  }
+  if (prior?.primaryImage) universe.add(prior.primaryImage);
+  for (const url of prior?.orderedAdditional ?? []) universe.add(url);
+  for (const url of prior?.suppressed ?? []) universe.add(url);
+
+  const requested = [
+    ...(selection.primaryImage ? [selection.primaryImage] : []),
+    ...selection.orderedAdditional,
+    ...selection.suppressed,
+  ];
+  const foreign = requested.filter((url) => !universe.has(url));
+  if (foreign.length > 0) {
+    return c.json(
+      { error: 'Media selection contains URLs outside the item candidate set.', urls: foreign },
+      400,
+    );
+  }
+
+  // Distributor constraint: selection draws ONLY from the approved set. The
+  // universe above already equals it for distributor rows, but keep this
+  // explicit guard so a future universe widening cannot silently relax it.
+  if (isDistributorSource) {
+    const approvedSet = new Set(approvedDistributorUrls);
+    const unapproved = requested.filter((url) => !approvedSet.has(url));
+    if (unapproved.length > 0) {
+      return c.json(
+        { error: 'Distributor media selection is limited to approved display images.', urls: unapproved },
+        400,
+      );
+    }
+  }
+
+  // Disjointness contract: a URL may occupy exactly ONE role. A primary that
+  // is also suppressed is self-contradictory (downstream interpretation would
+  // differ per source type); same for an ordered additional that is also
+  // suppressed. Reject before any persistence so `reviewedMedia` stays
+  // unambiguous regardless of source type.
+  const suppressedSelection = new Set(selection.suppressed);
+  if (selection.primaryImage !== null && suppressedSelection.has(selection.primaryImage)) {
+    return c.json(
+      { error: 'primaryImage cannot also appear in suppressed.', urls: [selection.primaryImage] },
+      400,
+    );
+  }
+  const roleOverlap = selection.orderedAdditional.filter((url) => suppressedSelection.has(url));
+  if (roleOverlap.length > 0) {
+    return c.json(
+      { error: 'orderedAdditional URLs cannot also appear in suppressed.', urls: roleOverlap },
+      400,
+    );
+  }
+
+  const db = getDb();
+  const reviewBeforeEdit = getReviewState(itemId);
+  const wasApprovedInPromotion =
+    item.stage === 'promotion' &&
+    Boolean(reviewBeforeEdit?.approvedAt) &&
+    !reviewBeforeEdit?.reviewInvalidatedAt;
+
+  // Known limitation (documented, not fixed — single-operator local CMS):
+  // a listing save (PUT /items/:id) and a media save (PUT /items/:id/media)
+  // issued concurrently both read item.curationData at request start and
+  // last-write-wins the whole JSON blob, so one side's fields can be lost.
+  // The epic's OVERWRITE suppression semantics make losing a suppression
+  // consequential; operators should avoid interleaving the two saves.
+  db.transaction(() => {
+    const nextCurationData: Record<string, unknown> = { ...(item.curationData ?? {}) };
+    nextCurationData.reviewedMedia = {
+      primaryImage: selection.primaryImage,
+      orderedAdditional: selection.orderedAdditional,
+      suppressed: selection.suppressed,
+    };
+    db.query('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?').run(
+      JSON.stringify(nextCurationData),
+      itemId,
+    );
+    // Invalidation is part of the same transaction as the persistence it
+    // describes: a failure between write and invalidation would otherwise
+    // leave changed media still marked reviewed.
+    markReviewInvalidated(itemId, 'consequential_edit');
+  })();
+  if (wasApprovedInPromotion && reopenApprovedForReapproval(itemId)) {
+    onboardingEvents.emitItemStatus(item.batchId, itemId, 'pending', {
+      stage: 'review',
+      reason: 'reapproval_required',
+    });
   }
 
   return c.json({ success: true });
@@ -2695,7 +2980,7 @@ route.get('/onboarding/settings/api-keys', (c) => {
   const redacted = keys.map(k => ({
     id: k.id,
     service: k.service,
-    apiKey: k.service === 'ollama_vlm'
+    apiKey: k.service === OLLAMA_VLM_SERVICE_NAME
       ? (k.api_key || '')
       : (k.api_key ? '••••••••' + k.api_key.slice(-4) : ''),
     baseUrl: k.base_url,
@@ -2766,7 +3051,7 @@ route.get('/onboarding/settings/ollama/models', async (c) => {
   if (models.size === 0) {
     models.add('llama3.2:3b');
     models.add('qwen2.5:3b');
-    models.add('qwen2.5vl:latest');
+    models.add(DEFAULT_LOCAL_VISION_MODEL);
     models.add('llama3.2');
   }
 

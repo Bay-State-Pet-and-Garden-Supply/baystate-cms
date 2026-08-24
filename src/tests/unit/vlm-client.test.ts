@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeAll, afterAll, describe, expect, it } from 'bun:test';
-import { callVlm, getVlmConfig } from '../../onboarding/vlm-client';
+import { callVlm, getVlmConfig, parseOcrTimeoutMs, DEFAULT_OCR_TIMEOUT_MS } from '../../onboarding/vlm-client';
 import { initDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { upsertApiKey } from '../../db/repositories/api-key-repo';
@@ -112,5 +112,132 @@ describe('VLM client — AI Compute route inheritance (getVlmConfig)', () => {
     expect(cfg?.transport).toBe('ollama-native');
     expect(cfg?.baseUrl).toBe('http://localhost:11434');
     expect(cfg?.model).toBe('qwen2.5vl:latest');
+  });
+});
+
+// ─── P3-T2 sampling options serialization ────────────────────────────────────
+
+describe('callVlm sampling options (VlmConfig.options)', () => {
+  function stubFetch(capture: { url?: string; body?: string }): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      capture.url = typeof input === 'string' ? input : input.toString();
+      capture.body = String(init?.body ?? '');
+      return new Response(JSON.stringify({ message: { content: 'ok' }, choices: [{ message: { content: 'ok' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  afterEach(() => {
+    delete process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS;
+  });
+
+  it('serializes temperature/frequency_penalty into the ollama-native body.options', async () => {
+    const capture: { url?: string; body?: string } = {};
+    globalThis.fetch = stubFetch(capture);
+    await callVlm('p', 'b64', {
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'm1',
+      enabled: true,
+      transport: 'ollama-native',
+      options: { temperature: 0, frequencyPenalty: 0.3 },
+    });
+    const body = JSON.parse(capture.body!);
+    expect(body.options).toEqual({ temperature: 0, frequency_penalty: 0.3 });
+    expect(capture.url).toBe('http://127.0.0.1:11434/api/chat');
+  });
+
+  it('serializes sampling as top-level fields into the openai-compatible body', async () => {
+    const capture: { url?: string; body?: string } = {};
+    globalThis.fetch = stubFetch(capture);
+    await callVlm('p', 'b64', {
+      baseUrl: 'http://127.0.0.1:1234/v1',
+      model: 'm2',
+      enabled: true,
+      transport: 'openai-compatible',
+      options: { temperature: 0.2, frequencyPenalty: 0.5 },
+    });
+    const body = JSON.parse(capture.body!);
+    expect(body.temperature).toBe(0.2);
+    expect(body.frequency_penalty).toBe(0.5);
+    expect(body.options).toBeUndefined();
+    expect(capture.url).toBe('http://127.0.0.1:1234/v1/chat/completions');
+  });
+
+  it('keeps bodies BYTE-IDENTICAL to pre-P3-T2 snapshots when options are absent', async () => {
+    const ollamaCapture: { body?: string } = {};
+    globalThis.fetch = stubFetch(ollamaCapture);
+    await callVlm('read this label', 'base64-image', {
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'test-vlm',
+      enabled: true,
+      transport: 'ollama-native',
+    });
+    expect(ollamaCapture.body).toBe(JSON.stringify({
+      model: 'test-vlm',
+      messages: [
+        { role: 'user', content: 'read this label', images: ['base64-image'] },
+      ],
+      stream: false,
+    }));
+
+    const openAiCapture: { body?: string } = {};
+    globalThis.fetch = stubFetch(openAiCapture);
+    await callVlm('read this label', 'base64-image', {
+      baseUrl: 'http://127.0.0.1:1234/v1',
+      model: 'test-vlm',
+      enabled: true,
+      transport: 'openai-compatible',
+    });
+    expect(openAiCapture.body).toBe(JSON.stringify({
+      model: 'test-vlm',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'read this label' },
+            { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,base64-image' } },
+          ],
+        },
+      ],
+      stream: false,
+    }));
+  });
+});
+
+// ─── per-attempt timeout knob (post-review fixup 4) ─────────────────────────────
+
+describe('parseOcrTimeoutMs (BAYSTATE_CMS_OCR_TIMEOUT_MS)', () => {
+  const ORIGINAL = process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS;
+    else process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS = ORIGINAL;
+  });
+
+  it('defaults to 120000 when the env var is absent', () => {
+    delete process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS;
+    expect(parseOcrTimeoutMs()).toBe(120_000);
+    expect(DEFAULT_OCR_TIMEOUT_MS).toBe(120_000);
+  });
+
+  it('parses a positive integer override', () => {
+    expect(parseOcrTimeoutMs('45000')).toBe(45_000);
+    process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS = '30000';
+    expect(parseOcrTimeoutMs()).toBe(30_000);
+  });
+
+  it('falls back to the default for unparseable values', () => {
+    expect(parseOcrTimeoutMs('not-a-number')).toBe(120_000);
+    expect(parseOcrTimeoutMs('12abc')).toBe(120_000); // non-integer junk rejected
+    expect(parseOcrTimeoutMs('')).toBe(120_000);
+  });
+
+  it('falls back to the default for zero and negative values', () => {
+    expect(parseOcrTimeoutMs('0')).toBe(120_000);
+    expect(parseOcrTimeoutMs('-5000')).toBe(120_000);
+    process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS = '-1';
+    expect(parseOcrTimeoutMs()).toBe(120_000);
   });
 });

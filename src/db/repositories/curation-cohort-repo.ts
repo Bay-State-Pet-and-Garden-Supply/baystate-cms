@@ -18,10 +18,8 @@ import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
 import { hashCanonicalJson } from '../../shared/stable-id';
 import {
-  normalizeBrand,
-  extractNameStem,
-  effectiveBrandFor,
   knownBrandsForBatch,
+  familyGroupingIdentityFor,
 } from '../../onboarding/product-line-grouper';
 import { stemsWithinTypoTolerance } from '../../onboarding/product-line-token-normalizer';
 import { GROUPING_VERSION } from '../../shared/schemas/cohorts';
@@ -116,11 +114,23 @@ export function mapCohortMemberRow(row: Record<string, any>): CurationCohortMemb
  * accepted evidence set changed, rebinds the hash. Provenance is sorted so
  * the hash is order-insensitive.
  *
+ * Post-review fixup: the observation-only `shadowPackagingOcrData` key is
+ * EXCLUDED from the hashed object. It is written by shadow-mode packaging-OCR
+ * stage runs and bumps `updated_at`, so letting it participate would change
+ * the evidence identity on the first shadow write and spuriously supersede a
+ * ready cohort. Observation payloads must never influence candidate/evidence
+ * identity. Safe: the key is brand-new behind a default-OFF flag — no
+ * pre-existing rows carry it, so no stored hashes can shift.
+ *
  * Returns NULL when the item has no extraction data yet.
  */
 export function computeExtractionHash(item: OnboardingItem): string | null {
-  const extractionData = item.extractionData;
+  let extractionData = item.extractionData;
   if (!extractionData) return null;
+  if ('shadowPackagingOcrData' in extractionData) {
+    const { shadowPackagingOcrData: _shadow, ...rest } = extractionData as Record<string, unknown>;
+    extractionData = rest as typeof extractionData;
+  }
   const piResultHashes = ((extractionData as any).productIntelligenceEvidence ?? [])
     .map((entry: any) => (entry && typeof entry.resultHash === 'string' ? entry.resultHash : null))
     .filter((hash: string | null): hash is string => hash !== null)
@@ -131,9 +141,12 @@ export function computeExtractionHash(item: OnboardingItem): string | null {
   const sourcingGenerationId =
     decision && typeof decision.sourcingGenerationId === 'string' ? decision.sourcingGenerationId : null;
   const acceptedEvidenceAttemptIds = [...(item.acceptedEvidenceAttemptIds ?? [])].sort();
+  const cleanSourcingDecision = item.sourcingDecision
+    ? JSON.parse(JSON.stringify(item.sourcingDecision))
+    : null;
   return hashCanonicalJson({
     extractionData,
-    sourcingDecision: item.sourcingDecision ?? null,
+    sourcingDecision: cleanSourcingDecision,
     sourceUrl: item.sourceUrl ?? null,
     productIntelligenceResultHashes: piResultHashes,
     sourceType: item.sourceType ?? 'official_page',
@@ -185,15 +198,11 @@ export function groupItemsByFamily(items: OnboardingItem[]): FamilyGroup[] {
   const sorted = [...items].sort((a, b) => a.rowNumber - b.rowNumber);
   for (const item of sorted) {
     if (item.stageStatus === 'skipped') continue; // skipped → not a candidate member
-    // Epic #46 Package A: brandHint OR name-embedded known-brand prefix
-    // ("BETTER BONE HARD VNSN SM" with an empty brandHint still belongs to
-    // the Better Bone family); the key uses the COMPACT brand so
-    // "BetterBone" and "Better Bone" are one family.
-    const normalizedBrand = normalizeBrand(effectiveBrandFor(item, knownBrands));
-    const normalizedNameStem = extractNameStem(item.name || '');
-    if (!normalizedNameStem) continue; // no stable name stem → not groupable
-    const brandKey = normalizedBrand.replace(/\s+/g, '') || 'no-brand';
-    const groupKey = `${brandKey}::${normalizedNameStem}`;
+    const identity = familyGroupingIdentityFor(item, knownBrands);
+    if (!identity.stem) continue; // no stable name stem → not groupable
+    const normalizedBrand = identity.normalizedBrand;
+    const normalizedNameStem = identity.stem;
+    const groupKey = identity.key;
     let group = byKey.get(groupKey);
     if (!group) {
       group = {
@@ -212,6 +221,8 @@ export function groupItemsByFamily(items: OnboardingItem[]): FamilyGroup[] {
   // that differ in exactly one token of length >= 4 with edit distance <= 1
   // ("soft classic veggie" vs "soft classic vegggie"). Deterministic: the
   // more-populous stem wins, ties break to the lexicographically first key.
+  // Durable repo merges distance-1 stems via stemsWithinTypoTolerance; transient
+  // coordination uses exact keys — intentional until v2 (deferred architecture decision).
   const groups = [...byKey.values()];
   const merged = new Set<FamilyGroup>();
   const result: FamilyGroup[] = [];

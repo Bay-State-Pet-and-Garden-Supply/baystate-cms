@@ -1,6 +1,7 @@
 // fallow-ignore-file unused-export
 
 import { z } from 'zod';
+import { DEFAULT_LOCAL_VISION_MODEL } from '../vision-model-defaults';
 
 
 // ─── Helper Schemas ────────────────────────────────────────────────────────────
@@ -223,7 +224,7 @@ export type GuidanceConfig = z.infer<typeof GuidanceConfigSchema>;
  */
 export const ModelPolicyConfigSchema = z.object({
   defaultProvider: z.string().default('ollama'),
-  defaultModel: z.string().default('qwen2.5vl:latest'),
+  defaultModel: z.string().default(DEFAULT_LOCAL_VISION_MODEL),
   stageOverrides: z
     .record(
       z.string(),
@@ -294,7 +295,7 @@ export const ClassificationConfigSchema = z.object({
   guidance: z.array(GuidanceConfigSchema).default(() => []),
   modelPolicy: ModelPolicyConfigSchema.default(() => ({
     defaultProvider: 'ollama' as const,
-    defaultModel: 'qwen2.5vl:latest' as const,
+    defaultModel: DEFAULT_LOCAL_VISION_MODEL,
     stageOverrides: {} as Record<string, { fallbackProvider: string | null; fallbackModel: string | null; provider?: string; model?: string }>,
     imageDataSharing: 'local_only' as const,
     textDataSharing: 'local_only' as const,

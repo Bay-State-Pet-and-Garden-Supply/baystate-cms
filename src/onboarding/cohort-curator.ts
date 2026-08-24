@@ -66,6 +66,8 @@ import {
   updateItemStageStatus,
   updateItemCurationData,
 } from '../db/repositories/onboarding-item-repo';
+import { getOcrStageFlags } from '../classification/ocr-stage-flags';
+import { runPackagingOcrStageForFreeze } from '../classification/stages/packaging-ocr-stage';
 import {
   getLatestExtractionBindingsByItemIds,
   type ExtractionBinding,
@@ -136,7 +138,7 @@ import { onboardingEvents } from './sse-emitter';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import type { ProductLineItemSnapshot, CoordinatedPageMemberValue } from '../classification/types';
 import { getVlmConfig } from './vlm-client';
-import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
+import { runPackagingOcrAttempt, mergeOcrResults } from './packaging-ocr';
 import { curateItemWithPipeline } from './product-curator';
 import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError, CohortTitleOutputCorruptError } from './cohort-title-coordinator';
 import {
@@ -233,10 +235,15 @@ function storedOcrExecutionDigest(item: OnboardingItem): string | null {
 
 /** OCR is settled ⇔ structured OCR data exists OR the attempt reached a
  *  terminal outcome (`succeeded | disabled | failed | no_image`). Mirrors the
- *  curation-cohort-service readiness check (curation-cohort-service.ts:196). */
+ *  curation-cohort-service readiness check (curation-cohort-service.ts).
+ *  P1-T3: a stale-marked OCR outcome (digest-staleness invalidation marker,
+ *  below) is NEVER settled — prior `packagingOcrData` may be preserved intact
+ *  for diagnostics, but it was executed under a superseded execution
+ *  authority and must not be reused or treated as done. */
 function isOcrSettled(item: OnboardingItem): boolean {
   const ext = item.extractionData;
   if (!ext) return false;
+  if ((ext.ocrOutcome ?? null)?.stale === true) return false;
   if (ext.packagingOcrData) return true;
   const status = (ext as { ocrOutcome?: { status?: string } | null }).ocrOutcome?.status;
   if (!status) return false;
@@ -251,6 +258,52 @@ function hasOcrContent(ocr: PackagingOcrData | undefined | null): boolean {
   if (ocr.brand && ocr.brand.trim().length > 0) return true;
   if (ocr.visibleTextLines && ocr.visibleTextLines.some(b => b && b.trim().length > 0)) return true;
   return false;
+}
+
+// ─── Digest-staleness re-run trigger (P1-T3) ──────────────────────────────
+
+/** Default per-freeze cap on digest-staleness OCR re-runs (stampede guard:
+ *  one authority change must not fan out into an unbounded VLM burst). */
+const DEFAULT_FREEZE_OCR_RERUN_CAP = 12;
+
+/**
+ * Parse `BAYSTATE_CMS_FREEZE_OCR_RERUN_CAP` (P1-T3 stampede guard): integer
+ * ≥ 0, default 12; missing/unparseable/negative → the default. Exported for
+ * tests.
+ */
+export function parseFreezeOcrRerunCap(raw: string | undefined | null): number {
+  if (raw === undefined || raw === null) return DEFAULT_FREEZE_OCR_RERUN_CAP;
+  const trimmed = raw.trim();
+  if (!trimmed) return DEFAULT_FREEZE_OCR_RERUN_CAP;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_FREEZE_OCR_RERUN_CAP;
+  return parsed;
+}
+
+/**
+ * Invalidate stored OCR whose execution-authority digest no longer matches
+ * the freshly computed digest for the current member snapshot (P1-T3). The
+ * stored copy is marked, never deleted: `packagingOcrData` / `packagingTitle`
+ * stay intact so nothing is lost, while the persisted `ocrOutcome` becomes a
+ * visible terminal failure marker (`status 'failed'`, reason
+ * `'plan_incompatible'`, `stale: true`). The marker keeps the item visibly
+ * unsettled (see `isOcrSettled`) until a fresh pull-forward under the new
+ * authority binds fresh data + digest at the existing write site — or, past
+ * the re-run cap, until a later pass picks it up.
+ */
+function invalidateStaleStoredOcr(item: OnboardingItem): OnboardingItem {
+  const ext: Record<string, any> = { ...(item.extractionData ?? {}) };
+  const priorOutcome = ext.ocrOutcome && typeof ext.ocrOutcome === 'object'
+    ? ext.ocrOutcome as Record<string, any>
+    : {};
+  ext.ocrOutcome = {
+    ...priorOutcome,
+    status: 'failed',
+    localFailureReason: 'plan_incompatible',
+    stale: true,
+  };
+  updateItemExtractionData(item.id, JSON.stringify(ext));
+  return { ...item, extractionData: ext as OnboardingItem['extractionData'] };
 }
 
 // ─── Execution-evidence projection (contract C) ───────────────────────────────
@@ -592,6 +645,31 @@ export async function runFrozenOcrPullForward(params: {
    */
   assertHeld?: () => void;
 }): Promise<{ packagingOcrData: PackagingOcrData | null; ocrOutcome: OcrAttemptOutcome }> {
+  // P2-T6 (packaging-OCR overhaul, ordered consumer migration — producer
+  // FIRST): when the packaging_ocr stage master flag is ON **and shadow-only
+  // mode is OFF**, the freeze DELEGATES its OCR moment to the stage
+  // (`runPackagingOcrStageForFreeze`). Shadow-only delegation is excluded:
+  // under master ON + shadow ON (the defaults) the stage's output can never
+  // become authoritative, so delegating here would either leave the freeze
+  // without live OCR keys or silently promote a shadow result — instead the
+  // freeze stays on THIS legacy pull-forward while the pipeline-level stage
+  // still runs in shadow via `composeCurationPipelineStages`. The freeze
+  // remains the authoritative OCR moment when delegation IS active: ALL
+  // caller-side gating below (settled / input-hash / digest-staleness /
+  // re-run cap), the scoped lease keeper, and the hash/digest binding
+  // write-back are untouched. Flag OFF (default) executes THIS legacy body
+  // byte-identically. Items that are not materialized DB rows (direct
+  // synthetic callers) stay on the legacy path — the stage resolves its
+  // inputs from the persisted row.
+  const ocrStageFlags = getOcrStageFlags();
+  if (
+    ocrStageFlags.packagingOcrStageEnabled
+    && !ocrStageFlags.packagingOcrStageShadowOnly
+    && params.item.id
+    && findItemById(params.item.id)
+  ) {
+    return runPackagingOcrStageForFreeze(params);
+  }
   const { snapshot, childRunId, item, workspacePath } = params;
   const sku = item.upc;
   const ext: Record<string, any> = item.extractionData ?? {};
@@ -603,6 +681,11 @@ export async function runFrozenOcrPullForward(params: {
 
   let localStatus: OcrAttemptOutcome['status'] = canUseLocalVlm ? 'skipped' : 'disabled';
   let cloudStatus: OcrAttemptOutcome['status'] = canUseCloudImages ? 'skipped' : 'disabled';
+  // P1-T5 fixup: persist the coded local failure reason + transport attempt
+  // count on ordinary (non-ownership) failures so production consumers
+  // observe WHY the local leg failed instead of a bare 'failed'.
+  let localFailureReason: import('../shared/schemas/onboarding').OcrFailureReason | null = null;
+  let localAttempts = 0;
 
   const imageUrls: string[] = [];
   if (ext.primaryImage) imageUrls.push(String(ext.primaryImage));
@@ -644,7 +727,7 @@ export async function runFrozenOcrPullForward(params: {
       // No compatible plan → no transport, no evidence from the model call.
       if (!localModelCall) continue;
       try {
-        const ocrResult = await extractPackagingOcr({
+        const attempt = await runPackagingOcrAttempt({
           imageUrl: imgUrl,
           workspacePath,
           imageSourceUrl: imgUrl,
@@ -655,7 +738,12 @@ export async function runFrozenOcrPullForward(params: {
           modelPolicyDigest: evidencePolicyView?.policyDigest ?? '',
           assertHeld: params.assertHeld,
         });
-        if (ocrResult && hasOcrContent(ocrResult)) ocrResults.push(ocrResult);
+        if (attempt.ok) {
+          if (hasOcrContent(attempt.data)) ocrResults.push(attempt.data);
+        } else {
+          localFailureReason = attempt.reasonCode;
+          localAttempts = Math.max(localAttempts, attempt.attempts);
+        }
       } catch (err) {
         // PR3 hardening C: an ownership assertion failure during the transport's
         // terminal update aborts the freeze IMMEDIATELY — no further images or
@@ -728,6 +816,8 @@ export async function runFrozenOcrPullForward(params: {
     cloudStatus,
     model: packagingOcrData?.metadata?.model ?? vlmConfig?.model ?? null,
     imageCount: imageUrls.length,
+    ...(localFailureReason ? { localFailureReason } : {}),
+    ...(localAttempts > 0 ? { attempts: localAttempts } : {}),
   };
   return { packagingOcrData: packagingOcrData ?? null, ocrOutcome };
 }
@@ -984,6 +1074,14 @@ export async function freezeCohortForExecution(
   // abstention). Empty (never populated) when the resolver is inactive.
   const memberTypeLlmResults: Array<MemberLlmRankResult | null> = [];
   let lastHeartbeatAt = 0;
+  // P1-T3 stampede guard: per-cohort-freeze cap on digest-staleness OCR
+  // re-runs. Only members actually re-run count; members beyond the cap keep
+  // their stale marker and remain unsettled — they pick up on a later pass.
+  // Re-runs triggered by OTHER fail-closed causes (never-settled OCR,
+  // input-hash change, null digests) are unchanged legacy behavior and are
+  // never capped.
+  const freezeOcrRerunCap = parseFreezeOcrRerunCap(process.env.BAYSTATE_CMS_FREEZE_OCR_RERUN_CAP);
+  let ocrStalenessReruns = 0;
   for (const member of members) {
     if (Date.now() - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3) {
       if (!heartbeatCohortRun(run.id, workerId, COHORT_LEASE_TTL_MS)) {
@@ -1075,8 +1173,26 @@ export async function freezeCohortForExecution(
       currentOcrExecutionDigest === null ||
       storedExecutionDigest === null ||
       storedExecutionDigest !== currentOcrExecutionDigest;
+    // P1-T3 digest-staleness trigger: a stored OCR bound to a DIFFERENT
+    // execution authority is never silently discarded. It is invalidated with
+    // a visible marker FIRST (prior data preserved), then re-run under the
+    // new authority below so fresh data + fresh digest bind atomically at the
+    // existing write site. Beyond the per-freeze cap the marker stays and the
+    // member remains visibly unsettled until a later pass.
+    const ocrDigestStale =
+      storedExecutionDigest !== null &&
+      currentOcrExecutionDigest !== null &&
+      storedExecutionDigest !== currentOcrExecutionDigest;
     let frozenItem = item;
-    if (ocrNeedsRun && !cohortCurationFlags.cohortShadowOnly) {
+    if (ocrDigestStale && !cohortCurationFlags.cohortShadowOnly) {
+      frozenItem = invalidateStaleStoredOcr(item);
+    }
+    if (
+      ocrNeedsRun
+      && !cohortCurationFlags.cohortShadowOnly
+      && (!ocrDigestStale || ocrStalenessReruns < freezeOcrRerunCap)
+    ) {
+      if (ocrDigestStale) ocrStalenessReruns += 1;
       // Scoped ownership-guarded lease keeper around the long-awaited OCR
       // call (PR3 hardening A2): the parent lease is renewed on a TTL/3
       // cadence WHILE the transport is in flight (a live-but-slow owner can

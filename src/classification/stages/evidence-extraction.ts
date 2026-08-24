@@ -1,11 +1,12 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
-import { getDb } from '../../db/connection';
+import { findExtractionSourceRowById, setItemExtractionDataJson } from '../../db/repositories/onboarding-item-repo';
 import { extractProductEvidence, packagingOcrDataToEvidence } from '../product-evidence-extractor';
 import type { NormalizedEvidenceInput, EvidenceInputField } from '../product-evidence-extractor';
 import { resolveBrand } from '../brand-resolution';
 import { CanonicalBrandEvidenceValueSchema } from '../../shared/schemas/classification';
 import { hashCanonicalJson } from '../../shared/stable-id';
 import { computeOcrExecutionDigest } from '../runtime-snapshot';
+import { getAuthoritativePackagingOcrStageOutput } from './packaging-ocr-stage';
 import type { ExecutionEvidenceProjectionMemberV2 } from '../../shared/schemas/cohorts';
 import type { ClassificationEvidence } from '../../shared/types';
 import * as crypto from 'node:crypto';
@@ -216,7 +217,10 @@ function executeFrozenEvidenceExtraction(
         evidence: [],
         proposals: [],
         abstained: true,
-        metadata: { ocrOutcome: frozenOcr.outcome, frozenProjection: true },
+        // P1-T3 (metadata only): surface the digest-staleness marker so an
+        // abstention caused by stale-marked OCR is observable. The hash-gate
+        // semantics above are UNCHANGED (defense in depth stays).
+        metadata: { ocrOutcome: frozenOcr.outcome, ocrStale: frozenOcr.outcome?.stale === true, frozenProjection: true },
       },
     };
   }
@@ -227,7 +231,7 @@ function executeFrozenEvidenceExtraction(
       evidence,
       proposals: [],
       abstained: false,
-      metadata: { ocrOutcome: frozenOcr.outcome, frozenProjection: true },
+      metadata: { ocrOutcome: frozenOcr.outcome, ocrStale: frozenOcr.outcome?.stale === true, frozenProjection: true },
     },
   };
 }
@@ -250,23 +254,25 @@ function executeFrozenEvidenceExtraction(
  * calls, no write-back.
  */
 export const evidenceExtractionStage: StageDefinition = {
+  // P2-T2 (packaging-OCR overhaul): the packaging_ocr stage runs BEFORE this
+  // stage and its fresh output is consumed below (zero inline OCR re-runs).
+  // The dependency is honored by `resolveStageOrder` only when the
+  // packaging_ocr stage is included in the pipeline's stage list; absent (flag
+  // OFF / legacy consumers) this stage keeps today's behavior byte-identical.
   name: 'evidence_extraction',
-  requires: [],
+  requires: ['packaging_ocr'],
   evidenceFrom: [],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
     if (context.cohortFrozenEvidence) {
       return executeFrozenEvidenceExtraction(input, context, context.cohortFrozenEvidence);
     }
-    const db = getDb();
 
     // Read the onboarding item's extraction data
     if (!input.onboardingItemId) {
       return { status: 'abstained', reason: 'No onboarding item ID available for evidence extraction.' };
     }
 
-    const itemRow = db.query(
-      'SELECT extraction_data_json, source_url, source_type, name, expected_name, brand_hint FROM onboarding_items WHERE id = ?'
-    ).get(input.onboardingItemId) as Record<string, any> | undefined;
+    const itemRow = findExtractionSourceRowById(input.onboardingItemId);
 
     if (!itemRow) {
       return { status: 'abstained', reason: 'No onboarding item found for evidence extraction.' };
@@ -403,6 +409,13 @@ export const evidenceExtractionStage: StageDefinition = {
       }
     }
 
+    // P2-T2 (packaging-OCR overhaul): when the packaging_ocr stage produced a
+    // fresh non-shadow result THIS RUN, consume it — the inline VLM OCR is
+    // suppressed (images nulled out) and the visual evidence is materialized
+    // from the stage output instead. Otherwise fall back to today's inline OCR
+    // path UNCHANGED (defense in depth stays).
+    const stageOcrOutput = getAuthoritativePackagingOcrStageOutput(input.stageOutputs);
+
     const normalizedInput: NormalizedEvidenceInput = {
       title: titleField,
       description: descriptionField,
@@ -411,16 +424,33 @@ export const evidenceExtractionStage: StageDefinition = {
       bulletPoints: Array.isArray(extData.bulletPoints) ? extData.bulletPoints : [],
       searchKeywords: extData.searchKeywords ? String(extData.searchKeywords) : null,
       customFields: customFieldsMap,
-      primaryImage: extData.primaryImage ?? null,
-      additionalImages: Array.isArray(extData.additionalImages) ? extData.additionalImages : [],
+      primaryImage: stageOcrOutput ? null : (extData.primaryImage ?? null),
+      additionalImages: stageOcrOutput ? [] : (Array.isArray(extData.additionalImages) ? extData.additionalImages : []),
       sourceUrl,
       existingPageNames: [],
       workspacePath: context.workspacePath,
     };
 
-    // Call the shared extractor (this handles VLM OCR, LLM extraction, brand resolution)
+    // Call the shared extractor (this handles LLM extraction, brand resolution;
+    // VLM OCR is skipped when fresh stage output is consumed above)
     const result = await extractProductEvidence(normalizedInput, input, context);
     const evidence = result.evidence;
+
+    // P2-T2: materialize the visual evidence from the FRESH packaging_ocr stage
+    // output (same conversion as the frozen-projection path) — zero new model
+    // calls for OCR this run.
+    if (stageOcrOutput) {
+      try {
+        const visualEvidence = packagingOcrDataToEvidence(stageOcrOutput.packagingOcrData, {
+          runId: context.runId,
+          sku: input.sku,
+          model: (stageOcrOutput.ocrOutcome as { model?: string | null } | null)?.model ?? 'unknown',
+        });
+        evidence.push(...visualEvidence);
+      } catch (err) {
+        console.warn(`[EvidenceExtraction] Failed to materialize packaging_ocr stage evidence: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     // ── Onboarding-specific: emit spreadsheet fields as 'spreadsheet' source ──
     const spreadsheetName = itemRow.name ? String(itemRow.name) : null;
@@ -484,7 +514,10 @@ export const evidenceExtractionStage: StageDefinition = {
     }
 
     // ── Onboarding-specific: persist OCR data & outcome back to extraction_data_json ────
-    if (result.ocrOutcome || result.packagingOcrData) {
+    // P2-T2: when the packaging_ocr stage owns this run's OCR, it already
+    // persisted the live keys through the repository — never clobber them with
+    // the extractor's image-less no_image outcome.
+    if (!stageOcrOutput && (result.ocrOutcome || result.packagingOcrData)) {
       try {
         const mergedOcr = result.packagingOcrData;
         const updatedExt = {
@@ -492,9 +525,7 @@ export const evidenceExtractionStage: StageDefinition = {
           ...(mergedOcr ? { packagingOcrData: mergedOcr, packagingTitle: mergedOcr.productName } : {}),
           ...(result.ocrOutcome ? { ocrOutcome: result.ocrOutcome } : {}),
         };
-        db.query(
-          'UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?',
-        ).run(JSON.stringify(updatedExt), input.onboardingItemId);
+        setItemExtractionDataJson(input.onboardingItemId, JSON.stringify(updatedExt));
       } catch (persistErr: any) {
         console.warn(`[EvidenceExtraction] Failed to persist OCR to onboarding item: ${persistErr.message}`);
       }
@@ -508,7 +539,7 @@ export const evidenceExtractionStage: StageDefinition = {
           evidence: [],
           proposals: [],
           abstained: true,
-          metadata: { ocrOutcome: result.ocrOutcome },
+          metadata: { ocrOutcome: stageOcrOutput?.ocrOutcome ?? result.ocrOutcome },
         },
       };
     }
@@ -519,7 +550,7 @@ export const evidenceExtractionStage: StageDefinition = {
         evidence,
         proposals: [],
         abstained: false,
-        metadata: { ocrOutcome: result.ocrOutcome },
+        metadata: { ocrOutcome: stageOcrOutput?.ocrOutcome ?? result.ocrOutcome },
       },
     };
   },

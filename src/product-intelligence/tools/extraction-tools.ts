@@ -14,6 +14,7 @@ import { extractViaHttpDetailed } from '../../onboarding/page-extractor';
 import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
 import { getVlmConfig } from '../../onboarding/vlm-client';
+import { OLLAMA_VLM_SERVICE_NAME } from '../../ai/vision-model-defaults';
 import { sha256Hex } from '../../shared/stable-id';
 import { createRequire } from 'node:module';
 import { sharpImageVerificationAdapter } from '../assets/contract';
@@ -558,7 +559,7 @@ const extractPackagingEvidence: PiToolAdapter = {
       return noResult('Packaging OCR produced no result (VLM may be unconfigured or the image could not be loaded)');
     }
     const modelDecision = await gateway.checkModelEndpoint(netCtx, {
-      provider: 'ollama_vlm',
+      provider: OLLAMA_VLM_SERVICE_NAME,
       model: vlmConfig.model,
       endpointUrl: vlmConfig.baseUrl,
     });
@@ -577,7 +578,7 @@ const extractPackagingEvidence: PiToolAdapter = {
         imageSourceUrl: params.imageSourceUrl ? String(params.imageSourceUrl) : null,
         fetchFn: gateway.buildPiNetworkFetch(netCtx, { dataClassification: 'fetched_content' }),
         modelFetchFn: gateway.buildModelFetch(netCtx, {
-          provider: 'ollama_vlm',
+          provider: OLLAMA_VLM_SERVICE_NAME,
           model: vlmConfig.model,
           endpointUrl: vlmConfig.baseUrl,
         }),

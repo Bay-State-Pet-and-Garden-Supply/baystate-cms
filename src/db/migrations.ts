@@ -1171,6 +1171,70 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint:', e);
   }
 
+  // ── Migration to expand classification_stage_results CHECK for packaging_ocr ──
+  //
+  // Packaging-OCR overhaul plan P2-T6: the flag-gated `packaging_ocr`
+  // classification stage persists its (succeeded/abstained/failed) result
+  // through the same `classification_stage_results` table as every other
+  // pipeline stage. Existing databases carry a CHECK constraint frozen to the
+  // legacy seven stage names; rebuild the table with `packaging_ocr` added.
+  // Purely additive (constraint widening only) and idempotent — flag-OFF
+  // behavior is unchanged because nothing writes the new value until the
+  // master flag is enabled.
+  //
+  // Hardening (post-review fixup): mirrors the catalog-classification rebuild
+  // precedent above — orphaned rows (run_id not in classification_runs, left
+  // by prior operations that ran with foreign_keys=OFF) are deleted BEFORE
+  // the copy so the FK-enforcing rebuild can never fail mid-swap and leave a
+  // `classification_stage_results_new` remnant blocking retry; the whole
+  // rebuild is transactional; foreign_keys is disabled around it and always
+  // restored in `finally`. A partial failure therefore rolls back cleanly and
+  // the migration re-runs on the next start.
+  try {
+    const tableInfoOcr = db.query('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?').get('table', 'classification_stage_results') as { sql: string } | undefined;
+    if (tableInfoOcr && tableInfoOcr.sql && !tableInfoOcr.sql.includes("'packaging_ocr'")) {
+      console.log('[Migrations] Expanding classification_stage_results CHECK constraint for packaging_ocr...');
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          // Retry safety: drop any _new remnant from an earlier failed swap.
+          db.exec('DROP TABLE IF EXISTS classification_stage_results_new');
+          // Orphaned rows first (dead data from prior foreign_keys=OFF ops):
+          // copying them into the rebuilt table would violate its restored FK.
+          const orphanedStageResults = db.query(
+            'SELECT COUNT(*) as cnt FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)'
+          ).get() as { cnt: number };
+          if (orphanedStageResults.cnt > 0) {
+            db.run('DELETE FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)');
+            console.log(`[Migrations] Cleaned up ${orphanedStageResults.cnt} orphaned classification_stage_results row(s).`);
+          }
+          db.exec(`
+            CREATE TABLE classification_stage_results_new (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+              stage_name TEXT NOT NULL CHECK (stage_name IN ('packaging_ocr', 'evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
+              status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
+              output_json TEXT,
+              error_message TEXT,
+              started_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+          `);
+          db.exec('INSERT INTO classification_stage_results_new SELECT * FROM classification_stage_results;');
+          db.exec('DROP TABLE classification_stage_results;');
+          db.exec('ALTER TABLE classification_stage_results_new RENAME TO classification_stage_results;');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_classification_stage_results_run ON classification_stage_results(run_id);');
+        })();
+      } finally {
+        // Always restore foreign key enforcement, even if the rebuild fails.
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+      console.log('[Migrations] classification_stage_results CHECK constraint expanded for packaging_ocr successfully.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint for packaging_ocr:', e);
+  }
+
   // Run stage pipeline migration if not already applied
   const stagePipelineVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('stage_pipeline_schema_version') as
     | { value: string }
@@ -4932,6 +4996,147 @@ export function runMigrations(): void {
       db.exec("UPDATE app_meta SET value = '1' WHERE key = 'batch_preflight_schema_version'");
     })();
     console.log('[Migrations] Batch preflight and controlled release migration complete.');
+  }
+
+  // ── Sourcing Decision V2 Schema Repair Migration ───────────────────────────
+  const sourcingDecisionRepairVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('sourcing_decision_repair_version') as { value: string } | undefined;
+  if (!sourcingDecisionRepairVersion) {
+    db.transaction(() => {
+      const items = db
+        .query('SELECT id, sourcing_decision_json FROM onboarding_items WHERE sourcing_decision_json IS NOT NULL')
+        .all() as Array<{ id: string; sourcing_decision_json: string }>;
+      const updateStmt = db.prepare('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?');
+
+      for (const item of items) {
+        try {
+          const parsed = JSON.parse(item.sourcing_decision_json) as Record<string, unknown>;
+          if (parsed && typeof parsed === 'object' && (parsed.schemaVersion === 2 || ('route' in parsed && typeof parsed.route === 'string'))) {
+            const route = parsed.route as string;
+            const origin = typeof parsed.origin === 'string' ? parsed.origin : 'automatic_policy';
+            const decidedAt = typeof parsed.decidedAt === 'string' ? parsed.decidedAt : new Date().toISOString();
+            const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
+            const conflicts = Array.isArray(parsed.conflicts) ? parsed.conflicts : [];
+
+            let changed = false;
+            let updatedDecision: Record<string, unknown> | null = null;
+
+            if (route === 'evidence_to_discovery') {
+              const acceptedAttemptIds = Array.isArray(parsed.acceptedEvidenceAttemptIds) ? parsed.acceptedEvidenceAttemptIds : [];
+              const providerIds = Array.isArray(parsed.providerIds) ? parsed.providerIds : [];
+              const genId = typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : null;
+
+              if (acceptedAttemptIds.length === 0 || providerIds.length === 0 || !genId) {
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'fallback_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: [],
+                  providerIds: [],
+                  sourcingGenerationId: genId ?? undefined,
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              } else if (!parsed.sourceType || !parsed.target) {
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'evidence_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: acceptedAttemptIds,
+                  providerIds,
+                  sourcingGenerationId: genId,
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              }
+            } else if (route === 'fallback_to_discovery') {
+              if (!parsed.sourceType || !parsed.target) {
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'fallback_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: [],
+                  providerIds: Array.isArray(parsed.providerIds) ? parsed.providerIds : [],
+                  sourcingGenerationId: typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : undefined,
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              }
+            } else if (route === 'degraded_fallback_to_discovery') {
+              if (!parsed.sourceType || !parsed.target || !parsed.sourcingGenerationId) {
+                const providerIds = Array.isArray(parsed.providerIds) && parsed.providerIds.length > 0 ? parsed.providerIds : ['unknown'];
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'degraded_fallback_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: [],
+                  providerIds,
+                  sourcingGenerationId: typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : 'legacy',
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              }
+            }
+
+            if (changed && updatedDecision) {
+              updateStmt.run(JSON.stringify(updatedDecision), item.id);
+            }
+          }
+        } catch {
+          // ignore corrupted unparseable JSON
+        }
+      }
+
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('sourcing_decision_repair_version', '1')");
+      db.exec("UPDATE app_meta SET value = '1' WHERE key = 'sourcing_decision_repair_version'");
+    })();
+    console.log('[Migrations] Sourcing decision repair migration complete.');
+  }
+
+  // ── Packaging-OCR shadow comparisons (packaging-ocr overhaul plan P2-T4) ────
+  //
+  // Additive dual-run diagnostics table: one row per (item, run) where the new
+  // `packaging_ocr` classification stage executed alongside the legacy inline
+  // OCR path. Purely observational — no authority decision reads these rows.
+  // Idempotent via CREATE TABLE/INDEX IF NOT EXISTS (fresh installs and every
+  // existing database get the table on the next migration pass).
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS packaging_ocr_shadow_comparisons (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+        batch_id TEXT,
+        run_id TEXT,
+        legacy_status TEXT,
+        legacy_reason TEXT,
+        stage_status TEXT NOT NULL,
+        stage_reason TEXT,
+        field_agreement_json TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_packaging_ocr_shadow_item ON packaging_ocr_shadow_comparisons(item_id);',
+    );
+  } catch (e) {
+    console.error('Failed to create packaging_ocr_shadow_comparisons table:', e);
   }
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as

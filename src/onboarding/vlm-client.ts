@@ -3,10 +3,35 @@ import { acquireLocalSlot, releaseLocalSlot } from '../ai/local-runtime-coordina
 import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
 import { dispatchWorkloadChat } from '../ai/inference-dispatcher';
 import { resolveWorkloadRoute, isConnectionUsable } from '../ai/provider-connections';
+import {
+  DEFAULT_LOCAL_VISION_MODEL,
+  LEGACY_ROUTE_FALLBACK_VISION_MODEL,
+  OLLAMA_VLM_SERVICE_NAME,
+} from '../ai/vision-model-defaults';
+import { redactTransportText } from '../classification/model-policy-gateway';
 
 /** Minimal structural fetch signature — lets callers inject the PI
  *  policy-gateway bound fetch (P0-1). */
 export type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/** Default per-attempt VLM transport timeout (ms). */
+export const DEFAULT_OCR_TIMEOUT_MS = 120_000;
+
+/**
+ * Per-attempt timeout knob (packaging-OCR overhaul P2):
+ * `BAYSTATE_CMS_OCR_TIMEOUT_MS` parsed once per `callVlm` invocation — an
+ * integer > 0 wins; unparseable/non-positive/absent values fall back to the
+ * 120s default.
+ */
+export function parseOcrTimeoutMs(
+  raw: string | undefined = process.env.BAYSTATE_CMS_OCR_TIMEOUT_MS,
+): number {
+  if (raw !== undefined && /^\d+$/.test(raw.trim())) {
+    const parsed = Number.parseInt(raw.trim(), 10);
+    if (parsed > 0) return parsed;
+  }
+  return DEFAULT_OCR_TIMEOUT_MS;
+}
 
 export interface VlmConfig {
   baseUrl: string;
@@ -14,6 +39,15 @@ export interface VlmConfig {
   enabled: boolean;
   transport?: 'openai-compatible' | 'ollama-native';
   credential?: string;
+  /**
+   * Optional sampling options (packaging-OCR overhaul P3-T2, hallucination
+   * mitigations). ADDITIVE + optional: when absent the request bodies are
+   * byte-identical to pre-P3-T2 behavior.
+   */
+  options?: {
+    temperature?: number;
+    frequencyPenalty?: number;
+  };
 }
 
 /**
@@ -39,18 +73,21 @@ export function getVlmConfig(): VlmConfig | null {
     if (conn && isConnectionUsable(conn)) {
       return {
         baseUrl: conn.baseUrl,
-        model: route.primary.modelId || 'gemma-4-26b-a4b-qat',
+        model: route.primary.modelId || LEGACY_ROUTE_FALLBACK_VISION_MODEL,
         enabled: true,
         transport: conn.transport,
         credential: conn.credential ?? undefined,
       };
     }
-  } catch {
-    // Database fallback
+  } catch (err: unknown) {
+    // Database fallback — surface the swallowed routing-resolution failure
+    // (redacted-safe) so misconfigured AI Compute routing is diagnosable.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[VlmClient] AI Compute routing resolution failed; falling back to legacy ollama_vlm row: ${redactTransportText(msg)}`);
   }
 
   // 2. Legacy fallback: api_keys.ollama_vlm
-  const row = getApiKey('ollama_vlm');
+  const row = getApiKey(OLLAMA_VLM_SERVICE_NAME);
   if (row) {
     if (row.api_key !== 'enabled') {
       return null;
@@ -59,7 +96,7 @@ export function getVlmConfig(): VlmConfig | null {
     const baseUrl = rawBaseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
     return {
       baseUrl,
-      model: row.model || 'qwen2.5vl:latest',
+      model: row.model || DEFAULT_LOCAL_VISION_MODEL,
       enabled: true,
       transport: 'ollama-native',
     };
@@ -93,8 +130,19 @@ export interface DispatchedVlmResult {
  * This must ONLY be used for non-frozen, non-gateway-bound live OCR. Frozen
  * (run-bound) calls and Product Intelligence's gateway-bound `modelFetchFn`
  * path keep the exact-endpoint `callVlm` invocation.
+ *
+ * Post-review fixup 6: optional sampling options (temperature /
+ * frequencyPenalty) thread through into the dispatcher request body via
+ * `ChatCompletionOptions`, so the greedy-decoding default and the
+ * repetition-penalty retry apply on the openai-compatible dispatcher path
+ * exactly as they do on the direct transports. Fields are only added when
+ * defined, so callers passing no options keep byte-identical bodies.
  */
-export async function callVlmWithDispatcher(prompt: string, imageBase64: string): Promise<DispatchedVlmResult> {
+export async function callVlmWithDispatcher(
+  prompt: string,
+  imageBase64: string,
+  options?: VlmConfig['options'],
+): Promise<DispatchedVlmResult> {
   const config = getVlmConfig();
   if (!config || !config.enabled) {
     throw new Error('VLM vision model is not enabled or configured.');
@@ -102,7 +150,9 @@ export async function callVlmWithDispatcher(prompt: string, imageBase64: string)
 
   if (config.transport === 'ollama-native') {
     // Legacy Ollama-native endpoint: no dispatcher/fallback semantics.
-    const content = await callVlm(prompt, imageBase64, config);
+    // Sampling options MUST still reach the body — the greedy temperature=0
+    // default and repetition-penalty retry apply on ALL live transports.
+    const content = await callVlm(prompt, imageBase64, options ? { ...config, options } : config);
     return { content, executedTarget: null };
   }
 
@@ -123,7 +173,9 @@ export async function callVlmWithDispatcher(prompt: string, imageBase64: string)
         ],
       },
     ],
-    { requiresImage: true },
+    { requiresImage: true,
+      ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(options?.frequencyPenalty !== undefined ? { frequencyPenalty: options.frequencyPenalty } : {}) },
   );
   return { content: result.content, executedTarget: result.executedTarget };
 }
@@ -158,6 +210,11 @@ export async function callVlm(
 
   const dataUri = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
 
+  // P3-T2: apply optional sampling options per transport. Absent options ⇒
+  // byte-identical bodies as before (fields are only added when defined).
+  const sampling = config.options ?? {};
+  const hasSampling = sampling.temperature !== undefined || sampling.frequencyPenalty !== undefined;
+
   const body = isOpenAi
     ? JSON.stringify({
         model: config.model,
@@ -171,6 +228,8 @@ export async function callVlm(
           },
         ],
         stream: false,
+        ...(sampling.temperature !== undefined ? { temperature: sampling.temperature } : {}),
+        ...(sampling.frequencyPenalty !== undefined ? { frequency_penalty: sampling.frequencyPenalty } : {}),
       })
     : JSON.stringify({
         model: config.model,
@@ -182,9 +241,19 @@ export async function callVlm(
           },
         ],
         stream: false,
+        // Ollama-native carries sampling inside body.options (snake_case).
+        ...(hasSampling
+          ? {
+              options: {
+                ...(sampling.temperature !== undefined ? { temperature: sampling.temperature } : {}),
+                ...(sampling.frequencyPenalty !== undefined ? { frequency_penalty: sampling.frequencyPenalty } : {}),
+              },
+            }
+          : {}),
       });
 
   await acquireLocalSlot('ollama');
+  const timeoutMs = parseOcrTimeoutMs();
   try {
     let response: Response;
     try {
@@ -193,12 +262,12 @@ export async function callVlm(
         headers,
         body,
         redirect: 'manual',
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err: unknown) {
       const errorName = err instanceof Error ? err.name : '';
       if (errorName === 'AbortError' || errorName === 'TimeoutError') {
-        throw new Error('VLM request timed out after 120s', { cause: err });
+        throw new Error(`VLM request timed out after ${Math.round(timeoutMs / 1000)}s`, { cause: err });
       }
       throw err;
     }

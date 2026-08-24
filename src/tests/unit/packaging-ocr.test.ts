@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseJsonFromVlmResponse, coercePackagingOcrData } from '../../onboarding/packaging-ocr';
+import { parseJsonFromVlmResponse, coercePackagingOcrData, mergeOcrResults } from '../../onboarding/packaging-ocr';
 import type { PackagingOcrData } from '../../shared/schemas/onboarding';
 
 // ─── parseJsonFromVlmResponse ──────────────────────────────────────────────────
@@ -223,5 +223,42 @@ describe('coercePackagingOcrData', () => {
     // should still work since we normalize confidence values
     expect(result).not.toBeNull();
     expect(result!.confidenceByField).toEqual({}); // invalid values filtered out
+  });
+});
+
+// ─── mergeOcrResults (post-review fixup 3) ─────────────────────────────────────
+
+describe('mergeOcrResults', () => {
+  it('carries the primary image contentHash forward instead of dropping it', () => {
+    const base = {
+      productName: 'Primary Name',
+      brand: null,
+      species: [],
+      upc: null,
+      flavorVariety: null,
+      color: null,
+      material: null,
+      size: null,
+      weight: null,
+      count: null,
+      lifeStage: null,
+      breedSize: null,
+      productForm: null,
+      healthConcernFunction: [],
+      dietaryLabels: [],
+      ingredients: [],
+      ingredientKeywords: [],
+      claims: [],
+      visibleTextLines: [],
+      confidenceByField: {},
+      metadata: null,
+    };
+    const primary = { ...base, productName: 'Primary Name', contentHash: 'a'.repeat(64) } as PackagingOcrData & { contentHash: string | null };
+    const secondary = { ...base, productName: 'Secondary Name', species: ['cat'], contentHash: 'b'.repeat(64) } as PackagingOcrData & { contentHash: string | null };
+
+    const merged = mergeOcrResults([primary, secondary]);
+    expect((merged as { contentHash?: string | null }).contentHash).toBe('a'.repeat(64));
+    expect(merged.productName).toBe('Primary Name');
+    expect(merged.species).toEqual(['cat']);
   });
 });

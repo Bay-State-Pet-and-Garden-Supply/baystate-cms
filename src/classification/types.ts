@@ -8,6 +8,7 @@ import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 // ─── Stage Identity ────────────────────────────────────────────────────────────
 
 export type ClassificationStageName =
+  | 'packaging_ocr'
   | 'evidence_extraction'
   | 'name_consolidation'
   | 'primary_product_type_proposal'
@@ -105,6 +106,14 @@ export interface StageContext {
    * change.
    */
   assertHeld?: () => void;
+  /**
+   * Optional injected transport for network-performing stages (packaging_ocr).
+   * When absent, the underlying client uses its default transport
+   * (globalThis.fetch). Test harnesses inject a server-bound fetch here so
+   * suite-level globalThis.fetch stubs in OTHER test files can never intercept
+   * stage transports. Prod callers omit it — zero behavior change.
+   */
+  modelFetchFn?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
   /**
    * Optional product-line group context for sibling-aware processing.
    * Populated before name_consolidation when the item belongs to a
