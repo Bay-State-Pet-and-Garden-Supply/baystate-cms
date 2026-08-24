@@ -346,6 +346,49 @@ function validateCohortResponse(
 }
 
 /**
+ * Generate deterministic fallback titles for all items in a group.
+ */
+function getGroupFallbackTitles(groupItems: OnboardingItem[]): Map<string, CoordinatedTitle> {
+  const fallbacks = new Map<string, CoordinatedTitle>();
+  for (const item of groupItems) {
+    fallbacks.set(item.upc, {
+      title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
+      source: 'cohort_fallback',
+    });
+  }
+  return fallbacks;
+}
+
+/**
+ * Coordinate titles for a single multi-item group, executing LLM coordination
+ * or returning fallback titles on failure. Rethrows HeartbeatLostError.
+ */
+async function coordinateSingleGroup(
+  groupItems: OnboardingItem[],
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  opts?: CohortCoordinationOptions,
+): Promise<Map<string, CoordinatedTitle>> {
+  try {
+    return await coordinateGroup(groupItems, modelPolicy, opts);
+  } catch (err: any) {
+    // PR6 C3: ownership loss is NEVER converted into an 'LLM unavailable →
+    // fallback' outcome. `HeartbeatLostError` (a sibling worker reclaimed
+    // the cohort run) rethrows unchanged so the stale owner aborts
+    // deterministically with NO output rows — the run belongs to the
+    // reclaiming worker, which re-enters the parent op and coordinates only
+    // if no complete durable output set exists yet.
+    if (err instanceof HeartbeatLostError) {
+      throw err;
+    }
+    console.warn(
+      `[CohortCoordinator] Coordination failed for group, using fallbacks: ${redactTransportText(err.message)}`,
+    );
+    // All-or-nothing: deterministic fallback for every sibling
+    return getGroupFallbackTitles(groupItems);
+  }
+}
+
+/**
  * Coordinate cohort names for a set of onboarding items.
  *
  * @param items - Items from the same batch (any stage)
@@ -369,31 +412,9 @@ export async function coordinateCohortItems(
   for (const [, groupItems] of groups) {
     if (groupItems.length <= 1) continue;
 
-    try {
-      const groupResult = await coordinateGroup(groupItems, modelPolicy, opts);
-      for (const [upc, ct] of groupResult) {
-        result.set(upc, ct);
-      }
-    } catch (err: any) {
-      // PR6 C3: ownership loss is NEVER converted into an 'LLM unavailable →
-      // fallback' outcome. `HeartbeatLostError` (a sibling worker reclaimed
-      // the cohort run) rethrows unchanged so the stale owner aborts
-      // deterministically with NO output rows — the run belongs to the
-      // reclaiming worker, which re-enters the parent op and coordinates only
-      // if no complete durable output set exists yet.
-      if (err instanceof HeartbeatLostError) {
-        throw err;
-      }
-      console.warn(
-        `[CohortCoordinator] Coordination failed for group, using fallbacks: ${redactTransportText(err.message)}`,
-      );
-      // All-or-nothing: deterministic fallback for every sibling
-      for (const item of groupItems) {
-        result.set(item.upc, {
-          title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
-          source: 'cohort_fallback',
-        });
-      }
+    const groupResult = await coordinateSingleGroup(groupItems, modelPolicy, opts);
+    for (const [upc, ct] of groupResult) {
+      result.set(upc, ct);
     }
   }
 
