@@ -1035,7 +1035,7 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
       'startedAt', 'endedAt', 'extractedAt', 'snapshotHash', 'evidenceIds',
       'supportingEvidenceIds', 'contradictingEvidenceIds', 'currentDecisionId',
       'classificationRunId', 'classificationConfigSnapshot', 'classificationHistory',
-      'verifiedPageIdSet', 'verifiedPageCount', 'pageSnapshot', 'snapshot',
+      'verifiedPageIdSet', 'verifiedPageCount', 'pageSnapshot', 'snapshot', 'bundleHash', 'bundleVersion',
     ]);
     const stripVolatile = (value: unknown): unknown => {
       if (Array.isArray(value)) return value.map(stripVolatile);
