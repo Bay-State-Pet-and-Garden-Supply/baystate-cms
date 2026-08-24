@@ -239,6 +239,25 @@ describe('curation cohort service (issue #30, PR2)', () => {
     expect(purina.status).toBe('ready'); // unresolved OCR no longer waits
   });
 
+  it('P1-T3: a stale-marked OCR outcome (digest-staleness invalidation) is never settled — even with prior packagingOcrData preserved', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    // Exactly the beyond-cap freeze state: invalidation marker written, prior
+    // data fields kept intact (nothing deleted).
+    makeItemExtractionReady(items[0].id, makeExtractionData({
+      ocrOutcome: { status: 'failed', localFailureReason: 'plan_incompatible', stale: true },
+      packagingOcrData: { productName: 'Old Authority Name' },
+      packagingTitle: 'Old Authority Name',
+    }));
+    makeItemExtractionReady(items[1].id, makeExtractionData());
+    makeItemExtractionReady(items[2].id, makeExtractionData());
+
+    const stale = evaluateItemReadiness(listItemsByBatch(batchId)[0]);
+    expect(stale.ocrSettled).toBe(false); // stale marker ⇒ visibly unsettled
+    // Readiness itself stays non-blocking for OCR (informational only).
+    expect(stale.ready).toBe(true);
+  });
+
   it('marks a cohort blocked when a member failed in a pipeline stage', () => {
     const batchId = newBatch();
     const items = insertFamilyItems(batchId);

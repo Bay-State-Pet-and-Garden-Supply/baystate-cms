@@ -126,7 +126,7 @@ let auditedPageCallCount = 0;
 let titleCallCount = 0;
 let auditCallSeq = 0;
 
-const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme'];
+const PAGE_NAMES = ['Dog Food Dry', 'Dog Food Canned', 'Brand - Acme'];
 
 /** Extract the frozen page list from a page prompt (`[ID:xxx] Name ...`). */
 function pageListFromPrompt(prompt: string): Array<{ id: string; name: string }> {
@@ -456,7 +456,7 @@ const THREE_MEMBER_EXTRACTIONS = {
 function activateVerifiedPages(wsId: string): void {
   const pages = [
     { key: 'dog-food-dry', name: 'Dog Food Dry' },
-    { key: 'dog-treats', name: 'Dog Treats' },
+    { key: 'dog-food-canned', name: 'Dog Food Canned' },
     { key: 'brand-acme', name: 'Brand - Acme' },
   ];
   activatePageImportFromRecords({
@@ -1198,16 +1198,16 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     // singleton keeps the per-item spreadsheet title (source web).
     const FROZEN_LEGACY_BASELINE = {
       '100000000001': {
-        title: 'Acme Purina Pro Plan Dry Dog Food Chicken 5 lb',
+        title: 'Acme Purina Pro Plan Dry Dog Food Chicken 5 lb.',
         source: 'cohort_fallback',
         pages: [],
-        keywords: 'Acme Purina Pro Plan Dry Dog Food Chicken 5 lb, dog-food-dry, Original, description',
+        keywords: 'Acme Purina Pro Plan Dry Dog Food Chicken 5 lb., dog-food-dry, Original, description',
       },
       '100000000002': {
-        title: 'Acme Purina Pro Plan Dry Dog Food Beef 10 lb',
+        title: 'Acme Purina Pro Plan Dry Dog Food Beef 10 lb.',
         source: 'cohort_fallback',
         pages: [],
-        keywords: 'Acme Purina Pro Plan Dry Dog Food Beef 10 lb, dog-food-dry, Original, description',
+        keywords: 'Acme Purina Pro Plan Dry Dog Food Beef 10 lb., dog-food-dry, Original, description',
       },
       '100000000003': {
         title: 'Purina Pro Plan Adult Dog Food Salmon 5 lb',

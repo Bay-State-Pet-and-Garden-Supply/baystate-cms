@@ -1497,12 +1497,13 @@ const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
 
         seedApproved(item.id, batch.id);
 const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    // Fail closed: an unverified page identity can NEVER satisfy the mandatory
-    // Pages gate — the product must not promote with zero verified page
-    // assignments.
+    // Fail closed: an unverified page identity can NEVER promote — e09 B3
+    // (P11) refuses the item at the promotion gate BEFORE any draft write
+    // (previously it reached the mandatory Pages gate and failed there; the
+    // item is still blocked, now earlier and with the Page-specific reason).
     expect(result.failures).toHaveLength(1);
     expect(result.count).toBe(0);
-    expect(result.failures[0].error).toContain('No verified page assignments exist');
+    expect(result.failures[0].error).toContain('does not resolve into the active verified Page import');
     const changeSetItem = db.query(
       'SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1',
     ).get(item.upc) as { draft_json: string } | null;
@@ -1552,7 +1553,7 @@ const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures[0].error).toContain('No verified page assignments exist');
   });
 
-  it('promotes with a MIXED verified + unverified accepted set and serializes ONLY the verified page', async () => {
+  it('REFUSES promotion when a MIXED verified + unverified accepted set exists — P11 fails the item closed before any draft write', async () => {
     const batch = createBatch({ workspaceId: wsId, name: 'Mixed Pages', fileName: 'mx.xlsx', totalItems: 1 });
     const items = insertItems(batch.id, [{ upc: '999000000005', name: 'Mixed Product', price: '$9.00', rowNumber: 1, brandHint: 'Test Brand' }]);
     const item = items[0];
@@ -1600,15 +1601,17 @@ const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
 
         seedApproved(item.id, batch.id);
 const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    expect(result.failures).toHaveLength(0);
-    expect(result.count).toBe(1);
-    const changeSetItem = db.query(
+    // e09 B3 (P11): an accepted category_page proposal whose identity does
+    // not resolve into the active verified import refuses the WHOLE item
+    // before any draft write — even when another accepted proposal IS
+    // verified (no partial page sets may reach ProductOnPages).
+    expect(result.failures).toHaveLength(1);
+    expect(result.count).toBe(0);
+    expect(result.failures[0].error).toContain('does not resolve into the active verified Page import');
+    const changeSetItemAfterRefusal = db.query(
       'SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1',
-    ).get(item.upc) as { draft_json: string };
-    const draft = JSON.parse(changeSetItem.draft_json);
-    const pagesXml = draft.shopsite?.preserved?.unknownElements?.ProductOnPages ?? '';
-    expect(pagesXml).toContain('Verified Only');
-    expect(pagesXml).not.toContain('Bogus Mixed');
+    ).get(item.upc) as { draft_json: string } | null;
+    expect(changeSetItemAfterRefusal).toBeNull();
   });
 
   it('resolves the verified page display name from the ACTIVE import when the proposal lacks one — never serializes the Page ID as a name', async () => {

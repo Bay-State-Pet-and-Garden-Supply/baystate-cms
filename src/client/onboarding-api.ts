@@ -29,6 +29,7 @@ import type {
   SitemapTestLookupRequest,
   BatchPreflightResponse,
   SourcingPolicy,
+  MediaSelectionRequest,
 } from '../shared/schemas/onboarding';
 import type {
   WorkerHealthResponse,
@@ -56,6 +57,12 @@ export class OnboardingApiError extends Error {
     message: string,
     readonly status: number,
     readonly code: string | null = null,
+    /**
+     * Full response body (additive, e10s03): lets callers recover structured
+     * detail — e.g. review-complete rejection `failures[].blockers` — without
+     * re-parsing human messages.
+     */
+    readonly payload?: unknown,
   ) {
     super(message);
     this.name = 'OnboardingApiError';
@@ -77,7 +84,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       ? errorObj.message
       : errorObj || `HTTP ${res.status}`;
     const code = typeof (data as any).code === 'string' ? (data as any).code : null;
-    throw new OnboardingApiError(errMsg, res.status, code);
+    throw new OnboardingApiError(errMsg, res.status, code, data);
   }
   return data as T;
 }
@@ -379,7 +386,10 @@ export async function completeReviewStage(itemIds: string[]): Promise<{ success:
       .filter((reason): reason is string => reason !== null);
     const baseMsg = typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`;
     const message = reasons.length > 0 ? `${baseMsg} ${reasons.join(' ')}` : baseMsg;
-    throw new OnboardingApiError(message, res.status, typeof data?.code === 'string' ? data.code : null);
+    // e10s03: carry the full response body as `payload` so
+    // parseBlockersFromRejection can read the structured failures[].blockers
+    // codes instead of relying on the human message marker alone.
+    throw new OnboardingApiError(message, res.status, typeof data?.code === 'string' ? data.code : null, data);
   }
   return data as { success: boolean; count: number; legacyCount?: number; classifiedCount?: number };
 }
@@ -504,6 +514,21 @@ export interface SourcingGenerationView {
 
 export async function getItemDetail(itemId: string): Promise<ItemDetailResponse> {
   return request<ItemDetailResponse>(`/items/${itemId}`);
+}
+
+/**
+ * e10s04: persist the reviewer media selection (primary/order/suppression).
+ * Server validates the candidate-set union, enforces distributor approved-only
+ * constraints, and invalidates durable review (consequential edit).
+ */
+export async function updateItemMedia(
+  itemId: string,
+  selection: MediaSelectionRequest,
+): Promise<{ success: boolean }> {
+  return request<{ success: boolean }>(`/items/${itemId}/media`, {
+    method: 'PUT',
+    body: JSON.stringify(selection),
+  });
 }
 
 export async function updateItem(
@@ -1559,3 +1584,38 @@ export async function getBrandStrategies(): Promise<{ strategies: import('../sha
 }
 
 
+
+// ─── Taxonomy release status + sanctioned activation (P4) ─────────────────────
+
+export interface TaxonomyReleaseRevisionInfo {
+  revision: string;
+  schemaVersion: number | null;
+  lifecycle: string | null;
+  counts: Record<string, number>;
+  manifestHashesOk: boolean;
+  errorCount: number;
+  warningCount: number;
+}
+
+export interface TaxonomyReleaseStatus {
+  activeRevision: string | null;
+  updatedAt: string | null;
+  defaultRevision: string;
+  v4Revision: string;
+  /** Server-side admin gate state — the client NEVER guesses (defense in depth). */
+  adminEnabled: boolean;
+  availableRevisions: TaxonomyReleaseRevisionInfo[];
+}
+
+export async function getTaxonomyReleaseStatus(): Promise<TaxonomyReleaseStatus> {
+  return request<TaxonomyReleaseStatus>('/settings/taxonomy-release');
+}
+
+export async function pinTaxonomyRelease(
+  revision: string,
+): Promise<{ success: boolean; activeRevision: string; updatedAt: string }> {
+  return request('/settings/taxonomy-release/pin', {
+    method: 'POST',
+    body: JSON.stringify({ revision }),
+  });
+}

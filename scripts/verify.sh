@@ -13,13 +13,14 @@ npx tsc --noEmit --skipLibCheck
 echo "==> vitest (client + importable unit suites)"
 npx vitest run
 
-echo "==> bun test:db (PI + DB integration suites)"
+echo "==> bun test:db (DB integration suites)"
 bun run test:db
 
 echo "==> production build"
 npx vite build
 
-echo "==> eslint (product-intelligence + routes)"
-npx eslint src/product-intelligence src/server/routes/product-intelligence-routes.ts --ext .ts
+# ADR-0030: the old PI-specific ESLint gate was retired with src/product-intelligence/**.
+# Directory-based import prevention for relocated onboarding code now lives in
+# eslint.config.mjs (no-restricted-imports) and runs as part of `bun run lint`.
 
 echo "verify: ALL GATES GREEN"

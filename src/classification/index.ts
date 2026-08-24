@@ -7,11 +7,14 @@
  * 2. Import and add it to the array below
  * 3. The pipeline runner resolves dependencies automatically
  */
+export { packagingOcrStage } from './stages/packaging-ocr-stage';
 export { evidenceExtractionStage } from './stages/evidence-extraction';
 export { nameConsolidationStage } from './stages/name-consolidation';
 export { primaryProductTypeStage } from './stages/primary-product-type';
 export { attributeApplicabilityStage } from './stages/attribute-applicability';
 export { productAttributeProposalsStage } from './stages/attribute-proposals';
+export { valueGapAbstainStage } from './stages/value-gap-abstain';
+export type { ValueGapOutcome, ValueGapResolutionRecord, ValueGapStageMetadata } from './stages/value-gap-abstain';
 export { categoryPageProposalsStage } from './stages/category-page-proposals';
 export { productDraftProjectionStage } from './stages/draft-projection';
 

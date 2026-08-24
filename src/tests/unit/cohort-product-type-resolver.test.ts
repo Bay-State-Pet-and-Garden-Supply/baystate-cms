@@ -16,6 +16,7 @@ import type {
 import type { RuntimeClassificationSnapshot } from '../../classification/runtime-snapshot';
 import type { BrandConfig } from '../../shared/schemas/classification';
 import type { ReviewedFact } from '../../classification/reviewed-facts';
+import { packagingOcrDataToEvidence } from '../../classification/ocr-evidence';
 
 // ─── Fixtures (pure — no DB) ──────────────────────────────────────────────────
 
@@ -250,7 +251,7 @@ describe('evidenceFromProjection', () => {
     expect(keywordRecord!.reliability).toBe('low');
     expect(evidence.some(e => e.sourceField === 'Flavor' && e.value === 'Chicken' && e.source === 'official_product_page')).toBe(true);
 
-    // Frozen packaging OCR records (mirrored packagingOcrDataToEvidence mapping).
+    // Frozen packaging OCR records (shared packagingOcrDataToEvidence mapping).
     const ocrRecords = evidence.filter(e => e.metadata && (e.metadata as Record<string, unknown>).provenance === 'packaging_ocr');
     expect(ocrRecords.length).toBeGreaterThan(0);
     const nameRec = ocrRecords.find(e => e.sourceField === 'name');
@@ -283,6 +284,62 @@ describe('evidenceFromProjection', () => {
     // runId/productSku overrides stamp the produced records.
     const stamped = evidenceFromProjection(member, { runId: 'run-1', productSku: 'SKU-X' });
     expect(stamped.every(e => e.runId === 'run-1' && e.productSku === 'SKU-X')).toBe(true);
+  });
+
+  it('P2-T1 equivalence: frozen OCR materialization exactly equals the shared packagingOcrDataToEvidence output (deleted mirror now delegated)', () => {
+    const ocrFixture = {
+      productName: 'Equivalence Dog Food',
+      brand: 'Acme',
+      species: ['dog'],
+      flavorVariety: 'Chicken & Rice',
+      color: 'blue',
+      material: 'steel',
+      size: 'large',
+      weight: '5 lb',
+      count: '2 pack',
+      lifeStage: 'adult',
+      breedSize: 'all',
+      productForm: 'kibble',
+      healthConcernFunction: ['joint support'],
+      dietaryLabels: ['grain-free'],
+      ingredientKeywords: ['chicken', ''],
+      visibleTextLines: ['line-1', '', 'line-3', 'line-4'], // >3 lines: only the first 3 are considered, blanks skipped
+      ingredients: ['', 'chicken meal'],
+      claims: ['vet approved'],
+      confidenceByField: { productName: 0.95, brand: 0.8, species: 0.55, flavorVariety: null, ingredientKeywords: 0.2 },
+      metadata: { modelCallIds: ['call-eq'] }, // durable call ids ride ON the frozen OCR record
+    };
+
+    // The shared pure converter's output for this fixture...
+    const expected = packagingOcrDataToEvidence(ocrFixture as never, {
+      runId: 'run-eq',
+      sku: 'SKU-EQ',
+      model: 'test-vlm',
+      modelCallIds: ['call-eq'],
+    });
+
+    // ...must EXACTLY equal the resolver's frozen-OCR materialization under
+    // identical params — proving the former mirrored copy is replaced by
+    // delegation to one shared implementation, not a second mapping.
+    const member = withSettledOcr(makeMemberProjection({ sku: 'SKU-EQ' }), ocrFixture);
+    const evidence = evidenceFromProjection(member, { runId: 'run-eq', productSku: 'SKU-EQ' });
+    const stripVolatile = (records: ReturnType<typeof evidenceFromProjection>) =>
+      records.map(({ id: _id, capturedAt: _capturedAt, ...rest }) => rest);
+    const actual = stripVolatile(
+      evidence.filter(e => (e.metadata as Record<string, unknown> | null)?.provenance === 'packaging_ocr'),
+    );
+    expect(actual).toEqual(stripVolatile(expected));
+
+    // Representative-mapping spot checks across all reliability bands.
+    const bySourceField = new Map(actual.map(r => [r.sourceField, r]));
+    expect(bySourceField.get('name')!.reliability).toBe('high'); // confidence 0.95
+    expect(bySourceField.get('flavor')!.reliability).toBe('medium'); // null confidence -> fallback 'medium'
+    expect(bySourceField.get('ingredientKeyword')!.reliability).toBe('low'); // confidence 0.2
+    expect(actual.filter(r => r.sourceField === 'visible_text')).toHaveLength(2); // blank line skipped within first-3 window
+    for (const rec of actual) {
+      expect((rec.metadata as Record<string, unknown>).model).toBe('test-vlm');
+      expect((rec.metadata as Record<string, unknown>).modelCallIds).toEqual(['call-eq']);
+    }
   });
 
   it('fails closed: OCR is never materialized on input-hash mismatch or a missing execution digest', () => {

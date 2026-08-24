@@ -93,6 +93,11 @@ export const PackagingOcrDataSchema = z.object({
     rawResponseExcerpt: z.string().nullable().default(null),
     /** Durable model-call IDs that produced this OCR (issue #17 E). */
     modelCallIds: z.array(z.string()).optional(),
+    /** P2 redaction pass: SHA-256 of the raw image source reference. The raw
+     *  ref itself is never persisted — `imageSourceUrl` keeps only a bounded,
+     *  credential/query-stripped form for debugging. Optional so hand-built
+     *  fixtures without it stay assignable. */
+    imageSourceDigest: z.string().nullable().optional(),
   }).nullable().default(null),
 });
 
@@ -138,6 +143,35 @@ export const DistributorImageApprovalSchema = z.object({
 });
 export type DistributorImageApproval = z.infer<typeof DistributorImageApprovalSchema>;
 
+/**
+ * Stable OCR failure-reason taxonomy (packaging-OCR overhaul P1-T1).
+ *
+ * Defined in the SHARED layer because it is persisted inside
+ * OcrAttemptOutcomeSchema and consumed by src/onboarding OCR modules;
+ * src/shared must never import from src/onboarding, so the enum values live
+ * here and src/onboarding/ocr-failure-reasons.ts derives its message map and
+ * helpers from this schema.
+ */
+export const OcrFailureReasonEnum = z.enum([
+  'not_configured',
+  'policy_denied',
+  'plan_incompatible',
+  'no_image',
+  'image_fetch_failed',
+  'image_http_error',
+  'image_too_small',
+  'image_svg_unsupported',
+  'timeout',
+  'http_error',
+  'transport_error',
+  'empty_response',
+  'unparseable_json',
+  'schema_coercion_failed',
+  'circuit_open',
+  'audit_terminal_write_failed',
+]);
+export type OcrFailureReason = z.infer<typeof OcrFailureReasonEnum>;
+
 export const OcrAttemptOutcomeStatusEnum = z.enum(['succeeded', 'failed', 'skipped', 'no_image', 'disabled']);
 export type OcrAttemptOutcomeStatus = z.infer<typeof OcrAttemptOutcomeStatusEnum>;
 
@@ -150,6 +184,14 @@ export const OcrAttemptOutcomeSchema = z.object({
   reason: z.string().nullable().optional(),
   imageCount: z.number().optional(),
   error: z.string().nullable().optional(),
+  /** P1-T1: structured failure reason for the LOCAL VLM leg (null when succeeded/skipped). */
+  localFailureReason: OcrFailureReasonEnum.nullish(),
+  /** P1-T1: structured failure reason for the CLOUD VLM leg (null when succeeded/skipped). */
+  cloudFailureReason: OcrFailureReasonEnum.nullish(),
+  /** P1-T1: number of transport attempts made (>= 1 when an attempt ran). */
+  attempts: z.number().int().positive().optional(),
+  /** P1-T3 (reserved): stored OCR data predates the current frozen plan digest. */
+  stale: z.boolean().optional(),
 });
 export type OcrAttemptOutcome = z.infer<typeof OcrAttemptOutcomeSchema>;
 
@@ -293,6 +335,22 @@ export const ExtractionDataSchema = z.object({
   confidence: z.number().min(0).max(1).default(0),
   fieldProvenance: z.record(z.string(), z.string()).default(() => ({})),
   // Tracks where each field came from: 'json-ld', 'meta', 'html', 'ai', 'user'
+  /**
+   * ADR-0031 (extraction-ladder wiring): deterministic identity classification
+   * of the extracted page against the requested product. Values match the
+   * PAGE_IDENTITY_STATUSES union in src/onboarding/extraction-ladder/result-shape.ts.
+   * Diagnostics only — never gates extraction success or promotion.
+   */
+  identityStatus: z.enum([
+    'exact_match',
+    'probable_match',
+    'parent_product_only',
+    'wrong_variant',
+    'conflicting_identity',
+    'insufficient_evidence',
+  ]).nullable().optional().default(null),
+  /** Human-readable reasons supporting identityStatus. */
+  identityReasons: z.array(z.string()).optional().default(() => []),
   packagingTitle: z.string().nullable().default(null),
   /** Structured OCR output from the primary product image. Populated once before classification. */
   packagingOcrData: PackagingOcrDataSchema.nullable().default(null),
@@ -627,6 +685,101 @@ export const CohortSemanticValidationSchema = z.object({
 
 export type CohortSemanticValidation = z.infer<typeof CohortSemanticValidationSchema>;
 
+/**
+ * e09 B3 (T9): persisted family-title-consistency proof, captured at the
+ * member-projection commit from the DURABLE coordinated title output. The
+ * cohort name coordinator already enforced all-or-nothing validation (T7)
+ * BEFORE commit — a committed `llm_cohort`/`cohort_fallback` title passed
+ * `validateFamilyTitleSet`, so only the passing status is representable.
+ * Additive key: absent in legacy/non-cohort runs (byte-identical). Consumed
+ * fail-closed by the review completion gate for cohort-coordinated titles
+ * (adjudication #8: new revisions only — completed cohorts are never
+ * backfilled).
+ */
+export const FamilyTitleValidationRecordSchema = z.object({
+  version: z.string(),
+  // 'blocked' is representable for a family whose coordinated set failed
+  // validation and was committed as a blocked outcome; the review completion
+  // gate refuses such records with `title_validation_blocked` (T9). The
+  // current producer only commits 'passed' — the wider enum keeps the record
+  // contract total without changing producer behavior.
+  status: z.enum(['passed', 'blocked']),
+  source: z.enum(['llm_cohort', 'cohort_fallback']),
+});
+
+export type FamilyTitleValidationRecord = z.infer<typeof FamilyTitleValidationRecordSchema>;
+
+/**
+ * e09 B3 (P10): persisted durable Category Page decision status for the
+ * member, captured at the member-projection commit from the DURABLE
+ * coordinated page output — never recomputed from live rows. Additive key:
+ * absent in legacy runs (byte-identical). The review completion gate enforces
+ * it for runs whose frozen snapshot enables the category_page target;
+ * `abstained` blocks review unless a reviewer correction resolves to a
+ * current verified Page ID (adjudication #6/#10).
+ */
+export const PageDecisionStatusRecordSchema = z.object({
+  status: z.enum(['assigned', 'abstained', 'absent']),
+  reason: z.string().nullable().optional(),
+});
+
+export type PageDecisionStatusRecord = z.infer<typeof PageDecisionStatusRecordSchema>;
+
+/**
+ * e09 round-3 FIX 1 (adjudication #10): reviewer manual-selection correction
+ * for an ABSTAINED durable Category Page decision. Written by the Review UI
+ * when the reviewer picks a page from the VERIFIED options list — a stable
+ * verified Page ID plus the active page-import hash captured at correction
+ * time. Additive optional key: absent in legacy/non-corrected runs
+ * (byte-identical). Consumed fail-closed by the review completion gate: the
+ * recorded Page ID must resolve into the CURRENT verified import AND the
+ * recorded hash must equal the ACTIVE page-import source hash at gate time
+ * (a stale hash or unverified ID → `page_decision_stale` refusal; a malformed
+ * record never satisfies the abstention).
+ */
+export const CorrectedCategoryPageRecordSchema = z.object({
+  /** Stable verified Page ID selected by the reviewer (never a display name). */
+  pageId: z.string().min(1),
+  /** Active page-import source hash captured when the correction was made. */
+  activePageImportHash: z.string().min(1),
+  /** ISO timestamp of the correction. */
+  correctedAt: z.string().min(1),
+});
+
+export type CorrectedCategoryPageRecord = z.infer<typeof CorrectedCategoryPageRecordSchema>;
+
+/**
+ * e10s04 — reviewer media selection persisted at review time
+ * (`curation_data.reviewedMedia`). Written ONLY by the dedicated
+ * `PUT /api/onboarding/items/:id/media` route after candidate-set union
+ * validation; never by generic curation_data edits. Additive optional key:
+ * absent until a reviewer saves a selection (legacy rows byte-identical).
+ *
+ * OVERWRITE semantics (supervisor decision 2026-08-23): suppression removes
+ * images from consideration without preserving a separate audit copy of the
+ * original extraction proposal set; repeated saves validate against the
+ * UNION of extraction candidates and previously persisted entries.
+ */
+export const ReviewedMediaSchema = z.object({
+  /** Reviewer-designated primary image; null ⇒ promoter falls back to its current chain. */
+  primaryImage: z.string().min(1).nullable().default(null),
+  /** Explicit ordering for additional images; empty ⇒ extraction order unchanged. */
+  orderedAdditional: z.array(z.string().min(1)).default(() => []),
+  /** URLs removed from consideration (never promoted, still validated as candidates). */
+  suppressed: z.array(z.string().min(1)).default(() => []),
+});
+
+export type ReviewedMedia = z.infer<typeof ReviewedMediaSchema>;
+
+/** Request body for PUT /api/onboarding/items/:id/media (e10s04). */
+export const MediaSelectionRequestSchema = z.object({
+  primaryImage: z.string().min(1).nullable(),
+  orderedAdditional: z.array(z.string().min(1)),
+  suppressed: z.array(z.string().min(1)),
+});
+
+export type MediaSelectionRequest = z.infer<typeof MediaSelectionRequestSchema>;
+
 export const CurationDataSchema = z.object({
   curatedTitle: z.string().nullable().default(null),
   /** Search keywords synthesized by the curator from curated title, brand, attributes, and page names. */
@@ -644,6 +797,10 @@ export const CurationDataSchema = z.object({
   /** The evidence attempt IDs whose copy contributed to curatedDescription. */
   curatedDescriptionSourceAttemptIds: z.array(z.string()).default(() => []),
   suggestedPages: z.array(z.string()).default(() => []),
+  /** e09 round-3 FIX 1: reviewer manual-selection correction record (see CorrectedCategoryPageRecordSchema). Additive, absent unless corrected. */
+  correctedCategoryPage: CorrectedCategoryPageRecordSchema.nullable().optional(),
+  /** e10s04: reviewer media selection (see ReviewedMediaSchema). Absent until first media save. */
+  reviewedMedia: ReviewedMediaSchema.nullable().optional(),
   suggestedProductType: z.string().nullable().default(null),
   curatedAt: z.string().nullable().default(null),
   curationMethod: z.enum(['auto', 'manual']).default('auto'),
@@ -679,6 +836,10 @@ export const CurationDataSchema = z.object({
    * + proposals stay intact for the Review UX (blocked-not-destroyed).
    */
   semanticValidation: CohortSemanticValidationSchema.nullable().optional(),
+  // e09 B3 (T9/P10): additive gate-status records — absent in legacy/shadow
+  // runs (JSON.stringify drops undefined keys). See the record schemas above.
+  familyTitleValidation: FamilyTitleValidationRecordSchema.nullable().optional(),
+  pageDecisionStatus: PageDecisionStatusRecordSchema.nullable().optional(),
   // e05s01: review observability — additive, absent in legacy runs (byte-identical)
   attributeApplicability: z
     .array(
@@ -726,6 +887,39 @@ export const CurationDataSchema = z.object({
 });
 
 export type CurationData = z.infer<typeof CurationDataSchema>;
+
+// ─── Review completeness (story e10s01) ─────────────────────────────────────
+// Shared blocker/warning codes for the review-completeness gate so the
+// server (authoritative) and client (advisory live status) can never
+// diverge on vocabulary. Blocker codes mirror the promotion mandatory
+// checklist in src/onboarding/draft-promoter.ts (~976–996) exactly.
+export const REVIEW_COMPLETENESS_BLOCKER_CODES = [
+  'missing_name',
+  'missing_price',
+  'missing_brand',
+  'missing_primary_image',
+  'missing_pages',
+] as const;
+export type ReviewCompletenessBlockerCode = (typeof REVIEW_COMPLETENESS_BLOCKER_CODES)[number];
+
+export const REVIEW_COMPLETENESS_WARNING_CODES = [
+  'name_from_fallback_source',
+  'description_empty',
+  'keywords_empty',
+  'weight_missing',
+  'pending_proposals',
+  'unverified_accepted_pages',
+] as const;
+export type ReviewCompletenessWarningCode = (typeof REVIEW_COMPLETENESS_WARNING_CODES)[number];
+
+export const ReviewCompletenessSchema = z.object({
+  ready: z.boolean(),
+  blockers: z.array(z.enum(REVIEW_COMPLETENESS_BLOCKER_CODES)),
+  warnings: z.array(z.enum(REVIEW_COMPLETENESS_WARNING_CODES)),
+  /** Non-coded human-readable notes (e.g. distributor price auto-satisfaction). */
+  notes: z.array(z.string()).default([]),
+});
+export type ReviewCompleteness = z.infer<typeof ReviewCompletenessSchema>;
 
 // ─── Batch Statuses ─────────────────────────────────────────────────────────────
 

@@ -312,6 +312,107 @@ function sha256OfFile(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
+// ─── P2 disposition codification helpers ──────────────────────────────────────
+
+/**
+ * P2 rule b — exported ⇔ proposer fail-closed rule.
+ *
+ * An attribute whose exportDisposition.kind is 'shopsite' MUST have at least
+ * one proposer, where a proposer is either:
+ *  - facet/profile membership (≥1 profile lists the attribute), or
+ *  - `isUniversal === true` (universal attributes flow through the
+ *    universal-tier proposers regardless of Product Type).
+ *
+ * Rationale (plan section B.P2.1 / D): an EXPORTED attribute nobody proposes
+ * is dead weight and masks coverage gaps. Promoting one of the retired
+ * `not_exported` attributes to `shopsite` without granting profile membership
+ * in the SAME release therefore fails closed — reactivation can never
+ * half-happen. Committed releases stay valid because every mapped-but-
+ * profile-less attribute (`brand`, `product-type`, and the two canonical
+ * compiled projections) carries `isUniversal: true`.
+ */
+function assertExportedAttributesHaveProposers(
+  fail: (code: string, message: string) => void,
+  attributes: Array<{ id: string; isUniversal?: boolean; exportDisposition?: { kind: string } | undefined }>,
+  profileMembershipIds: ReadonlySet<string>,
+): void {
+  for (const attr of attributes) {
+    if (attr.exportDisposition?.kind !== 'shopsite') continue;
+    if (profileMembershipIds.has(attr.id)) continue;
+    if (attr.isUniversal === true) continue; // universal tier proposes it regardless of type
+    fail(
+      'exported_attribute_without_profile_membership',
+      `Attribute "${attr.id}" has a shopsite exportDisposition but no facet-profile membership and is not universal. Grant ≥1 profile membership in this release (or declare it universal) so the exported field has a proposer.`,
+    );
+  }
+}
+
+/** Attribute ids currently declared `not_exported` AND absent from every profile. */
+function currentlyRetiredAttributeIds(
+  attributes: Array<{ id: string; exportDisposition?: { kind: string } | undefined }>,
+  profileMembershipIds: ReadonlySet<string>,
+): string[] {
+  return attributes
+    .filter(a => a.exportDisposition?.kind === 'not_exported' && !profileMembershipIds.has(a.id))
+    .map(a => a.id)
+    .sort();
+}
+
+/**
+ * P2 rule c — advisory `retire_candidate` findings (NEVER blocks).
+ *
+ * A `not_exported`, profile-less attribute that was ALREADY not_exported and
+ * profile-less in the manifest's `sourceBaseline` release has now been retired
+ * for >1 consecutive release; it is flagged as an advisory retirement
+ * candidate in the validation report. Missing/unreadable baseline data yields
+ * no finding at all — the check is best-effort by design.
+ */
+function collectRetireCandidateWarnings(
+  dir: string,
+  sourceBaseline: string | undefined,
+  currentRetiredIds: readonly string[],
+): ReleaseValidationFinding[] {
+  if (!sourceBaseline || currentRetiredIds.length === 0) return [];
+  try {
+    const baselineDir = path.resolve(path.dirname(dir), sourceBaseline);
+    const attributesFile = path.join(baselineDir, 'attributes.json');
+    // Profile file name differs per release generation (v3/v5+: attribute-
+    // profiles.json, v4: facet-profiles.json) — detect what the baseline has.
+    const profilesFile = ['facet-profiles.json', 'attribute-profiles.json']
+      .map(name => path.join(baselineDir, name))
+      .find(candidate => fs.existsSync(candidate));
+    if (!fs.existsSync(attributesFile) || !profilesFile) return [];
+    const baselineAttrs = JSON.parse(fs.readFileSync(attributesFile, 'utf8')) as { entries?: unknown };
+    const baselineProfiles = JSON.parse(fs.readFileSync(profilesFile, 'utf8')) as { entries?: unknown };
+    if (!Array.isArray(baselineAttrs.entries) || !Array.isArray(baselineProfiles.entries)) return [];
+    const baselineMembership = new Set<string>();
+    for (const profile of baselineProfiles.entries) {
+      const attrs = (profile as { attributes?: unknown } | null)?.attributes;
+      if (!Array.isArray(attrs)) continue;
+      for (const a of attrs) {
+        const id = (a as { attributeId?: unknown } | null)?.attributeId;
+        if (typeof id === 'string') baselineMembership.add(id);
+      }
+    }
+    const alreadyRetired = new Set<string>();
+    for (const entry of baselineAttrs.entries) {
+      const a = entry as { id?: unknown; exportDisposition?: { kind?: unknown } } | null;
+      if (typeof a?.id !== 'string') continue;
+      if (a.exportDisposition?.kind !== 'not_exported') continue;
+      if (!baselineMembership.has(a.id)) alreadyRetired.add(a.id);
+    }
+    return currentRetiredIds
+      .filter(id => alreadyRetired.has(id))
+      .map(id => ({
+        code: 'retire_candidate',
+        message: `Attribute "${id}" is not_exported and absent from every profile here and in baseline release "${sourceBaseline}" (>1 consecutive release). Advisory only — review for formal retirement; ids are never deleted.`,
+        severity: 'warning' as const,
+      }));
+  } catch {
+    return []; // advisory check must never block validation
+  }
+}
+
 const SLUG_RELEASE_ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 // ─── Validator ─────────────────────────────────────────────────────────────────
@@ -620,6 +721,29 @@ export function validateTaxonomyRelease(releaseDir: string): ReleaseValidationRe
         }
       }
     }
+  }
+
+  // ── Rule 8c (P2 disposition codification): exported ⇔ proposer ──────────
+  // An exported attribute must have at least one proposer (facet/profile
+  // membership, or the universal tier). See assertExportedAttributesHaveProposers.
+  {
+    const profiledAttributeIds = new Set<string>();
+    for (const profile of profiles) {
+      for (const pa of profile.attributes) profiledAttributeIds.add(pa.attributeId);
+    }
+    assertExportedAttributesHaveProposers(fail, attributes, profiledAttributeIds);
+  }
+
+  // ── Rule 8d (P2 rule c): retire_candidate advisories vs sourceBaseline ───
+  {
+    const profiledAttributeIds = new Set<string>();
+    for (const profile of profiles) {
+      for (const pa of profile.attributes) profiledAttributeIds.add(pa.attributeId);
+    }
+    const retiredNow = currentlyRetiredAttributeIds(attributes, profiledAttributeIds);
+    findings.push(
+      ...collectRetireCandidateWarnings(dir, manifest?.sourceBaseline, retiredNow),
+    );
   }
 
   // ── Rule 9: guidance ids unique; structured refs known where applicable ──
@@ -1484,6 +1608,22 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
         }
       }
     }
+  }
+
+  // ── Rule A2 (P2 disposition codification): exported ⇔ proposer ──────────
+  // Facet profiles are the v4 proposer registry; universal attributes are
+  // proposed by the universal tier instead. See assertExportedAttributesHaveProposers.
+  {
+    const profiledAttributeIds = new Set<string>();
+    for (const profile of facetProfiles) {
+      for (const pa of profile.attributes) profiledAttributeIds.add(pa.attributeId);
+    }
+    assertExportedAttributesHaveProposers(fail, attributes, profiledAttributeIds);
+
+    const retiredNow = currentlyRetiredAttributeIds(attributes, profiledAttributeIds);
+    findings.push(
+      ...collectRetireCandidateWarnings(dir, manifest?.sourceBaseline, retiredNow),
+    );
   }
 
   // ── Rule 10: species-safety cross-check ──────────────────────────────────

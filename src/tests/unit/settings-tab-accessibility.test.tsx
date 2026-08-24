@@ -19,7 +19,33 @@ vi.mock('../../client/api', () => ({
   getConnection: vi.fn(async () => ({ connection: null })),
   saveConnection: vi.fn(async () => ({})),
   testConnection: vi.fn(async () => ({ ok: true, message: 'ok' })),
+  // Workbench views reused in settings panels (always mounted)
+  listCatalogFields: vi.fn(async () => ({ fields: [] })),
+  listAttributeMappings: vi.fn(async () => ({ mappings: [] })),
+  getCatalogSchemaHealth: vi.fn(async () => ({ findings: [], summary: { blockers: 0, warnings: 0, infos: 0 } })),
+  getCatalogHealthReport: vi.fn(async () => ({ issues: [] })),
 }));
+
+vi.mock('../../client/onboarding-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/onboarding-api')>();
+  return {
+    ...actual,
+    getClassificationConfig: vi.fn(async () => ({ config: { productTypes: [], attributes: [], attributeProfiles: [], attributeMappings: [] } })),
+    getCurationTargets: vi.fn(async () => ({ targets: [], candidates: { productFields: [], pages: [] }, applicability: [], findings: [] })),
+    getClassificationReadiness: vi.fn(async () => ({ readiness: {} })),
+    getApiKeys: vi.fn(async () => ({ keys: [] })),
+    updateApiKey: vi.fn(async () => ({})),
+    deleteApiKey: vi.fn(async () => ({})),
+    getOnboardingCapabilities: vi.fn(async () => ({})),
+    getExtractionWorkerHealth: vi.fn(async () => ({})),
+    getLlmTaskConfigs: vi.fn(async () => ({ taskConfigs: [], knownTasks: [] })),
+    upsertLlmTaskConfig: vi.fn(async () => ({})),
+    deleteLlmTaskConfig: vi.fn(async () => ({})),
+    getDeepseekModels: vi.fn(async () => ({ models: [] })),
+    getOpenaiModels: vi.fn(async () => ({ models: [] })),
+    getOllamaModels: vi.fn(async () => ({ models: [] })),
+  };
+});
 
 vi.mock('../../client/components/AiComputePanel', () => ({
   AiComputePanel: () => <div data-testid="ai-compute-panel">AI Compute</div>,
@@ -74,23 +100,28 @@ describe('Settings tab accessibility', () => {
     expect(tablist!.getAttribute('aria-label')).toBe('Store Settings sections');
 
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(3);
+    expect(tabs.length).toBe(7); // includes the P4 Taxonomy Release card tab
 
     const generalTab = getTab(container, 'general');
+    const aiTasksTab = getTab(container, 'ai-tasks');
     const aiTab = getTab(container, 'ai');
     const catalogTab = getTab(container, 'catalog');
+    const typesTab = getTab(container, 'types');
+    const mappingsHealthTab = getTab(container, 'mappings-health');
+    const taxonomyReleaseTab = getTab(container, 'taxonomy-release');
 
     expect(generalTab.getAttribute('aria-selected')).toBe('true');
-    expect(aiTab.getAttribute('aria-selected')).toBe('false');
-    expect(catalogTab.getAttribute('aria-selected')).toBe('false');
+    for (const tab of [aiTasksTab, aiTab, catalogTab, typesTab, mappingsHealthTab, taxonomyReleaseTab]) {
+      expect(tab.getAttribute('aria-selected')).toBe('false');
+      expect(tab.tabIndex).toBe(-1);
+    }
 
     expect(generalTab.getAttribute('aria-controls')).toBe('settings-tabpanel-general');
+    expect(aiTasksTab.getAttribute('aria-controls')).toBe('settings-tabpanel-ai-tasks');
     expect(aiTab.getAttribute('aria-controls')).toBe('settings-tabpanel-ai');
     expect(catalogTab.getAttribute('aria-controls')).toBe('settings-tabpanel-catalog');
 
     expect(generalTab.tabIndex).toBe(0);
-    expect(aiTab.tabIndex).toBe(-1);
-    expect(catalogTab.tabIndex).toBe(-1);
 
     const generalPanel = getPanel(container, 'general');
     const aiPanel = getPanel(container, 'ai');
@@ -114,6 +145,7 @@ describe('Settings tab accessibility', () => {
   it('supports ArrowRight/ArrowLeft/Home/End keyboard navigation with focus movement', async () => {
     const { container, unmount } = await renderSettings();
     const generalTab = getTab(container, 'general');
+    const aiTasksTab = getTab(container, 'ai-tasks');
     const aiTab = getTab(container, 'ai');
     const catalogTab = getTab(container, 'catalog');
 
@@ -121,9 +153,18 @@ describe('Settings tab accessibility', () => {
       generalTab.focus();
       generalTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     });
+    expect(document.activeElement).toBe(aiTasksTab);
+    expect(aiTasksTab.getAttribute('aria-selected')).toBe('true');
+    expect(generalTab.tabIndex).toBe(-1);
+    expect(aiTasksTab.tabIndex).toBe(0);
+    expect(getPanel(container, 'ai-tasks').hasAttribute('hidden')).toBe(false);
+
+    await act(async () => {
+      aiTasksTab.focus();
+      aiTasksTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
     expect(document.activeElement).toBe(aiTab);
     expect(aiTab.getAttribute('aria-selected')).toBe('true');
-    expect(generalTab.tabIndex).toBe(-1);
     expect(aiTab.tabIndex).toBe(0);
     expect(getPanel(container, 'ai').hasAttribute('hidden')).toBe(false);
 
@@ -140,6 +181,33 @@ describe('Settings tab accessibility', () => {
       catalogTab.focus();
       catalogTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     });
+    const typesTab = getTab(container, 'types');
+    expect(document.activeElement).toBe(typesTab);
+    expect(typesTab.getAttribute('aria-selected')).toBe('true');
+    expect(typesTab.tabIndex).toBe(0);
+    expect(getPanel(container, 'types').hasAttribute('hidden')).toBe(false);
+
+    await act(async () => {
+      typesTab.focus();
+      typesTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
+    const mappingsHealthTab = getTab(container, 'mappings-health');
+    expect(document.activeElement).toBe(mappingsHealthTab);
+    expect(mappingsHealthTab.getAttribute('aria-selected')).toBe('true');
+
+    await act(async () => {
+      mappingsHealthTab.focus();
+      mappingsHealthTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
+    const taxonomyReleaseTab = getTab(container, 'taxonomy-release');
+    expect(document.activeElement).toBe(taxonomyReleaseTab);
+    expect(taxonomyReleaseTab.getAttribute('aria-selected')).toBe('true');
+
+    await act(async () => {
+      taxonomyReleaseTab.focus();
+      taxonomyReleaseTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
+    // wraps to first tab
     expect(document.activeElement).toBe(generalTab);
     expect(generalTab.getAttribute('aria-selected')).toBe('true');
     expect(generalTab.tabIndex).toBe(0);
@@ -149,9 +217,23 @@ describe('Settings tab accessibility', () => {
       generalTab.focus();
       generalTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
     });
-    expect(document.activeElement).toBe(catalogTab);
-    expect(catalogTab.getAttribute('aria-selected')).toBe('true');
-    expect(catalogTab.tabIndex).toBe(0);
+    // wraps to last tab (Taxonomy Release)
+    const wrappedLast = getTab(container, 'taxonomy-release');
+    expect(document.activeElement).toBe(wrappedLast);
+    expect(wrappedLast.getAttribute('aria-selected')).toBe('true');
+    expect(wrappedLast.tabIndex).toBe(0);
+
+    await act(async () => {
+      wrappedLast.focus();
+      wrappedLast.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    });
+    expect(document.activeElement).toBe(getTab(container, 'mappings-health'));
+
+    // Home returns to the first tab from anywhere
+    await act(async () => {
+      getTab(container, 'types').focus();
+      getTab(container, 'types').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    });
 
     await act(async () => {
       catalogTab.focus();
@@ -165,9 +247,10 @@ describe('Settings tab accessibility', () => {
       generalTab.focus();
       generalTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
     });
-    expect(document.activeElement).toBe(catalogTab);
-    expect(catalogTab.getAttribute('aria-selected')).toBe('true');
-    expect(catalogTab.tabIndex).toBe(0);
+    const lastTab = getTab(container, 'taxonomy-release');
+    expect(document.activeElement).toBe(lastTab);
+    expect(lastTab.getAttribute('aria-selected')).toBe('true');
+    expect(lastTab.tabIndex).toBe(0);
 
     await unmount();
   });

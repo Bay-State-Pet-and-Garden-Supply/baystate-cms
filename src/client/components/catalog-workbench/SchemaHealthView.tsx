@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { getCatalogSchemaHealth, getCatalogHealthReport } from '../../api';
 import type { SchemaHealthFinding, CatalogSchemaHealthReport } from './types';
+import { StatusBadge, type StatusBadgeVariant } from '../settings/StatusBadge';
+import { KeyValueList } from '../settings/KeyValueList';
+import { FrozenBanner } from '../settings/FrozenBanner';
 
 interface SchemaHealthViewProps {
   onSelectProduct: (sku: string) => void;
@@ -66,9 +69,22 @@ export function SchemaHealthView({ onSelectProduct }: SchemaHealthViewProps) {
 
   return (
     <div>
-      <p style={{ fontSize: 13, color: '#525252', marginBottom: 16 }}>
+      <FrozenBanner note="Schema health reads the active taxonomy release and live catalog evidence; findings are informational." />
+      <p style={{ fontSize: 13, color: '#525252', marginBottom: 12 }}>
         Schema health checks across Catalog Fields, Attribute Mappings, Category Page assignments, and classification configuration.
       </p>
+
+      <div style={{ marginBottom: 16 }}>
+        <KeyValueList
+          stacked={false}
+          items={[
+            { label: 'Total Findings', value: findings.length },
+            { label: 'Blockers', value: summary.blockers },
+            { label: 'Warnings', value: summary.warnings },
+            { label: 'Info', value: summary.infos },
+          ]}
+        />
+      </div>
 
       {/* Summary bar */}
       <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
@@ -109,6 +125,7 @@ export function SchemaHealthView({ onSelectProduct }: SchemaHealthViewProps) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {filtered.map(f => {
             const colors = severityColor(f.severity);
+            const badgeVariant: StatusBadgeVariant = f.severity === 'blocker' ? 'blocker' : f.severity === 'warning' ? 'warning' : 'info';
             return (
               <div
                 key={f.id}
@@ -121,9 +138,7 @@ export function SchemaHealthView({ onSelectProduct }: SchemaHealthViewProps) {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <span style={{ background: colors.fg, color: '#fff', padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>
-                    {colors.label}
-                  </span>
+                  <StatusBadge variant={badgeVariant} />
                   <code style={{ fontSize: 10, color: '#666' }}>{f.code}</code>
                   {f.relatedId && <span style={{ fontSize: 10, color: '#666' }}>· {f.relatedTab}:{f.relatedId}</span>}
                 </div>

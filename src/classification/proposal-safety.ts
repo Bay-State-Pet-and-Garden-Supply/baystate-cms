@@ -16,6 +16,7 @@
  */
 import type { ClassificationEvidence, ClassificationProposal } from '../shared/types';
 import type { ProductAttributeConfig } from '../shared/schemas/classification';
+import type { CalibratedThresholds } from './confidence-calibrator';
 import { validateSerializableValue } from './assignment-projection';
 
 export type SafetyFindingCode =
@@ -119,6 +120,39 @@ function validateDirectEvidence(
   }
 
   return null;
+}
+
+/**
+ * P3 calibrated bulk acceptance (plan B.P3.4) — pure decision over the
+ * existing `isBulkAcceptable` machinery (Issue #10).
+ *
+ * A proposal is bulk-acceptable ONLY when ALL of:
+ * - CALIBRATED thresholds exist (a calibrated model with fitted thresholds);
+ *   `calibrated === null/undefined` is the UNCALIBRATED fallback and returns
+ *   false — byte-identical to the legacy behavior where nothing was ever
+ *   marked bulk-acceptable from confidence;
+ * - the proposal is a plain `field_assignment` (claims/composition can never
+ *   be bulk-acceptable — the validator finding below still enforces this);
+ * - the attribute carries no claim/composition semantics;
+ * - the value has NO contradicting evidence (conflicts force manual review);
+ * - confidence clears the CALIBRATED `fieldAssignment.reviewAbove` threshold.
+ *
+ * Calibration NEVER grants acceptance: a bulk-acceptable proposal stays
+ * `pending` until an explicit human/policy decision, per confidence-calibrator's
+ * evaluation-only contract. The uncalibrated fallback exists so callers can
+ * thread thresholds without branching — passing null reproduces today's
+ * output byte-identically (`isBulkAcceptable` resolves to false downstream).
+ */
+export function isCalibratedBulkAcceptable(
+  proposal: Pick<ClassificationProposal, 'proposalType' | 'confidence' | 'contradictingEvidenceIds'>,
+  attribute: ProductAttributeConfig | null,
+  calibrated?: CalibratedThresholds | null,
+): boolean {
+  if (!calibrated) return false;
+  if (proposal.proposalType !== 'field_assignment') return false;
+  if (!attribute || attribute.isClaim === true || attribute.isCompositionAttribute === true) return false;
+  if (proposal.contradictingEvidenceIds && proposal.contradictingEvidenceIds.length > 0) return false;
+  return proposal.confidence >= calibrated.fieldAssignment.reviewAbove;
 }
 
 /**

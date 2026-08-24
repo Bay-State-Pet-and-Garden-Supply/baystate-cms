@@ -1,0 +1,37 @@
+story_id: e09s01
+title: "Requirements & adjudication scaffold — frozen gold set by family (T1-T10/P1-P12)"
+status: done
+bcps: 5
+tasks:
+  - id: e09s01t01
+    description: "Export incident census: all known title inconsistencies + wrong-Page cases from verified backup/read-only clone (read-only export only; no live DB writes). Capture frozen evidence hashes + current verified Page import hash; include BetterBone 22/veiling cases and Jerky-vs-Bones example when present."
+    verify: "ls -l src/tests/fixtures/family-title-page-goldset-v2.json && cat specs/metrics/family-title-page-eval-v1.json"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Requirements", "Gold Set"]
+  - id: e09s01t02
+    description: "Store Manager adjudication: for each family mark skeleton Brand→Line→Form→Flavor→Size, required Soft/Hard/Classic/Hypo tokens (always visible), correct primary Page ID(s) — co-primary for evidenced dual-species only — allowed secondary Brand Pages (optional secondary only), child>Shop All, rationale + reviewer + timestamp per family. Ambiguous Pages get manual selection from verified IDs."
+    verify: "bunx vitest run src/tests/unit/family-title-page-goldset.test.ts (shape + by-family split + synthetic labeling)"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Requirements", "Adjudication"]
+  - id: e09s01t03
+    description: "Freeze gold set by whole family (never by SKU): write src/tests/fixtures/family-title-page-goldset-v2.json with fields familyId, members[]{onboardingItemId,upc,frozenEvidenceHash,rawTitle}, expectedTitleSkeleton, expectedTitles[], expectedPrimaryPageIds[] (stable IDs), allowedSecondaryPageIds[], reviewStatus, reviewer, reviewTimestamp, adjudicationRationale, activePageImportHash, isSynthetic + train/test/holdout splits; scaffold seeded with BetterBone illustrative 3-member family + 1 evidenced dual-species co-primary + 1 synthetic-labeled family; mark isSynthetic correctly."
+    verify: "node -e \"const j=require('./src/tests/fixtures/family-title-page-goldset-v2.json'); console.log('families',j.families.length,'synthetic',j.families.filter(f=>f.isSynthetic).length)\" && bun run typecheck"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Fixtures", "Determinism"]
+  - id: e09s01t04
+    description: "Validate Plan §12 acceptance: every incident represented, every member has reviewed expected title contract + primary Page ID(s), synthetic not presented as attested, by-family split prevents leakage, no src/ code changed. Run typecheck + lint on touched files only."
+    verify: "bun run typecheck && bunx eslint --quiet specs/epics/e09-family-title-page-correctness/epic.yaml specs/epics/e09-family-title-page-correctness/e09s01-* src/tests/fixtures/family-title-page-goldset-v2.json specs/metrics/family-title-page-eval-v1.json 2>&1 | head -n 50"
+    risk: P1
+    status: passing
+    allure:
+      severity: high
+      categories: ["Validation", "Scope"]

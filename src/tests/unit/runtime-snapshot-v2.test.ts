@@ -211,7 +211,8 @@ describe('runtime snapshot with ACTIVE v2 config authority (Milestone 7)', () =>
   it('runtime rule versions are deterministic and versioned', () => {
     const rv = buildRuntimeRuleVersions();
     expect(rv.version).toBe(1);
-    expect(rv.registryVersion).toBe(2);
+    // P3 (value_gap_resolution registration): registry tracks the live constant.
+    expect(rv.registryVersion).toBe(MODEL_OPERATION_REGISTRY_VERSION);
     expect(rv.digest).toMatch(/^[a-f0-9]{64}$/);
     const rv2 = buildRuntimeRuleVersions();
     expect(rv2.digest).toBe(rv.digest);
@@ -261,11 +262,12 @@ describe('PR7 review R2 (F1) — frozen cohort_page_assignment_parent operation 
     expect(entry!.ruleVersion).toBe('cohort-page-assignment-parent-rules-v2');
   });
 
-  it('the registry version bump (1 → 2) is reflected in the frozen plan and rule versions', () => {
+  it('the registry version bump (1 → 2 → current) is reflected in the frozen plan and rule versions', () => {
     const v2 = buildRuntimeSnapshot(buildV2Input());
-    expect(v2.modelExecutionPlan!.registryVersion).toBe(2);
-    expect(v2.runtimeRuleVersions!.registryVersion).toBe(2);
-    expect(buildRuntimeRuleVersions().registryVersion).toBe(2);
+    // P3: pinned to the live constant (registry bumped 2 → 3 for value_gap_resolution).
+    expect(v2.modelExecutionPlan!.registryVersion).toBe(MODEL_OPERATION_REGISTRY_VERSION);
+    expect(v2.runtimeRuleVersions!.registryVersion).toBe(MODEL_OPERATION_REGISTRY_VERSION);
+    expect(buildRuntimeRuleVersions().registryVersion).toBe(MODEL_OPERATION_REGISTRY_VERSION);
   });
 
   it('the legacy cohort_page_assignment entry keeps its v1 prompt/rule versions', () => {
@@ -335,7 +337,8 @@ describe('PR12 C4 — registry-version fail-closed (issue #30, DECISION-B)', () 
   });
 
   it('current-registry-version snapshots pass and schema-v1 legacy snapshots are unaffected (never registry_version_mismatch)', () => {
-    expect(MODEL_OPERATION_REGISTRY_VERSION).toBe(2);
+    // P3 (plan B.P3.3): registry bumped 2 → 3 for `value_gap_resolution`.
+    expect(MODEL_OPERATION_REGISTRY_VERSION).toBe(3);
     const v2 = buildRuntimeSnapshot(buildV2Input());
     expect(v2.modelExecutionPlan!.registryVersion).toBe(MODEL_OPERATION_REGISTRY_VERSION);
     expect(() => assertModelPlanCompatible(v2, 'product_type_ranking')).not.toThrow();

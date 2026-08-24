@@ -1,5 +1,7 @@
 # ADR 0020: ProductSeed v2 and non-authoritative batch context
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 ## Status
 
 Accepted for Product Intelligence issue #50.

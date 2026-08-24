@@ -16,7 +16,6 @@
 | Scraping | Crawlee 3 + Playwright 1.58 + Camoufox-js + Cheerio 1 | `src/extraction-worker/server.ts` (separate worker, `preload/crawlee-storage.mjs`), `src/onboarding/extraction/`, `src/shopsite/page-*.ts`, `sharp` for images |
 | AI — routing | `src/ai` | `model-registry.ts` + `provider-registry.ts` + `provider-connections.ts` + `inference-dispatcher.ts` + `network-transport.ts` + `local-runtime-coordinator.ts` + `evals/*-scorer.ts` |
 | AI — VLM OCR | Ollama native `/api/chat` | `src/onboarding/vlm-client.ts` + `cloud-vlm-client.ts`, `api_keys.service='ollama_vlm'`, `qwen2.5vl:latest` |
-| PI (Agent Lab) | Pi SDK 0.83 | `@earendil-works/pi-coding-agent`, lazy import, `SessionManager.inMemory()`, allowlist tools, `src/product-intelligence/{contracts,executor,flags,execution-router,legacy-executor,pi/,policy,tools,evaluation,assets}` — 25 tools |
 | Onboarding | Pipeline | `src/onboarding/{job-queue,product-curator,draft-promoter,sourcing,discovery,extraction,normalization}` + `src/classification/stages/*` (ADR 0004 replaceable stages) |
 | Classification | Cohort + stages | `src/classification/{stages,taxonomy,releases/bay-state-v3+v4,curation,benchmarks,embedding,config-store}` — Attribute Profiles, Product Types, Category Page identity (ADR 0005) |
 | Tests | Vitest 3 + bun:test | `vitest.config.ts` (`include: src/tests/**/*.test.ts`, 30+ DB suites excluded → `test:db`), `bun run test` = `vitest run && bun run test:db` (150+ suites) |
@@ -31,7 +30,7 @@ src/server (app.ts, routes/*, middleware/*, services/*)
   ↕ Git workspaces (src/git, src/db/repositories/workspace-repo) ↔ src/shopsite (XML ↔ CGI)
   ↕ src/shared/schemas (Zod) shared client+server
   ↕ src/validation (change-set + product)
-src/client (App.tsx → components/*: Catalog, PipelineBoard, Settings, agent-lab/*, onboarding/*, store-manager/*, profile-builder/*)
+src/client (App.tsx → components/*: Catalog, PipelineBoard, Settings, onboarding/*, store-manager/*, profile-builder/*)
   ↕ fetch api.ts ↔ src/server/routes
 src/onboarding
   job-queue → sourcing engine (src/onboarding/sourcing/{engine,generations,proofing,scrapers: bradley/central_pet/orgill/pet_food_experts/phillips_storefront,html-scraper/session-runner})
@@ -41,10 +40,13 @@ src/onboarding
           → review (onboarding-review-repo, onboarding-work-state) → draft-promoter (product_pages rows)
   VLM: packaging-ocr ↔ vlm-client / cloud-vlm-client ↔ Ollama
 src/classification (1,000+ lines catalog-* + curation + releases/bay-state-v3+v4 + stages/*) — cohort-centric, type-first (ADR 0013), taxonomy freeze (v3/v4 manifests)
-src/product-intelligence
-  contracts → executor (Pi SDK adapter pi/) → execution-router + PolicyGateway (policy/) → tools (25, behind PageExtractionContract)
-  → assets/verifyImageCandidate (sharp, sha256 + dHash, commerceApproved) → evaluation/metrics + rollout + retention
-  flags (env BAYSTATE_CMS_PI_* + in-memory overrides) + legacy-executor (fail-closed)
+<!-- ADR-0030 (2026-08): src/product-intelligence/** (Agent Lab / PI) DELETED. Salvage homes:
+  image verification/rights → src/onboarding/image-verification/ (deterministic network gate, no policy runtime)
+  imported-result gate → src/onboarding/imported-result-gate.ts (retired in Phase 4 with the pi_* tables)
+  SSRF classifier → src/shared/ssrf.ts; Wilson interval → src/onboarding/ocr-eval/stats.ts
+  extraction ladder layers 1–4 → src/onboarding/extraction-ladder/ (unwired; see ADR-0030)
+  slim live repos: onboarding-pi-asset-repo + image-reuse-policy-repo (tables product_intelligence_assets, pi_reuse_policies kept)
+-->
 src/ai (provider-registry/model-registry/inference-dispatcher/local-runtime-coordinator/network-transport) + src/benchmarks
 src/store-manager (flags + tool-registry + event-worker + scheduler + playbook-*) — ops console (ADRs 0015, 0018)
 src/db (30+ repos: onboarding-*, classification-*, pi-*, benchmark, brand, drift, change-set, audit-log, api-key)
@@ -54,7 +56,7 @@ src/extraction-worker (standalone Node — Crawlee + Playwright) ↔ profile-run
 **Key flows:**
 - **CSV/Sheets import** → `onboarding/batch-repo` → Sourcing (provider-neutral, generation-scoped evidence, default-on `BAYSTATE_CMS_SOURCING_*`) → Discovery (brand official URL, sitemap + Serper cache) → Extraction (per-domain profile or distributor_record profile-free) → Curation (OCR + consolidation + classification stages → cohort) → Review drawer → Promotion (Git commit + product draft + `product_pages`).
 - **Direct edit** → `change-set-repo` → validation (`product-validation.ts`, blockers/warnings) → approval → Git commit → `shopsite/publish` (Basic auth) or `export-package` zip fallback.
-- **Agent Lab** → `run-service` creates in-memory Pi session → tools via `PiToolRegistry` (ownership + allowlist + budget + PolicyGateway SSRF) → `submit_product_research` validated (Zod) → `product_intelligence_runs` → optional `onboarding-import` (array `productIntelligenceEvidence`, import record) → promotion gate `verifyImportedResultGate`.
+- ~~**Agent Lab**~~ **RETIRED (ADR-0030)** — the Pi runtime, run-service, tool registry, and `verifyImportedResultGate` promotion gate were deleted. Distributor imagery is verified by the deterministic gate in `src/onboarding/image-verification/` (`POST /api/onboarding/batches/:id/verify-distributor-imagery`).
 
 ## Commands
 
@@ -75,7 +77,7 @@ src/extraction-worker (standalone Node — Crawlee + Playwright) ↔ profile-run
 
 ## Config & env
 
-- `PORT`/`HOST` (server), `BAYSTATE_CMS_API_TOKEN` (mutating auth), `BAYSTATE_CMS_SOURCING_ENABLED`/`BAYSTATE_CMS_SOURCING_MODE` (observe/manual/automatic, default-on), `BAYSTATE_CMS_PRODUCT_INTELLIGENCE_*` / `BAYSTATE_CMS_PI_*` (flags), `BAYSTATE_CMS_PI_KILL_SWITCH`, `api_keys.service='ollama_vlm'` for VLM.
+- `PORT`/`HOST` (server), `BAYSTATE_CMS_API_TOKEN` (mutating auth), `BAYSTATE_CMS_SOURCING_ENABLED`/`BAYSTATE_CMS_SOURCING_MODE` (observe/manual/automatic, default-on), `BAYSTATE_CMS_OCR_KILL_SWITCH` (alias `BAYSTATE_CMS_PI_KILL_SWITCH`, deprecated until next release cycle), `api_keys.service='ollama_vlm'` for VLM.
 - Gitignored secrets: `.baystate-cms-dev-token`, `.env`, `*.db*`, `workspaces/`, `storage/`, `exports/`, `.recent-workspaces.json`.
 
 ## Infra & CI
@@ -91,11 +93,10 @@ src/extraction-worker (standalone Node — Crawlee + Playwright) ↔ profile-run
 - **Classification releases** bay-state-v3/v4 snapshots in `src/classification/releases` + `snapshots/` — frozen manifests; new taxonomy goes via `config-loader` + `config-store`.
 - **Sourcing generations** — amendment B: merchandising-depth distributor images are display-only until PI-6 rights verification; promotion revalidates provenance.
 - **PI shadow mode** — many suites run under flags; `local_only` denies remote models; `maxCostUsd` enforced server-side.
-- **PI-9 rollout (e03s02 / ADR 0029)** — `evaluation/rollout.ts`: staged `shadow_only→manual_agent_lab→reviewed_import→optional_onboarding→automatic` gates over measured metrics only (no confidence), `isPiKillSwitchEnabled()` forces legacy everywhere and blocks imports, `isLegacyRemovalAllowed()` guards legacy-executor removal until `automatic` stage passes; v1/v2 shadow writes only `shadow_comparisons` (never mutates state).
 - **File-size** — several modules >300 lines (`product-curator`, large repos), monitored but justified.
 
 ## Entry points for agents
 
 - **Spec:** `CONTEXT.md` (authoritative language) → `AGENTS.md` (security + arch mandates) → `specs/product/SCOPE_LATEST.yaml` + `VISION_LATEST.yaml` + `GLOSSARY_LATEST.yaml` → `specs/tech-architecture/*` → `docs/adr/*`.
-- **Code:** `src/server/routes`, `src/db/repositories`, `src/shopsite/*-normalizer.ts`, `src/onboarding/job-queue.ts`, `src/product-intelligence/pi/*`, `src/client/components/agent-lab/*`.
+- **Code:** `src/server/routes`, `src/db/repositories`, `src/shopsite/*-normalizer.ts`, `src/onboarding/job-queue.ts`, `src/onboarding/image-verification/*`.
 - **Never:** hardcode credentials; raw SQL outside repos; drop unknown XML fields; invent taxonomy IDs in PI.

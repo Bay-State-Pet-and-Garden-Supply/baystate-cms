@@ -1,5 +1,7 @@
 # ADR 0026: Curator Specialist for Deterministic Catalog Drafting and Evidence Grounding
 
+**Status update (2026-08): SUPERSEDED operationally by ADR-0030 (Agent Lab decommission); paths below are deleted/historical.**
+
 - Status: Accepted
 - Date: 2026-08-18
 - Issue: #54 (epic #47)

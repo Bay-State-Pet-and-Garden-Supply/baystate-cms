@@ -27,6 +27,7 @@ import {
   type OnboardingReviewState,
 } from '../db/repositories/onboarding-review-repo';
 import { listChangeSetStatusBySkus } from '../db/repositories/change-set-repo';
+import { convertToLbs } from '../shared/weight-converter';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 import type { CurationCohortView } from '../shared/schemas/cohorts';
 import {
@@ -94,7 +95,11 @@ function normalizeHost(url: string | null | undefined): string | null {
  * load inside `buildCohortView`).
  */
 export function buildCohortContext(batchId: string, items: OnboardingItem[]): Map<string, FamilyCohortState> {
-  const views: CurationCohortView[] = listCohortsByBatch(batchId).map(cohort => buildCohortView(cohort, items));
+  // Include superseded cohorts: family grouping is display context for Review
+  // (and historical audit), and a family whose cohort was superseded after its
+  // members were curated must still render grouped. Processing never reads this
+  // map — the claim queue selects `status = 'ready'` rows directly.
+  const views: CurationCohortView[] = listCohortsByBatch(batchId, { includeSuperseded: true }).map(cohort => buildCohortView(cohort, items));
   const map = new Map<string, FamilyCohortState>();
   for (const view of views) {
     // `waitingOn` excludes blocked members, so memberCount - readyCount -
@@ -175,6 +180,55 @@ function build(
   cohort: FamilyCohortState | null,
   input: DerivationInput,
 ): OnboardingWorkState {
+  const extData = item.extractionData as Record<string, unknown> | null;
+  const curData = item.curationData as Record<string, unknown> | null;
+
+  const curatedTitle =
+    typeof curData?.curatedTitle === 'string' && curData.curatedTitle.trim().length > 0
+      ? curData.curatedTitle.trim()
+      : typeof curData?.name === 'string' && curData.name.trim().length > 0
+      ? curData.name.trim()
+      : typeof extData?.title === 'string' && extData.title.trim().length > 0
+      ? extData.title.trim()
+      : null;
+
+  const approvals = (extData?.distributorImageApprovals as Array<{ imageUrl?: string }>) ?? [];
+  const distributorPrimary = approvals.find(
+    (a) => typeof a?.imageUrl === 'string' && a.imageUrl.trim().length > 0,
+  )?.imageUrl;
+  const candidatePrimary = (extData?.distributorImageCandidates as Array<{ url?: string }>)?.find(
+    (c) => typeof c?.url === 'string' && c.url.trim().length > 0,
+  )?.url;
+
+  const imageUrl =
+    typeof extData?.primaryImage === 'string' && extData.primaryImage.trim().length > 0
+      ? extData.primaryImage.trim()
+      : distributorPrimary ?? candidatePrimary ?? null;
+
+  const description =
+    typeof curData?.curatedDescription === 'string' && curData.curatedDescription.trim().length > 0
+      ? curData.curatedDescription.trim()
+      : typeof extData?.description === 'string' && extData.description.trim().length > 0
+      ? extData.description.trim()
+      : null;
+
+  const sizeAttr = (extData?.variantAttributes as Record<string, any> | undefined)?.size;
+  const rawWeight =
+    typeof curData?.curatedWeight === 'string' && curData.curatedWeight.trim().length > 0
+      ? curData.curatedWeight.trim()
+      : typeof extData?.weight === 'number' || typeof extData?.weight === 'string'
+      ? String(extData.weight).trim()
+      : typeof sizeAttr === 'string' && sizeAttr.trim().length > 0
+      ? sizeAttr.trim()
+      : convertToLbs(item.name) ?? null;
+
+  const weight =
+    rawWeight != null && rawWeight.length > 0
+      ? /^\d+(\.\d+)?$/.test(rawWeight)
+        ? `${parseFloat(rawWeight)} lbs`
+        : rawWeight
+      : null;
+
   return {
     itemId: item.id,
     category: input.category,
@@ -198,9 +252,13 @@ function build(
     stageStatus: item.stageStatus,
     upc: item.upc,
     name: item.name,
-    brand: item.brandHint ?? null,
+    brand: item.brandHint ?? (typeof extData?.brand === 'string' ? extData.brand : null),
     sourceType: item.sourceType,
     domain: normalizeHost(item.sourceUrl),
+    curatedTitle,
+    imageUrl,
+    description,
+    weight,
   };
 }
 

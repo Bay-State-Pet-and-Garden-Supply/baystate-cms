@@ -226,3 +226,52 @@ describe('buildAssignmentProjection — skipped assignments stay visible and do 
     expect(goodProjection.pages.proposed).toEqual(['Dog Food']);
   });
 });
+
+// ── P2 acceptance criterion: retired attributes produce zero export fields ────
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+describe('P2 disposition — retired (not_exported, profile-less) attributes serialize NOTHING', () => {
+  const RELEASE_DIR = path.resolve(__dirname, '../../classification/releases/bay-state-v4');
+
+  const readEntries = (fileName: string): Array<Record<string, unknown>> =>
+    (JSON.parse(fs.readFileSync(path.join(RELEASE_DIR, fileName), 'utf8')) as { entries: unknown }).entries as Array<Record<string, unknown>>;
+
+  const RETIRED_IDS = [
+    'btu-rating', 'fuel-type', 'hose-length', 'joule-rating',
+    'npk-ratio', 'protein-pct', 'safety-toe-type', 'towing-capacity-lbs',
+  ];
+
+  it('all eight unmapped attributes are not_exported, profile-less, and mapping-free in the committed release', () => {
+    const attributes = readEntries('attributes.json');
+    const profiles = readEntries('facet-profiles.json');
+    const mappings = readEntries('export-mappings.json');
+    const membership = new Set<string>();
+    for (const profile of profiles) {
+      for (const attr of profile.attributes as Array<{ attributeId: string }>) membership.add(attr.attributeId);
+    }
+    for (const id of RETIRED_IDS) {
+      const attr = attributes.find(a => a.id === id);
+      expect(attr, id).toBeDefined();
+      expect((attr!.exportDisposition as { kind: string }).kind, `${id} disposition`).toBe('not_exported');
+      expect(membership.has(id), `${id} profile membership`).toBe(false);
+      expect(mappings.some(m => m.attributeId === id), `${id} export mapping`).toBe(false);
+    }
+  });
+
+  it('even an accepted value for a retired attribute emits ZERO export fields (visible skip instead)', () => {
+    const mappings = readEntries('export-mappings.json') as unknown as Parameters<typeof buildAssignmentProjection>[3];
+    const accepted = RETIRED_IDS.map((id, index) => makeProposal({
+      id: `p-retired-${index}`,
+      proposalType: 'field_assignment',
+      targetId: id,
+      proposedValue: 'whatever value',
+      status: 'accepted' as ClassificationProposal['status'],
+    }));
+    const projection = buildAssignmentProjection(accepted, {}, [], mappings);
+    // Zero export fields reach serialization; every proposal is a visible skip.
+    expect(projection.fields).toEqual([]);
+    expect(projection.skipped.map(s => s.targetId)).toEqual(RETIRED_IDS);
+  });
+});

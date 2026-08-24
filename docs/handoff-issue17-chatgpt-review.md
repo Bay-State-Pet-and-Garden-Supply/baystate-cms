@@ -1,5 +1,7 @@
 # Issue #17 Remediation — Review Handoff (for ChatGPT code review)
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 Reviewed target: `main` @ `06ffda2` (36 commits ahead of origin before push),
 pushed to `origin/main` on 2026-08-09.
 

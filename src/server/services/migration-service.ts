@@ -1,10 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { createRequire } from 'node:module';
 import { initDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-
-const lazyRequire = createRequire(import.meta.url);
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const DEFAULT_WORKSPACE_NAME = 'Bay State Store';
@@ -116,30 +113,6 @@ function ensureCatalogStructure(targetDir: string): void {
   }
 }
 
-/**
- * Best-effort, idempotent seeding of a workspace's default approved Product
- * Intelligence policy (P0-2). Called from updateWorkspaceRecord so newly
- * created workspaces get a default approved-policy record immediately, not
- * only on their first PI run.
- *
- * The repo/run-service modules are loaded lazily (createRequire) so this
- * module stays importable in environments without bun:sqlite (e.g. vitest);
- * failures are swallowed because the PI run route re-seeds lazily and
- * idempotently — this hook is a safety net, not the enforcement point.
- */
-export function seedDefaultApprovedPolicyForWorkspace(workspaceId: string): void {
-  try {
-    const runService = lazyRequire('../../product-intelligence/run-service') as typeof import('../../product-intelligence/run-service');
-    const approvedPolicyRepo = lazyRequire('../../db/repositories/pi-approved-policy-repo') as typeof import('../../db/repositories/pi-approved-policy-repo');
-    const defaultPolicy = runService.buildDefaultPiPolicy();
-    approvedPolicyRepo.seedDefaultApprovedPolicy(workspaceId, JSON.stringify(defaultPolicy), defaultPolicy.configId);
-  } catch {
-    // pi_approved_policies may not exist yet during early bootstrap, or the
-    // lazy requires failed in a non-bun environment; the run route's lazy
-    // seed covers this idempotently.
-  }
-}
-
 function updateWorkspaceRecord(targetDir: string): void {
   const db = getDb();
   const gitPath = path.join(targetDir, '.git');
@@ -159,10 +132,8 @@ function updateWorkspaceRecord(targetDir: string): void {
       [DEFAULT_WORKSPACE_ID, DEFAULT_WORKSPACE_NAME, targetDir, gitPath, now, now, 'not_started'],
     );
   }
-  // Ensure the workspace's default approved PI policy exists for both the
-  // newly inserted row and the pre-existing row (idempotent; run route
-  // re-seeds lazily as the authoritative fallback).
-  seedDefaultApprovedPolicyForWorkspace(existing?.id ?? DEFAULT_WORKSPACE_ID);
+  // ADR-0030 Phase 3: the PI default approved-policy seed hook was removed
+  // with the Agent Lab; workspaces bootstrap without PI state.
 }
 
 function copyOrMoveDirSync(src: string, dst: string): void {
