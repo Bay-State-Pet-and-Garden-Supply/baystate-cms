@@ -1,6 +1,6 @@
 import { expect, test, describe, beforeAll, afterAll } from 'vitest';
 import { unlinkSync } from 'node:fs';
-import { initDb, closeDb, resetDb } from '../../db/connection';
+import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import {
   insertProfileGeneration,
@@ -9,6 +9,7 @@ import {
   listProfileGenerationsByDomain,
   listValidatedGenerationsByDomain,
   listProfileGenerationDomainSummaries,
+  deleteProfileGeneration,
 } from '../../db/repositories/profile-generation-repo';
 
 describe('Profile Generation Audit Repository', () => {
@@ -317,5 +318,57 @@ describe('Profile Generation Audit Repository', () => {
         expect(row.generationCount).toBeGreaterThanOrEqual(1);
       }
     });
+  });
+
+  test('should delete profile generation and cascade delete revisions, validation results, and field decisions', () => {
+    const record = insertProfileGeneration({
+      domain: 'deletetest.com',
+      sourceUrl: 'https://deletetest.com/p/1',
+      selectors: { titleSelector: 'h1' },
+      status: 'proposed',
+    });
+
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Insert child revision
+    const revId = 'test-rev-1';
+    db.query(`
+      INSERT INTO profile_generation_revisions (
+        id, generation_id, revision_number, source, selectors_json, status, confidence, created_at, updated_at
+      ) VALUES (?, ?, 1, 'manual', '{}', 'draft', 0, ?, ?)
+    `).run(revId, record.id, now, now);
+
+    // Insert child validation result
+    const valId = 'test-val-1';
+    db.query(`
+      INSERT INTO profile_generation_validation_results (
+        id, revision_id, selector_field, sample_url, status, created_at
+      ) VALUES (?, ?, 'title', 'https://deletetest.com/p/1', 'pass', ?)
+    `).run(valId, revId, now);
+
+    // Insert child field decision
+    const decisionId = 'test-dec-1';
+    db.query(`
+      INSERT INTO profile_generation_field_decisions (
+        id, generation_id, domain, selector_field, decision, decided_at
+      ) VALUES (?, ?, 'deletetest.com', 'title', 'accept', ?)
+    `).run(decisionId, record.id, now);
+
+    const result = deleteProfileGeneration(record.id);
+    expect(result).toBe(true);
+
+    // Verify generation is deleted
+    expect(findProfileGenerationById(record.id)).toBeNull();
+
+    // Verify cascade child deletions
+    const revs = db.query('SELECT * FROM profile_generation_revisions WHERE generation_id = ?').all(record.id);
+    expect(revs.length).toBe(0);
+
+    const valResults = db.query('SELECT * FROM profile_generation_validation_results WHERE revision_id = ?').all(revId);
+    expect(valResults.length).toBe(0);
+
+    const decisions = db.query('SELECT * FROM profile_generation_field_decisions WHERE generation_id = ?').all(record.id);
+    expect(decisions.length).toBe(0);
   });
 });
