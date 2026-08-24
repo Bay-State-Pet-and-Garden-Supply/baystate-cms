@@ -31,29 +31,15 @@ export default tseslint.config(
       ],
     },
   },
-  // ADR-0030 (Agent Lab decommission): non-PI production code must not
-  // import src/product-intelligence/** — the relocated onboarding modules
-  // (src/onboarding/image-verification, imported-result-gate, db repos) are
-  // the only sanctioned dependencies. PI's own code and its dedicated tests
-  // are exempt; the Agent Lab client surface is deleted in Phase 2.
+  // ADR-0030 (Agent Lab decommission): non-PI production code must not import
+  // deleted PI paths. The relocated onboarding modules live in
+  // src/onboarding/image-verification, imported-result-gate, and the slim db
+  // repos. Remaining ignores cover only the relocated-code tests that still
+  // reference the kept pi_* tables by name.
   {
     files: ['src/**/*.{ts,tsx}'],
     ignores: [
-      'src/product-intelligence/**',
-      'src/client/agent-lab/**',
-      'src/client/product-intelligence-api.ts',
-      'src/client/hooks/useProductIntelligenceEvents.ts',
-      'src/client/App.tsx',
-      'src/server/routes/product-intelligence-routes.ts',
-      'src/tests/unit/product-intelligence*',
-      'src/tests/unit/pi-*',
-      'src/tests/unit/specialist-workflow-repo.test.ts',
-      'src/tests/unit/specialist-workflow-import.test.ts',
-      'src/tests/unit/profile-engineer-workflow-repo.test.ts',
-      'src/tests/unit/evaluation-orchestrator.test.ts',
-      'src/tests/unit/compiled-prompt-builder.test.ts',
-      'src/tests/unit/e03s01-*.test.ts',
-      'src/tests/unit/product-intelligence/**',
+      'src/tests/unit/pi-reuse-policies.test.ts',
     ],
     rules: {
       'no-restricted-imports': [

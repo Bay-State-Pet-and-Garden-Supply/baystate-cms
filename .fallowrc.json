@@ -49,146 +49,160 @@
       ]
     },
     {
-      "file": "src/product-intelligence/budgets.ts",
-      "exports": [
-        "effectivePiRuntimeCapMs"
-      ]
-    },
-    {
-      "file": "src/db/repositories/pi-approved-policy-repo.ts",
-      "exports": [
-        "getApprovedPolicyRecord"
-      ]
-    },
-    {
-      "file": "src/db/repositories/product-intelligence-repo.ts",
-      "exports": [
-        "getPiPageArtifactForRun",
-        "upsertSourceAuthority",
-        "listResolvedProductBrands",
-        "revokeSourceAuthority",
-        "getSourceAuthorities"
-      ]
-    },
-    {
       "file": "src/classification/config-validation.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/shared/schemas/classification.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/classification/types.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/ai/model-pricing.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/classification/model-operation-registry.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/classification/embedding-client.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/db/repositories/embedding-repo.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/db/repositories/extractor-profile-repo.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/shared/schemas/onboarding.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/onboarding/page-extractor.ts",
-      "exports": ["*"]
-    },
-    {
-      "file": "src/product-intelligence/extraction/platforms.ts",
-      "exports": ["*"]
-    },
-    {
-      "file": "src/product-intelligence/contracts.ts",
-      "exports": ["*"]
-    },
-    {
-      "file": "src/product-intelligence/workflow/bundle.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/db/repositories/llm-task-config-repo.ts",
-      "exports": ["*"]
-    },
-    {
-      "file": "src/product-intelligence/assets/schema.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/onboarding/vlm-client.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/db/repositories/profile-generation-field-decision-repo.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/db/repositories/profile-generation-revision-repo.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/db/repositories/profile-generation-repo.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/classification/model-policy-gateway.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/onboarding/profile-generator.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/shared/schemas/extraction-worker.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/onboarding/variant-resolver.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/onboarding/variant-url-resolver.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/shared/schemas/page.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/shopsite/page-import-service.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/classification/assignment-projection.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/client/pipeline-decision-state.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/client/profile-review-utils.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     },
     {
       "file": "src/shared/profile-fields.ts",
-      "exports": ["*"]
+      "exports": [
+        "*"
+      ]
     }
   ]
 }
