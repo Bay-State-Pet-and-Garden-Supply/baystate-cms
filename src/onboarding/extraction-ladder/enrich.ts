@@ -75,7 +75,12 @@ export interface LadderEnrichmentOutcome {
 
 /**
  * Enrich a merged extraction result from deterministic ladder signals.
- * Never throws — internal failures degrade to partial/no enrichment.
+ * NEVER-THROWS CONTRACT: resolves for any input. Every layer runs under its
+ * own guard, and all mutations of `data` — including the identity fields —
+ * are guarded, so even a frozen/sealed target object only degrades enrichment
+ * (fills skipped, identity assignment dropped) rather than throwing into the
+ * extraction pipeline. The returned outcome is authoritative even when `data`
+ * could not be mutated.
  */
 export async function applyLadderEnrichment(options: LadderEnrichmentOptions): Promise<LadderEnrichmentOutcome> {
   const { html, url, data } = options;
@@ -84,6 +89,8 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
   const gtins: Array<{ value: string }> = [];
   const variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }> = [];
   let platformVariantCount: number | undefined;
+  /** SKU observed by platform layers — feeds identity classification only. */
+  let observedSku: string | null = null;
 
   /** Fill a field ONLY when its current value is empty; record provenance. */
   const fill = (field: 'title' | 'brand' | 'description' | 'price', value: unknown, provenanceKey: string): void => {
@@ -134,6 +141,8 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
     const firstName = signals.jsonLdProducts.find((p) => p.name)?.name ?? null;
     fill('title', firstName, 'ladder-json-ld');
     fill('title', signals.metaTitle, 'ladder-meta');
+    const firstBrand = signals.jsonLdProducts.find((p) => p.brand)?.brand ?? null;
+    fill('brand', firstBrand, 'ladder-json-ld');
     fill('description', signals.metaDescription, 'ladder-meta');
     const firstPrice = signals.jsonLdProducts.flatMap((p) => p.offers).find((o) => o.price)?.price ?? null;
     fill('price', firstPrice, 'ladder-json-ld');
@@ -151,6 +160,7 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
         const product = next.product;
         fill('title', typeof product.title === 'string' ? product.title : undefined, 'ladder-nextjs');
         fill('brand', typeof product.brand === 'string' ? product.brand : typeof product.vendor === 'string' ? product.vendor : undefined, 'ladder-nextjs');
+        if (typeof product.sku === 'string' && product.sku.trim()) observedSku = product.sku.trim();
         const gtin = gtinFromAny(product);
         if (gtin) gtins.push({ value: gtin });
         const images = Array.isArray(product.images)
@@ -170,6 +180,7 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
         const product = nuxt.product;
         fill('title', typeof product.title === 'string' ? product.title : undefined, 'ladder-nuxt');
         fill('brand', typeof product.brand === 'string' ? product.brand : typeof product.vendor === 'string' ? product.vendor : undefined, 'ladder-nuxt');
+        if (typeof product.sku === 'string' && product.sku.trim()) observedSku = product.sku.trim();
         const gtin = gtinFromAny(product);
         if (gtin) gtins.push({ value: gtin });
         const images = Array.isArray(product.images)
@@ -189,6 +200,7 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
         fill('title', wc.product.name, 'ladder-woocommerce');
         fill('description', wc.product.description, 'ladder-woocommerce');
         fill('price', wc.product.price, 'ladder-woocommerce');
+        if (wc.product.sku) observedSku = wc.product.sku;
         appendImages(wc.product.images, 'ladder-woocommerce');
       }
     } else if (platform === 'shopify') {
@@ -233,7 +245,7 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
     identity = classifyPageIdentity({
       requestedGtin: options.expected?.gtin?.replace(/\D/g, '') ?? '',
       extractedGtins: gtins.map((g) => g.value),
-      sku: null,
+      sku: observedSku,
       productName: data.title ?? null,
       expectedName: options.expected?.name,
       variantSignals,
@@ -246,8 +258,13 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
   } catch {
     identity = { status: 'insufficient_evidence', reasons: ['identity classification failed'] };
   }
-  data.identityStatus = identity.status;
-  data.identityReasons = identity.reasons;
+  // Guarded mutation (never-throws contract): a frozen/sealed target must not
+  // turn enrichment into an extraction failure — the returned outcome stays
+  // authoritative even when these assignments are dropped.
+  try {
+    data.identityStatus = identity.status;
+    data.identityReasons = identity.reasons;
+  } catch { /* target rejects mutation */ }
 
   return { layersUsed: [...new Set(layersUsed)], fills, identityStatus: identity.status, identityReasons: identity.reasons };
 }

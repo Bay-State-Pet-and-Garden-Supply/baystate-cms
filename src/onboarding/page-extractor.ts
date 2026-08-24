@@ -28,7 +28,6 @@ interface RawExtraction {
   microdata: Record<string, string>;
   htmlHeuristics: Record<string, string | string[]>;
   images: string[];
-  networkProducts: Record<string, unknown>[];
 }
 
 /**
@@ -183,7 +182,6 @@ export async function extractViaHttpDetailed(
     microdata,
     htmlHeuristics,
     images,
-    networkProducts: [],
   };
 
   const merged = mergeExtractionLayers(raw, url, expected);
@@ -302,6 +300,9 @@ export async function extractProductData(
         name: expected.name,
         brandHint: expected.brandHint,
         price: expected.price,
+        // ADR-0031: forwarded so the worker-side ladder enrichment can run
+        // real identity classification (ExtractRequest.expected.upc).
+        upc: expected.gtin || null,
       },
     });
 
@@ -407,7 +408,6 @@ export async function extractProductData(
         microdata: {},
         htmlHeuristics: {},
         images: [],
-        networkProducts: [],
       };
       playwrightCustomHadAnyValue = customSelectorsHadAnyValue(custom);
 

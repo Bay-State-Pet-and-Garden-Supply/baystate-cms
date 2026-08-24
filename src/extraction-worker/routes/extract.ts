@@ -23,6 +23,7 @@ import * as cheerio from 'cheerio';
 import type { Element, AnyNode } from 'domhandler';
 import { runRenderedPage } from '../browser/rendered-page-runner';
 import { loadWorkerBrowserConfig } from '../browser/config';
+import { applyLadderEnrichment } from '../../onboarding/extraction-ladder/enrich';
 import {
   ExtractRequestSchema,
   ExtractResponseSchema,
@@ -941,6 +942,20 @@ export async function doStaticExtract(
     data.customFields = customFields;
   }
 
+  // ADR-0031: embedded-only ladder enrichment on the production profile
+  // path. Uses the HTML this handler already fetched — no second request.
+  // Additive-only: profile values are never overwritten; failures degrade.
+  try {
+    await applyLadderEnrichment({
+      html,
+      url: finalUrl,
+      data,
+      expected: { name: expected.name, brandHint: expected.brandHint ?? null, price: expected.price ?? null, gtin: expected.upc },
+    });
+  } catch (enrichErr) {
+    warnings.push(`Ladder enrichment failed (non-blocking): ${enrichErr instanceof Error ? enrichErr.message : String(enrichErr)}`);
+  }
+
   const retained = retainProfileSource(finalUrl, html);
   const fieldProvenanceDetails = buildFieldProvenanceDetails(provenance, origins);
   return { data, warnings, sourceContentHash: retained.sourceContentHash, sourceArtifactId: retained.sourceArtifactId, fieldProvenanceDetails };
@@ -1428,8 +1443,10 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
 
       // Retain the exact rendered DOM after all deterministic selectors have
       // run. Selector values are not authoritative without this source hash
-      // (and artifact reference) attached to the response.
-      const retained = retainProfileSource(finalUrl, await page.content());
+      // (and artifact reference) attached to the response. The same bytes are
+      // reused for ADR-0031 embedded-only ladder enrichment (no refetch).
+      const renderedHtml = await page.content();
+      const retained = retainProfileSource(finalUrl, renderedHtml);
       const fieldProvenanceDetails = buildFieldProvenanceDetails(provenance, origins);
       return {
         blocked: false as const,
@@ -1444,6 +1461,7 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         sourceContentHash: retained.sourceContentHash,
         sourceArtifactId: retained.sourceArtifactId,
         customFields,
+        renderedHtml,
       };
     },
     runnerConfig,
@@ -1496,6 +1514,21 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   // Merge custom fields into result
   if (Object.keys(extracted.customFields).length > 0) {
     (data as ExtractionData).customFields = extracted.customFields;
+  }
+
+  // ADR-0031: embedded-only ladder enrichment on the production rendered
+  // profile path. Reuses the exact DOM bytes the runner captured — no second
+  // fetch, single profile-execution authority preserved. Additive-only;
+  // failures degrade to a warning.
+  try {
+    await applyLadderEnrichment({
+      html: extracted.renderedHtml,
+      url: sourceUrl,
+      data,
+      expected: { name: expected.name, brandHint: request.expected?.brandHint ?? null, price: request.expected?.price ?? null, gtin: request.expected?.upc },
+    });
+  } catch (enrichErr) {
+    warnings.push(`Ladder enrichment failed (non-blocking): ${enrichErr instanceof Error ? enrichErr.message : String(enrichErr)}`);
   }
 
   return { data, warnings, sourceContentHash: extracted.sourceContentHash, sourceArtifactId: extracted.sourceArtifactId, fieldProvenanceDetails: extracted.fieldProvenanceDetails };
