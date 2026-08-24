@@ -97,20 +97,53 @@ function extractCandidateBrand(name: string, knownBrands: string[]): string | nu
   return toTitleCase(firstClean);
 }
 
+export interface BrandMaps {
+  knownBrandMap: Map<string, string>;
+  knownBrandNames: string[];
+  brandsWithDomain: Set<string>;
+  brandToPatternMap: Map<string, string>;
+  brandToRoutingMap: Map<string, { preferredDistributorIds: string[]; sourcingPolicy: string }>;
+  availableDistributors: PreflightAvailableDistributor[];
+}
+
+export interface ItemSampleProduct {
+  id: string;
+  name: string;
+  upc: string | null;
+  sku: string | null;
+}
+
+export interface UnassignedBrandGroupData {
+  suggestedBrand: string | null;
+  itemIds: string[];
+  sampleNames: string[];
+  sampleProducts: ItemSampleProduct[];
+}
+
+export interface BrandGroupData {
+  brand: string;
+  itemIds: string[];
+  sampleNames: string[];
+  sampleProducts: ItemSampleProduct[];
+}
+
+export interface ClassificationResults {
+  brandResolvedCount: number;
+  ambiguousBrandCount: number;
+  missingBrandCount: number;
+  domainMappedCount: number;
+  distributorRoutedCount: number;
+  readyItemIds: string[];
+  heldItemIds: string[];
+  unassignedByBrandKey: Map<string, UnassignedBrandGroupData>;
+  missingDomainByBrand: Map<string, BrandGroupData>;
+  unroutedByBrand: Map<string, BrandGroupData>;
+}
+
 /**
- * Reusable server-side batch preflight analyzer (ADR 0017 / Controlled Release).
- * Evaluates readiness across brand resolution, official domains, and distributor routing.
+ * Fetch reference authorities and build canonical brand, domain, pattern, and routing maps.
  */
-export function analyzeBatchPreflight(workspaceId: string, batchId: string): BatchPreflightResponse {
-  const batch = findBatchById(batchId);
-  if (!batch) {
-    throw new Error(`Batch not found: ${batchId}`);
-  }
-
-  const items = listItemsByBatch(batchId);
-  const totalItems = items.length;
-
-  // 1. Fetch reference authorities and build canonical brand map
+function buildBrandMaps(workspaceId: string): BrandMaps {
   const allBrandSites = listAllBrandSites();
   const knownBrandMap = new Map<string, string>();
 
@@ -184,7 +217,20 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
     enabled: c.enabled,
   }));
 
-  // 2. Classify items
+  return {
+    knownBrandMap,
+    knownBrandNames,
+    brandsWithDomain,
+    brandToPatternMap,
+    brandToRoutingMap,
+    availableDistributors,
+  };
+}
+
+/**
+ * Classify onboarding items across brand resolution, official domains, and distributor routing.
+ */
+function classifyItems(items: ReturnType<typeof listItemsByBatch>, brandMaps: BrandMaps): ClassificationResults {
   let brandResolvedCount = 0;
   let ambiguousBrandCount = 0;
   let missingBrandCount = 0;
@@ -194,25 +240,9 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
   const readyItemIds: string[] = [];
   const heldItemIds: string[] = [];
 
-  // Grouping structures
-  const unassignedByBrandKey = new Map<string, {
-    suggestedBrand: string | null;
-    itemIds: string[];
-    sampleNames: string[];
-    sampleProducts: { id: string; name: string; upc: string | null; sku: string | null }[];
-  }>();
-  const missingDomainByBrand = new Map<string, {
-    brand: string;
-    itemIds: string[];
-    sampleNames: string[];
-    sampleProducts: { id: string; name: string; upc: string | null; sku: string | null }[];
-  }>();
-  const unroutedByBrand = new Map<string, {
-    brand: string;
-    itemIds: string[];
-    sampleNames: string[];
-    sampleProducts: { id: string; name: string; upc: string | null; sku: string | null }[];
-  }>();
+  const unassignedByBrandKey = new Map<string, UnassignedBrandGroupData>();
+  const missingDomainByBrand = new Map<string, BrandGroupData>();
+  const unroutedByBrand = new Map<string, BrandGroupData>();
 
   for (const item of items) {
     const rawBrand = item.brandHint?.trim() || null;
@@ -223,10 +253,10 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
       const normBrand = rawBrand!.toLowerCase();
 
       // Check official domain
-      if (brandsWithDomain.has(normBrand)) {
+      if (brandMaps.brandsWithDomain.has(normBrand)) {
         domainMappedCount++;
       } else {
-        const canonicalBrand = knownBrandMap.get(normBrand) || rawBrand!;
+        const canonicalBrand = brandMaps.knownBrandMap.get(normBrand) || rawBrand!;
         const existing = missingDomainByBrand.get(normBrand) ?? {
           brand: canonicalBrand,
           itemIds: [],
@@ -249,11 +279,11 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
       }
 
       // Check distributor routing
-      const routing = brandToRoutingMap.get(normBrand);
+      const routing = brandMaps.brandToRoutingMap.get(normBrand);
       if (routing && routing.preferredDistributorIds.length > 0) {
         distributorRoutedCount++;
       } else {
-        const canonicalBrand = knownBrandMap.get(normBrand) || rawBrand!;
+        const canonicalBrand = brandMaps.knownBrandMap.get(normBrand) || rawBrand!;
         const existing = unroutedByBrand.get(normBrand) ?? {
           brand: canonicalBrand,
           itemIds: [],
@@ -279,7 +309,7 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
       readyItemIds.push(item.id);
     } else {
       // Missing brand hint: attempt candidate suggestion from product name
-      const suggested = extractCandidateBrand(item.name, knownBrandNames);
+      const suggested = extractCandidateBrand(item.name, brandMaps.knownBrandNames);
 
       if (suggested) {
         ambiguousBrandCount++;
@@ -313,8 +343,33 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
     }
   }
 
-  // 3. Transform blockers
-  const needsBrandGroups: PreflightBrandGroup[] = Array.from(unassignedByBrandKey.entries()).map(([key, data]) => ({
+  return {
+    brandResolvedCount,
+    ambiguousBrandCount,
+    missingBrandCount,
+    domainMappedCount,
+    distributorRoutedCount,
+    readyItemIds,
+    heldItemIds,
+    unassignedByBrandKey,
+    missingDomainByBrand,
+    unroutedByBrand,
+  };
+}
+
+/**
+ * Transform internal classification maps into sorted blocker groups.
+ */
+function transformBlockers(
+  classification: ClassificationResults,
+  brandToPatternMap: Map<string, string>,
+  brandToRoutingMap: Map<string, { preferredDistributorIds: string[]; sourcingPolicy: string }>
+): {
+  needsBrandGroups: PreflightBrandGroup[];
+  missingDomainBrands: PreflightDomainBlocker[];
+  unroutedBrands: PreflightRoutingBlocker[];
+} {
+  const needsBrandGroups: PreflightBrandGroup[] = Array.from(classification.unassignedByBrandKey.entries()).map(([key, data]) => ({
     key,
     suggestedBrand: data.suggestedBrand,
     itemCount: data.itemIds.length,
@@ -323,7 +378,7 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
     sampleProducts: data.sampleProducts,
   })).sort((a, b) => b.itemCount - a.itemCount);
 
-  const missingDomainBrands: PreflightDomainBlocker[] = Array.from(missingDomainByBrand.values()).map((data) => ({
+  const missingDomainBrands: PreflightDomainBlocker[] = Array.from(classification.missingDomainByBrand.values()).map((data) => ({
     brand: data.brand,
     itemCount: data.itemIds.length,
     itemIds: data.itemIds,
@@ -332,7 +387,7 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
     sampleProducts: data.sampleProducts,
   })).sort((a, b) => b.itemCount - a.itemCount);
 
-  const unroutedBrands: PreflightRoutingBlocker[] = Array.from(unroutedByBrand.values()).map((data) => {
+  const unroutedBrands: PreflightRoutingBlocker[] = Array.from(classification.unroutedByBrand.values()).map((data) => {
     const profile = brandToRoutingMap.get(data.brand.toLowerCase());
     return {
       brand: data.brand,
@@ -345,7 +400,40 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
     };
   }).sort((a, b) => b.itemCount - a.itemCount);
 
-  const readyCount = readyItemIds.length;
+  return {
+    needsBrandGroups,
+    missingDomainBrands,
+    unroutedBrands,
+  };
+}
+
+/**
+ * Reusable server-side batch preflight analyzer (ADR 0017 / Controlled Release).
+ * Evaluates readiness across brand resolution, official domains, and distributor routing.
+ */
+export function analyzeBatchPreflight(workspaceId: string, batchId: string): BatchPreflightResponse {
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    throw new Error(`Batch not found: ${batchId}`);
+  }
+
+  const items = listItemsByBatch(batchId);
+  const totalItems = items.length;
+
+  // 1. Fetch reference authorities and build canonical brand maps
+  const brandMaps = buildBrandMaps(workspaceId);
+
+  // 2. Classify items
+  const classification = classifyItems(items, brandMaps);
+
+  // 3. Transform blockers
+  const blockers = transformBlockers(
+    classification,
+    brandMaps.brandToPatternMap,
+    brandMaps.brandToRoutingMap
+  );
+
+  const readyCount = classification.readyItemIds.length;
   const heldCount = totalItems - readyCount;
 
   return {
@@ -355,26 +443,22 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
     totalItems,
     readyCount,
     heldCount,
-    readyItemIds,
-    heldItemIds,
+    readyItemIds: classification.readyItemIds,
+    heldItemIds: classification.heldItemIds,
     metrics: {
-      brandResolvedCount,
-      brandResolvedPercent: totalItems > 0 ? Math.round((brandResolvedCount / totalItems) * 100) : 0,
-      ambiguousBrandCount,
-      missingBrandCount,
-      domainMappedCount,
-      domainMappedPercent: totalItems > 0 ? Math.round((domainMappedCount / totalItems) * 100) : 0,
-      missingDomainBrandCount: missingDomainBrands.length,
-      distributorRoutedCount,
-      distributorRoutedPercent: totalItems > 0 ? Math.round((distributorRoutedCount / totalItems) * 100) : 0,
-      unroutedBrandCount: unroutedBrands.length,
+      brandResolvedCount: classification.brandResolvedCount,
+      brandResolvedPercent: totalItems > 0 ? Math.round((classification.brandResolvedCount / totalItems) * 100) : 0,
+      ambiguousBrandCount: classification.ambiguousBrandCount,
+      missingBrandCount: classification.missingBrandCount,
+      domainMappedCount: classification.domainMappedCount,
+      domainMappedPercent: totalItems > 0 ? Math.round((classification.domainMappedCount / totalItems) * 100) : 0,
+      missingDomainBrandCount: blockers.missingDomainBrands.length,
+      distributorRoutedCount: classification.distributorRoutedCount,
+      distributorRoutedPercent: totalItems > 0 ? Math.round((classification.distributorRoutedCount / totalItems) * 100) : 0,
+      unroutedBrandCount: blockers.unroutedBrands.length,
     },
-    blockers: {
-      needsBrandGroups,
-      missingDomainBrands,
-      unroutedBrands,
-    },
-    availableDistributors,
-    knownBrands: knownBrandNames,
+    blockers,
+    availableDistributors: brandMaps.availableDistributors,
+    knownBrands: brandMaps.knownBrandNames,
   };
 }
