@@ -13,7 +13,7 @@
  * - flag ON: packaging_ocr joins FIRST and resolves before
  *   evidence_extraction (its declared dependency);
  * - PI kill-switch dominance: the master flag can never enable the stage
- *   while BAYSTATE_CMS_PI_KILL_SWITCH is set.
+ *   while BAYSTATE_CMS_OCR_KILL_SWITCH is set.
  *
  * Pure composition test — no DB needed.
  */
@@ -54,7 +54,7 @@ const LEGACY_RESOLVED_ORDER: ClassificationStageName[] = [
 
 afterEach(() => {
   resetOcrStageFlagsOverride();
-  delete process.env.BAYSTATE_CMS_PI_KILL_SWITCH;
+  delete process.env.BAYSTATE_CMS_OCR_KILL_SWITCH;
 });
 
 describe('curation pipeline stage composition (P2-T6)', () => {
@@ -83,14 +83,14 @@ describe('curation pipeline stage composition (P2-T6)', () => {
 
   it('PI kill-switch dominance: an enabled override cannot add the stage while the kill switch is set', () => {
     overrideOcrStageFlags({ packagingOcrStageEnabled: true });
-    process.env.BAYSTATE_CMS_PI_KILL_SWITCH = 'true';
+    process.env.BAYSTATE_CMS_OCR_KILL_SWITCH = 'true';
     try {
       expect(getOcrStageFlags().packagingOcrStageEnabled).toBe(false);
       const stages = composeCurationPipelineStages();
       expect(stages.some(s => s.name === 'packaging_ocr')).toBe(false);
       expect(stages.map(s => s.name)).toEqual(LEGACY_STAGE_NAMES);
     } finally {
-      delete process.env.BAYSTATE_CMS_PI_KILL_SWITCH;
+      delete process.env.BAYSTATE_CMS_OCR_KILL_SWITCH;
     }
     // Clearing the env restores normal precedence immediately.
     expect(getOcrStageFlags().packagingOcrStageEnabled).toBe(true);

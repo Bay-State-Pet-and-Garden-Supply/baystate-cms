@@ -23,11 +23,10 @@
  *   default until golden-set evaluation (P3) validates it.
  *
  * Kill-switch dominance (precedence documented here):
- * `BAYSTATE_CMS_PI_KILL_SWITCH` is parsed with the same fail-closed boolean
- * rule as `src/product-intelligence/flags.ts` (`killSwitch`: 'true'|'1'|'yes'
- * → set, 'false'|'0'|'no'/unset/garbage → not set). When set, the Product
- * Intelligence program's global contract forces the legacy pipeline
- * everywhere, so `packagingOcrStageEnabled` resolves `false` REGARDLESS of
+ * `BAYSTATE_CMS_OCR_KILL_SWITCH` is parsed with the same fail-closed boolean
+ * rule the Product Intelligence program used for its global kill switch
+ * ('true'|'1'|'yes' → set, 'false'|'0'|'no'/unset/garbage → not set). When
+ * set, the OCR kill switch forces the legacy pipeline everywhere, so `packagingOcrStageEnabled` resolves `false` REGARDLESS of
  * env or in-memory override — including after `overrideOcrStageFlags({
  * packagingOcrStageEnabled: true })`. Dominance is applied in BOTH
  * `loadOcrStageFlags()` (against the supplied/ambient env) and
@@ -69,8 +68,13 @@ const OCR_STAGE_FLAG_ENV: Record<keyof OcrStageFlags, string> = {
   packagingOcrRetriesEnabled: 'BAYSTATE_CMS_OCR_RETRIES_ENABLED',
 };
 
-/** The PI global kill switch env var (same contract as product-intelligence/flags.ts). */
-const PI_KILL_SWITCH_ENV = 'BAYSTATE_CMS_PI_KILL_SWITCH';
+/**
+ * The OCR kill switch env var (ADR-0030 Phase 3 rename from the PI global
+ * kill switch). `BAYSTATE_CMS_PI_KILL_SWITCH` is honored as a deprecated
+ * alias during the alias window: EITHER name explicitly set ⇒ switch on.
+ */
+const OCR_KILL_SWITCH_ENV = 'BAYSTATE_CMS_OCR_KILL_SWITCH';
+const PI_KILL_SWITCH_ALIAS_ENV = 'BAYSTATE_CMS_PI_KILL_SWITCH';
 
 function parseBooleanEnv(raw: string | undefined, fallback: boolean): boolean {
   if (raw === undefined || raw === '') return fallback;
@@ -82,12 +86,16 @@ function parseBooleanEnv(raw: string | undefined, fallback: boolean): boolean {
 }
 
 /**
- * Kill-switch detection mirrors `parseBooleanEnv` in
- * `src/product-intelligence/flags.ts` for `killSwitch`: only an explicit
- * truthy value counts as set; unset/falsey/garbage means not set.
+ * Kill-switch detection mirrors the old `killSwitch` parsing in the deleted
+ * `src/product-intelligence/flags.ts`: only an explicit truthy value counts
+ * as set; unset/falsey/garbage means not set. Either the primary OCR var or
+ * the deprecated PI alias counts.
  */
 function isPiKillSwitchSet(env: Record<string, string | undefined>): boolean {
-  return parseBooleanEnv(env[PI_KILL_SWITCH_ENV], false);
+  return (
+    parseBooleanEnv(env[OCR_KILL_SWITCH_ENV], false) ||
+    parseBooleanEnv(env[PI_KILL_SWITCH_ALIAS_ENV], false)
+  );
 }
 
 export function loadOcrStageFlags(

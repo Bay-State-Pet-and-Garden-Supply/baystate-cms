@@ -18,7 +18,7 @@ import {
   domainMatches,
   listReusePolicies,
   upsertReusePolicy,
-} from '../../db/repositories/pi-reuse-policy-repo';
+} from '../../db/repositories/image-reuse-policy-repo';
 
 const workspaceId = 'ws-pi-reuse-test';
 

@@ -17,10 +17,10 @@ import sharp from 'sharp';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { dhashFromRaw, perceptualHammingDistance } from '../../product-intelligence/assets/image-hash';
-import { parseJsonLdImages, parseShopifyVariantImages, parseWooCommerceVariantImages, parseNetworkCaptures, discoverCandidates } from '../../product-intelligence/assets/discovery';
-import { resolveRights, computeCommerceApproved } from '../../product-intelligence/assets/rights';
-import { classifyAssetIdentity, findDuplicateAssets, parseNetContent, verifyImageCandidate } from '../../product-intelligence/assets/verification';
+import { dhashFromRaw, perceptualHammingDistance } from '../../onboarding/image-verification/image-hash';
+import { parseJsonLdImages, parseShopifyVariantImages, parseWooCommerceVariantImages, parseNetworkCaptures, discoverCandidates } from '../../onboarding/image-verification/discovery';
+import { resolveRights, computeCommerceApproved } from '../../onboarding/image-verification/rights';
+import { classifyAssetIdentity, findDuplicateAssets, parseNetContent, verifyImageCandidate } from '../../onboarding/image-verification/verification';
 import { DeterministicNetworkGate } from '../../onboarding/image-verification/network-gate';
 
 const wsId = 'pi-assets-test-workspace';

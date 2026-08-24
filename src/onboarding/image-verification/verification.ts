@@ -483,9 +483,9 @@ export type ReuseGrantResolver = (sourceTier: string, domain: string) => ReuseGr
 /**
  * Verify an image candidate end-to-end. Never throws for expected conditions:
  * decode failures and fetch failures become structured evidence records
- * (qualityStatus 'invalid', commerceApproved false). A `PolicyDeniedError`
- * from the gateway propagates so the caller can surface the exact policy
- * outcome.
+ * (qualityStatus 'invalid', commerceApproved false). A `NetworkGateDeniedError`
+ * from the deterministic network gate propagates so the caller can surface the
+ * exact denial outcome.
  */
 export async function verifyImageCandidate(input: VerifyImageInput, deps: VerifyImageDeps): Promise<ProductAssetEvidence> {
   const now = deps.now ?? (() => new Date());
