@@ -1,5 +1,6 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
+import { hashCanonicalJson } from '../../shared/stable-id';
 import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus, SourcingDecision, SourcingDecisionV2 } from '../../shared/schemas/onboarding';
 import { getAcceptedAttemptIdsForItem, isAcceptanceMigrationCompleted } from './onboarding-acceptance-repo';
 import { supersedeCurrentSourcingGeneration, getCurrentSourcingGeneration, getEvidenceAttemptsByItemAndGeneration } from './onboarding-evidence-repo';
@@ -82,7 +83,110 @@ const STAGE_ORDER: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'cu
  */
 function safeParseDecision(raw: string): SourcingDecision | SourcingDecisionV2 | null {
   try {
-    return JSON.parse(raw) as SourcingDecision | SourcingDecisionV2;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    if (parsed.schemaVersion === 2) {
+      const route = parsed.route as string;
+      const origin = typeof parsed.origin === 'string' ? parsed.origin : 'automatic_policy';
+      const decidedAt = typeof parsed.decidedAt === 'string' ? parsed.decidedAt : new Date().toISOString();
+      const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
+      const conflicts = Array.isArray(parsed.conflicts) ? parsed.conflicts : [];
+
+      if (route === 'evidence_to_discovery') {
+        const acceptedAttemptIds = Array.isArray(parsed.acceptedEvidenceAttemptIds) ? parsed.acceptedEvidenceAttemptIds : [];
+        const providerIds = Array.isArray(parsed.providerIds) ? parsed.providerIds : [];
+        const genId = typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : null;
+
+        // If there are no accepted attempts, no provider IDs, or no generation ID, this was effectively a fallback
+        if (acceptedAttemptIds.length === 0 || providerIds.length === 0 || !genId) {
+          const fallback: SourcingDecisionV2 = {
+            schemaVersion: 2,
+            route: 'fallback_to_discovery',
+            origin: origin as any,
+            acceptedEvidenceAttemptIds: [],
+            providerIds: [],
+            ...(genId ? { sourcingGenerationId: genId } : {}),
+            sourceType: 'official_page',
+            target: 'discovery',
+            conflicts,
+            warnings,
+            decidedAt,
+          };
+          const res = SourcingDecisionV2Schema.safeParse(fallback);
+          if (res.success) return res.data;
+        } else {
+          const normalized: SourcingDecisionV2 = {
+            schemaVersion: 2,
+            route: 'evidence_to_discovery',
+            origin: origin as any,
+            acceptedEvidenceAttemptIds: acceptedAttemptIds,
+            providerIds,
+            sourcingGenerationId: genId,
+            sourceType: 'official_page',
+            target: 'discovery',
+            conflicts,
+            warnings,
+            decidedAt,
+          };
+          const res = SourcingDecisionV2Schema.safeParse(normalized);
+          if (res.success) return res.data;
+        }
+      } else if (route === 'fallback_to_discovery') {
+        const fallbackGenId = typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : null;
+        const normalized: SourcingDecisionV2 = {
+          schemaVersion: 2,
+          route: 'fallback_to_discovery',
+          origin: origin as any,
+          acceptedEvidenceAttemptIds: [],
+          providerIds: Array.isArray(parsed.providerIds) ? parsed.providerIds : [],
+          ...(fallbackGenId ? { sourcingGenerationId: fallbackGenId } : {}),
+          sourceType: 'official_page',
+          target: 'discovery',
+          conflicts,
+          warnings,
+          decidedAt,
+        };
+        const res = SourcingDecisionV2Schema.safeParse(normalized);
+        if (res.success) return res.data;
+      } else if (route === 'degraded_fallback_to_discovery') {
+        const providerIds = Array.isArray(parsed.providerIds) && parsed.providerIds.length > 0 ? parsed.providerIds : ['unknown'];
+        const normalized: SourcingDecisionV2 = {
+          schemaVersion: 2,
+          route: 'degraded_fallback_to_discovery',
+          origin: origin as any,
+          acceptedEvidenceAttemptIds: [],
+          providerIds,
+          sourcingGenerationId: typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : 'legacy',
+          sourceType: 'official_page',
+          target: 'discovery',
+          conflicts,
+          warnings,
+          decidedAt,
+        };
+        const res = SourcingDecisionV2Schema.safeParse(normalized);
+        if (res.success) return res.data;
+      } else if (route === 'distributor_record_to_extraction') {
+        const normalized: SourcingDecisionV2 = {
+          schemaVersion: 2,
+          route: 'distributor_record_to_extraction',
+          origin: origin as any,
+          acceptedEvidenceAttemptIds: Array.isArray(parsed.acceptedEvidenceAttemptIds) ? parsed.acceptedEvidenceAttemptIds : [],
+          providerIds: Array.isArray(parsed.providerIds) ? parsed.providerIds : [],
+          sourcingGenerationId: typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : 'legacy',
+          evidenceHash: typeof parsed.evidenceHash === 'string' ? parsed.evidenceHash : '',
+          sourceType: 'distributor_record',
+          target: 'extraction',
+          conflicts,
+          warnings,
+          decidedAt,
+        };
+        const res = SourcingDecisionV2Schema.safeParse(normalized);
+        if (res.success) return res.data;
+      }
+    }
+
+    return parsed as unknown as SourcingDecision | SourcingDecisionV2;
   } catch {
     return null;
   }
@@ -137,6 +241,32 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItemWithEntryPolicy {
 }
 
 // ─── INSERT ────────────────────────────────────────────────────────────────────
+
+/** Row projection of curation_data_json for read-only analysis tooling
+ *  (e.g. the P2 mapping-coverage audit). Deliberately minimal: no stage/status
+ *  hydration, no acceptance joins — callers parse the JSON payload themselves. */
+export interface CurationDataHistoryRow {
+  id: string;
+  upc: string;
+  name: string;
+  curationDataJson: string | null;
+}
+
+/** Read-only scan of every onboarding item's persisted curation payload.
+ *  Used by offline audit scripts (repository pattern: SQL lives here, never in
+ *  scripts); NOT used by any runtime pipeline path. */
+export function listCurationDataRows(): CurationDataHistoryRow[] {
+  const db = getDb();
+  const rows = db.query(
+    'SELECT id, upc, name, curation_data_json FROM onboarding_items ORDER BY id ASC',
+  ).all() as Array<Record<string, unknown>>;
+  return rows.map(row => ({
+    id: String(row.id),
+    upc: String(row.upc),
+    name: String(row.name),
+    curationDataJson: row.curation_data_json ? String(row.curation_data_json) : null,
+  }));
+}
 
 export function insertItems(
   batchId: string,
@@ -231,6 +361,41 @@ export function findItemById(id: string): OnboardingItemWithEntryPolicy | undefi
   const db = getDb();
   const row = db.query('SELECT * FROM onboarding_items WHERE id = ?').get(id) as OnboardingItemRow | undefined;
   return row ? mapRowToItem(row) : undefined;
+}
+
+/**
+ * Raw `extraction_data_json` lookup by item id — the exact legacy inline
+ * query from product-curator's post-run OCR/extraction refresh (packaging-ocr
+ * overhaul P2-T5 repository cleanup). Returns undefined when no row matches.
+ */
+export function findExtractionDataJsonRowById(id: string): { extraction_data_json: string | null } | undefined {
+  const db = getDb();
+  return db
+    .query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?')
+    .get(id) as { extraction_data_json: string | null } | undefined;
+}
+
+/** The semantic source fields the evidence_extraction stage reads from an
+ *  onboarding item row (packaging-ocr overhaul P2-T5 repository cleanup of
+ *  the stage's legacy inline SELECT — same columns, same WHERE). */
+export interface ItemExtractionSourceRow {
+  extraction_data_json: string | null;
+  source_url: string | null;
+  source_type: string | null;
+  name: string;
+  expected_name: string | null;
+  brand_hint: string | null;
+}
+
+/** Read the evidence-extraction source fields for one item; undefined when no
+ *  row matches (the stage abstains on undefined, exactly as before). */
+export function findExtractionSourceRowById(id: string): ItemExtractionSourceRow | undefined {
+  const db = getDb();
+  return db
+    .query(
+      'SELECT extraction_data_json, source_url, source_type, name, expected_name, brand_hint FROM onboarding_items WHERE id = ?',
+    )
+    .get(id) as ItemExtractionSourceRow | undefined;
 }
 
 /**
@@ -643,6 +808,19 @@ export function advanceReviewedItemsToPromotion(
         refused.push({ itemId: id, reason: `semantic_validation_blocked: ${firstMessage}` });
         continue;
       }
+      // Universal Category Page requirement (defense in depth): review
+      // completion already refuses pageless items, so a review/completed row
+      // without an assignment can only be stale data — never approve it into
+      // Promotion. Verified-identity resolution stays with the run gate and
+      // the promotion mandatory-Pages backstop.
+      const assignedPages = item.curationData?.suggestedPages;
+      if (!Array.isArray(assignedPages) || assignedPages.length === 0) {
+        refused.push({
+          itemId: id,
+          reason: 'missing_category_page: no Category Page is assigned; assign pages before approval.',
+        });
+        continue;
+      }
       const result = db.query(
         `UPDATE onboarding_items
          SET stage = 'promotion', stage_status = 'pending', error_message = NULL, retry_count = 0,
@@ -913,12 +1091,106 @@ export function updateItemSourceUrl(id: string, url: string): void {
   ).run(url, 'source_confirmed', now, id);
 }
 
+/**
+ * Classification-stage OCR persistence write (packaging-ocr overhaul P2-T5):
+ * exact parity with the legacy inline UPDATE in
+ * `stages/evidence-extraction.ts` — NO `updated_at` bump, so a stage re-run
+ * never churns the row timestamp. Use `updateItemExtractionData` when a
+ * timestamped update IS wanted.
+ */
+export function setItemExtractionDataJson(id: string, extractionDataJson: string): void {
+  const db = getDb();
+  db.query(
+    'UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?',
+  ).run(extractionDataJson, id);
+}
+
 export function updateItemExtractionData(id: string, extractionDataJson: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.query(
     'UPDATE onboarding_items SET extraction_data_json = ?, updated_at = ? WHERE id = ?',
   ).run(extractionDataJson, now, id);
+}
+
+// ─── Packaging-OCR stage persistence (packaging-ocr overhaul P2-T2) ────────────
+
+/**
+ * Persist ONE packaging-OCR stage result into the item's extraction_data_json,
+ * mirroring the freeze pull-forward's unconditional-overwrite write shape
+ * (cohort-curator.ts): `packagingOcrData` / `packagingTitle` / `ocrOutcome` /
+ * `ocrInputHash` / `ocrExecutionDigest`. ALL live OCR authority keys —
+ * including a null `ocrOutcome`, which REPLACES any stored outcome rather
+ * than preserving it — are replaced together so a re-run never leaves
+ * mixed-authority state. Repository pattern — callers never hand-roll this
+ * read-merge-write.
+ */
+export interface PersistItemPackagingOcrInput {
+  itemId: string;
+  packagingOcrData: Record<string, unknown> | null;
+  packagingTitle: string | null;
+  ocrOutcome: Record<string, unknown> | null;
+  ocrInputHash: string | null;
+  ocrExecutionDigest: string | null;
+  /** P2 baseline-drift guard: when set, the extraction_data_json key
+   *  `packagingOcrStageRunId` marks the live OCR keys as STAGE-authored so a
+   *  later dual-run comparison never mistakes this stage output for a legacy
+   *  inline baseline. The legacy inline write-back path omits it. */
+  stageRunId?: string | null;
+}
+
+export function persistItemPackagingOcrResult(input: PersistItemPackagingOcrInput): void {
+  const row = findExtractionDataJsonRowById(input.itemId);
+  if (!row) return;
+  let ext: Record<string, unknown> = {};
+  if (row.extraction_data_json) {
+    try { ext = JSON.parse(String(row.extraction_data_json)) as Record<string, unknown>; } catch { ext = {}; }
+  }
+  const updatedExt = {
+    ...ext,
+    packagingOcrData: input.packagingOcrData,
+    packagingTitle: input.packagingTitle,
+    // Explicit replacement: null clears the key (JSON.stringify drops it) so
+    // 'all authority keys replaced together' holds unconditionally. No current
+    // caller passes null; the semantics exist to keep the contract honest.
+    ocrOutcome: input.ocrOutcome,
+    ocrInputHash: input.ocrInputHash,
+    ocrExecutionDigest: input.ocrExecutionDigest,
+    ...(input.stageRunId ? { packagingOcrStageRunId: input.stageRunId } : {}),
+  };
+  updateItemExtractionData(input.itemId, JSON.stringify(updatedExt));
+}
+
+/**
+ * Shadow-only counterpart (P2-T4): writes ONLY the namespaced
+ * `shadowPackagingOcrData` key — the live OCR authority keys
+ * (`packagingOcrData` / `packagingTitle` / `ocrOutcome` / `ocrInputHash` /
+ * `ocrExecutionDigest`) are NEVER touched, so a shadow run can never become a
+ * reusable execution authority.
+ */
+export function persistItemShadowPackagingOcrResult(
+  itemId: string,
+  shadowPackagingOcrData: Record<string, unknown> | null,
+  /** P2 race guard: when provided, the write proceeds ONLY if the CURRENTLY
+   *  stored shadow key canonically equals this observed value. A concurrent
+   *  writer that changed the key since the caller read it is never erased
+   *  (stale-owner CAS). Returns false when skipped. */
+  options?: { expectedPrevious?: unknown },
+): boolean {
+  const row = findExtractionDataJsonRowById(itemId);
+  if (!row) return false;
+  let ext: Record<string, unknown> = {};
+  if (row.extraction_data_json) {
+    try { ext = JSON.parse(String(row.extraction_data_json)) as Record<string, unknown>; } catch { ext = {}; }
+  }
+  if (options && 'expectedPrevious' in options) {
+    const current = ext.shadowPackagingOcrData ?? null;
+    const expected = options.expectedPrevious ?? null;
+    if (hashCanonicalJson(current) !== hashCanonicalJson(expected)) return false;
+  }
+  const updatedExt = { ...ext, shadowPackagingOcrData };
+  updateItemExtractionData(itemId, JSON.stringify(updatedExt));
+  return true;
 }
 
 /** Write the item's curation_data_json (used by the legacy worker and by the
@@ -1131,6 +1403,10 @@ export function completeSourcingWithDecision(
   if (targetStage === 'extraction') {
     const v2 = SourcingDecisionV2Schema.safeParse(decision);
     if (!v2.success) {
+      console.warn(
+        `[completeSourcingWithDecision] SourcingDecisionV2Schema validation failed for item ${itemId}:`,
+        JSON.stringify(v2.error.format()),
+      );
       return { ok: false, reason: 'invalid_v2_distributor_decision' };
     }
     if (v2.data.route !== 'distributor_record_to_extraction') {
@@ -1209,7 +1485,7 @@ export interface CompleteSourcingViaProjectionResult {
   ok: boolean;
   reason?: string;
   qualified: boolean;
-  route: 'distributor_record_to_extraction' | 'evidence_to_discovery' | null;
+  route: 'distributor_record_to_extraction' | 'evidence_to_discovery' | 'fallback_to_discovery' | null;
   reasonCodes?: SourcingProjectionReasonCode[];
   evidenceHash?: string | null;
 }
@@ -1279,37 +1555,79 @@ export function completeSourcingViaProjection(
         evidenceHash: null,
       };
     }
-    const decision: SourcingDecision | SourcingDecisionV2 = {
-      schemaVersion: 2,
-      route: 'evidence_to_discovery',
-      origin: 'operator_override',
-      acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
-      providerIds: projection.providerIds,
-      conflicts: [],
-      warnings: projection.warnings,
-      decidedAt: now,
-    };
+    const acceptedProviderIds = Array.from(
+      new Set(attempts.filter((a) => acceptedIds.includes(a.id)).map((a) => a.providerId)),
+    );
+    const hasAcceptedEvidence = acceptedIds.length > 0 && acceptedProviderIds.length > 0;
+    const decision: SourcingDecisionV2 = hasAcceptedEvidence
+      ? {
+          schemaVersion: 2,
+          route: 'evidence_to_discovery',
+          origin: 'operator_override',
+          acceptedEvidenceAttemptIds: acceptedIds,
+          providerIds: acceptedProviderIds,
+          sourcingGenerationId: generation.id,
+          sourceType: 'official_page',
+          target: 'discovery',
+          conflicts: [],
+          warnings: projection.warnings,
+          decidedAt: now,
+        }
+      : {
+          schemaVersion: 2,
+          route: 'fallback_to_discovery',
+          origin: 'operator_override',
+          acceptedEvidenceAttemptIds: [],
+          providerIds: [],
+          sourcingGenerationId: generation.id,
+          sourceType: 'official_page',
+          target: 'discovery',
+          conflicts: [],
+          warnings: projection.warnings,
+          decidedAt: now,
+        };
     const res = completeSourcingWithDecision(itemId, decision, 'discovery');
     if (!res.ok) return { ok: false, reason: res.reason, qualified: false, route: null };
-    return { ok: true, qualified: false, route: 'evidence_to_discovery', reasonCodes: projection.reasonCodes, evidenceHash: null };
+    return { ok: true, qualified: false, route: decision.route, reasonCodes: projection.reasonCodes, evidenceHash: null };
   }
 
   if (!isCurrentSourcingEntryPolicy(item.sourcingEntryPolicyVersion)) {
     // Marker-v0: qualified evidence still completes to Discovery (legacy
     // operator-controlled cohort never routes to Extraction).
-    const decision: SourcingDecision | SourcingDecisionV2 = {
-      schemaVersion: 2,
-      route: 'evidence_to_discovery',
-      origin: 'operator_override',
-      acceptedEvidenceAttemptIds: projection.acceptedAttemptIds,
-      providerIds: projection.providerIds,
-      conflicts: [],
-      warnings: projection.warnings,
-      decidedAt: now,
-    };
+    const acceptedProviderIds = Array.from(
+      new Set(attempts.filter((a) => acceptedIds.includes(a.id)).map((a) => a.providerId)),
+    );
+    const hasAcceptedEvidence = acceptedIds.length > 0 && acceptedProviderIds.length > 0;
+    const decision: SourcingDecisionV2 = hasAcceptedEvidence
+      ? {
+          schemaVersion: 2,
+          route: 'evidence_to_discovery',
+          origin: 'operator_override',
+          acceptedEvidenceAttemptIds: acceptedIds,
+          providerIds: acceptedProviderIds,
+          sourcingGenerationId: generation.id,
+          sourceType: 'official_page',
+          target: 'discovery',
+          conflicts: [],
+          warnings: projection.warnings,
+          decidedAt: now,
+        }
+      : {
+          schemaVersion: 2,
+          route: 'fallback_to_discovery',
+          origin: 'operator_override',
+          acceptedEvidenceAttemptIds: [],
+          providerIds: [],
+          sourcingGenerationId: generation.id,
+          sourceType: 'official_page',
+          target: 'discovery',
+          conflicts: [],
+          warnings: projection.warnings,
+          decidedAt: now,
+        };
     const res = completeSourcingWithDecision(itemId, decision, 'discovery');
     if (!res.ok) return { ok: false, reason: res.reason, qualified: true, route: null };
-    return { ok: true, qualified: true, route: 'evidence_to_discovery', evidenceHash: projection.evidenceHash };
+    return { ok: true, qualified: true, route: decision.route, evidenceHash: projection.evidenceHash };
   }
 
   const decision: SourcingDecisionV2 = {
@@ -1340,13 +1658,16 @@ export function completeSourcingViaProjection(
  * Audit helper: build the operator-override fallback decision written when a
  * stranded Sourcing item is moved to Discovery.
  */
-function fallbackSourcingDecision(decidedAt: string): SourcingDecision | SourcingDecisionV2 {
+function fallbackSourcingDecision(decidedAt: string, sourcingGenerationId?: string): SourcingDecisionV2 {
   return {
     schemaVersion: 2,
     route: 'fallback_to_discovery',
     origin: 'operator_override',
     acceptedEvidenceAttemptIds: [],
     providerIds: [],
+    ...(sourcingGenerationId ? { sourcingGenerationId } : {}),
+    sourceType: 'official_page',
+    target: 'discovery',
     conflicts: [],
     warnings: [],
     decidedAt,
@@ -1365,19 +1686,27 @@ function fallbackSourcingDecision(decidedAt: string): SourcingDecision | Sourcin
  */
 function applyFallbackTransition(id: string, decidedAt: string): boolean {
   const db = getDb();
+  const generation = getCurrentSourcingGeneration(id);
   const acceptedIds = getCurrentGenerationAcceptedAttemptIds(id);
-  const decision: SourcingDecision | SourcingDecisionV2 = acceptedIds.length > 0
+  const attempts = generation ? getEvidenceAttemptsByItemAndGeneration(id, generation.id) : [];
+  const providerIds = Array.from(new Set(attempts.filter(a => acceptedIds.includes(a.id)).map(a => a.providerId)));
+
+  const hasEvidence = generation && acceptedIds.length > 0 && providerIds.length > 0;
+  const decision: SourcingDecisionV2 = hasEvidence
     ? {
         schemaVersion: 2,
         route: 'evidence_to_discovery',
         origin: 'operator_override',
         acceptedEvidenceAttemptIds: acceptedIds,
-        providerIds: [],
+        providerIds,
+        sourcingGenerationId: generation.id,
+        sourceType: 'official_page',
+        target: 'discovery',
         conflicts: [],
         warnings: [],
         decidedAt,
       }
-    : fallbackSourcingDecision(decidedAt);
+    : fallbackSourcingDecision(decidedAt, generation?.id);
   const result = db.query(
     `UPDATE onboarding_items
      SET sourcing_decision_json = ?, stage = 'discovery', stage_status = 'pending', error_message = NULL,

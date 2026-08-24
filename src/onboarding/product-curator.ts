@@ -23,7 +23,7 @@ import { convertToLbs } from '../shared/weight-converter';
 import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../classification/page-snapshot';
 import { assertClassificationReady } from '../classification/readiness';
 import { coordinateCohortItemsOnce, formatDeterministicTitle } from './cohort-name-coordinator';
-import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
+import { listItemsByBatch, findExtractionDataJsonRowById } from '../db/repositories/onboarding-item-repo';
 import { getDb } from '../db/connection';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../classification/config-loader';
 import { createConfigSnapshot, syncConfigToCache, getPersistedConfigSnapshotId, upsertConfigSnapshot } from '../db/repositories/classification-config-repo';
@@ -47,10 +47,15 @@ import {
   categoryPageProposalsStage,
   productDraftProjectionStage,
 } from '../classification';
+import { valueGapAbstainStage } from '../classification/stages/value-gap-abstain';
+import { getUniversalTierFlags } from '../classification/flags';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { redactTransportText, type ModelPolicyView } from '../classification/model-policy-gateway';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
 import { determineProductGroup } from './product-line-grouper';
+import { listDistinctProductPageNames } from '../db/repositories/page-repo';
+import { packagingOcrStage } from '../classification/stages/packaging-ocr-stage';
+import { getOcrStageFlags } from '../classification/ocr-stage-flags';
 import type { ProductLineItemSnapshot, StageDefinition, PipelineRunResult, ClassificationStageName } from '../classification/types';
 import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
@@ -114,8 +119,48 @@ export function assertCohortSynthesisOrdering(
 // ─── Page Assignment Validation ───────────────────────────────────────────────
 // Species-guard moved to pure module so vitest (no bun:sqlite) can import it.
 import { validatePageAssignmentsBySpecies, validatePageAssignmentsWithProvenance } from '../classification/species-guard';
+import { validateCategoryPageAssignment } from '../classification/category-page-correctness';
 // Re-export for tests that import from curator (back-compat)
 export { validatePageAssignmentsWithProvenance, validatePageAssignmentsBySpecies };
+
+/**
+ * Compose the curation pipeline stage list — the SINGLE composition point
+ * driven by BOTH the legacy per-item worker path (job-queue.processCuration)
+ * AND prepared-cohort member execution (processCohort →
+ * curateItemWithPipeline), so consumer wiring is identical for cohort and
+ * non-cohort runs.
+ *
+ * P2-T6 (packaging-OCR overhaul, ordered consumer migration): the
+ * `packaging_ocr` stage joins the executed list ONLY behind the single master
+ * flag (`BAYSTATE_CMS_PACKAGING_OCR_STAGE_ENABLED`; PI kill-switch dominance
+ * resolved inside the flags). Flag OFF (default) composes exactly today's
+ * seven-stage list byte-identically. When included, the stage runs FIRST
+ * (evidence_extraction declares `requires: ['packaging_ocr']`, honored by
+ * `resolveStageOrder` only while the stage is present) and its fresh output
+ * suppresses evidence_extraction's inline OCR via
+ * `getAuthoritativePackagingOcrStageOutput`. Dual-run comparison happens
+ * INSIDE the stage (`packagingOcrDualRunCompare`); shadow-only inclusion is
+ * additive only (live OCR authority keys untouched).
+ */
+export function composeCurationPipelineStages(): StageDefinition[] {
+  return [
+    ...(getOcrStageFlags().packagingOcrStageEnabled ? [packagingOcrStage] : []),
+    evidenceExtractionStage,
+    nameConsolidationStage,
+    primaryProductTypeStage,
+    attributeApplicabilityStage,
+    productAttributeProposalsStage,
+    // P3 value-production ladder (plan B.P3.3): the flag-gated residual-gap
+    // stage joins ONLY while BAYSTATE_CMS_VALUE_GAP_LLM is on. Flag OFF
+    // (default) composes exactly today's list byte-identically. It runs after
+    // `product_attribute_proposals` (reads its output) and before page
+    // assignment; it never touches promotion gates or stage ordering for the
+    // legacy seven stages.
+    ...(getUniversalTierFlags().valueGapLlmEnabled ? [valueGapAbstainStage] : []),
+    categoryPageProposalsStage,
+    productDraftProjectionStage,
+  ];
+}
 
 /**
  * Runs the modular classification pipeline for a curated item.
@@ -647,16 +692,10 @@ export async function curateItemWithPipeline(
     // reading the onboarding item's extraction_data_json from the DB
     // and producing spreadsheet, web, and visual evidence entries.
 
-    // Run the full modular pipeline including name_consolidation
-    const stages: StageDefinition[] = [
-      evidenceExtractionStage,
-      nameConsolidationStage,
-      primaryProductTypeStage,
-      attributeApplicabilityStage,
-      productAttributeProposalsStage,
-      categoryPageProposalsStage,
-      productDraftProjectionStage,
-    ];
+    // Run the full modular pipeline including name_consolidation. The
+    // packaging_ocr stage joins the list ONLY when the master flag is ON —
+    // see composeCurationPipelineStages (P2-T6 ordered consumer migration).
+    const stages: StageDefinition[] = composeCurationPipelineStages();
 
     const result = await runPipeline(stages, context, {
       sku: item.upc,
@@ -763,9 +802,7 @@ export async function curateItemWithPipeline(
     // once at freeze).
     if (!cohortMode) {
       try {
-        const freshRow = getDb().query(
-          'SELECT extraction_data_json FROM onboarding_items WHERE id = ?',
-        ).get(item.id) as { extraction_data_json: string | null } | undefined;
+        const freshRow = findExtractionDataJsonRowById(item.id);
         if (freshRow?.extraction_data_json) {
           const freshExt = JSON.parse(freshRow.extraction_data_json);
           if (freshExt && typeof freshExt === 'object') {
@@ -782,7 +819,10 @@ export async function curateItemWithPipeline(
           }
         }
       } catch (refreshErr: any) {
-        console.warn(`[ProductCurator] Failed to refresh extraction data: ${refreshErr.message}`);
+        const msg = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
+        console.warn(
+          `[ProductCurator] Post-run OCR/extraction refresh failed (non-blocking) for item ${item.id} (sku/upc ${item.upc}): ${msg}`,
+        );
       }
     }
 
@@ -799,20 +839,50 @@ export async function curateItemWithPipeline(
     // PR3 hardening (Commit B / R2): the live product_pages fallback is a
     // post-freeze semantic read — cohort mode uses ONLY the frozen
     // verifiedPageIds (above), never the mutable page_index.
+    // e09 B2 P12: legacy name-only hard-coded fallback is gated through
+    // category-page-correctness — unverified or semantically incompatible pages abstain (needs_input).
     if (!cohortMode && suggestedPages.length === 0 && (suggestedProductType || item.name)) {
       try {
         const text = `${suggestedProductType || ''} ${item.name}`.toLowerCase();
-        const catalogPages = getDb().query(
-          'SELECT DISTINCT page_name FROM product_pages',
-        ).all() as { page_name: string }[];
-        const allStorePages = catalogPages.map(p => p.page_name);
+        const allStorePages = listDistinctProductPageNames();
+
+        // Frozen verified catalog for validation (from the run's snapshot, not live DB names)
+        const verifiedRecords = runtimeSnapshot.pages?.state === 'verified'
+          ? runtimeSnapshot.pages.records
+          : undefined;
+        const catalogForValidation = (verifiedRecords ?? [])
+          .filter(r => r.verified !== false)
+          .map(r => ({ id: r.pageId, name: r.pageName, parentId: r.parentPageId ?? null }));
+        const pageIdByName = new Map(catalogForValidation.map(r => [r.name.toLowerCase(), r.id] as const));
+        const canPushPageName = (name: string): boolean => {
+          if (!pageIdByName.has(name.toLowerCase())) return false;
+          if (catalogForValidation.length === 0) return false;
+          const pid = pageIdByName.get(name.toLowerCase())!;
+          const result = validateCategoryPageAssignment({
+            member: {
+              onboardingItemId: item.id,
+              frozenEvidenceHash: `fallback:${item.id}`,
+              frozenEvidence: {
+                title: item.name,
+                description: item.extractionData?.description ?? null,
+                productType: suggestedProductType,
+                species: ext?.packagingOcrData?.species ?? [],
+                form: ext?.packagingOcrData?.productForm ?? null,
+              },
+            },
+            candidate: { primaryPageId: pid, secondaryPageIds: [], primaryPageName: name },
+            verifiedPageCatalog: catalogForValidation,
+            activePageImportHash: runtimeSnapshot.pageImportHash ?? 'unknown',
+          });
+          return result.valid && result.outcome === 'assigned';
+        };
 
         if (text.includes('chew') || text.includes('dog treat')) {
-          if (allStorePages.includes('Dog Treats Bones Bully Sticks & Natural Chews')) suggestedPages.push('Dog Treats Bones Bully Sticks & Natural Chews');
-          if (allStorePages.includes('Dog Treats Shop All')) suggestedPages.push('Dog Treats Shop All');
+          if (allStorePages.includes('Dog Treats Bones Bully Sticks & Natural Chews') && canPushPageName('Dog Treats Bones Bully Sticks & Natural Chews')) suggestedPages.push('Dog Treats Bones Bully Sticks & Natural Chews');
+          if (allStorePages.includes('Dog Treats Shop All') && canPushPageName('Dog Treats Shop All')) suggestedPages.push('Dog Treats Shop All');
         } else if (text.includes('churu') || text.includes('cat food') || text.includes('entree') || text.includes('mousse') || text.includes('gravy')) {
-          if (allStorePages.includes('Cat Food Wet')) suggestedPages.push('Cat Food Wet');
-          if (allStorePages.includes('Cat Food Shop All')) suggestedPages.push('Cat Food Shop All');
+          if (allStorePages.includes('Cat Food Wet') && canPushPageName('Cat Food Wet')) suggestedPages.push('Cat Food Wet');
+          if (allStorePages.includes('Cat Food Shop All') && canPushPageName('Cat Food Shop All')) suggestedPages.push('Cat Food Shop All');
         }
         suggestedPages.splice(5);
       } catch {

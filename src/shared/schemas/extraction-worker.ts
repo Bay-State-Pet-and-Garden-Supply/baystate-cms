@@ -2,7 +2,18 @@
 
 import { z } from 'zod';
 import { ExtractionDataSchema } from './onboarding';
-import { NetworkCaptureArtifactSchema } from '../../product-intelligence/assets/schema';
+
+
+// ─── Network capture artifact (relocated from product-intelligence/assets/schema.ts, ADR-0030 PR 1.3) ───
+
+/** A #29-style captured network response (JSON body only, no raw payloads). */
+export const NetworkCaptureArtifactSchema = z.object({
+  url: z.string().url(),
+  status: z.number().int().nullish(),
+  responseContentType: z.string().nullish(),
+  jsonBody: z.unknown().nullish(),
+});
+export type NetworkCaptureArtifact = z.infer<typeof NetworkCaptureArtifactSchema>;
 
 
 // ─── Capabilities ──────────────────────────────────────────────────────────────

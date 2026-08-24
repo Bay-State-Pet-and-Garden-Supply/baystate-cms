@@ -9,7 +9,6 @@ import { listItemsByBatch, completePromotionStage, findItemById } from '../db/re
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
 import { getReviewState, type OnboardingReviewState } from '../db/repositories/onboarding-review-repo';
 import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
-import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
 import {
@@ -267,6 +266,11 @@ function computePromotionGate(
     acceptedProposals: activeProposals,
     dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
     currentAuthorityHashes,
+    // e09 B3 (P11): CURRENT verified Page identities of the active import —
+    // an accepted category_page proposal that no longer resolves into this
+    // set refuses the item before any draft write. Legacy items (no run
+    // pointer) never reach the check inside the gate.
+    verifiedPageIds: new Set(listVerifiedPageOptions(workspaceId).map(page => page.id)),
   });
   if (!gate.ok) {
     return {
@@ -611,9 +615,9 @@ export async function promoteItems(
           );
         })
         .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
           console.warn(
-            `[DraftPromoter] Distributor imagery verification failed for ${item.upc} (non-blocking): ` +
-              `${err instanceof Error ? err.message : String(err)}`,
+            `[DraftPromoter] Distributor imagery verification failed for item ${item.id} (${item.upc}) (non-blocking): ${msg}`,
           );
         });
     }
@@ -643,7 +647,6 @@ export async function promoteItems(
     // including accepted/current-generation ones — contribute ZERO commerce
     // downloads. The `item_id OR lookup_upc` evidence query is DELETED; only
     // official extracted images (extractionData.primaryImage/additionalImages)
-    // and the separately verified PI-import gate (verifyImportedResultGate)
     // may reach the downloader. Distributor images reach commerce ONLY
     // through explicit APPROVALS (Amendment B addendum 3, store-owner
     // opt-in 2026-08-15): the materializer writes rights-attested approvals
@@ -660,14 +663,56 @@ export async function promoteItems(
           .filter((u): u is string => typeof u === 'string' && u.length > 0)
       : [];
 
+    // e10s04: the reviewer's persisted media selection (curation_data.
+    // reviewedMedia, written only by PUT /items/:id/media after candidate-set
+    // validation) wins FIRST; the chain below is byte-identical to the
+    // pre-e10s04 behavior when no selection exists. Suppressed URLs are
+    // removed from consideration (OVERWRITE semantics); a distributor primary
+    // designation is honored only while it remains an approved URL.
+    const reviewedMedia = (item.curationData as { reviewedMedia?: { primaryImage?: string | null; orderedAdditional?: string[]; suppressed?: string[] } | null } | null | undefined)?.reviewedMedia ?? null;
+    const suppressedUrls = new Set(reviewedMedia?.suppressed ?? []);
+    let downloaderPrimary: string | null;
+    let downloaderAdditional: string[];
+    if (isDistributorSource) {
+      const approvedUnsuppressed = distributorApprovedImages.filter((u) => !suppressedUrls.has(u));
+      const designated = reviewedMedia?.primaryImage ?? null;
+      downloaderPrimary = designated && approvedUnsuppressed.includes(designated)
+        ? designated
+        : (approvedUnsuppressed[0] ?? null);
+      downloaderAdditional = approvedUnsuppressed.filter((u) => u !== downloaderPrimary);
+    } else {
+      const orderedSelection = (reviewedMedia?.orderedAdditional ?? []).filter(
+        (u) => typeof u === 'string' && u.length > 0 && !suppressedUrls.has(u),
+      );
+      const fallbackAdditional = (extractionData.additionalImages || []).filter(
+        (u): u is string => !suppressedUrls.has(u),
+      );
+      // Suppression removes a URL from consideration ENTIRELY (OVERWRITE
+      // semantics): neither the designated primary nor the extraction
+      // fallback may resolve to a suppressed URL, or hiding the current
+      // primary would still ship it as the commerce image.
+      const designated = reviewedMedia?.primaryImage ?? null;
+      const designatedPrimary =
+        designated && !suppressedUrls.has(designated) ? designated : null;
+      const extractionPrimary =
+        typeof extractionData.primaryImage === 'string' && extractionData.primaryImage.length > 0
+          ? extractionData.primaryImage
+          : null;
+      const fallbackPrimary =
+        extractionPrimary && !suppressedUrls.has(extractionPrimary) ? extractionPrimary : null;
+      downloaderPrimary = designatedPrimary || fallbackPrimary;
+      downloaderAdditional =
+        orderedSelection.length > 0 ? orderedSelection : fallbackAdditional;
+    }
+
     try {
       const processed = await downloadAndProcessImages(
         workspacePath,
         item.upc,
         brandFolder,
         imageStem,
-        isDistributorSource ? (distributorApprovedImages[0] ?? null) : extractionData.primaryImage ?? null,
-        isDistributorSource ? distributorApprovedImages.slice(1) : [...(extractionData.additionalImages || [])],
+        downloaderPrimary,
+        downloaderAdditional.filter((u) => u !== downloaderPrimary),
       );
       processedImagesMap.set(item.id, processed);
     } catch (err) {
@@ -722,18 +767,10 @@ export async function promoteItems(
       // only keeps the type narrow.
       if (!extractionData) continue;
 
-      // ── Imported Agent Lab result gate (PI-8) ─────────────────────────
-      // An item whose extraction data carries imported PI evidence is only
-      // promotable while its origin is verifiable: the run exists, the
-      // result hash matches, and the import record is active.
-      const importGate = verifyImportedResultGate(item);
-      if (!importGate.ok) {
-        const errMsg = importGate.error;
-        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
-        completePromotionStage(item.id, false, errMsg);
-        failures.push({ itemId: item.id, error: errMsg });
-        continue;
-      }
+      // ── Imported Agent Lab result gate — RETIRED (ADR-0030 Phase 4) ────
+      // The PI runs/results/imports tables are dropped; promotion proceeds on
+      // approvals-based gating alone. Historical imported-evidence items were
+      // verified at every promotion attempt while the gate existed.
 
       // Determine if product already exists
       const existingApproved = readProductFile(workspacePath, item.upc);

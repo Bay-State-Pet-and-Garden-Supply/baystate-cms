@@ -33,6 +33,9 @@ import {
   listItemsByBatch,
   findItemById,
   updateItemExtractionData,
+  advanceReviewedItemsToPromotion,
+  advanceItemsToNextStage,
+  completeReviewStage,
 } from '../../db/repositories/onboarding-item-repo';
 import { insertExtraction } from '../../db/repositories/onboarding-extraction-repo';
 import {
@@ -52,10 +55,12 @@ import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-sta
 import { computeClassificationBundleHash } from '../../classification/config-validation';
 import { freezeCohortForExecution, processCohort } from '../../onboarding/cohort-curator';
 import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
-import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
+import { validateReviewCompletionGate, validateItemCategoryPagesAssigned } from '../../classification/review-completion-gate';
+import { validatePromotionGate } from '../../classification/promotion-gate';
+import type { PromotionGateInput } from '../../classification/promotion-gate';
+import type { ClassificationRunRow } from '../../db/repositories/classification-run-repo';
 import {
   validateMemberSemantics,
-  validateMemberLocalAttributes,
   validateCohortBrandCoherence,
 } from '../../classification/cohort-semantic-validator';
 import { clearCohortCoordinationCache } from '../../onboarding/cohort-name-coordinator';
@@ -76,7 +81,7 @@ import type { OnboardingItem, CurationData } from '../../shared/schemas/onboardi
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
 import type { InsertItemData } from '../../db/repositories/onboarding-item-repo';
 import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
-import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
+import { getActivePageImportHash, listVerifiedPageOptions } from '../../db/repositories/page-repo';
 import { OnboardingWorker } from '../../onboarding/job-queue';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import type { OnboardingEvent } from '../../onboarding/sse-emitter';
@@ -85,7 +90,7 @@ import type { OnboardingEvent } from '../../onboarding/sse-emitter';
 
 let auditCallSeq = 0;
 
-const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme'];
+const PAGE_NAMES = ['Dog Food Dry', 'Dog Food Canned', 'Brand - Acme'];
 
 function pageListFromPrompt(prompt: string): Array<{ id: string; name: string }> {
   const matches = [...prompt.matchAll(/\[ID:([^\]]+)\]\s+([^\n(]+)/g)];
@@ -378,7 +383,7 @@ const THREE_MEMBER_EXTRACTIONS = {
 function activateVerifiedPages(wsId: string): void {
   const pages = [
     { key: 'dog-food-dry', name: 'Dog Food Dry' },
-    { key: 'dog-treats', name: 'Dog Treats' },
+    { key: 'dog-food-canned', name: 'Dog Food Canned' },
     { key: 'brand-acme', name: 'Brand - Acme' },
   ];
   activatePageImportFromRecords({
@@ -657,6 +662,52 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
       activeRunId: memberOne.curationData!.classificationRunId!,
     });
     expect(gate.ok).toBe(true);
+  });
+
+  it('e09 B3 (T9/P10): a MISSING persisted gate record fails review closed (corruption, never review-ready)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member);
+    const baseCuration = member.curationData!;
+
+    // T9: a cohort-coordinated title WITHOUT its familyTitleValidation record
+    // is corruption — the review gate must refuse, not pass through.
+    const withoutTitleValidation = { ...baseCuration } as Record<string, unknown>;
+    delete withoutTitleValidation.familyTitleValidation;
+    getDb().run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [
+      JSON.stringify(withoutTitleValidation),
+      member.id,
+    ]);
+    const titleGate = validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: member.id,
+      productSku: member.upc,
+      activeRunId: baseCuration.classificationRunId!,
+    });
+    expect(titleGate.ok).toBe(false);
+    if (!titleGate.ok) expect(titleGate.code).toBe('title_validation_missing');
+
+    // Restore the title record, then strip the Page decision record (P10).
+    // The page target is enabled in this fixture's frozen snapshot, so a
+    // missing decision refuses; if the fixture's snapshot has no page target
+    // the title record is present again and the earlier checks hold instead.
+    const withoutPageDecision = { ...baseCuration } as Record<string, unknown>;
+    delete withoutPageDecision.pageDecisionStatus;
+    getDb().run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [
+      JSON.stringify(withoutPageDecision),
+      member.id,
+    ]);
+    const pageGate = validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: member.id,
+      productSku: member.upc,
+      activeRunId: baseCuration.classificationRunId!,
+    });
+    expect(pageGate.ok).toBe(false);
   });
 
   it('sibling Page differences + title variant differences => PASS (each member matches its OWN durable output; never sibling equality)', async () => {
@@ -1035,7 +1086,12 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
       'startedAt', 'endedAt', 'extractedAt', 'snapshotHash', 'evidenceIds',
       'supportingEvidenceIds', 'contradictingEvidenceIds', 'currentDecisionId',
       'classificationRunId', 'classificationConfigSnapshot', 'classificationHistory',
-      'verifiedPageIdSet', 'verifiedPageCount', 'pageSnapshot', 'snapshot', 'taxonomyProvenance',
+      'verifiedPageIdSet', 'verifiedPageCount', 'pageSnapshot', 'snapshot',
+      // taxonomyProvenance (product-curator.ts:986) writes per-workspace
+      // activation identity: bundleHash/bundleVersion differ on every run and
+      // are non-deterministic across executions — normalized out like the
+      // other volatile identity fields.
+      'bundleHash', 'bundleVersion',
     ]);
     const stripVolatile = (value: unknown): unknown => {
       if (Array.isArray(value)) return value.map(stripVolatile);
@@ -1217,7 +1273,19 @@ describe('PR9 review R2 — active review authority gate + coordinated correspon
   it('R2-A: a legacy non-cohort child is byte-identical — absent semanticValidation proceeds (no parent checks)', async () => {
     // The gate's legacy path (cohort_run_id NULL) is EXACTLY today's behavior:
     // an absent semanticValidation key proceeds and no parent checks run.
+    // The universal Category Page requirement still applies (operator
+    // mandate), so the fixture activates a verified Page import and assigns
+    // one verified page.
     const { workspaceId } = newWorkspace();
+    activatePageImportFromRecords({
+      workspaceId,
+      sourceHash: sha256Hex('pr9-r2a-pages'),
+      parserFormatVersion: 'pages-xml-1',
+      records: [
+        { identity: { kind: 'exported_guid' as const, key: 'dog-food-dry', status: 'verified' as const }, name: 'Dog Food Dry', parentRef: null, availability: 'available' as const },
+      ],
+      activatedBy: 'test',
+    });
     const batchId = createBatch({ workspaceId, name: 'R2 Legacy Batch', fileName: 'legacy.xlsx', totalItems: 1 }).id;
     const [item] = insertItems(batchId, [
       { upc: '900000000001', name: 'Acme Legacy Item', brandHint: 'Acme', rowNumber: 1, stage: 'review' as const, stageStatus: 'pending' as const },
@@ -1228,7 +1296,7 @@ describe('PR9 review R2 — active review authority gate + coordinated correspon
     );
     getDb().run(
       'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
-      [JSON.stringify({ curatedTitle: 'Legacy Title', classificationRunId: 'r2-legacy-run' }), item.id],
+      [JSON.stringify({ curatedTitle: 'Legacy Title', classificationRunId: 'r2-legacy-run', suggestedPages: ['Dog Food Dry'] }), item.id],
     );
     // Seed one decided proposal so the gate reaches ok.
     getDb().run(
@@ -1340,5 +1408,451 @@ describe('PR9 review R2 — active review authority gate + coordinated correspon
     });
     expect(twoIds.status).toBe('blocked');
     expect(twoIds.findings.every(f => f.code === 'family_brand')).toBe(true);
+  });
+});
+
+// ─── e09 Phase C — T9/P10 gate codes, reviewer corrections, stale-import ─────
+
+/** Overwrite one key of the member's committed curation JSON. */
+function mutateCuration(member: OnboardingItem, mutate: (curation: Record<string, unknown>) => void): void {
+  const fresh = findItemById(member.id)!;
+  const copy = { ...(fresh.curationData ?? {}) } as Record<string, unknown>;
+  mutate(copy);
+  getDb().run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [JSON.stringify(copy), member.id]);
+}
+
+function reviewGate(wsId: string, member: OnboardingItem) {
+  return validateReviewCompletionGate({
+    workspaceId: wsId,
+    onboardingItemId: member.id,
+    productSku: member.upc,
+    activeRunId: member.curationData!.classificationRunId!,
+  });
+}
+
+describe('e09 Phase C — review-completion gate codes + corrections (T9/P10)', () => {
+  afterEach(() => {
+    resetCohortCurationFlagsOverride();
+    clearCohortCoordinationCache();
+    clearCohortPageCoordinationCache();
+  });
+
+  it('T9 codes: malformed familyTitleValidation refuses title_validation_malformed; a committed BLOCKED record refuses title_validation_blocked', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member);
+
+    // Malformed: version is not a string → schema parse fails.
+    mutateCuration(member, curation => {
+      curation.familyTitleValidation = { status: 'passed', version: 123 };
+    });
+    const malformed = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(malformed.ok).toBe(false);
+    if (!malformed.ok) expect(malformed.code).toBe('title_validation_malformed');
+
+    // Blocked representable status (schema widened in B3): producer never
+    // commits it today, but the gate must refuse it if present.
+    mutateCuration(member, curation => {
+      curation.familyTitleValidation = { status: 'blocked', version: 'v1', source: 'llm_cohort' };
+    });
+    const blocked = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.code).toBe('title_validation_blocked');
+  });
+
+  it('P10 codes: missing decision record AND abstained decision each refuse with THAT code', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    // NOTE: deliberately NO reviewer decisions here — an accepted verified
+    // category_page proposal would trigger the adjudication #10 correction
+    // path instead of the plain refusal codes these assertions pin.
+
+    // Missing record (strengthens the earlier ok:false-only assertion).
+    mutateCuration(member, curation => {
+      delete curation.pageDecisionStatus;
+    });
+    const missing = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.code).toBe('page_decision_missing');
+
+    // Abstained WITHOUT any reviewer-accepted verified page → refused with
+    // the specific code (adjudication #6: abstention blocks Review).
+    mutateCuration(member, curation => {
+      curation.pageDecisionStatus = { status: 'abstained' };
+    });
+    const abstained = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(abstained.ok).toBe(false);
+    if (!abstained.ok) expect(abstained.code).toBe('page_decision_abstained');
+  });
+
+  it('adjudication #10: an abstained decision + reviewer-ACCEPTED verified category_page proposal completes review (plain target)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member); // accepts every proposal incl. category_page → targets are VERIFIED ids
+
+    mutateCuration(member, curation => {
+      curation.pageDecisionStatus = { status: 'abstained' };
+    });
+    // The accepted proposals resolve into the active verified import →
+    // the manual correction satisfies the gate despite the abstention.
+    const corrected = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(corrected.ok).toBe(true);
+  });
+
+  it('adjudication #10 REVISED variant: correction honored via revised_target_id (COALESCE semantics), not the original target', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member);
+    const runId = member.curationData!.classificationRunId!;
+    const verifiedIds = new Set(listVerifiedPageOptions(workspaceId).map(row => row.id));
+    const revisedTarget = listVerifiedPageOptions(workspaceId).find(row => row.name === 'Dog Food Dry')!.id;
+
+    // Corrupt every ORIGINAL predicted target so nothing resolves anymore…
+    getDb().run(
+      "UPDATE classification_proposals SET target_id = 'page-bogus-original' WHERE run_id = ? AND proposal_type = 'category_page'",
+      [runId],
+    );
+    mutateCuration(member, curation => {
+      curation.pageDecisionStatus = { status: 'abstained' };
+    });
+    // …without a revision the abstained refusal stands.
+    const beforeRevision = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(beforeRevision.ok).toBe(false);
+    if (!beforeRevision.ok) expect(beforeRevision.code).toBe('page_decision_abstained');
+
+    // …then the reviewer REVISES ONE page proposal onto a current verified ID.
+    const pageProposal = getDb().query(
+      "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'category_page' ORDER BY rowid LIMIT 1",
+    ).get(runId) as { id: string };
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, revised_target_id, has_revised_target, created_at)
+       VALUES (?, ?, 'accepted', ?, 1, ?)`,
+      [`phasec-revision-${pageProposal.id}`, pageProposal.id, revisedTarget, new Date().toISOString()],
+    );
+    // The REVISED (current) id is what gets validated — gate passes.
+    const afterRevision = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(afterRevision.ok).toBe(true);
+    expect(verifiedIds.has(revisedTarget)).toBe(true);
+  });
+
+  it('P10 fail-open regression: an ASSIGNED decision whose accepted pages were ALL rejected by the reviewer refuses page_decision_missing', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    // Accept non-page proposals; REJECT every category_page proposal.
+    const proposals = getDb().query(
+      'SELECT id, proposal_type FROM classification_proposals WHERE run_id = ?',
+    ).all(member.curationData!.classificationRunId!) as Array<{ id: string; proposal_type: string }>;
+    const now = new Date().toISOString();
+    for (const proposal of proposals) {
+      if (proposal.proposal_type === 'reviewable_abstention') continue;
+      const decision = proposal.proposal_type === 'category_page' ? 'rejected' : 'accepted';
+      getDb().run(
+        `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, decision_key, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [`phasec-decision-${proposal.id}`, proposal.id, decision, `phasec-key-${proposal.id}`, now],
+      );
+    }
+    mutateCuration(member, curation => {
+      curation.pageDecisionStatus = { status: 'assigned' };
+    });
+    const gate = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.code).toBe('page_decision_missing');
+      expect(gate.reason).toMatch(/no reviewer-accepted/i);
+    }
+  });
+});
+
+describe('e09 Phase C — stale import between Review and Promotion (P10+P11 defense-in-depth)', () => {
+  afterEach(() => {
+    resetCohortCurationFlagsOverride();
+    clearCohortCoordinationCache();
+    clearCohortPageCoordinationCache();
+  });
+
+  it('approved under import N; import N+1 activates; BOTH gates refuse before any draft write', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member);
+
+    // Positive controls under import N: review completes; promotion passes.
+    expect(reviewGate(workspaceId, findItemById(items[0].id)!).ok).toBe(true);
+
+    const stored = findItemById(items[0].id)!;
+    const runId = stored.curationData!.classificationRunId!;
+    const promotionGateFor = (): ReturnType<typeof validatePromotionGate> => {
+      const runRow = getDb().query('SELECT id, workspace_id, status, cohort_run_id FROM classification_runs WHERE id = ?')
+        .get(runId) as { id: string; workspace_id: string; status: string; cohort_run_id: string };
+      const parentRow = getDb().query('SELECT id, workspace_id, status FROM classification_cohort_runs WHERE id = ?')
+        .get(runRow.cohort_run_id) as { id: string; workspace_id: string; status: string };
+      const proposalRows = getDb().query(
+        "SELECT id, proposal_type, target_id, proposed_value_json FROM classification_proposals WHERE run_id = ?",
+      ).all(runId) as Array<{ id: string; proposal_type: string; target_id: string | null; proposed_value_json: string | null }>;
+      return validatePromotionGate({
+        workspaceId,
+        itemId: stored.id,
+        productSku: stored.upc,
+        curationData: stored.curationData!,
+        activeRun: {
+          id: runRow.id,
+          workspaceId: runRow.workspace_id,
+          status: runRow.status,
+          cohortRunId: runRow.cohort_run_id,
+        } as unknown as ClassificationRunRow,
+        parentRun: {
+          id: parentRow.id,
+          workspaceId: parentRow.workspace_id,
+          status: parentRow.status,
+        } as unknown as PromotionGateInput['parentRun'],
+        effectiveTypeId: 'dog-food-dry',
+        acceptedProposals: proposalRows.map(row => ({
+          id: row.id,
+          proposalType: row.proposal_type,
+          targetId: row.target_id,
+          proposedValue: row.proposed_value_json ? JSON.parse(row.proposed_value_json) : null,
+          hasRevisedValue: false,
+        })) as PromotionGateInput['acceptedProposals'],
+        dependencyLookup: () => [],
+        verifiedPageIds: new Set(listVerifiedPageOptions(workspaceId).map(row => row.id)),
+      });
+    };
+    expect(promotionGateFor()).toEqual({ ok: true });
+
+    // Import N+1 activates with DISJOINT pages — every committed identity goes stale.
+    activatePageImportFromRecords({
+      workspaceId,
+      sourceHash: sha256Hex('pr9-phasec-pages-N2'),
+      parserFormatVersion: 'pages-xml-1',
+      records: [
+        { identity: { kind: 'exported_guid' as const, key: 'wet-dog-food', status: 'verified' as const }, name: 'Wet Dog Food', parentRef: null, availability: 'available' as const },
+      ],
+      activatedBy: 'test',
+    });
+
+    // P10: review can no longer complete on the stale assignment (the P10
+    // durable-decision gate fires before the universal name-level page check).
+    const staleReview = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(staleReview.ok).toBe(false);
+    if (!staleReview.ok) expect(staleReview.code).toBe('page_decision_stale');
+
+    // P11: promotion refuses BEFORE any draft write.
+    const stalePromotion = promotionGateFor();
+    expect(stalePromotion.ok).toBe(false);
+    if (!stalePromotion.ok) {
+      expect(stalePromotion.code).toBe('stale_page_assignment');
+      expect(stalePromotion.reason).toMatch(/P11/);
+    }
+  });
+
+  it('round-3 FIX 1: correctedCategoryPage RECORD seam — current ID+hash resolves an abstained decision; stale hash and malformed records refuse', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    // Accept every NON-page proposal; REJECT every category_page proposal so
+    // the accepted-proposal correction path is unavailable — only the
+    // correctedCategoryPage RECORD can resolve the abstention.
+    const proposals = getDb().query(
+      'SELECT id, proposal_type FROM classification_proposals WHERE run_id = ?',
+    ).all(member.curationData!.classificationRunId!) as Array<{ id: string; proposal_type: string }>;
+    const now = new Date().toISOString();
+    for (const proposal of proposals) {
+      if (proposal.proposal_type === 'reviewable_abstention') continue;
+      const decision = proposal.proposal_type === 'category_page' ? 'rejected' : 'accepted';
+      getDb().run(
+        `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, decision_key, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [`fix1-decision-${proposal.id}`, proposal.id, decision, `fix1-key-${proposal.id}`, now],
+      );
+      // Mirror the real decision service: the durable decision AND the
+      // proposal status move together (a pending proposal blocks review).
+      getDb().run('UPDATE classification_proposals SET status = ? WHERE id = ?', [decision, proposal.id]);
+    }
+
+    const currentHash = getActivePageImportHash(workspaceId);
+    expect(currentHash).toBeTruthy();
+    const verifiedId = listVerifiedPageOptions(workspaceId)[0].id;
+
+    // Abstained WITHOUT any record → plain refusal (baseline).
+    mutateCuration(member, curation => {
+      curation.pageDecisionStatus = { status: 'abstained' };
+    });
+    const baseline = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(baseline.ok).toBe(false);
+    if (!baseline.ok) expect(baseline.code).toBe('page_decision_abstained');
+
+    // MALFORMED record → never satisfies the abstention (fail closed).
+    mutateCuration(member, curation => {
+      curation.correctedCategoryPage = { pageId: 123 };
+    });
+    const malformed = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(malformed.ok).toBe(false);
+    if (!malformed.ok) expect(malformed.code).toBe('page_decision_abstained');
+
+    // STALE hash (recorded against a superseded import) → page_decision_stale.
+    mutateCuration(member, curation => {
+      curation.correctedCategoryPage = { pageId: verifiedId, activePageImportHash: 'dead-import-hash', correctedAt: now };
+    });
+    const staleHash = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(staleHash.ok).toBe(false);
+    if (!staleHash.ok) expect(staleHash.code).toBe('page_decision_stale');
+
+    // Current hash but an ID OUTSIDE the verified import → page_decision_stale.
+    mutateCuration(member, curation => {
+      curation.correctedCategoryPage = { pageId: 'page-not-in-import', activePageImportHash: currentHash!, correctedAt: now };
+    });
+    const unverifiedId = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(unverifiedId.ok).toBe(false);
+    if (!unverifiedId.ok) expect(unverifiedId.code).toBe('page_decision_stale');
+
+    // CURRENT verified ID + CURRENT import hash → the correction resolves the
+    // abstained decision and review completes (adjudication #10).
+    mutateCuration(member, curation => {
+      curation.correctedCategoryPage = { pageId: verifiedId, activePageImportHash: currentHash!, correctedAt: now };
+    });
+    const resolved = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(resolved.ok).toBe(true);
+  });
+});
+
+describe('Universal Category Page assignment requirement (operator mandate)', () => {
+  afterEach(() => {
+    resetCohortCurationFlagsOverride();
+    clearCohortCoordinationCache();
+    clearCohortPageCoordinationCache();
+  });
+
+  it('review gate refuses missing_category_page when committed curation carries no suggestedPages', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member);
+    // Positive control: with pages assigned, review completes.
+    expect(reviewGate(workspaceId, findItemById(items[0].id)!).ok).toBe(true);
+
+    mutateCuration(member, curation => {
+      delete curation.suggestedPages;
+    });
+    const missing = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.code).toBe('missing_category_page');
+      expect(missing.reason).toMatch(/category page/i);
+    }
+  });
+
+  it('review gate refuses unverified_category_page when an assigned name does not resolve into the current verified import', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member);
+    mutateCuration(member, curation => {
+      curation.suggestedPages = ['Renamed Or Removed Page'];
+    });
+    const unverified = reviewGate(workspaceId, findItemById(items[0].id)!);
+    expect(unverified.ok).toBe(false);
+    if (!unverified.ok) {
+      expect(unverified.code).toBe('unverified_category_page');
+      expect(unverified.reason).toMatch(/Renamed Or Removed Page/);
+    }
+  });
+
+  it('shared helper: absent/empty assignments refuse; verified names pass; non-string entries refuse', () => {
+    const { workspaceId } = newWorkspace();
+    activatePageImportFromRecords({
+      workspaceId,
+      sourceHash: sha256Hex('pr9-universal-pages'),
+      parserFormatVersion: 'pages-xml-1',
+      records: [
+        { identity: { kind: 'exported_guid' as const, key: 'dog-food-dry', status: 'verified' as const }, name: 'Dog Food Dry', parentRef: null, availability: 'available' as const },
+      ],
+      activatedBy: 'test',
+    });
+
+    const forData = (curationData: unknown) =>
+      validateItemCategoryPagesAssigned({ workspaceId, curationData });
+
+    const nullResult = forData(null);
+    expect(nullResult?.ok).toBe(false);
+    if (nullResult && !nullResult.ok) expect(nullResult.code).toBe('missing_category_page');
+
+    const emptyResult = forData({ suggestedPages: [] });
+    expect(emptyResult?.ok).toBe(false);
+    if (emptyResult && !emptyResult.ok) expect(emptyResult.code).toBe('missing_category_page');
+
+    expect(forData({ suggestedPages: ['Dog Food Dry'] })).toBeNull();
+
+    const nonString = forData({ suggestedPages: [42] });
+    expect(nonString?.ok).toBe(false);
+    if (nonString && !nonString.ok) expect(nonString.code).toBe('unverified_category_page');
+
+    const unknownName = forData({ suggestedPages: ['Dog Food Dry', 'Ghost Page'] });
+    expect(unknownName?.ok).toBe(false);
+    if (unknownName && !unknownName.ok) expect(unknownName.code).toBe('unverified_category_page');
+  });
+
+  it('advanceReviewedItemsToPromotion refuses pageless review/completed rows before approval', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+
+    const member = findItemById(items[0].id)!;
+    decideAllProposals(member);
+    expect(advanceItemsToNextStage([member.id]).advanced).toBe(1);
+    completeReviewStage(member.id);
+
+    getDb().run(
+      `UPDATE onboarding_items SET curation_data_json = json_set(curation_data_json, '$.suggestedPages', json_array()) WHERE id = ?`,
+      [member.id],
+    );
+    const refusedPageless = advanceReviewedItemsToPromotion([member.id]);
+    expect(refusedPageless.advanced).toEqual([]);
+    expect(refusedPageless.refused[0]?.itemId).toBe(member.id);
+    expect(refusedPageless.refused[0]?.reason).toMatch(/missing_category_page/);
+
+    // Restoring the assignment unblocks approval.
+    const stored = findItemById(member.id)!;
+    getDb().run(
+      `UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?`,
+      [JSON.stringify({ ...stored.curationData!, suggestedPages: ['Dog Food Dry'] }), member.id],
+    );
+    const approvedAfterFix = advanceReviewedItemsToPromotion([member.id]);
+    expect(approvedAfterFix.advanced).toEqual([member.id]);
+    expect(approvedAfterFix.refused).toEqual([]);
   });
 });

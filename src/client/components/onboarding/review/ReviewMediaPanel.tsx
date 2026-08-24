@@ -33,7 +33,7 @@ export function ReviewMediaPanel({ workState, detail, onOpenLightbox }: ReviewMe
   // Distributor records carry rights-attested approvals (Amendment B addendum
   // 3) instead of primaryImage/additionalImages — render those so the
   // operator can actually SEE the product during review.
-  const primary = ext?.primaryImage ?? approved?.primary ?? null;
+  const primary = ext?.primaryImage ?? approved?.primary ?? workState.imageUrl ?? null;
   const additional = (ext?.additionalImages ?? []).filter(url => url !== primary);
   for (const url of approved?.additional ?? []) {
     if (url !== primary && !additional.includes(url)) additional.push(url);
@@ -51,15 +51,15 @@ export function ReviewMediaPanel({ workState, detail, onOpenLightbox }: ReviewMe
           <button
             type="button"
             className="rv-image-tile"
-            style={{ width: 220, height: 220, cursor: 'zoom-in', border: 'none', padding: 0 }}
+            style={{ width: 220, height: 220, cursor: 'zoom-in', border: '1px solid var(--color-card-border)', padding: '4px', background: 'var(--color-feed-bag-cream)', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 'var(--rounded-lg)', overflow: 'hidden' }}
             onClick={() => onOpenLightbox(primary, `${provenance}${hostOf(primary) ? ` — ${hostOf(primary)}` : ''}`)}
             aria-label={`Open primary image: ${hostOf(primary) ?? primary}`}
           >
             <img
               src={primary}
-              alt={`${workState.name} primary image`}
+              alt={`${workState.curatedTitle || workState.name} primary image`}
               className="rv-primary-image"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             />
           </button>
         ) : (
@@ -81,14 +81,14 @@ export function ReviewMediaPanel({ workState, detail, onOpenLightbox }: ReviewMe
                   key={`${url}-${idx}`}
                   type="button"
                   className="rv-image-tile"
-                  style={{ padding: 0, border: '1px solid var(--color-card-border)' }}
+                  style={{ padding: '2px', border: '1px solid var(--color-card-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--color-feed-bag-cream)', overflow: 'hidden' }}
                   onClick={() => onOpenLightbox(url, `Additional image ${idx + 1}${hostOf(url) ? ` — ${hostOf(url)}` : ''}`)}
                   aria-label={`Open additional image ${idx + 1}`}
                 >
                   <img
                     src={url}
-                    alt={`${workState.name} additional image ${idx + 1}`}
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 6 }}
+                    alt={`${workState.curatedTitle || workState.name} additional image ${idx + 1}`}
+                    style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: 4 }}
                   />
                 </button>
               ))}

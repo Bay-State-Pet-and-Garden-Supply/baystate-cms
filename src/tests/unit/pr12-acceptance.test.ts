@@ -77,6 +77,7 @@ import {
   ClassificationFocusedFileNames,
 } from '../../shared/schemas/classification';
 import type { ModelCallContext } from '../../classification/model-operation-registry';
+import { MODEL_OPERATION_REGISTRY_VERSION } from '../../classification/model-operation-registry';
 import type { CohortRun, CurationCohort } from '../../shared/schemas/cohorts';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
@@ -761,7 +762,8 @@ describe('PR12 C6 — registry-version fail-closed (issue #30, DECISION-B)', () 
     const snapshot = JSON.parse(row.config_json) as {
       modelExecutionPlan: { version: number; registryVersion: number; entries: unknown[]; digest?: string };
     };
-    expect(snapshot.modelExecutionPlan.registryVersion).toBe(2);
+    // P3: registry bumped 2 → 3 (value_gap_resolution); pin to the live constant.
+    expect(snapshot.modelExecutionPlan.registryVersion).toBe(MODEL_OPERATION_REGISTRY_VERSION);
     snapshot.modelExecutionPlan.registryVersion = 1;
     snapshot.modelExecutionPlan = {
       ...snapshot.modelExecutionPlan,

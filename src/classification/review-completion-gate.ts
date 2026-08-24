@@ -1,7 +1,13 @@
 import { getDb } from '../db/connection';
 import { getRuntimeSnapshotByHash } from './runtime-snapshot';
 import { isUniversalAttribute } from './applicability-evaluator';
-import { CohortSemanticValidationSchema } from '../shared/schemas/onboarding';
+import {
+  CohortSemanticValidationSchema,
+  CorrectedCategoryPageRecordSchema,
+  FamilyTitleValidationRecordSchema,
+  PageDecisionStatusRecordSchema,
+} from '../shared/schemas/onboarding';
+import { getActivePageImportHash, listVerifiedPageOptions } from '../db/repositories/page-repo';
 
 export type ReviewCompletionGateResult =
   | { ok: true; proposalCount: number }
@@ -72,6 +78,49 @@ export interface ReviewCompletionGateInput {
   onboardingItemId: string;
   productSku: string;
   activeRunId: string;
+}
+
+/**
+ * Universal Category Page assignment requirement (operator mandate): an
+ * onboarding item may never complete Review without at least one Category
+ * Page assignment that resolves into the CURRENT active verified Page
+ * import. Structural, NOT config-dependent — unlike the snapshot-gated P10
+ * decision gate for cohort children, this applies to every classified item
+ * AND to legacy items through the route-level call. Promotion already fails
+ * closed on missing verified pages; this moves the refusal earlier so an
+ * unpageable item is never marked reviewed/approved in the first place.
+ *
+ * `curationData` is the PARSED curation payload (null when absent). Corrupt
+ * JSON semantics stay with the caller (the run gate refuses with
+ * `semantic_validation_blocked` per existing convention).
+ */
+export function validateItemCategoryPagesAssigned(input: {
+  workspaceId: string;
+  curationData: unknown;
+}): ReviewCompletionGateResult | null {
+  const curation =
+    input.curationData && typeof input.curationData === 'object'
+      ? (input.curationData as Record<string, unknown>)
+      : null;
+  const suggestedPages = Array.isArray(curation?.suggestedPages) ? curation!.suggestedPages : [];
+  if (suggestedPages.length === 0) {
+    return {
+      ok: false,
+      code: 'missing_category_page',
+      reason:
+        'No Category Page is assigned; assign at least one Category Page from the verified options before completing review.',
+    };
+  }
+  const verifiedNames = new Set(listVerifiedPageOptions(input.workspaceId).map(page => page.name));
+  const unverified = suggestedPages.filter(name => typeof name !== 'string' || !verifiedNames.has(name));
+  if (unverified.length > 0) {
+    return {
+      ok: false,
+      code: 'unverified_category_page',
+      reason: `Category Page assignment does not resolve into the current verified Page import (${unverified.map(String).join(', ')}); re-select from the verified options.`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -289,6 +338,212 @@ export function validateReviewCompletionGate(
         reason: firstMessage ?? 'A hard cohort semantic validation finding blocks this item.',
       };
     }
+
+    // ── e09 B3 (T9): family title consistency proof ──
+    // A cohort-coordinated title (`llm_cohort`/`cohort_fallback`) may only be
+    // reviewed when the committed curation data carries a valid passing
+    // `familyTitleValidation` record — captured at the member-projection
+    // commit from the durable output (never recomputed from live rows).
+    // Missing or malformed for a coordinated title is corruption → fail
+    // closed. Non-cohort title sources (manual/web/ocr/llm single) are not
+    // family-coordinated and skip this check.
+    const committedTitleSource = parsedCuration?.titleSource;
+    if (committedTitleSource === 'llm_cohort' || committedTitleSource === 'cohort_fallback') {
+      const familyTitleValidation = parsedCuration?.familyTitleValidation;
+      if (familyTitleValidation === undefined || familyTitleValidation === null) {
+        return {
+          ok: false,
+          code: 'title_validation_missing',
+          reason:
+            'Committed curation data carries a cohort-coordinated title without the required family title validation record; the item cannot be review-ready (T9).',
+        };
+      }
+      const parsedTitleValidation = FamilyTitleValidationRecordSchema.safeParse(familyTitleValidation);
+      if (!parsedTitleValidation.success) {
+        return {
+          ok: false,
+          code: 'title_validation_malformed',
+          reason:
+            'Committed family title validation record is malformed; the item cannot be review-ready (T9).',
+        };
+      }
+      if (parsedTitleValidation.data.status !== 'passed') {
+        return {
+          ok: false,
+          code: 'title_validation_blocked',
+          reason:
+            'The committed family title set did not pass consistency validation; the item cannot be review-ready (T9).',
+        };
+      }
+    }
+
+    // ── e09 B3 (P10): Category Page decision gate ──
+    // Enforced only when the run's FROZEN snapshot enables the category_page
+    // target (same intent-proof pattern as the type gate above); legacy runs
+    // without a resolvable snapshot skip it. NOTE: both this gate and the T9
+    // title gate above are additionally scoped to cohort children — the page
+    // decision status and family-title record are written only by the cohort
+    // commit (cohort_run_id !== null branch). Single-item classification runs
+    // rely on the promotion mandatory-Pages + verified-set currentness
+    // backstop instead. An abstained or absent durable
+    // decision blocks review (adjudication #6) unless a reviewer correction —
+    // an ACCEPTED category_page proposal in this run — resolves to a CURRENT
+    // verified Page ID (adjudication #10). An assigned decision with accepted
+    // identified proposals that no longer resolve into the active verified
+    // import is stale → refuse. Confidence is never consulted.
+    const pageGateSnapshot = run.config_snapshot_hash
+      ? getRuntimeSnapshotByHash(input.workspaceId, run.config_snapshot_hash)
+      : null;
+    const categoryPageTargetEnabled = pageGateSnapshot
+      ? pageGateSnapshot.curationTargets.some(
+          // Snapshot curation-target kinds are 'product_type' | 'product_field' | 'page'
+          // (CurationTargetKindEnum) — the Page decision is the 'page' target.
+          target => target.kind === 'page' && (target.enabled || target.mandatory),
+        )
+      : false;
+    // CURRENT active verified Page import identities (P10: a reviewer
+    // correction satisfies the gate only when it resolves to a current
+    // verified Page ID).
+    const verifiedPageIdSet = new Set(
+      categoryPageTargetEnabled ? listVerifiedPageOptions(input.workspaceId).map(page => page.id) : [],
+    );
+    if (categoryPageTargetEnabled) {
+      const pageDecisionStatus = parsedCuration?.pageDecisionStatus;
+      if (pageDecisionStatus === undefined || pageDecisionStatus === null) {
+        return {
+          ok: false,
+          code: 'page_decision_missing',
+          reason:
+            'Committed Category Page decision record is missing; the item cannot be review-ready (P10).',
+        };
+      }
+      const parsedPageDecision = PageDecisionStatusRecordSchema.safeParse(pageDecisionStatus);
+      if (!parsedPageDecision.success) {
+        return {
+          ok: false,
+          code: 'page_decision_missing',
+          reason:
+            'Committed Category Page decision record is malformed; the item cannot be review-ready (P10).',
+        };
+      }
+      // Effective identity mirrors getAcceptedProposals (classification-run-repo):
+      // the live non-superseded decision's revised_target_id wins when present,
+      // otherwise the original predicted target. Adjudication #10 — a reviewer
+      // correction satisfies the gate only when it resolves to a current
+      // verified Page ID, so a REVISED target must be validated as itself.
+      const pageProposalRows = db.query(
+        `SELECT p.target_id,
+                (SELECT CASE WHEN COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END) = 1
+                        THEN d.revised_target_id ELSE p.target_id END
+                   FROM classification_proposal_decisions d
+                  WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+                  ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS effective_target_id,
+                EXISTS(
+                  SELECT 1 FROM classification_proposal_decisions d
+                  WHERE d.proposal_id = p.id AND d.superseded_at IS NULL AND d.decision = 'accepted'
+                ) AS has_accepted_decision
+         FROM classification_proposals p
+         WHERE p.run_id = ? AND p.proposal_type = 'category_page'`,
+      ).all(input.activeRunId) as Array<{
+        target_id: string | null;
+        effective_target_id: string | null;
+        has_accepted_decision: number;
+      }>;
+      const hasAcceptedVerifiedPage = pageProposalRows.some(
+        row =>
+          row.has_accepted_decision &&
+          typeof row.effective_target_id === 'string' &&
+          row.effective_target_id.length > 0 &&
+          verifiedPageIdSet.has(row.effective_target_id),
+      );
+      if (parsedPageDecision.data.status === 'abstained') {
+        if (!hasAcceptedVerifiedPage) {
+          // e09 round-3 FIX 1 (adjudication #10): an abstained member
+          // materializes ZERO category_page proposals, so the accepted-proposal
+          // correction path above can never fire for it. The Review UI
+          // therefore writes a `correctedCategoryPage` record (stable verified
+          // Page ID + active import hash at correction time) when the reviewer
+          // picks a page from the VERIFIED options list. Fail-closed: a missing
+          // OR malformed record keeps the plain abstention refusal; a stale
+          // hash or an ID outside the CURRENT verified import refuses with
+          // page_decision_stale. A valid correction satisfies the abstention.
+          const rawCorrection = parsedCuration?.correctedCategoryPage;
+          const parsedCorrection = CorrectedCategoryPageRecordSchema.safeParse(rawCorrection);
+          if (!parsedCorrection.success) {
+            return {
+              ok: false,
+              code: 'page_decision_abstained',
+              reason:
+                (rawCorrection === undefined || rawCorrection === null
+                  ? parsedPageDecision.data.reason ??
+                    'The Category Page decision abstained; manual selection resolving to a current verified Page ID is required before review can complete (P10).'
+                  : 'The reviewer Category Page correction record is malformed and cannot satisfy the abstention; re-select the page from the current verified options (P10).'),
+            };
+          }
+          const activeImportHash = getActivePageImportHash(input.workspaceId);
+          if (!activeImportHash || parsedCorrection.data.activePageImportHash !== activeImportHash) {
+            return {
+              ok: false,
+              code: 'page_decision_stale',
+              reason:
+                'The reviewer Category Page correction was recorded against a different Page import; re-select the page from the current verified options (P10).',
+            };
+          }
+          if (!verifiedPageIdSet.has(parsedCorrection.data.pageId)) {
+            return {
+              ok: false,
+              code: 'page_decision_stale',
+              reason:
+                'The reviewer-corrected Category Page ID does not resolve into the active verified Page import; re-select the page from the current verified options (P10).',
+            };
+          }
+          // Valid current correction — the abstention is resolved; fall through.
+        }
+      } else if (parsedPageDecision.data.status === 'absent') {
+        if (!hasAcceptedVerifiedPage) {
+          return {
+            ok: false,
+            code: 'page_decision_missing',
+            reason:
+              'No durable Category Page decision was committed for this cohort member and no reviewer-accepted verified Page exists; the item cannot be review-ready (P10).',
+          };
+        }
+      } else {
+        // Assigned: verify committed assignments still resolve into the
+        // CURRENT active verified import. Only IDENTIFIED accepted proposals
+        // participate — name-only rows carry no verifiable identity and are
+        // never acceptance authority (P2/P12).
+        const identifiedAcceptedPages = pageProposalRows.filter(
+          row =>
+            row.has_accepted_decision &&
+            typeof row.effective_target_id === 'string' &&
+            row.effective_target_id.length > 0,
+        );
+        if (
+          identifiedAcceptedPages.length > 0 &&
+          !identifiedAcceptedPages.some(row => verifiedPageIdSet.has(row.effective_target_id!))
+        ) {
+          return {
+            ok: false,
+            code: 'page_decision_stale',
+            reason:
+              'The committed Category Page assignment no longer resolves into the active verified Page import (stale or unverified identity); the item cannot be review-ready (P10).',
+          };
+        }
+        if (!hasAcceptedVerifiedPage) {
+          // Fail closed (P10): an `assigned` decision whose accepted proposals
+          // were ALL rejected by the reviewer (or carry name-only rows with no
+          // verifiable identity) leaves zero accepted verified Pages — review
+          // must not complete on that end state.
+          return {
+            ok: false,
+            code: 'page_decision_missing',
+            reason:
+              'No reviewer-accepted Category Page resolves into the active verified import; the item cannot be review-ready (P10).',
+          };
+        }
+      }
+    }
   }
 
   const proposals = db.query(
@@ -340,6 +595,41 @@ export function validateReviewCompletionGate(
     })),
   });
   if (typeGate) return typeGate;
+
+  // ── Universal Category Page assignment requirement ──
+  // Checked LAST so run-integrity, semantic, decision, and type gates keep
+  // their established precedence. It applies uniformly to cohort children
+  // AND single-item/legacy runs regardless of whether the frozen snapshot
+  // enabled the page curation target — an item without an assigned Category
+  // Page that resolves into the CURRENT verified import is never
+  // review-ready (promotion's mandatory-Pages backstop would fail it later;
+  // this refuses before the item can be marked reviewed/approved). Corrupt
+  // curation JSON fails closed with the established semantic_validation_blocked code.
+  let universalPagesCuration: Record<string, unknown> | null = null;
+  {
+    const pagesCurationRow = db.query(
+      'SELECT curation_data_json FROM onboarding_items WHERE id = ?',
+    ).get(input.onboardingItemId) as { curation_data_json: string | null } | undefined;
+    if (pagesCurationRow?.curation_data_json) {
+      try {
+        const parsedPagesCuration = JSON.parse(String(pagesCurationRow.curation_data_json));
+        if (parsedPagesCuration && typeof parsedPagesCuration === 'object') {
+          universalPagesCuration = parsedPagesCuration as Record<string, unknown>;
+        }
+      } catch {
+        return {
+          ok: false,
+          code: 'semantic_validation_blocked',
+          reason: 'Curation data is corrupt; the item cannot be review-ready.',
+        };
+      }
+    }
+  }
+  const universalPagesGate = validateItemCategoryPagesAssigned({
+    workspaceId: input.workspaceId,
+    curationData: universalPagesCuration,
+  });
+  if (universalPagesGate) return universalPagesGate;
 
   return { ok: true, proposalCount: proposals.length };
 }

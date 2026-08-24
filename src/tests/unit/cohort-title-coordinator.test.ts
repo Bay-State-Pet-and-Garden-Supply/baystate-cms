@@ -149,8 +149,10 @@ function mockCallLlmForTask(): string {
 const CANNED_TITLES: Record<string, string> = {
   '100000000001': 'Purina Pro Plan Dog Food Chicken 5 lb',
   '100000000002': 'Purina Pro Plan Dog Food Beef 10 lb',
-  '100000000003': 'Purina Pro Plan Dog Food Salmon 5 lb',
-  '100000000004': 'Purina Pro Plan Dog Food Lamb 10 lb',
+  // ProPet group (SHOULD-FIX 1): titles carry the group's evidenced brand so
+  // the candidate set passes T3 and persists as llm_cohort.
+  '100000000003': 'ProPet Pro Plan Dog Food Salmon 5 lb',
+  '100000000004': 'ProPet Pro Plan Dog Food Lamb 10 lb',
 };
 
 function cannedTitleForUpc(upc: string): string {
@@ -160,10 +162,14 @@ function cannedTitleForUpc(upc: string): string {
 /** Extract the exact UPC set from the cohort prompt and return a matching JSON
  *  (multi-group cohorts make one call per group — each prompt carries only
  *  that group's UPCs). */
+/** Round-3 FIX 4 (Gap 1): per-test title overrides — lets a test inject an LLM
+ *  set that FAILS validateFamilyTitleSet without touching other tests. */
+let titleOverrides: Record<string, string> | null = null;
+
 function cannedResponseForPrompt(prompt: string): string {
   const upcs = [...prompt.matchAll(/\[(\d{10,})\]/g)].map(match => match[1]);
   const payload: Record<string, string> = {};
-  for (const upc of upcs) payload[upc] = cannedTitleForUpc(upc);
+  for (const upc of upcs) payload[upc] = titleOverrides?.[upc] ?? cannedTitleForUpc(upc);
   return JSON.stringify(payload);
 }
 
@@ -589,8 +595,13 @@ function ordinal0ChildRunId(fixture: FrozenCohortFixture): string {
 }
 
 const TWO_MEMBER_EXTRACTIONS = {
-  '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
-  '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb' }),
+  // _brandHint 'Purina' matches the canned LLM titles below so the candidate
+  // sets PASS validateFamilyTitleSet (T3: the evidenced brand must appear in
+  // each title). Raw names carry 'ADULT' so the canned candidates differ from
+  // the raw by content — a byte-equal candidate is now correctly B1-blocked as
+  // a spreadsheet_fallback_leak by the title lint (e09).
+  '100000000001': settledExtraction({ _name: 'Purina Pro Plan Adult Dog Food Chicken 5 lb', _brandHint: 'Purina' }),
+  '100000000002': settledExtraction({ _name: 'Purina Pro Plan Adult Dog Food Beef 10 lb', _brandHint: 'Purina' }),
 };
 
 describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
@@ -611,8 +622,8 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
 
     expect(titleCallCount).toBe(1);
     expect(map.size).toBe(2);
-    expect(map.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb', source: 'llm_cohort' });
-    expect(map.get('100000000002')).toEqual({ title: 'Purina Pro Plan Dog Food Beef 10 lb', source: 'llm_cohort' });
+    expect(map.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb.', source: 'llm_cohort' });
+    expect(map.get('100000000002')).toEqual({ title: 'Purina Pro Plan Dog Food Beef 10 lb.', source: 'llm_cohort' });
 
     // Persisted rows: 2, sharing the canonical input_hash, matching the map.
     const rows = getCohortTitleOutputsByRun(fixture.run.id);
@@ -620,8 +631,8 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(rows[0].inputHash).toBe(inputHash);
     expect(rows[1].inputHash).toBe(inputHash);
     const persisted = new Map(rows.map(r => [r.productSku, JSON.parse(r.outputValueJson)]));
-    expect(persisted.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb', source: 'llm_cohort' });
-    expect(persisted.get('100000000002')).toEqual({ title: 'Purina Pro Plan Dog Food Beef 10 lb', source: 'llm_cohort' });
+    expect(persisted.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb.', source: 'llm_cohort' });
+    expect(persisted.get('100000000002')).toEqual({ title: 'Purina Pro Plan Dog Food Beef 10 lb.', source: 'llm_cohort' });
     // model_call_id provenance: the audited call id from the mock. (The call
     // id sequence is monotonic across the file so rows never collide.)
     expect(rows.every(r => r.modelCallId === `title-call-${auditCallSeq}`)).toBe(true);
@@ -633,6 +644,103 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(calls).toHaveLength(2);
     expect(calls.map(c => c.status).sort()).toEqual(['started', 'success']);
     expect(calls.every(c => c.run_id === childRunId)).toBe(true);
+  });
+
+  it('e09 round-3 FIX 4 (Gap 1): an LLM set failing validateFamilyTitleSet persists ZERO llm_cohort rows — the all-or-nothing deterministic fallback is used instead', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    // Inconsistent skeletons + missing evidenced brand/flavor/size tokens:
+    // this candidate set must FAIL family-title consistency (T2/T4).
+    titleOverrides = {
+      '100000000001': 'Totally Different Brand Alpha',
+      '100000000002': 'Another Unrelated Line Beta',
+    };
+    try {
+      const map = await ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      });
+
+      // The rejected LLM set produced ZERO durable rows — never one member's row.
+      const rows = getCohortTitleOutputsByRun(fixture.run.id);
+      expect(rows.length === 0 || rows.length === 2).toBe(true); // never partial
+      for (const row of rows) {
+        const parsed = JSON.parse(row.outputValueJson) as { title: string; source: string };
+        expect(parsed.source).toBe('cohort_fallback');
+        expect(parsed.title).not.toContain('Totally Different Brand');
+        expect(parsed.title).not.toContain('Another Unrelated Line');
+      }
+      if (rows.length === 2) {
+        // Complete validated deterministic fallback (all-or-nothing).
+        expect(map.get('100000000001')).toEqual({ title: 'Purina Pro Plan Adult Dog Food Chicken 5 lb.', source: 'cohort_fallback' });
+        expect(map.get('100000000002')).toEqual({ title: 'Purina Pro Plan Adult Dog Food Beef 10 lb.', source: 'cohort_fallback' });
+      } else {
+        expect(map.size).toBe(0);
+      }
+
+      // The audited call still happened (started+success) — rejection is a
+      // validation outcome, not a transport failure. Scoped to THIS run's
+      // ordinal-0 child: the module-level DB accumulates rows across tests.
+      const childRunId = ordinal0ChildRunId(fixture);
+      const calls = getDb().query(
+        "SELECT status FROM classification_model_calls WHERE operation = 'cohort_title_consolidation' AND run_id = ?",
+      ).all(childRunId) as Array<{ status: string }>;
+      expect(calls.map(c => c.status).sort()).toEqual(['started', 'success']);
+    } finally {
+      titleOverrides = null;
+    }
+  });
+
+  it('e09 lint round-2 gap: an LLM set BLOCKED by the title lint persists ZERO llm_cohort rows — the deterministic fallback is committed instead, and reuse cannot resurrect a stale llm row', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    // Phantom weight on ONE sibling: "2.64" appears in no member's rawTitle
+    // or extraction evidence ("Chicken 5 lb" / "Beef 10 lb"), so the lint
+    // invalidates the whole LLM candidate set (all-or-nothing).
+    titleOverrides = {
+      '100000000001': 'Purina Pro Plan Dog Food Chicken 5 lb 2.64 oz',
+      '100000000002': 'Purina Pro Plan Dog Food Beef 10 lb',
+    };
+    try {
+      const map = await ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      });
+
+      // Persistence seam: EXACTLY zero llm_cohort rows and one cohort_fallback
+      // row per member — a lint-blocked group can never leave a stale llm row
+      // behind for reuse/caching to resurrect.
+      const rows = getCohortTitleOutputsByRun(fixture.run.id);
+      const sources = rows.map(r => (JSON.parse(r.outputValueJson) as { source: string }).source);
+      expect(sources.filter(s => s === 'llm_cohort')).toHaveLength(0);
+      expect(sources.filter(s => s === 'cohort_fallback')).toHaveLength(2);
+      for (const row of rows) {
+        const parsed = JSON.parse(row.outputValueJson) as { title: string; source: string };
+        expect(parsed.title).not.toContain('2.64');
+      }
+      expect(map.get('100000000001')?.source).toBe('cohort_fallback');
+      expect(map.get('100000000002')?.source).toBe('cohort_fallback');
+      expect(map.get('100000000001')?.title).not.toContain('2.64');
+
+      // The audited call still happened (started+success) — a lint block is a
+      // validation outcome, not a transport failure. Scoped to THIS run's
+      // ordinal-0 child (the module-level DB accumulates rows across tests).
+      const childRunId = ordinal0ChildRunId(fixture);
+      const calls = getDb().query(
+        "SELECT status FROM classification_model_calls WHERE operation = 'cohort_title_consolidation' AND run_id = ?",
+      ).all(childRunId) as Array<{ status: string }>;
+      expect(calls.map(c => c.status).sort()).toEqual(['started', 'success']);
+    } finally {
+      titleOverrides = null;
+    }
   });
 
   it('reuse: second call on the same run (cache cleared) → zero calls, identical map', async () => {
@@ -710,7 +818,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(corrupt.message).toContain('100000000001');
     // The unaffected row stays usable for the parent to continue.
     expect(corrupt.usableOutputs.get('100000000002')).toEqual({
-      title: 'Purina Pro Plan Dog Food Beef 10 lb',
+      title: 'Purina Pro Plan Dog Food Beef 10 lb.',
       source: 'llm_cohort',
     });
     expect(corrupt.usableOutputs.has('100000000001')).toBe(false);
@@ -1328,8 +1436,8 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     });
     expect(titleCallCount).toBe(2);
     expect(secondMap.size).toBe(2);
-    expect(secondMap.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb', source: 'llm_cohort' });
-    expect(secondMap.get('100000000002')).toEqual({ title: 'Purina Pro Plan Dog Food Beef 10 lb', source: 'llm_cohort' });
+    expect(secondMap.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb.', source: 'llm_cohort' });
+    expect(secondMap.get('100000000002')).toEqual({ title: 'Purina Pro Plan Dog Food Beef 10 lb.', source: 'llm_cohort' });
     const rows = getCohortTitleOutputsByRun(fixture.run.id);
     expect(rows).toHaveLength(2);
     expect(rows.every(r => r.inputHash === inputHash)).toBe(true);

@@ -65,7 +65,7 @@ A Product Attribute without a live Catalog Field target.
 _Avoid_: Planned field, final assignment
 
 **Universal Product Attribute**:
-A Product Attribute that is relevant regardless of Product Type.
+A Product Attribute that is universally PROPOSABLE from evidence, with requiredness and applicability still enforced by the Attribute Profile.
 _Avoid_: Global field, common metadata
 
 **Product Claim**:
@@ -424,7 +424,7 @@ _Avoid_: Hidden ordering, implicit prerequisite
 
 - A **Product Type** defines which **Product Attributes** are relevant for a product.
 - A **Product SKU** may have one **Primary Product Type** or an **Unknown Primary Product Type** during review.
-- A **Primary Product Type** gates Product Attribute classification except for **Universal Product Attributes**.
+- A **Primary Product Type** gates Product Attribute classification except for **Universal Product Attributes**, which are universally PROPOSABLE from evidence while the **Attribute Profile** continues to enforce requiredness and applicability.
 - An **Unknown Primary Product Type** pauses type-gated Product Attribute proposals and Category Page proposals but does not block product draft creation.
 - A **Product Type** remains local CMS classification unless represented by a mapped **Product Attribute**.
 - Changing a **Product Type** may make type-specific **Classification Proposals** stale.
@@ -964,3 +964,32 @@ _Avoid_: Labeling approved items as published/exported, "Promotion" as a primary
 | Curation | Curating Product Family |
 | Review | Review |
 | Promotion | Approved / Ready to Export / Exporting |
+
+## Packaging OCR (2026-08-24 overhaul)
+
+Packaging OCR extracts structured fields (productName, brand, UPC, size, species, …)
+from a product's primary package image to ground curation titles and evidence.
+
+- **Entry point:** `runPackagingOcrAttempt` in `src/onboarding/packaging-ocr.ts` —
+  returns `{ ok: true, data } | { ok: false, reasonCode, … }`. Every failure carries a
+  coded reason from `OcrFailureReasonEnum` (`src/shared/schemas/onboarding.ts`); nothing
+  fails silently. `extractPackagingOcr` remains as a thin null-returning adapter.
+- **Reliability:** circuit breaker (`src/onboarding/vlm-circuit-breaker.ts`, transient
+  failures only), bounded flag-gated retry (`BAYSTATE_CMS_OCR_RETRIES_ENABLED`), per-attempt
+  timeout (`BAYSTATE_CMS_OCR_TIMEOUT_MS`). Greedy `temperature=0` default; repetition-tail
+  detection triggers one `frequency_penalty≈0.3` retry with fallback to the original response.
+- **Model selection is data-driven:** all defaults live in `src/shared/vision-model-defaults.ts`
+  (`DEFAULT_LOCAL_VISION_MODEL = 'qwen2.5vl:latest'`). Never hardcode model literals.
+- **Stage path (flag-gated):** the `packaging_ocr` classification stage
+  (`src/classification/stages/packaging-ocr-stage.ts`) runs behind
+  `BAYSTATE_CMS_PACKAGING_OCR_STAGE_ENABLED` (default OFF = legacy behavior). Shadow mode
+  (default ON) never writes live keys. Distributor-record items are URL-null and skip OCR
+  by design (Amendment B — images are display-only).
+- **Evaluation:** golden-set harness in `src/onboarding/ocr-eval/` + `scripts/ocr-eval.ts`.
+  Model flips require the pre-registered gate in
+  `docs/runbooks/packaging-ocr-model-rollout.md`; flip = one-constant commit.
+- **Plan:** `docs/plans/packaging-ocr-overhaul-plan.md`.
+
+## Naming footnote: `product_intelligence_assets` (ADR 0030)
+
+The `product_intelligence_assets` table and `pi_reuse_policies` table keep their historical names even though the Agent Lab program was decommissioned: both are live-written onboarding infrastructure (distributor imagery verification + image reuse grants) whose homes moved to `src/onboarding/image-verification/`, `src/db/repositories/onboarding-pi-asset-repo.ts`, and `src/db/repositories/image-reuse-policy-repo.ts`. The names are retained for row-history continuity, not because an agent program exists.

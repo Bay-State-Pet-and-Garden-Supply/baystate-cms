@@ -13,10 +13,20 @@ export interface ReviewInspectorItem {
   detailError: string | null;
 }
 
-/** Editable listing fields surfaced for inline editing during review. */
+/**
+ * Editable listing fields surfaced for inline editing during review.
+ *
+ * e10s02: extended with price/quantity behind the V2 flag. The V1 call
+ * sites construct the five original keys; V2 seeds and saves all seven.
+ */
 export interface ReviewDraft {
   curatedTitle: string;
+  brandHint: string;
+  curatedWeight: string;
   curatedDescription: string;
   searchKeywords: string;
-  brandHint: string;
+  /** V2 only — official-page items (distributor rows never send this key). */
+  price?: string;
+  /** V2 only — official-page items; integer-as-string (distributor rows readonly). */
+  quantity?: string;
 }

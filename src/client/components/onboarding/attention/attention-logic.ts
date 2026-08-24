@@ -236,7 +236,7 @@ export function groupAttentionItems(items: OnboardingWorkState[]): AttentionGrou
 
 // ─── Candidate presentation ────────────────────────────────────────────────────
 
-/** Human label for a discovery source method (mirrors DiscoveryStagePanel). */
+/** Human label for a discovery source method (panel removed with the retired review drawer). */
 export function candidateMethodLabel(method: string | null | undefined): string {
   switch (method) {
     case 'shopify_variant':

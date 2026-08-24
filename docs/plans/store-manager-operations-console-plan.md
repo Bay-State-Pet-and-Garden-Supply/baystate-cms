@@ -1,5 +1,7 @@
 # Store Manager Operations Console Plan (Epic Number TBD, After #42)
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 ## Context
 
 Epic #42 established the bounded Store Manager runtime in `src/store-manager/runtime/`: the executor resolves one model route, creates a per-turn immutable policy, validates messages, builds the static prompt and bounded context, dispatches versioned tools through the registry, applies the signed consumed-approval gate, enforces the whole-turn deadline and composed `AbortSignal`, emits redacted events, and links every terminal turn to `ai_model_calls`. Issues #36 and #40 are satisfied prerequisites; this plan does not reopen their implementation.

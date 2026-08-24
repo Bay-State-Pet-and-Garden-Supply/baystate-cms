@@ -22,7 +22,6 @@ import catalogRoutes from './routes/catalog-routes';
 import catalogClassificationRoutes from './routes/catalog-classification-routes';
 import embeddingRoutes from './routes/embedding-routes';
 import benchmarkRoutes from './routes/benchmark-routes';
-import productIntelligenceRoutes from './routes/product-intelligence-routes';
 import { sitemapRoutes } from './routes/sitemap-routes';
 import { brandHubRoutes } from './routes/brand-hub-routes';
 import { brandStrategyRoutes } from './routes/brand-strategy-routes';
@@ -33,6 +32,7 @@ import { profileActivationRoutes } from './routes/profile-activation-routes';
 import { inventoryPickerRoutes } from './routes/inventory-picker-routes';
 import { profileBuilderGenerateDraftRoutes } from './routes/profile-builder-generate-draft-routes';
 import { profileMatrixRoutes } from './routes/profile-matrix-routes';
+import releaseRoutes from './routes/release-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
@@ -97,7 +97,6 @@ app.route('/api', catalogClassificationRoutes);
 app.route('/api', embeddingRoutes);
 // Mounted exactly once under /api; route internals use /benchmark/... paths.
 app.route('/api', benchmarkRoutes);
-app.route('/api', productIntelligenceRoutes);
 app.route('/api', sitemapRoutes);
 app.route('/api', brandHubRoutes);
 app.route('/api', brandStrategyRoutes);
@@ -108,6 +107,8 @@ app.route('/api', profileActivationRoutes);
 app.route('/api', inventoryPickerRoutes);
 app.route('/api', profileBuilderGenerateDraftRoutes);
 app.route('/api', profileMatrixRoutes);
+// P4: taxonomy release status + sanctioned pin activation (sole state.json writer).
+app.route('/api', releaseRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

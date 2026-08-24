@@ -59,6 +59,15 @@ import type { BrandConfig } from '../shared/schemas/classification';
 import { evaluateConditions } from './applicability-evaluator';
 import type { ReviewedFact } from './reviewed-facts';
 
+// TODO (e09 B1): family title consistency is enforced pre-commit via
+// src/classification/family-title-consistency.ts → cohort-name-coordinator.
+// This validator intentionally does NOT re-check title skeleton/leakage yet —
+// Page correctness (B2) lands next and will extend this module.
+// TODO (e09 B2 P5): Page correctness re-validation via src/classification/category-page-correctness.ts
+// — semantic compatibility (species, food/treat/toy, wet/dry, chew/jerky, product vs accessory) from
+// member frozen evidence vs durable coordinated_page assignment. Pre-commit gate already enforces P5 per-member;
+// this post-loop validator will add defense-in-depth without inventing taxonomy (P5 frozen-evidence only).
+
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
 export type CohortSemanticFindingCode =
@@ -210,7 +219,11 @@ export function validateMemberSemantics(
           `Execution Product Type "${input.parentExecutionType.id}"${label} is the family ` +
           'authority; every projected member must resolve a matching suggestion.',
       });
-    } else if (input.suggestedProductType !== input.parentExecutionType.id) {
+    } else if (
+      input.suggestedProductType !== input.parentExecutionType.id &&
+      (!input.parentExecutionType.label ||
+        input.suggestedProductType.trim().toLowerCase() !== input.parentExecutionType.label.trim().toLowerCase())
+    ) {
       const label = input.parentExecutionType.label
         ? ` (${input.parentExecutionType.label})`
         : '';

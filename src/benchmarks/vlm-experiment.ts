@@ -6,6 +6,7 @@
  */
 
 import { scoreVlmOcr, type VlmEvalCase, type VlmScorerResult } from '../ai/evals/vlm-scorer';
+import { evaluateRolloutGate, type OcrComparisonReport } from '../onboarding/ocr-eval/metrics';
 
 export interface VlmExperimentResult {
   baselineModel: string; // e.g. qwen2.5vl:latest
@@ -44,4 +45,17 @@ export function runVlmExperiment(
     f1Comparable,
     recommendation: qualified ? 'promote_gemma_unified' : 'retain_qwen_vlm',
   };
+}
+
+/** Recommendation values for the P3 golden-set harness path. */
+export type OcrEvalRecommendation = 'promote_candidate' | 'retain_baseline';
+
+/**
+ * Thin P3-T1 bridge: map an ocr-eval comparison report through the
+ * pre-registered rollout gate to a flip/retain recommendation for the
+ * DEFAULT_LOCAL_VISION_MODEL constant. The existing `runVlmExperiment`
+ * enum and behavior are intentionally unchanged.
+ */
+export function recommendFromOcrEvalReport(report: OcrComparisonReport): OcrEvalRecommendation {
+  return evaluateRolloutGate(report).pass ? 'promote_candidate' : 'retain_baseline';
 }

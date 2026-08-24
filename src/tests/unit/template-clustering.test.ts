@@ -1,6 +1,7 @@
 // story: e07s02
-import { describe, expect, it } from 'vitest';
-import { clusterUrls, domFingerprint, jaccard, templateAwarePrefix } from '../../onboarding/template-clustering';
+import { describe, expect, it, vi } from 'vitest';
+import { clusterInventoryUrls, clusterUrls, domFingerprint, jaccard, templateAwarePrefix } from '../../onboarding/template-clustering';
+import * as suiteSuggestionService from '../../onboarding/suite-suggestion-service';
 
 describe('templateAwarePrefix', () => {
   it('strips slug under /products', () => {
@@ -90,5 +91,55 @@ describe('clusterUrls', () => {
     ]);
     expect(clusters.length).toBe(1);
     expect(clusters[0].count).toBe(2);
+  });
+});
+
+describe('clusterInventoryUrls', () => {
+  it('handles errors from suite-suggestion-service gracefully', () => {
+    const spy = vi.spyOn(suiteSuggestionService, 'getSuiteSuggestion').mockImplementation(() => {
+      throw new Error('Module require or service error');
+    });
+
+    const result = clusterInventoryUrls('example.com');
+    expect(result).toEqual({
+      clusters: [],
+      suggested: [],
+      filtered: { count: 0, reason: '' },
+    });
+
+    spy.mockRestore();
+  });
+
+  it('maps getSuiteSuggestion results correctly when successful', () => {
+    const fakeSuggestion: suiteSuggestionService.SuiteSuggestion = {
+      clusters: [
+        {
+          key: '/products',
+          prefix: '/products',
+          count: 2,
+          fingerprint: 'div',
+          suggestedUrl: 'https://example.com/products/a',
+          urls: ['https://example.com/products/a', 'https://example.com/products/b'],
+          hasVariant: false,
+        },
+      ],
+      suggested: ['https://example.com/products/a'],
+      filteredCount: 1,
+      filteredReasons: { failed_extraction: 1 },
+    };
+
+    const spy = vi.spyOn(suiteSuggestionService, 'getSuiteSuggestion').mockReturnValue(fakeSuggestion);
+
+    const result = clusterInventoryUrls('example.com');
+    expect(result).toEqual({
+      clusters: fakeSuggestion.clusters,
+      suggested: fakeSuggestion.suggested,
+      filtered: {
+        count: 1,
+        reason: 'failed_extraction:1',
+      },
+    });
+
+    spy.mockRestore();
   });
 });

@@ -61,6 +61,12 @@ import {
   resetCohortCurationFlagsOverride,
   getCohortCurationFlags,
 } from '../../classification/flags';
+import {
+  overrideOcrStageFlags,
+  resetOcrStageFlagsOverride,
+  getOcrStageFlags,
+} from '../../classification/ocr-stage-flags';
+import { countPackagingOcrShadowComparisons } from '../../db/repositories/packaging-ocr-shadow-repo';
 import { ClassificationManifestV2Schema, ClassificationFocusedFileNames } from '../../shared/schemas/classification';
 import {
   ExecutionEvidenceProjectionV1Schema,
@@ -95,10 +101,12 @@ afterAll(() => {
 });
 beforeEach(() => {
   overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: false });
+  resetOcrStageFlagsOverride();
   try { getDb().run("DELETE FROM api_keys WHERE service IN ('ollama_vlm', 'ollama')"); } catch { /* ok */ }
 });
 afterEach(() => {
   resetCohortCurationFlagsOverride();
+  resetOcrStageFlagsOverride();
   try { getDb().run("DELETE FROM api_keys WHERE service IN ('ollama_vlm', 'ollama')"); } catch { /* ok */ }
 });
 const EVIDENCE: CatalogEvidence = {
@@ -1183,6 +1191,53 @@ describe('OCR pull-forward exactly-once (PR3 M2)', () => {
       server.stop(true);
     }
   });
+
+  it('run-bound OCR pull-forward persists a coded localFailureReason + attempts on an ordinary transport failure (post-review fixup 6)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // VLM route answers images fine but the model endpoint fails with HTTP
+    // 500 — a coded transport-class failure that must surface in ocrOutcome.
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        return Response.json({ error: 'model exploded' }, { status: 500 });
+      },
+    });
+    try {
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${server.port}`, 'test-vlm');
+      const candidate = generateCandidate(BayStatePetGardenSeed, EVIDENCE);
+      const bundle = candidate.bundle;
+      const snapshot = buildRuntimeSnapshot({
+        workspaceId,
+        workspacePath: wsPath,
+        productSku: 'SKU-OCR-FAIL',
+        authority: { kind: 'v2' as const, bundle },
+        configSnapshotRef: { id: bundle.manifest.bundleHash, hash: bundle.manifest.bundleHash, sourceCommit: null, createdAt: new Date().toISOString() },
+        sourceProductHash: '',
+      });
+      const run = createRun(workspaceId, 'SKU-OCR-FAIL', null, null, { sourceKind: 'onboarding' });
+      const item = {
+        upc: 'SKU-OCR-FAIL',
+        extractionData: {
+          primaryImage: `http://127.0.0.1:${server.port}/img.png`,
+          additionalImages: [],
+        },
+      } as never;
+
+      const result = await runFrozenOcrPullForward({ snapshot, childRunId: run.id, item, workspacePath: wsPath });
+      expect(result.packagingOcrData).toBeNull();
+      expect(result.ocrOutcome.status).toBe('failed');
+      expect(result.ocrOutcome.localStatus).toBe('failed');
+      expect(result.ocrOutcome.localFailureReason).toBe('http_error');
+      expect(result.ocrOutcome.attempts).toBeGreaterThanOrEqual(1);
+    } finally {
+      server.stop(true);
+    }
+  });
 });
 
 // Reference the projection member type so the type-level contract is exercised.
@@ -1665,6 +1720,356 @@ describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
       serverA.stop(true);
       serverB.stop(true);
     }
+  });
+
+  it('P1-T3 digest-staleness: freeze INVALIDATES mismatched-authority OCR with a plan_incompatible/stale marker, then re-runs under the new authority binding a fresh digest', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { bundle } = writeActiveV2Bundle(wsPath);
+    upsertConfigSnapshot(workspaceId, bundle);
+
+    // Authority A succeeds; authority B's transport is GATED so the test can
+    // deterministically observe extraction_data_json while the re-run is in
+    // flight (after the invalidation-marker write, before the final bind).
+    let releaseB: (() => void) | null = null;
+    const gateB = new Promise<void>(resolve => { releaseB = resolve; });
+    let bChatCalls = 0;
+    const serverA = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          return Response.json({ message: { content: JSON.stringify({ productName: 'Pkg Under A', brand: 'Acme' }) } });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    const serverB = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          bChatCalls += 1;
+          return gateB.then(() => Response.json({ message: { content: JSON.stringify({ productName: 'Pkg Under B', brand: 'Acme' }) } }));
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    try {
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${serverA.port}`, 'vlm-model-a');
+
+      // Unsettled OCR: the first freeze runs OCR under authority A.
+      const unresolved = settledExtraction({
+        _name: 'Purina Pro Plan Dog Food Chicken 5 lb',
+        primaryImage: `http://127.0.0.1:${serverA.port}/img.png`,
+        additionalImages: [],
+      });
+      delete unresolved.ocrOutcome;
+      delete unresolved.packagingOcrData;
+      delete unresolved.packagingTitle;
+      delete unresolved.ocrInputHash;
+      const { items } = createReadyCohort(workspaceId, { '100000000001': unresolved });
+      const readStoredExt = (): Record<string, any> => JSON.parse(
+        String((getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string }).extraction_data_json),
+      );
+
+      const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+      // Freeze attempt 1: OCR binds to authority A, then the worker crashes
+      // BEFORE the final CAS (the run stays `freezing`, OCR + digest persist).
+      let crashed = false;
+      await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+        beforeFinalCas: () => {
+          if (crashed) return;
+          crashed = true;
+          throw new Error('simulated crash before final CAS');
+        },
+      })).rejects.toThrow('simulated crash before final CAS');
+      const storedA = readStoredExt();
+      expect(storedA.packagingOcrData.productName).toBe('Pkg Under A');
+      const digestA = storedA.ocrExecutionDigest;
+      expect(digestA).toMatch(/^[a-f0-9]{64}$/);
+
+      // The world moved on: the local VLM route changes to authority B.
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${serverB.port}`, 'vlm-model-b');
+
+      // Reclaim the SAME parent (crash mid-freeze → vacuous match).
+      getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+      const reclaim = reclaimExpiredCohortRuns(
+        workspaceId,
+        new Date().toISOString(),
+        () => (verifyCohortRunFrozen(getCohortRunById(run.id)!, wsPath, workspaceId) ? 'match' : 'drift'),
+        'worker-b',
+        COHORT_LEASE_TTL_MS,
+      );
+      expect(reclaim.resumed.length).toBe(1);
+      const resumed = getCohortRunById(run.id)!;
+
+      // Re-freeze under B: while B's transport sits gated in flight, the
+      // stale copy must ALREADY be invalidated with the visible marker AND
+      // the prior data fields preserved intact (nothing is lost).
+      let observedMidFlight: Record<string, any> | null = null;
+      const finalized = await freezeCohortForExecution(resumed, wsPath, workspaceId, {
+        onOcrInFlight: () => {
+          observedMidFlight = readStoredExt();
+          releaseB!();
+        },
+      });
+      expect(finalized.status).toBe('running');
+      expect(bChatCalls).toBe(1);
+
+      expect(observedMidFlight).toBeTruthy();
+      const mid = observedMidFlight as unknown as Record<string, any>;
+      expect(mid.packagingOcrData.productName).toBe('Pkg Under A');
+      expect(mid.packagingTitle).toBe('Pkg Under A');
+      expect(mid.ocrOutcome.status).toBe('failed');
+      expect(mid.ocrOutcome.localFailureReason).toBe('plan_incompatible');
+      expect(mid.ocrOutcome.stale).toBe(true);
+      expect(mid.ocrExecutionDigest).toBe(digestA);
+
+      // Final state: B's OCR + B's digest bound atomically at the existing
+      // write site; no stale-marker residue.
+      const storedB = readStoredExt();
+      expect(storedB.packagingOcrData.productName).toBe('Pkg Under B');
+      expect(storedB.ocrExecutionDigest).not.toBe(digestA);
+      const childB = getDb().query(
+        'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status = ?',
+      ).get(run.id, items[0].id, 'running') as Record<string, any>;
+      const snapshotB = getRuntimeSnapshotByHash(workspaceId, String(childB.config_snapshot_hash))!;
+      expect(storedB.ocrExecutionDigest).toBe(computeOcrExecutionDigest(snapshotB));
+      expect(storedB.ocrOutcome.status).toBe('succeeded');
+      expect(storedB.ocrOutcome.model).toBe('vlm-model-b');
+      expect(storedB.ocrOutcome.stale ?? false).toBe(false);
+      expect(storedB.ocrOutcome.localFailureReason ?? null).toBeNull();
+
+      // The persisted projection carries B's digest — the member is settled
+      // again under the new authority.
+      const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
+      const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
+      expect(projection.members[0].extraction.ocr.ocrExecutionDigest).toBe(storedB.ocrExecutionDigest);
+      expect((projection.members[0].extraction.ocr.outcome as Record<string, any>).stale ?? false).toBe(false);
+    } finally {
+      serverA.stop(true);
+      serverB.stop(true);
+    }
+  });
+
+  it('P1-T3 positive: matching execution digest stays byte-identical — no invalidation marker, no re-run', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { bundle } = writeActiveV2Bundle(wsPath);
+    upsertConfigSnapshot(workspaceId, bundle);
+
+    let chatCalls = 0;
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          chatCalls += 1;
+          return Response.json({ message: { content: JSON.stringify({ productName: 'Pkg Under A', brand: 'Acme' }) } });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    try {
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${server.port}`, 'vlm-model-a');
+      const unresolved = settledExtraction({
+        _name: 'Purina Pro Plan Dog Food Chicken 5 lb',
+        primaryImage: `http://127.0.0.1:${server.port}/img.png`,
+        additionalImages: [],
+      });
+      delete unresolved.ocrOutcome;
+      delete unresolved.packagingOcrData;
+      delete unresolved.packagingTitle;
+      delete unresolved.ocrInputHash;
+      const { items } = createReadyCohort(workspaceId, { '100000000001': unresolved });
+      const readRawExt = (): string =>
+        String((getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string }).extraction_data_json);
+
+      const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+      // Freeze attempt 1: OCR runs under authority A, then crash before CAS.
+      let crashed = false;
+      await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+        beforeFinalCas: () => {
+          if (crashed) return;
+          crashed = true;
+          throw new Error('simulated crash before final CAS');
+        },
+      })).rejects.toThrow('simulated crash before final CAS');
+      expect(chatCalls).toBe(1);
+      const rawBefore = readRawExt();
+
+      // Reclaim WITHOUT changing any authority: the stored digest still
+      // matches the freshly computed one.
+      getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+      reclaimExpiredCohortRuns(
+        workspaceId,
+        new Date().toISOString(),
+        () => (verifyCohortRunFrozen(getCohortRunById(run.id)!, wsPath, workspaceId) ? 'match' : 'drift'),
+        'worker-b',
+        COHORT_LEASE_TTL_MS,
+      );
+      const resumed = getCohortRunById(run.id)!;
+
+      // Re-freeze: matching digest ⇒ byte-identical behavior as before the
+      // P1-T3 change — NO invalidation marker, NO re-run.
+      const finalized = await freezeCohortForExecution(resumed, wsPath, workspaceId);
+      expect(finalized.status).toBe('running');
+      expect(chatCalls).toBe(1);
+      expect(readRawExt()).toBe(rawBefore);
+      const stored = JSON.parse(readRawExt());
+      expect(stored.packagingOcrData.productName).toBe('Pkg Under A');
+      expect(stored.ocrOutcome.status).toBe('succeeded');
+      expect(stored.ocrOutcome.stale ?? false).toBe(false);
+      expect(stored.ocrOutcome.localFailureReason ?? null).toBeNull();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it('P1-T3 rerun cap: members beyond BAYSTATE_CMS_FREEZE_OCR_RERUN_CAP keep their stale marker and remain unsettled without VLM calls', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { bundle } = writeActiveV2Bundle(wsPath);
+    upsertConfigSnapshot(workspaceId, bundle);
+
+    const serverA = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          return Response.json({ message: { content: JSON.stringify({ productName: 'Pkg Under A', brand: 'Acme' }) } });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    let bChatCalls = 0;
+    const serverB = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          bChatCalls += 1;
+          return Response.json({ message: { content: JSON.stringify({ productName: 'Pkg Under B', brand: 'Acme' }) } });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    const prevCap = process.env.BAYSTATE_CMS_FREEZE_OCR_RERUN_CAP;
+    try {
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${serverA.port}`, 'vlm-model-a');
+
+      // TWO members in ONE cohort, both unsettled: the first freeze binds
+      // each to authority A (uncapped legacy pull-forward).
+      const makeUnresolved = (variety: string): Record<string, any> => {
+        const ext = settledExtraction({
+          _name: `Purina Pro Plan Dog Food ${variety}`,
+          primaryImage: `http://127.0.0.1:${serverA.port}/img.png`,
+          additionalImages: [],
+        });
+        delete ext.ocrOutcome;
+        delete ext.packagingOcrData;
+        delete ext.packagingTitle;
+        delete ext.ocrInputHash;
+        return ext;
+      };
+      const { items } = createReadyCohort(workspaceId, {
+        '100000000001': makeUnresolved('Chicken 5 lb'),
+        '100000000002': makeUnresolved('Beef 10 lb'),
+      });
+      const readExt = (itemId: string): Record<string, any> => JSON.parse(
+        String((getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(itemId) as { extraction_data_json: string }).extraction_data_json),
+      );
+
+      const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+      let crashed = false;
+      await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+        beforeFinalCas: () => {
+          if (crashed) return;
+          crashed = true;
+          throw new Error('simulated crash before final CAS');
+        },
+      })).rejects.toThrow('simulated crash before final CAS');
+      const digestA1 = readExt(items[0].id).ocrExecutionDigest;
+      const digestA2 = readExt(items[1].id).ocrExecutionDigest;
+      expect(digestA1).toMatch(/^[a-f0-9]{64}$/);
+      expect(digestA2).toMatch(/^[a-f0-9]{64}$/);
+
+      // Authority moves to B; cap allows only ONE staleness re-run.
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${serverB.port}`, 'vlm-model-b');
+      process.env.BAYSTATE_CMS_FREEZE_OCR_RERUN_CAP = '1';
+
+      getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+      reclaimExpiredCohortRuns(
+        workspaceId,
+        new Date().toISOString(),
+        () => (verifyCohortRunFrozen(getCohortRunById(run.id)!, wsPath, workspaceId) ? 'match' : 'drift'),
+        'worker-b',
+        COHORT_LEASE_TTL_MS,
+      );
+      const resumed = getCohortRunById(run.id)!;
+
+      const finalized = await freezeCohortForExecution(resumed, wsPath, workspaceId);
+      expect(finalized.status).toBe('running');
+
+      // EXACTLY one member actually re-ran under B.
+      expect(bChatCalls).toBe(1);
+      const exts = [readExt(items[0].id), readExt(items[1].id)];
+      const reran = exts.filter(e => e.ocrOutcome?.model === 'vlm-model-b' && e.ocrOutcome?.stale !== true && e.ocrExecutionDigest !== digestA1);
+      const stale = exts.filter(e => e.ocrOutcome?.stale === true);
+      expect(reran.length).toBe(1);
+      expect(stale.length).toBe(1);
+
+      // The beyond-cap member keeps its stale marker + intact prior data and
+      // stays VISIBLY unsettled (readiness mirror), picking up on a later pass.
+      const staleExt = stale[0];
+      expect(staleExt.packagingOcrData.productName).toBe('Pkg Under A');
+      expect(staleExt.ocrOutcome.status).toBe('failed');
+      expect(staleExt.ocrOutcome.localFailureReason).toBe('plan_incompatible');
+      const { evaluateItemReadiness } = await import('../../onboarding/curation-cohort-service');
+      const staleItemRow = items.map(i => findItemById(i.id)!).find(it => (it.extractionData as Record<string, any>)?.ocrOutcome?.stale === true)!;
+      const reranItemRow = items.map(i => findItemById(i.id)!).find(it => (it.extractionData as Record<string, any>)?.ocrOutcome?.model === 'vlm-model-b')!;
+      expect(evaluateItemReadiness(staleItemRow).ocrSettled).toBe(false);
+      expect(evaluateItemReadiness(reranItemRow).ocrSettled).toBe(true);
+    } finally {
+      if (prevCap === undefined) delete process.env.BAYSTATE_CMS_FREEZE_OCR_RERUN_CAP;
+      else process.env.BAYSTATE_CMS_FREEZE_OCR_RERUN_CAP = prevCap;
+      serverA.stop(true);
+      serverB.stop(true);
+    }
+  });
+
+  it('P1-T3 rerun-cap parsing: missing/unparseable/negative → default 12; valid integers pass through', async () => {
+    const { parseFreezeOcrRerunCap } = await import('../../onboarding/cohort-curator');
+    expect(parseFreezeOcrRerunCap(undefined)).toBe(12);
+    expect(parseFreezeOcrRerunCap(null)).toBe(12);
+    expect(parseFreezeOcrRerunCap('')).toBe(12);
+    expect(parseFreezeOcrRerunCap('   ')).toBe(12);
+    expect(parseFreezeOcrRerunCap('abc')).toBe(12);
+    expect(parseFreezeOcrRerunCap('12x')).toBe(12);
+    expect(parseFreezeOcrRerunCap('-3')).toBe(12);
+    expect(parseFreezeOcrRerunCap('0')).toBe(0);
+    expect(parseFreezeOcrRerunCap('1')).toBe(1);
+    expect(parseFreezeOcrRerunCap('12')).toBe(12);
   });
 
   it('A2 heartbeat: a sibling reclaim during an in-flight freeze OCR aborts the freeze with NO post-loss writes; the new owner keeps the run', async () => {
@@ -2743,5 +3148,220 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     expect(finalized.executionProductTypeId).toBe('dog-treats');
     expect(finalized.productTypeConfidence).toBeCloseTo(0.8, 4);
     expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
+  });
+});
+
+// ─── P2-T6 (packaging-OCR overhaul): consumer migration at the freeze ────────
+
+/** An extraction fixture with NO OCR settled — forces the freeze's OCR
+ *  pull-forward moment (the delegation seam under test). */
+function unresolvedOcrExtraction(): Record<string, any> {
+  const ext = settledExtraction();
+  delete ext.ocrOutcome;
+  delete ext.packagingOcrData;
+  delete ext.packagingTitle;
+  delete ext.ocrInputHash;
+  return ext;
+}
+
+describe('packaging-OCR stage consumer migration (P2-T6)', () => {
+  it('flag OFF (default): the freeze settles OCR through the LEGACY pull-forward — legacy write-back shape, no packaging_ocr stage rows, no shadow keys', async () => {
+    expect(getOcrStageFlags().packagingOcrStageEnabled).toBe(false);
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1Config(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, { '100000000421': unresolvedOcrExtraction() });
+    const before = tableCounts();
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-flagoff', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // VLM disabled in the test env → the legacy pull-forward settles the OCR
+    // as `disabled` with a full binding write-back and ZERO transports.
+    expect(Number((tableCounts().classification_model_calls))).toBe(Number(before.classification_model_calls));
+    const storedRow = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
+    const stored = JSON.parse(storedRow.extraction_data_json) as Record<string, any>;
+    expect(stored.ocrOutcome.status).toBe('disabled');
+    expect(stored.packagingOcrData).toBeNull();
+    expect(stored.packagingTitle).toBeNull();
+    expect(stored.ocrInputHash).toMatch(/^[a-f0-9]{64}$/);
+
+    // The digest binding semantics are untouched: the persisted execution
+    // digest equals the member's own frozen runtime snapshot digest.
+    const child = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(run.id, items[0].id) as Record<string, any>;
+    const memberSnapshot = getRuntimeSnapshotByHash(workspaceId, String(child.config_snapshot_hash))!;
+    expect(stored.ocrExecutionDigest).toBe(computeOcrExecutionDigest(memberSnapshot));
+
+    // Flag-off inertness: the stage NEVER wrote its namespaced shadow key and
+    // NO packaging_ocr stage result exists anywhere.
+    expect('shadowPackagingOcrData' in stored).toBe(false);
+    const stageRows = getDb().query(
+      "SELECT COUNT(*) AS cnt FROM classification_stage_results WHERE stage_name = 'packaging_ocr'",
+    ).get() as { cnt: number };
+    expect(Number(stageRows.cnt)).toBe(0);
+  });
+
+  it('flag ON + shadow-only OFF: the freeze DELEGATES its OCR moment to the packaging_ocr stage while binding IDENTICAL hash/digest semantics', async () => {
+    // Master flag ON + shadow-only OFF (delegation precondition) + dual-run
+    // compare ON. Fixture mirrors the A2 fail-closed authority test: settled
+    // OCR WITHOUT an execution digest is never reused, so the freeze MUST
+    // re-run its OCR moment — which, under the flag, is delegated to the
+    // stage.
+    overrideOcrStageFlags({
+      packagingOcrStageEnabled: true,
+      packagingOcrStageShadowOnly: false,
+      packagingOcrDualRunCompare: true,
+    });
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1Config(workspaceId, wsPath);
+    const sourceUrl = 'https://brand.example.com/100000000431';
+    const extFixture = settledExtraction(); // terminal OCR, no ocrExecutionDigest → forced re-run
+    const { items } = createReadyCohort(workspaceId, { '100000000431': extFixture });
+    const before = tableCounts();
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-flagon', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // PROOF of delegation: the DUAL-RUN COMPARISON ROW — written ONLY by the
+    // packaging_ocr stage (the legacy pull-forward never touches this table).
+    // The stage saw the stored legacy OCR (succeeded) and produced its own
+    // coded result (disabled — VLM unavailable in the test env).
+    const comparisons = getDb().query(
+      'SELECT * FROM packaging_ocr_shadow_comparisons WHERE item_id = ?',
+    ).all(items[0].id) as Array<Record<string, any>>;
+    expect(comparisons.length).toBe(1);
+    expect(comparisons[0].legacy_status).toBe('succeeded');
+    expect(comparisons[0].stage_status).toBe('disabled');
+    expect(comparisons[0].batch_id).toBe(items[0].batchId);
+
+    // The freeze write-back still owns the LIVE keys with identical binding
+    // semantics: unconditional overwrite, input hash over the SAME canonical
+    // set, and the digest of the member's OWN frozen runtime snapshot.
+    const storedRow = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
+    const stored = JSON.parse(storedRow.extraction_data_json) as Record<string, any>;
+    expect(stored.ocrOutcome.status).toBe('disabled');
+    expect(stored.ocrInputHash).toBe(expectedOcrInputHash(sourceUrl, extFixture));
+    const child = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(run.id, items[0].id) as Record<string, any>;
+    const memberSnapshot = getRuntimeSnapshotByHash(workspaceId, String(child.config_snapshot_hash))!;
+    expect(stored.ocrExecutionDigest).toBe(computeOcrExecutionDigest(memberSnapshot));
+
+    // Zero transports under the disabled VLM; no pipeline ran → no
+    // packaging_ocr stage RESULTS rows from the delegated freeze either.
+    expect(Number(tableCounts().classification_model_calls)).toBe(Number(before.classification_model_calls));
+    const stageRows = getDb().query(
+      "SELECT COUNT(*) AS cnt FROM classification_stage_results WHERE stage_name = 'packaging_ocr'",
+    ).get() as { cnt: number };
+    expect(Number(stageRows.cnt)).toBe(0);
+  });
+
+  it('flag ON + shadow-only TRUE (default): the freeze stays on the LEGACY pull-forward — NO delegation, no comparison row, live keys from legacy only', async () => {
+    // Post-review fixup 1: delegation additionally requires shadow-only OFF.
+    // Under master ON + shadowOnly true (the defaults) the stage output can
+    // never become authoritative, so the freeze must NOT delegate — otherwise
+    // flipping just the master flag would silently make the stage live-
+    // authority. The pipeline-level stage still runs in shadow via
+    // composeCurationPipelineStages; THIS seam keeps legacy behavior.
+    overrideOcrStageFlags({ packagingOcrStageEnabled: true });
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1Config(workspaceId, wsPath);
+    const sourceUrl = 'https://brand.example.com/100000000441';
+    const extFixture = settledExtraction(); // terminal OCR, no ocrExecutionDigest → forced re-run
+    const { items } = createReadyCohort(workspaceId, { '100000000441': extFixture });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-shadow-default', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // PROOF of non-delegation: ZERO comparison rows (the delegated path writes
+    // one whenever a legacy baseline exists and dual-run is on).
+    const comparisons = getDb().query(
+      'SELECT COUNT(*) AS cnt FROM packaging_ocr_shadow_comparisons WHERE item_id = ?',
+    ).get(items[0].id) as { cnt: number };
+    expect(Number(comparisons.cnt)).toBe(0);
+
+    // Live keys were written by the LEGACY pull-forward: identical binding
+    // semantics, no namespaced shadow key.
+    const storedRow = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
+    const stored = JSON.parse(storedRow.extraction_data_json) as Record<string, any>;
+    expect(stored.ocrOutcome.status).toBe('disabled'); // VLM unavailable in the test env → legacy coded outcome
+    expect(stored.packagingOcrData).toBeNull();
+    expect(stored.ocrInputHash).toBe(expectedOcrInputHash(sourceUrl, extFixture));
+    const child = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(run.id, items[0].id) as Record<string, any>;
+    const memberSnapshot = getRuntimeSnapshotByHash(workspaceId, String(child.config_snapshot_hash))!;
+    expect(stored.ocrExecutionDigest).toBe(computeOcrExecutionDigest(memberSnapshot));
+    expect('shadowPackagingOcrData' in stored).toBe(false);
+  });
+});
+
+// ─── Post-review fixup 2: freeze-delegated distributor_record convergence ─────
+
+describe('freeze-delegated distributor_record OCR settles (post-review fixup 2)', () => {
+  it('flag-ON non-shadow freeze of a distributor_record item binds a terminal no_image outcome, and a second pass does NOT re-run (at most ONE comparison row across two passes)', async () => {
+    overrideOcrStageFlags({
+      packagingOcrStageEnabled: true,
+      packagingOcrStageShadowOnly: false,
+      packagingOcrDualRunCompare: true,
+    });
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1Config(workspaceId, wsPath);
+    // Legacy inline OCR stored but bound to a STALE input hash → the freeze
+    // must re-run its OCR moment (forced delegation), and a legacy baseline
+    // exists so a comparison row CAN be written.
+    const extFixture = { ...settledExtraction(), ocrInputHash: 'stale-hash' };
+    const { items } = createReadyCohort(workspaceId, { '100000000451': extFixture });
+    getDb().query('UPDATE onboarding_items SET source_type = ? WHERE id = ?')
+      .run('distributor_record', items[0].id);
+
+    // PASS 1 — freeze with an in-window CAS mutation so the run supersedes
+    // (the pull-forward + write-back already happened; the cohort returns to
+    // READY for a second claim, mirroring the two-phase CAS test above).
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-dist-1', COHORT_LEASE_TTL_MS);
+    let mutated = false;
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId, {
+      beforeFinalCas: () => {
+        if (mutated) return;
+        mutated = true;
+        const live = findItemById(items[0].id)!;
+        updateItemExtractionData(
+          items[0].id,
+          JSON.stringify({ ...live.extractionData, title: 'MUTATED IN WINDOW' }),
+        );
+      },
+    });
+    expect(finalized.status).toBe('superseded');
+
+    // The delegated stage emitted 'skipped' for the distributor record, which
+    // the freeze delegation maps to TERMINAL 'no_image' before write-back.
+    const afterPass1 = JSON.parse(
+      String((getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as any).extraction_data_json),
+    ) as Record<string, any>;
+    expect(afterPass1.ocrOutcome.status).toBe('no_image');
+    // "At most ONE" comparison row: the stage's distributor branch returns
+    // before its dual-run writer (no OCR transport happens), so a fresh
+    // distributor item writes ZERO rows here — the invariant under test is
+    // that the count NEVER grows across passes (no unbounded churn).
+    const comparisonsAfterPass1 = countPackagingOcrShadowComparisons(items[0].id);
+    expect(comparisonsAfterPass1).toBeLessThanOrEqual(1);
+
+    // PASS 2 — fresh claim re-freezes; OCR is now SETTLED (no_image is
+    // terminal) so the pull-forward never re-runs: the comparison-row count
+    // is unchanged, outcome unchanged.
+    const retried = claimReadyCurationCohorts(workspaceId, 10, 'worker-dist-2', COHORT_LEASE_TTL_MS);
+    expect(retried.length).toBe(1);
+    const rerun = await freezeCohortForExecution(retried[0], wsPath, workspaceId);
+    expect(rerun.status).toBe('running');
+
+    const afterPass2 = JSON.parse(
+      String((getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as any).extraction_data_json),
+    ) as Record<string, any>;
+    expect(afterPass2.ocrOutcome.status).toBe('no_image');
+    expect(countPackagingOcrShadowComparisons(items[0].id)).toBe(comparisonsAfterPass1);
   });
 });

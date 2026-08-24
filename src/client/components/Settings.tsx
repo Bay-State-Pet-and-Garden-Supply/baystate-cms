@@ -1,30 +1,58 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { listFieldRegistry, updateFieldRegistryEntry, getConnection, saveConnection, testConnection } from '../api';
 import { ViewHeader } from './common/ViewHeader';
 import { AiComputePanel } from './AiComputePanel';
+import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
+import { CatalogFieldsView } from './catalog-workbench/CatalogFieldsView';
+import { TypesAttributesView } from './catalog-workbench/TypesAttributesView';
+import { MappingsView } from './catalog-workbench/MappingsView';
+import { SchemaHealthView } from './catalog-workbench/SchemaHealthView';
+import { SettingsTabShell, SettingsTabPanel, type SettingsTabDef } from './settings/SettingsTabShell';
+import { SettingsClassificationTab } from './settings/SettingsClassificationTab';
+import { TaxonomyReleaseCard } from './settings/TaxonomyReleaseCard';
 import { colors } from '../theme';
 
-/** Store Settings tab (deep-linked via `?view=settings&tab=ai|catalog`). */
-type SettingsTab = 'general' | 'ai' | 'catalog';
+/**
+ * Store Settings (deep-linked via `?view=settings&tab=<id>`).
+ *
+ * P1 UI revamp: classification/taxonomy administration consolidated here as
+ * top-level tabs (Catalog Fields / Types & Attributes / Mappings & Health /
+ * AI Tasks) so managers operate releases without entering Onboarding.
+ * Read-only release-derived views render inside SettingsClassificationTab
+ * (FrozenBanner pattern); editable surfaces remain only those the server
+ * permits today (LLM task configs, field-registry display labels, connection,
+ * AI compute routing).
+ */
 
-const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
+type SettingsTab = 'general' | 'ai-tasks' | 'ai' | 'catalog' | 'types' | 'mappings-health' | 'taxonomy-release';
+
+const SETTINGS_TABS: readonly SettingsTabDef[] = [
   { id: 'general', label: 'General' },
-  { id: 'ai', label: 'AI Compute' },
-  { id: 'catalog', label: 'Catalog' },
+  { id: 'ai-tasks', label: 'AI Tasks' },
+  { id: 'ai', label: 'AI Routes' },
+  { id: 'catalog', label: 'Catalog Fields' },
+  { id: 'types', label: 'Types & Attributes' },
+  { id: 'mappings-health', label: 'Mappings & Health' },
+  { id: 'taxonomy-release', label: 'Taxonomy Release' },
 ];
+
+const VALID_TAB_IDS = new Set<string>(SETTINGS_TABS.map((t) => t.id));
 
 function getInitialSettingsTab(): SettingsTab {
   const tab = new URLSearchParams(window.location.search).get('tab');
-  if (tab === 'ai' || tab === 'catalog') return tab;
-  return 'general';
+  return VALID_TAB_IDS.has(tab ?? '') ? (tab as SettingsTab) : 'general';
 }
 
-export function Settings() {
+interface SettingsProps {
+  /** Opens a product overlay when reused workbench views reference SKUs. */
+  onSelectProduct?: (sku: string) => void;
+}
+
+export function Settings({ onSelectProduct }: SettingsProps) {
   const [fieldRegistry, setFieldRegistry] = useState<any[]>([]);
   const [loadingFields, setLoadingFields] = useState(false);
   const [savingFields, setSavingFields] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(getInitialSettingsTab);
-  const tabRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement | null>>>({});
 
   // Connection settings state
   const [cgiBaseUrl, setCgiBaseUrl] = useState('');
@@ -72,15 +100,15 @@ export function Settings() {
   useEffect(() => {
     const handlePopState = () => {
       const tab = new URLSearchParams(window.location.search).get('tab');
-      setSettingsTab(tab === 'ai' || tab === 'catalog' ? tab : 'general');
+      setSettingsTab(VALID_TAB_IDS.has(tab ?? '') ? (tab as SettingsTab) : 'general');
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  const handleSettingsTabChange = (next: SettingsTab) => {
-    if (next === settingsTab) return;
-    setSettingsTab(next);
+  const handleSettingsTabChange = (next: string) => {
+    if (!VALID_TAB_IDS.has(next) || next === settingsTab) return;
+    setSettingsTab(next as SettingsTab);
     // Keep the URL as the source of truth for the active tab so deep links
     // (`?view=settings&tab=ai`) stay live. replaceState avoids history spam.
     const url = new URL(window.location.href);
@@ -92,40 +120,6 @@ export function Settings() {
     window.history.replaceState(null, '', url.toString());
   };
 
-  const focusSettingsTab = (next: SettingsTab) => {
-    tabRefs.current[next]?.focus();
-  };
-
-  const handleTablistKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const focusedTab = (event.target as HTMLElement).closest<HTMLButtonElement>('[role="tab"]')?.dataset.settingsTab as SettingsTab | undefined;
-    if (event.key === 'Enter' || event.key === ' ') {
-      if (!focusedTab) return;
-      event.preventDefault();
-      handleSettingsTabChange(focusedTab);
-      focusSettingsTab(focusedTab);
-      return;
-    }
-
-    const currentTab = focusedTab ?? settingsTab;
-    const currentIndex = SETTINGS_TABS.findIndex((tab) => tab.id === currentTab);
-    let nextIndex: number | null = null;
-
-    if (event.key === 'ArrowLeft') {
-      nextIndex = currentIndex === 0 ? SETTINGS_TABS.length - 1 : currentIndex - 1;
-    } else if (event.key === 'ArrowRight') {
-      nextIndex = currentIndex === SETTINGS_TABS.length - 1 ? 0 : currentIndex + 1;
-    } else if (event.key === 'Home') {
-      nextIndex = 0;
-    } else if (event.key === 'End') {
-      nextIndex = SETTINGS_TABS.length - 1;
-    }
-
-    if (nextIndex === null) return;
-    event.preventDefault();
-    const nextTab = SETTINGS_TABS[nextIndex].id;
-    handleSettingsTabChange(nextTab);
-    focusSettingsTab(nextTab);
-  };
   const handleSaveConnection = async () => {
     if (!cgiBaseUrl.trim() || !merchantId.trim()) {
       setConnError('CGI URL and merchant ID are required.');
@@ -149,13 +143,10 @@ export function Settings() {
 
   const styles: Record<string, React.CSSProperties> = {
     container: { padding: 24, maxWidth: 1200, margin: '0 auto' },
-    title: { fontSize: 24, fontWeight: 600, margin: '0 0 24px 0', color: '#111827' },
     section: { background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: 24, marginBottom: 24, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' },
     sectionTitle: { fontSize: 18, fontWeight: 600, margin: '0 0 16px 0', color: '#111827' },
     input: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const, marginBottom: 12 },
-    select: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const, background: '#fff' },
     primaryBtn: { background: colors.uniformGreen, color: colors.feedBagCream, border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
-    secondaryBtn: { background: '#4b5563', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
     table: { width: '100%', borderCollapse: 'collapse' as const, marginTop: 12, fontSize: 14 },
     th: { borderBottom: '2px solid #e5e7eb', textAlign: 'left' as const, padding: '8px 12px', color: '#4b5563', fontWeight: 600 },
     td: { borderBottom: '1px solid #e5e7eb', padding: '8px 12px', verticalAlign: 'middle' },
@@ -163,9 +154,6 @@ export function Settings() {
     success: { color: '#16a34a', padding: 12, background: '#f0fdf4', borderRadius: 6, marginBottom: 20, fontSize: 14 },
     hint: { fontSize: 13, color: '#6b7280', margin: '0 0 16px' },
     empty: { fontSize: 14, color: '#9ca3af', fontStyle: 'italic' as const },
-    tabBar: { display: 'flex', gap: 4, borderBottom: '1px solid #e5e7eb', marginBottom: 20 },
-    tab: { padding: '8px 16px', fontSize: 14, fontWeight: 500, color: '#4b5563', background: 'transparent', border: 'none', borderBottom: '2px solid transparent', cursor: 'pointer' },
-    tabActive: { color: '#111827', fontWeight: 600, borderBottom: `2px solid ${colors.uniformGreen}` },
   };
 
   return (
@@ -175,44 +163,18 @@ export function Settings() {
         description="Manage ShopSite CGI API connection, merchant credentials, global AI compute & provider routing, and catalog Field Registry definitions."
       />
 
-      {/* Store Settings tab bar (General / AI Compute / Catalog) */}
-      <div
-        style={styles.tabBar}
-        role="tablist"
-        aria-label="Store Settings sections"
-        onKeyDown={handleTablistKeyDown}
-      >
-        {SETTINGS_TABS.map((t) => (
-          <button
-            key={t.id}
-            ref={(node) => {
-              tabRefs.current[t.id] = node;
-            }}
-            type="button"
-            role="tab"
-            id={`settings-tab-${t.id}`}
-            data-settings-tab={t.id}
-            aria-selected={settingsTab === t.id}
-            aria-controls={`settings-tabpanel-${t.id}`}
-            tabIndex={settingsTab === t.id ? 0 : -1}
-            style={{ ...styles.tab, ...(settingsTab === t.id ? styles.tabActive : {}) }}
-            onClick={() => handleSettingsTabChange(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      {/* Store Settings tab bar (accessible ARIA pattern via SettingsTabShell) */}
+      <SettingsTabShell
+        tabs={SETTINGS_TABS}
+        active={settingsTab}
+        onChange={handleSettingsTabChange}
+        ariaLabel="Store Settings sections"
+      />
 
       {error && <div style={styles.error}>{error}</div>}
 
       {/* Connection & Credentials Section (General) */}
-      <div
-        role="tabpanel"
-        id="settings-tabpanel-general"
-        aria-labelledby="settings-tab-general"
-        hidden={settingsTab !== 'general'}
-        style={{ display: settingsTab === 'general' ? 'block' : 'none' }}
-      >
+      <SettingsTabPanel tabId="general" active={settingsTab}>
       <div style={styles.section}>
         <h2 style={styles.sectionTitle}>ShopSite Connection & Credentials</h2>
         <p style={styles.hint}>
@@ -261,154 +223,172 @@ export function Settings() {
           </button>
         </div>
       </div>
-      </div>
+      </SettingsTabPanel>
 
-      {/* AI Compute Section — canonical global AI infrastructure surface */}
-      <div
-        role="tabpanel"
-        id="settings-tabpanel-ai"
-        aria-labelledby="settings-tab-ai"
-        hidden={settingsTab !== 'ai'}
-        style={{ display: settingsTab === 'ai' ? 'block' : 'none' }}
-      >
+      {/* AI Tasks Section — per-task model routing (orphaned panel mounted, P1) */}
+      <SettingsTabPanel tabId="ai-tasks" active={settingsTab}>
+        <LlmTaskConfigPanel />
+      </SettingsTabPanel>
+
+      {/* AI Routes Section — canonical global AI infrastructure surface */}
+      <SettingsTabPanel tabId="ai" active={settingsTab}>
         <AiComputePanel onChange={() => setError('')} />
-      </div>
+      </SettingsTabPanel>
 
-      {/* Catalog Field Display Labels Section (Catalog) */}
-      <div
-        role="tabpanel"
-        id="settings-tabpanel-catalog"
-        aria-labelledby="settings-tab-catalog"
-        hidden={settingsTab !== 'catalog'}
-        style={{ display: settingsTab === 'catalog' ? 'block' : 'none' }}
-      >
-      <div style={styles.section}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div>
-            <h2 style={{ ...styles.sectionTitle, margin: 0 }}>Catalog Field Display Labels</h2>
-          </div>
-          <button
-            type="button"
-            style={styles.primaryBtn}
-            onClick={async () => {
-              setSavingFields(true);
-              try {
-                for (const entry of fieldRegistry) {
-                  await updateFieldRegistryEntry(entry.id, entry);
-                }
-                alert('Display labels saved successfully.');
-                void loadFieldRegistry();
-              } catch (err) {
-                alert('Failed to save display labels: ' + (err instanceof Error ? err.message : String(err)));
-              } finally {
-                setSavingFields(false);
-              }
-            }}
-            disabled={savingFields || loadingFields}
-          >
-            {savingFields ? 'Saving...' : 'Save Labels'}
-          </button>
-        </div>
-        <p style={styles.hint}>
-          Customize how ShopSite XML fields appear throughout the CMS editors. Labels, types, and groupings configured here
-          affect the Product Detail editor, Catalog Health reports, and the Catalog Workbench.
-          Product attribute mapping for the onboarding pipeline is configured in <strong>Onboarding Settings → Curation</strong>.
-        </p>
+      {/* Catalog Fields — live field registry view (reused workbench view)
+          plus the editable display-labels editor (server-permitted surface) */}
+      <SettingsTabPanel tabId="catalog" active={settingsTab}>
+        <SettingsClassificationTab view="catalog-fields" showBanner={false}>
+          <CatalogFieldsView onSelectProduct={onSelectProduct ?? (() => {})} />
+          <div style={{ height: 24 }} />
+          <div style={styles.section}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <h2 style={{ ...styles.sectionTitle, margin: 0 }}>Catalog Field Display Labels</h2>
+              <button
+                type="button"
+                style={styles.primaryBtn}
+                onClick={async () => {
+                  setSavingFields(true);
+                  try {
+                    for (const entry of fieldRegistry) {
+                      await updateFieldRegistryEntry(entry.id, entry);
+                    }
+                    alert('Display labels saved successfully.');
+                    void loadFieldRegistry();
+                  } catch (err) {
+                    alert('Failed to save display labels: ' + (err instanceof Error ? err.message : String(err)));
+                  } finally {
+                    setSavingFields(false);
+                  }
+                }}
+                disabled={savingFields || loadingFields}
+              >
+                {savingFields ? 'Saving...' : 'Save Labels'}
+              </button>
+            </div>
+            <p style={styles.hint}>
+              Customize how ShopSite XML fields appear throughout the CMS editors. Labels, types, and groupings configured here
+              affect the Product Detail editor, Catalog Health reports, and the Catalog Workbench.
+              Product attribute mapping for the onboarding pipeline is configured in <strong>Onboarding Settings → Curation</strong>.
+            </p>
 
-        {loadingFields ? (
-          <p style={styles.empty}>Loading field registry...</p>
-        ) : fieldRegistry.length === 0 ? (
-          <p style={styles.empty}>No fields discovered yet. Sync catalog products to populate.</p>
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={{ ...styles.th, width: '15%' }}>XML Field</th>
-                  <th style={{ ...styles.th, width: '25%' }}>Display Label</th>
-                  <th style={{ ...styles.th, width: '15%' }}>Data Type</th>
-                  <th style={{ ...styles.th, width: '10%' }}>Editable</th>
-                  <th style={{ ...styles.th, width: '10%' }}>Required</th>
-                  <th style={{ ...styles.th, width: '25%' }}>UI Group</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fieldRegistry.map((entry, idx) => (
-                  <tr key={entry.id}>
-                    <td style={styles.td}>
-                      <strong>{entry.xmlField}</strong>
-                      <div style={{ fontSize: 11, color: '#6b7280' }}>({entry.kind})</div>
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        style={styles.input}
-                        type="text"
-                        value={entry.label || ''}
-                        onChange={(e) => {
-                          const next = [...fieldRegistry];
-                          next[idx] = { ...entry, label: e.target.value };
-                          setFieldRegistry(next);
-                        }}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <select
-                        style={styles.select}
-                        value={entry.dataType}
-                        onChange={(e) => {
-                          const next = [...fieldRegistry];
-                          next[idx] = { ...entry, dataType: e.target.value };
-                          setFieldRegistry(next);
-                        }}
-                      >
-                        {['string', 'number', 'boolean', 'html', 'image', 'list', 'raw_xml'].map(t => (
-                          <option key={t} value={t}>{t}</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="checkbox"
-                        checked={entry.editable}
-                        onChange={(e) => {
-                          const next = [...fieldRegistry];
-                          next[idx] = { ...entry, editable: e.target.checked };
-                          setFieldRegistry(next);
-                        }}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="checkbox"
-                        checked={entry.required}
-                        disabled={!entry.editable}
-                        onChange={(e) => {
-                          const next = [...fieldRegistry];
-                          next[idx] = { ...entry, required: e.target.checked };
-                          setFieldRegistry(next);
-                        }}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        style={styles.input}
-                        type="text"
-                        value={entry.uiGroup || ''}
-                        onChange={(e) => {
-                          const next = [...fieldRegistry];
-                          next[idx] = { ...entry, uiGroup: e.target.value || null };
-                          setFieldRegistry(next);
-                        }}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {loadingFields ? (
+              <p aria-live="polite" style={styles.empty}>Loading field registry...</p>
+            ) : fieldRegistry.length === 0 ? (
+              <p aria-live="polite" style={styles.empty}>No fields discovered yet. Sync catalog products to populate.</p>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={{ ...styles.th, width: '15%' }}>XML Field</th>
+                      <th style={{ ...styles.th, width: '25%' }}>Display Label</th>
+                      <th style={{ ...styles.th, width: '15%' }}>Data Type</th>
+                      <th style={{ ...styles.th, width: '10%' }}>Editable</th>
+                      <th style={{ ...styles.th, width: '10%' }}>Required</th>
+                      <th style={{ ...styles.th, width: '25%' }}>UI Group</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fieldRegistry.map((entry, idx) => (
+                      <tr key={entry.id}>
+                        <td style={styles.td}>
+                          <strong>{entry.xmlField}</strong>
+                          <div style={{ fontSize: 11, color: '#6b7280' }}>({entry.kind})</div>
+                        </td>
+                        <td style={styles.td}>
+                          <input
+                            style={styles.input}
+                            type="text"
+                            value={entry.label || ''}
+                            onChange={(e) => {
+                              const next = [...fieldRegistry];
+                              next[idx] = { ...entry, label: e.target.value };
+                              setFieldRegistry(next);
+                            }}
+                          />
+                        </td>
+                        <td style={styles.td}>
+                          <select
+                            style={styles.input}
+                            value={entry.dataType}
+                            onChange={(e) => {
+                              const next = [...fieldRegistry];
+                              next[idx] = { ...entry, dataType: e.target.value };
+                              setFieldRegistry(next);
+                            }}
+                          >
+                            {['string', 'number', 'boolean', 'html', 'image', 'list', 'raw_xml'].map(t => (
+                              <option key={t} value={t}>{t}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td style={styles.td}>
+                          <input
+                            type="checkbox"
+                            checked={entry.editable}
+                            onChange={(e) => {
+                              const next = [...fieldRegistry];
+                              next[idx] = { ...entry, editable: e.target.checked };
+                              setFieldRegistry(next);
+                            }}
+                          />
+                        </td>
+                        <td style={styles.td}>
+                          <input
+                            type="checkbox"
+                            checked={entry.required}
+                            disabled={!entry.editable}
+                            onChange={(e) => {
+                              const next = [...fieldRegistry];
+                              next[idx] = { ...entry, required: e.target.checked };
+                              setFieldRegistry(next);
+                            }}
+                          />
+                        </td>
+                        <td style={styles.td}>
+                          <input
+                            style={styles.input}
+                            type="text"
+                            value={entry.uiGroup || ''}
+                            onChange={(e) => {
+                              const next = [...fieldRegistry];
+                              next[idx] = { ...entry, uiGroup: e.target.value || null };
+                              setFieldRegistry(next);
+                            }}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        )}
-      </div>
-      </div>
+        </SettingsClassificationTab>
+      </SettingsTabPanel>
+
+      {/* Types & Attributes — read-only release-derived view */}
+      <SettingsTabPanel tabId="types" active={settingsTab}>
+        <SettingsClassificationTab view="types-attributes" showBanner={false}>
+          <TypesAttributesView />
+        </SettingsClassificationTab>
+      </SettingsTabPanel>
+
+      {/* Mappings & Health — read-only release-derived views, stacked */}
+      <SettingsTabPanel tabId="mappings-health" active={settingsTab}>
+        <SettingsClassificationTab view="mappings-health" showBanner={false}>
+          <MappingsView />
+          <div style={{ height: 32 }} />
+          <SchemaHealthView onSelectProduct={onSelectProduct ?? (() => {})} />
+        </SettingsClassificationTab>
+      </SettingsTabPanel>
+
+      {/* Taxonomy Release — pin status, available immutable releases, and the
+          sanctioned Activate action (server-gated; P4) */}
+      <SettingsTabPanel tabId="taxonomy-release" active={settingsTab}>
+        <TaxonomyReleaseCard />
+      </SettingsTabPanel>
     </div>
   );
 }

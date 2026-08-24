@@ -28,6 +28,8 @@ import {
 } from './evidence-targeting';
 import { enrichProductDetails } from './detail-enrichment';
 import { llmRankOptions } from './curation-target-ranker';
+import { isCalibratedBulkAcceptable } from './proposal-safety';
+import type { CalibratedThresholds } from './confidence-calibrator';
 import { buildModelCallContext } from './runtime-snapshot';
 import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
@@ -131,12 +133,17 @@ export function processProductTypeTarget(
  *
  * @param options.cardinality - Per-Product-Type cardinality from the accepted
  *   type's profile; overrides the global target selectionMode when supplied.
+ * @param options.calibratedThresholds - P3 (plan B.P3.4): CALIBRATED review
+ *   thresholds from a fitted calibration model. Absent/null (the default —
+ *   no production fitted thresholds exist today) keeps bulk acceptance
+ *   byte-identical to legacy: nothing becomes bulk-acceptable from
+ *   confidence alone.
  */
 export async function processProductFieldTarget(
   target: ResolvedTarget,
   input: StageInput,
   context: StageContext,
-  options: { cardinality?: 'single' | 'multiple' } = {},
+  options: { cardinality?: 'single' | 'multiple'; calibratedThresholds?: CalibratedThresholds | null } = {},
 ): Promise<TargetProcessResult> {
   const { config: targetConfig, options: targetOptions, attribute } = target;
   const options2 = targetOptions;
@@ -428,6 +435,12 @@ export async function processProductFieldTarget(
     hasConflict = true;
   }
 
+  // P3 calibrated bulk acceptance (plan B.P3.4): with calibrated thresholds
+  // present AND no conflicting evidence, a high-confidence plain field
+  // assignment may be marked bulk-acceptable through the Issue #10 machinery;
+  // the uncalibrated fallback reproduces legacy byte-identically (false).
+  // Claims/composition and conflicts can never pass — enforced inside
+  // isCalibratedBulkAcceptable AND by validateProposalSafety.
   const proposal = buildFieldAssignmentProposal({
     runId: context.runId,
     sku: input.sku,
@@ -438,7 +451,13 @@ export async function processProductFieldTarget(
     supportingEvidenceIds,
     contradictingEvidenceIds,
     isMultiple: selectionMode === 'multiple',
-    isBulkAcceptable: hasConflict ? false : undefined,
+    isBulkAcceptable: hasConflict
+      ? false
+      : isCalibratedBulkAcceptable(
+          { proposalType: 'field_assignment', confidence, contradictingEvidenceIds },
+          target.attribute ?? null,
+          options.calibratedThresholds ?? null,
+        ),
     snapshotHash,
     ...(llmModelCallIds?.length ? { modelCallIds: llmModelCallIds } : {}),
   });
@@ -846,8 +865,12 @@ async function processTargetInternal(
   }
 
   const proposals = llmResult.values.map(v => {
-    const singlePacket = buildPacket(v);
-    return builder.buildProposal(v, llmResult.confidence, {
+    const opt = options.find(
+      o => o.label.toLowerCase() === v.toLowerCase() || o.value.toLowerCase() === v.toLowerCase(),
+    );
+    const proposalValue = targetConfig.kind === 'product_type' ? (opt?.value ?? v) : v;
+    const singlePacket = buildPacket(proposalValue);
+    return builder.buildProposal(proposalValue, llmResult.confidence, {
       evidenceIds: singlePacket.evidenceIds,
       supportingEvidenceIds: singlePacket.supportingEvidenceIds,
       contradictingEvidenceIds: singlePacket.contradictingEvidenceIds,

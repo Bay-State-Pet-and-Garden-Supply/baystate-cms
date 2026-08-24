@@ -17,6 +17,7 @@ import type {
   TerminalBehavior,
 } from '../../ai/provider-connections';
 import { DEFAULT_BUILTIN_CONNECTIONS } from '../../ai/provider-connections';
+import { DEFAULT_LOCAL_VISION_MODEL } from '../../shared/vision-model-defaults';
 
 interface DbProviderConnection {
   id: string;
@@ -152,7 +153,7 @@ function ensureSeededDefaults(): void {
         id, catalog_primary_connection_id, catalog_primary_model_id,
         catalog_fallback_connection_id, catalog_fallback_model_id,
         text_data_sharing, image_data_sharing, created_at, updated_at
-      ) VALUES ('current', 'local-ollama', 'qwen2.5vl:latest', NULL, NULL, 'this_device_only', 'this_device_only', ?, ?)
+      ) VALUES ('current', 'local-ollama', '${DEFAULT_LOCAL_VISION_MODEL}', NULL, NULL, 'this_device_only', 'this_device_only', ?, ?)
     `).run(now, now);
   }
 }
@@ -272,7 +273,7 @@ export function deleteProviderConnection(id: string): boolean {
       if (defaults.catalog_primary_connection_id === id) {
         const remaining = db.query('SELECT id FROM provider_connections LIMIT 1').get() as { id: string } | undefined;
         const newPrimaryId = remaining?.id ?? 'openai-cloud';
-        const newPrimaryModel = newPrimaryId === 'openai-cloud' ? 'gpt-4o-mini' : (newPrimaryId === 'deepseek-cloud' ? 'deepseek-chat' : 'qwen2.5vl:latest');
+        const newPrimaryModel = newPrimaryId === 'openai-cloud' ? 'gpt-4o-mini' : (newPrimaryId === 'deepseek-cloud' ? 'deepseek-chat' : DEFAULT_LOCAL_VISION_MODEL);
         db.query('UPDATE ai_routing_defaults SET catalog_primary_connection_id = ?, catalog_primary_model_id = ? WHERE id = ?').run(newPrimaryId, newPrimaryModel, 'current');
       }
       if (defaults.catalog_fallback_connection_id === id) {
@@ -419,7 +420,7 @@ export function isAiComputeConfigured(): boolean {
     const defaultsRow = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current') as DbRoutingDefaults | undefined;
     if (defaultsRow) {
       if (defaultsRow.text_data_sharing !== 'this_device_only' || defaultsRow.image_data_sharing !== 'this_device_only') return true;
-      if (defaultsRow.catalog_primary_connection_id !== 'local-ollama' || defaultsRow.catalog_primary_model_id !== 'qwen2.5vl:latest') return true;
+      if (defaultsRow.catalog_primary_connection_id !== 'local-ollama' || defaultsRow.catalog_primary_model_id !== DEFAULT_LOCAL_VISION_MODEL) return true;
       if (defaultsRow.catalog_fallback_connection_id !== null || defaultsRow.catalog_fallback_model_id !== null) return true;
     }
 
@@ -458,7 +459,7 @@ export function getFullAiRoutingConfig(): AiRoutingConfig {
     imageDataSharing: (defaultsRow?.image_data_sharing as DataSharingPolicy) ?? 'this_device_only',
     catalogTarget: {
       connectionId: defaultsRow?.catalog_primary_connection_id ?? 'local-ollama',
-      modelId: defaultsRow?.catalog_primary_model_id ?? 'qwen2.5vl:latest',
+      modelId: defaultsRow?.catalog_primary_model_id ?? DEFAULT_LOCAL_VISION_MODEL,
     },
     catalogFallback: defaultsRow?.catalog_fallback_connection_id
       ? {

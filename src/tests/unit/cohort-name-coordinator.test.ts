@@ -22,11 +22,13 @@ import {
   coordinateCohortItems,
   coordinateCohortItemsOnce,
   clearCohortCoordinationCache,
+  deriveFrozenFactsForValidation,
   formatDeterministicTitle,
   groupByProductLine,
 } from '../../onboarding/cohort-name-coordinator';
 import { buildCohortPrompt } from '../../onboarding/title-prompt-template';
 import { HeartbeatLostError } from '../../classification/heartbeat-errors';
+import { validateFamilyTitleSet } from '../../classification/family-title-consistency';
 
 vi.mock('../../onboarding/llm-client', () => ({
   getLlmConfigForTask: vi.fn(() => ({
@@ -38,15 +40,15 @@ vi.mock('../../onboarding/llm-client', () => ({
   callLlmForTask: vi.fn(
     async (_task: string, _prompt: string) =>
       JSON.stringify({
-        'U1': 'Woof Pupsicle Small',
-        'U2': 'Woof Pupsicle Large',
+        'U1': 'TestBrand Woof Pupsicle Small',
+        'U2': 'TestBrand Woof Pupsicle Large',
       }),
   ),
   callLlmForTaskWithProvenance: vi.fn(
     async (_task: string, _prompt: string, _systemPrompt: string, _options: Record<string, any>) => ({
       content: JSON.stringify({
-        'U1': 'Woof Pupsicle Small',
-        'U2': 'Woof Pupsicle Large',
+        'U1': 'TestBrand Woof Pupsicle Small',
+        'U2': 'TestBrand Woof Pupsicle Large',
       }),
       callId: 'mock-call-1',
       provider: 'openai',
@@ -135,16 +137,17 @@ describe('Cohort Name Coordinator', () => {
       makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
       makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
     ] as OnboardingItem[];
-    // Mock LLM returning parenthesized titles
+    // Mock LLM returning parenthesized titles (brand included — B1 T3 requires
+    // the family brand exactly once in every coordinated title)
     (callLlmForTask as any).mockResolvedValueOnce(
       JSON.stringify({
-        U1: 'Woof Pupsicle (Small)',
-        U2: 'Woof Pupsicle (Large)',
+        U1: 'TestBrand Woof Pupsicle (Small)',
+        U2: 'TestBrand Woof Pupsicle (Large)',
       }),
     );
     const result = await coordinateCohortItems(items);
-    expect(result.get('U1')!.title).toBe('Woof Pupsicle Small');
-    expect(result.get('U2')!.title).toBe('Woof Pupsicle Large');
+    expect(result.get('U1')!.title).toBe('TestBrand Woof Pupsicle Small');
+    expect(result.get('U2')!.title).toBe('TestBrand Woof Pupsicle Large');
   });
 
   // ─── Singleton absent ───────────────────────────────────────────────────
@@ -447,8 +450,8 @@ describe('Cohort Name Coordinator', () => {
     // The legacy non-audited transport was NOT used.
     expect(callLlmForTask).not.toHaveBeenCalled();
     // The response content still parses through the coordinator.
-    expect(result.get('U1')).toEqual({ title: 'Woof Pupsicle Small', source: 'llm_cohort' });
-    expect(result.get('U2')).toEqual({ title: 'Woof Pupsicle Large', source: 'llm_cohort' });
+    expect(result.get('U1')).toEqual({ title: 'TestBrand Woof Pupsicle Small', source: 'llm_cohort' });
+    expect(result.get('U2')).toEqual({ title: 'TestBrand Woof Pupsicle Large', source: 'llm_cohort' });
   });
 
   it('absent opts keeps the legacy non-audited call byte-identical (options.modelCall undefined)', async () => {
@@ -480,6 +483,33 @@ describe('Cohort Name Coordinator', () => {
     });
     expect(calls).toEqual([{ callId: 'mock-call-1', skus: ['U1', 'U2'] }]);
     expect(result.size).toBe(2);
+  });
+
+  it('phantom-weight candidate member: zero rows from that group, falls through to linted deterministic fallback', async () => {
+    // Census regression: the LLM injects a family-default weight ("2.64 oz")
+    // onto a sibling whose sheet name and extraction evidence carry no such
+    // number. The lint BLOCKS that member => the whole LLM set is invalid =>
+    // the caller must write ZERO llm_cohort rows for the group and fall
+    // through to the deterministic fallback (which is itself linted +
+    // revalidated before commit, T7).
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', extractionData: { title: 'Woof Pupsicle small breed', packagingOcrData: null } }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', extractionData: { title: 'Woof Pupsicle large breed', packagingOcrData: null } }),
+    ] as OnboardingItem[];
+    (callLlmForTask as any).mockResolvedValueOnce(
+      JSON.stringify({
+        U1: 'TestBrand Woof Pupsicle Small 2.64 oz',
+        U2: 'TestBrand Woof Pupsicle Large',
+      }),
+    );
+    const result = await coordinateCohortItems(items);
+    expect(result.size).toBe(2);
+    for (const entry of result.values()) {
+      expect(entry.source).toBe('cohort_fallback');
+    }
+    // Neither fallback title may carry the phantom weight.
+    expect(result.get('U1')!.title).not.toContain('2.64');
+    expect(result.get('U2')!.title).not.toContain('2.64');
   });
 
   it('HeartbeatLostError from the transport propagates out of coordinateCohortItems — never converted to fallback', async () => {
@@ -766,6 +796,138 @@ Return ONLY valid JSON: {"UPC1": "name1", "UPC2": "name2", ...}`,
       const result = formatDeterministicTitle('BEEF CKN RECIPE', null);
       expect(result).toContain('Chicken');
       expect(result).not.toContain('Ckn');
+    });
+
+    it('expands VNSN to Venison (exact output)', () => {
+      expect(formatDeterministicTitle('BETTER BONE VNSN SM', null)).toBe('Better Bone Venison Small');
+      expect(formatDeterministicTitle('VNSN TREAT', null)).toBe('Venison Treat');
+    });
+
+    it('expands HYPO to Hypoallergenic (exact output)', () => {
+      expect(formatDeterministicTitle('BETTER BONE HYPO SM', null)).toBe('Better Bone Hypoallergenic Small');
+      expect(formatDeterministicTitle('HYPO TREAT', null)).toBe('Hypoallergenic Treat');
+    });
+
+    it('expands full HYPOALLERGENIC remains single canonical word', () => {
+      expect(formatDeterministicTitle('BETTER BONE HYPOALLERGENIC SM', null)).toBe('Better Bone Hypoallergenic Small');
+    });
+
+    it('expands FRZN to Frozen (exact output)', () => {
+      expect(formatDeterministicTitle('BUTCHERS PUP FRZN DINNER CHKN 3LB', null)).toBe('Butchers Pup Frozen Dinner Chicken 3 lb');
+    });
+
+    it('expands VGG to Veggie (exact output)', () => {
+      expect(formatDeterministicTitle('BETTER BONE VGG SM', null)).toBe('Better Bone Veggie Small');
+    });
+
+    it('does not duplicate brand and leaves unknown abbreviations unchanged', () => {
+      expect(formatDeterministicTitle('WOOF PUPSICLE SM', 'Woof')).toBe('Woof Pupsicle Small');
+      expect(formatDeterministicTitle('UNKNOWN XYZ TREAT', null)).toBe('Unknown Xyz Treat');
+    });
+  });
+
+  describe('groupByProductLine batch-aware brand', () => {
+    it('groups unbranded BetterBone via name-embedded brand with branded siblings', () => {
+      const a = makeItem({ upc: 'U1', name: 'BETTER BONE HARD VNSN SM', brandHint: null });
+      const b = makeItem({ upc: 'U2', name: 'BETTER BONE HARD VNSN LG', brandHint: 'BetterBone' });
+      const groups = groupByProductLine([a, b] as any);
+      // Both should be in same group (size 2) because batch-aware brand detection uses name prefix
+      let found = false;
+      for (const g of groups.values()) if (g.length === 2) found = true;
+      expect(found).toBe(true);
+    });
+
+    it('treats BetterBone and Better Bone as same brand for grouping', () => {
+      const a = makeItem({ upc: 'U1', name: 'BETTER BONE SOFT BEEF SM', brandHint: 'BetterBone' });
+      const b = makeItem({ upc: 'U2', name: 'BETTER BONE SOFT BEEF LG', brandHint: 'Better Bone' });
+      const groups = groupByProductLine([a, b] as any);
+      let found = false;
+      for (const g of groups.values()) if (g.length === 2) found = true;
+      expect(found).toBe(true);
+    });
+  });
+
+  // e09 round-3 FIX 2 — slot unification in frozen-fact derivation
+  describe('deriveFrozenFactsForValidation slot unification', () => {
+    it('weight does NOT displace a co-present size word — both occupy the {size} slot', () => {
+      const item = makeItem({ upc: 'U1', name: 'Acme Dog Food Chicken Small 5 lb' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.sizeOrCount).toBe('5 lb');
+      expect(f.extraSizeTokens).toEqual(['small']); // raw is lowercased before mapping; case is irrelevant downstream
+    });
+
+    it('a lone size word stays the primary size token with no extras', () => {
+      const item = makeItem({ upc: 'U2', name: 'Acme Dog Food Beef Small' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.sizeOrCount).toBe('small');
+      expect(f.extraSizeTokens).toBeUndefined();
+    });
+
+    it('two DISTINCT flavors keep both — first is primary, second is an extra slot token', () => {
+      const item = makeItem({ upc: 'U3', name: 'BetterBone Chicken Beef Small' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.flavorOrColorOrSubline).toBe('chicken');
+      expect(f.extraFlavorTokens).toEqual(['beef']);
+    });
+
+    it('repeated mentions of the SAME flavor do not create extra tokens', () => {
+      const item = makeItem({ upc: 'U4', name: 'BetterBone Beef Beef Sm' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.flavorOrColorOrSubline).toBe('beef');
+      expect(f.extraFlavorTokens).toBeUndefined();
+    });
+
+    // Regression: cohort run e94894818226a66f669c42ad829a0491 — numbered sizes
+    // ("Sz 4" / "Sz 5") carried no weight unit, stayed literal in the T2
+    // skeleton, and hard-failed the deterministic fallback (T7).
+    it('explicit numbered size ("sz 4") occupies the {size} slot', () => {
+      const item = makeItem({ upc: 'U5', name: 'Ultra Moldable Muzzle Sz 4' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.sizeOrCount).toBe('sz 4');
+      expect(f.extraSizeTokens).toBeUndefined();
+    });
+
+    it('spelled-out numbered size ("Size 10") keeps its rendered spelling verbatim', () => {
+      const item = makeItem({ upc: 'U6', name: 'Ultra Moldable Muzzle Size 10' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.sizeOrCount).toBe('size 10');
+    });
+
+    it('co-present size word + numbered size share the {size} slot via extras', () => {
+      const item = makeItem({ upc: 'U7', name: 'Acme Harness Small Sz 4' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.sizeOrCount).toBe('small');
+      expect(f.extraSizeTokens).toEqual(['sz 4']);
+    });
+
+    it('weight still wins primary when a numbered size is co-present', () => {
+      const item = makeItem({ upc: 'U8', name: 'Acme Rope Toy Sz 4 5 lb' });
+      const f = deriveFrozenFactsForValidation(item as any);
+      expect(f.sizeOrCount).toBe('5 lb');
+      expect(f.extraSizeTokens).toEqual(['sz 4']);
+    });
+
+    it('fallback title set for a numbered-size family passes family consistency (T2/T7)', () => {
+      const items = [
+        makeItem({ upc: 'U1', brandHint: 'Bumas', name: 'BUMAS Ultra Moldable Muzzle (Sz 4)' }),
+        makeItem({ upc: 'U2', brandHint: 'Bumas', name: 'BUMAS Ultra Moldable Muzzle (Sz 5)' }),
+      ];
+      const fallbackTitles = items.map(item => ({
+        upc: item.upc,
+        title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
+      }));
+      const result = validateFamilyTitleSet({
+        familyId: 'regression-sz-family',
+        members: items.map(item => ({
+          onboardingItemId: item.id,
+          upc: item.upc,
+          frozenEvidenceHash: 'fallback:' + item.upc,
+          frozenFacts: deriveFrozenFactsForValidation(item),
+        })),
+        candidateTitles: fallbackTitles,
+      });
+      expect(result.valid).toBe(true);
+      expect(result.skeleton).not.toContain('sz 4');
     });
   });
 });

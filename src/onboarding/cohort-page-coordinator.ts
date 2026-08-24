@@ -121,6 +121,7 @@ import {
 import type { CohortPagePlanAuthority } from './cohort-page-hash';
 import { coordinateCohortPagesCore } from '../classification/cohort-page-coordinator';
 import type { CohortPageMemberResult } from '../classification/cohort-page-coordinator';
+import { validateCategoryPageAssignment } from '../classification/category-page-correctness';
 import { buildPageHierarchy } from '../classification/page-assignment-llm';
 import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
 import { groupByProductLine } from './cohort-name-coordinator';
@@ -492,6 +493,12 @@ export async function ensureCohortPagesCoordinated(
     // `llmAssignCategoryPages` singleton path is gone from the parent op).
     // `afterCoordinatedCall` is threaded so the pre-commit crash seam fires
     // after each successful transport.
+    // e09 T1 INVARIANT (round-3 FIX 3, same contract as the title op): this
+    // grouping via groupByProductLine(frozenBatchItems) → extractNameStem is
+    // BYTE-EQUIVALENT to durable product-family-v1 membership only while
+    // GROUPING_VERSION and frozen raw inputs are unchanged; membership
+    // divergence must route through coordinateCohortItems'
+    // `authoritativeCohortId` seam, not re-derivation.
     for (const [groupKey, groupItems] of groupByProductLine(frozenLineContext.frozenBatchItems).entries()) {
       const skus = groupItems
         .map(item => item.upc)
@@ -543,6 +550,49 @@ export async function ensureCohortPagesCoordinated(
           throw new Error(
             `[CohortPageCoordinator] Group coordination returned no result for member ${sku} (run ${run.id}).`,
           );
+        }
+        // e09 B2 (P1-P9): per-member Page correctness gate at the durable parent op — no sibling copying.
+        // The core already gated per-member, this is defense-in-depth before persistence.
+        if (result.status === 'assigned') {
+          const memberAuthority = authorityBundle.members.find(m => m.sku === sku);
+          const verifiedCatalogForValidation = pageHierarchy.map(p => ({
+            id: p.id,
+            name: p.name,
+            parentId: null as string | null,
+          }));
+          const correctness = validateCategoryPageAssignment({
+            member: {
+              onboardingItemId: sku,
+              frozenEvidenceHash: memberAuthority ? `member:${sku}` : `member:${sku}`,
+              frozenEvidence: {
+                species: memberAuthority?.species ?? [],
+                form: memberAuthority?.productForm ?? null,
+                title: memberAuthority?.webTitle ?? memberAuthority?.name ?? null,
+                description: memberAuthority?.description ?? null,
+                productType: null,
+                brand: memberAuthority?.brand ?? null,
+                extraction: {
+                  title: memberAuthority?.webTitle ?? null,
+                  description: memberAuthority?.description ?? null,
+                  productForm: memberAuthority?.productForm ?? null,
+                },
+              },
+            },
+            candidate: {
+              primaryPageId: result.pages[0]?.pageId ?? null,
+              secondaryPageIds: result.pages.slice(1).map(p => p.pageId),
+              primaryPageName: result.pages[0]?.pageName ?? null,
+            },
+            verifiedPageCatalog: verifiedCatalogForValidation,
+            activePageImportHash: memberSnapshot0.pageImportHash ?? 'unknown',
+          });
+          if (!correctness.valid || correctness.outcome !== 'assigned') {
+            memberValues.set(sku, {
+              output: { status: 'abstained', reason: correctness.reason ?? `Page correctness gate blocked assigned page for SKU ${sku} (P5/P6/P7).` },
+              modelCallId: null,
+            });
+            continue;
+          }
         }
         memberValues.set(sku, toMemberValue(result));
       }

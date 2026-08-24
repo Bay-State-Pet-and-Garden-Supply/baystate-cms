@@ -1,5 +1,7 @@
 # #17 Governance Alignment — AI Curation/Classification Quality
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 Tracking issue #17 coordinates remediation of the adversarial audit of the
 production modular curation/classification pipeline. This document maps every
 tracked item to its delivering work and status, with emphasis on the items

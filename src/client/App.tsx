@@ -11,12 +11,19 @@ import { CatalogHealth } from './components/CatalogHealth';
 import { Onboarding } from './components/Onboarding';
 import { StoreManagerAssistant } from './components/StoreManagerAssistant';
 import { Settings } from './components/Settings';
-import { AgentLab } from './components/agent-lab/AgentLab';
 import { ProfileWorkspacePage } from './components/profile-workspace/ProfileWorkspacePage';
 import { colors, fonts, rounded } from './theme';
 import './styles/workspace-tokens.css';
 
-type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings' | 'agentlab';
+type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings';
+
+const VALID_VIEWS: readonly View[] = ['setup', 'dashboard', 'catalog', 'product', 'changesets', 'drift', 'syncjobs', 'health', 'onboarding', 'assistant', 'settings'];
+
+// Stale/deep-linked `?view=` values (e.g. removed views) degrade gracefully to
+// Dashboard instead of rendering a blank main region.
+function resolveViewParam(raw: string | null): View | null {
+  return raw && (VALID_VIEWS as readonly string[]).includes(raw) ? (raw as View) : null;
+}
 
 function getProfileWorkspaceDomainFromPath(pathname: string): string | null {
   const m = pathname.match(/^\/settings\/domains\/([^/]+)\/profile\/?$/);
@@ -177,7 +184,8 @@ function App() {
     // forces a specific tab.
     if (newView === 'settings') {
       const settingsTab = url.searchParams.get('tab');
-      if (settingsTab !== 'ai' && settingsTab !== 'catalog') {
+      const validSettingsTabs = ['ai', 'catalog', 'ai-tasks', 'types', 'mappings-health'];
+      if (!validSettingsTabs.includes(settingsTab ?? '')) {
         url.searchParams.delete('tab');
       }
     } else {
@@ -218,7 +226,7 @@ function App() {
         } else {
           const params = new URLSearchParams(window.location.search);
           const sku = params.get('product');
-          const urlView = params.get('view') as View | null;
+          const urlView = resolveViewParam(params.get('view'));
           
           if (sku) {
             setSelectedSku(sku);
@@ -245,7 +253,7 @@ function App() {
       const sku = params.get('product');
       setSelectedSku(sku);
       
-      const urlView = params.get('view') as View | null;
+      const urlView = resolveViewParam(params.get('view'));
       if (urlView) {
         setView(urlView);
       } else {
@@ -358,23 +366,6 @@ function App() {
               Onboarding
             </button>
             <button
-              style={view === 'agentlab' ? navStyles.navLinkActive : navStyles.navLink}
-              onClick={() => handleNavigate('agentlab')}
-              aria-current={view === 'agentlab' ? 'page' : undefined}
-            >
-              Agent Lab
-              <span style={{
-                display: 'inline-block',
-                fontSize: 9,
-                fontWeight: 700,
-                padding: '2px 5px',
-                borderRadius: rounded.xs,
-                backgroundColor: colors.cornerCalloutGold,
-                color: colors.ledgerCharcoal,
-                lineHeight: 1,
-              }}>EXP</span>
-            </button>
-            <button
               style={view === 'changesets' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('changesets')}
               aria-current={view === 'changesets' ? 'page' : undefined}
@@ -426,7 +417,7 @@ function App() {
         </span>
       </nav>
 
-      <main style={profileWorkspaceDomain ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : (view === 'onboarding' || view === 'assistant' || view === 'changesets' || view === 'agentlab') ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : navStyles.main}>
+      <main style={profileWorkspaceDomain ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : (view === 'onboarding' || view === 'assistant' || view === 'changesets') ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : navStyles.main}>
         {profileWorkspaceDomain ? (
           <ProfileWorkspacePage domain={profileWorkspaceDomain} />
         ) : (
@@ -464,9 +455,7 @@ function App() {
 
         {view === 'syncjobs' && <SyncJobsView />}
 
-        {view === 'settings' && <Settings />}
-
-            {view === 'agentlab' && <AgentLab />}
+        {view === 'settings' && <Settings onSelectProduct={handleOpenProduct} />}
           </>
         )}
       </main>
