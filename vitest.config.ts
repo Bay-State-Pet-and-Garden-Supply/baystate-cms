@@ -274,6 +274,7 @@ export default defineConfig({
       'src/tests/unit/representative-suite.test.ts',
       'src/tests/unit/profile-waiver.test.ts',
       'src/tests/unit/source-discovery-sitemap-priority.test.ts',
+      'src/tests/unit/template-clustering.test.ts',
       // Page extractor / specialist workflow DB suites
       'src/tests/unit/page-extractor-images.test.ts',
       'src/tests/unit/page-extractor-ladder-wiring.test.ts',
