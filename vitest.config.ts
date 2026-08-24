@@ -58,6 +58,7 @@ export default defineConfig({
       'src/tests/unit/profile-promoter.test.ts',
       'src/tests/unit/serper-cache-integration.test.ts',
       'src/tests/unit/serper-cache-repo.test.ts',
+      'src/tests/unit/price-supplementer.test.ts',
       'src/tests/unit/sitemap-cache-repo.test.ts',
       'src/tests/unit/sitemap-fetcher.test.ts',
       'src/tests/unit/sitemap-matcher.test.ts',
