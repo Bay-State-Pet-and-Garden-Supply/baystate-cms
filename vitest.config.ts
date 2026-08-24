@@ -132,6 +132,7 @@ export default defineConfig({
       'src/tests/unit/sourcing-resolution.test.ts',
       'src/tests/unit/sourcing-stage-order.test.ts',
       'src/tests/unit/sourcing-safety-routes.test.ts',
+      'src/tests/unit/fetch-html-ssrf.test.ts',
       'src/tests/unit/distributor-v2.test.ts',
       // DB-backed (bun:sqlite) — run under `bun test` via test:db
       'src/tests/unit/distributor-image-verification.test.ts',

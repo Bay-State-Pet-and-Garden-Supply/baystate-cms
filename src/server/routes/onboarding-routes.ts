@@ -3365,9 +3365,13 @@ route.post('/onboarding/settings/profile-tooling/fetch-html', async (c) => {
     return c.json({ ok: false, error: 'url is required' }, 400);
   }
 
-  // Block private/internal IP ranges (SSRF protection)
+  // Block non-HTTP(S) protocols and private/internal IP ranges (SSRF & Local File Disclosure protection)
   try {
     const parsedUrl = new URL(url);
+    // Security: Only allow http and https protocols to prevent file:// local file leakage or other schemes
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return c.json({ ok: false, error: 'Only http and https protocols are allowed' }, 400);
+    }
     const hostname = parsedUrl.hostname;
     if (
       hostname === 'localhost' ||
