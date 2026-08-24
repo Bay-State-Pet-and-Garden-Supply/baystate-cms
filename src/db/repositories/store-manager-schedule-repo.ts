@@ -479,13 +479,20 @@ export function cancelOverdueOccurrences(
        WHERE workspace_id = ? AND status = 'pending' AND scheduled_at < ? LIMIT ?`,
     )
     .all(workspaceId, cutoffIso, Math.min(limit, 200)) as Array<{ id: string }>;
-  for (const row of rows) {
+
+  if (rows.length === 0) return 0;
+
+  const ids = rows.map((r) => r.id);
+  const placeholders = ids.map(() => '?').join(', ');
+
+  db.transaction(() => {
     db.query(
       `UPDATE store_manager_schedule_occurrences
        SET status = 'cancelled', error_code = 'catch_up_window_exceeded', completed_at = ?, updated_at = ?
-       WHERE workspace_id = ? AND id = ? AND status = 'pending'`,
-    ).run(now, now, workspaceId, row.id);
-  }
+       WHERE workspace_id = ? AND status = 'pending' AND id IN (${placeholders})`,
+    ).run(now, now, workspaceId, ...ids);
+  })();
+
   return rows.length;
 }
 
@@ -504,15 +511,24 @@ export function expireStaleLeases(workspaceId: string, nowIso: string, limit = 2
        LIMIT ?`,
     )
     .all(workspaceId, nowIso, Math.min(limit, 200)) as Array<{ id: string }>;
-  for (const row of rows) {
+
+  if (rows.length === 0) return 0;
+
+  const ids = rows.map((r) => r.id);
+  const placeholders = ids.map(() => '?').join(', ');
+
+  db.transaction(() => {
     db.query(
       `UPDATE store_manager_schedule_occurrences
        SET status = 'pending', claimed_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
            error_code = 'lease_expired', updated_at = ?
-       WHERE workspace_id = ? AND id = ? AND status = 'claimed'`,
-    ).run(now, workspaceId, row.id);
-    db.query('DELETE FROM store_manager_schedule_leases WHERE occurrence_id = ?').run(row.id);
-  }
+       WHERE workspace_id = ? AND status = 'claimed' AND id IN (${placeholders})`,
+    ).run(now, workspaceId, ...ids);
+    db.query(
+      `DELETE FROM store_manager_schedule_leases WHERE occurrence_id IN (${placeholders})`,
+    ).run(...ids);
+  })();
+
   return rows.length;
 }
 
