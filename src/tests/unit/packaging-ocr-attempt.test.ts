@@ -249,6 +249,39 @@ describe('runPackagingOcrAttempt — FIX-I non-raster payload rejection', () => 
     expect(vlmTransport.calls()).toBe(0);
   });
 
+  it('ACCEPTS a valid PNG whose early tEXt metadata contains markup-like strings (signature-first ordering)', async () => {
+    seedLegacyVlm();
+    // Minimal valid PNG: signature + IHDR + a tEXt chunk whose payload embeds
+    // "<svg" and "<!doctype html" — must NOT be rejected by the markup scan.
+    // CRCs are zero-filled: the loader never validates them.
+    const ihdrData = Buffer.alloc(13);
+    ihdrData.writeUInt32BE(1, 0); ihdrData.writeUInt32BE(1, 4);
+    ihdrData[8] = 8; // bit depth
+    const ihdrChunk = Buffer.concat([
+      Buffer.from([0, 0, 0, 13]), Buffer.from('IHDR', 'latin1'), ihdrData, Buffer.from([0, 0, 0, 0]),
+    ]);
+    const textPayload = Buffer.from('Comment\u0000see <svg> or <!doctype html> docs', 'latin1');
+    const textChunk = Buffer.concat([
+      Buffer.from([0]), Buffer.from([0, 0]), Buffer.from([0, textPayload.length]),
+      Buffer.from('tEXt', 'latin1'), textPayload, Buffer.from([0, 0, 0, 0]),
+    ]);
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      ihdrChunk, textChunk,
+      // Trailing padding: the OCR loader enforces a 1 KiB minimum size and
+      // never parses PNG chunk structure, so trailing bytes are inert here.
+      Buffer.alloc(2048, 0),
+    ]);
+    fs.writeFileSync(path.join(tmpDir, 'meta.png'), png);
+    const vlmTransport = contentTransport('{"productName":"Real Raster"}');
+    const result = await runPackagingOcrAttempt(
+      makeParams({ imageLocalPath: 'meta.png', modelFetchFn: vlmTransport.fn }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data.productName).toBe('Real Raster');
+    expect(vlmTransport.calls()).toBe(1);
+  });
+
   it('rejects a local <svg …> file with image_svg_unsupported and NO VLM transport call', async () => {
     seedLegacyVlm();
     const svgPath = path.join(tmpDir, 'img.svg');

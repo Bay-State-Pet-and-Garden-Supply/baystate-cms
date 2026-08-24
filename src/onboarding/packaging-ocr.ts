@@ -130,11 +130,41 @@ interface ImageLoadOutcome {
  * FIX-I round 3: textual/SVG payloads must never reach the VLM transports
  * labeled image/jpeg. Sniff the first ~512 bytes as ASCII: HTML/SVG markup
  * (after leading whitespace) is rejected as a coded image-load failure.
+ *
+ * Round-3 review fixup: a recognized RASTER magic signature short-circuits
+ * the scan. Valid PNG (tEXt/iTXt) or JPEG (COM/APP) metadata may legitimately
+ * embed "<svg"/"<html" strings within the first 512 bytes; signature-first
+ * ordering means markup scanning only ever applies to payloads that are not
+ * already identified as a known raster format.
  */
 const MARKUP_SNIFF_BYTES = 512;
 const MARKUP_REJECTION_MESSAGE = 'Payload is not a raster image (HTML/SVG markup detected).';
 
+/** True when the buffer begins with a known raster-image magic signature. */
+export function hasRasterMagicSignature(buffer: Buffer): boolean {
+  if (buffer.length < 12) {
+    // JPEG needs only 3 bytes but every other accepted signature needs more;
+    // check JPEG explicitly before the length floor.
+    return (
+      buffer.length >= 3 &&
+      buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff
+    );
+  }
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return true; // JPEG
+  if (
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47 &&
+    buffer[4] === 0x0d && buffer[5] === 0x0a && buffer[6] === 0x1a && buffer[7] === 0x0a
+  ) return true; // PNG
+  const sig6 = buffer.toString('latin1', 0, 6);
+  if (sig6 === 'GIF87a' || sig6 === 'GIF89a') return true; // GIF
+  if (buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') return true; // WebP
+  return false;
+}
+
 function looksLikeTextualMarkup(buffer: Buffer): boolean {
+  // Signature-first ordering: known raster formats are never markup, no
+  // matter what their early metadata chunks happen to contain.
+  if (hasRasterMagicSignature(buffer)) return false;
   const head = buffer.subarray(0, MARKUP_SNIFF_BYTES).toString('latin1').toLowerCase();
   const trimmed = head.replace(/^\s+/, '');
   return trimmed.includes('<svg') || trimmed.includes('<!doctype html') || trimmed.includes('<html');
