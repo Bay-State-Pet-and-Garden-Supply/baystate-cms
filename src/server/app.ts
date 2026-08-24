@@ -33,6 +33,7 @@ import { profileActivationRoutes } from './routes/profile-activation-routes';
 import { inventoryPickerRoutes } from './routes/inventory-picker-routes';
 import { profileBuilderGenerateDraftRoutes } from './routes/profile-builder-generate-draft-routes';
 import { profileMatrixRoutes } from './routes/profile-matrix-routes';
+import releaseRoutes from './routes/release-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
@@ -108,6 +109,8 @@ app.route('/api', profileActivationRoutes);
 app.route('/api', inventoryPickerRoutes);
 app.route('/api', profileBuilderGenerateDraftRoutes);
 app.route('/api', profileMatrixRoutes);
+// P4: taxonomy release status + sanctioned pin activation (sole state.json writer).
+app.route('/api', releaseRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

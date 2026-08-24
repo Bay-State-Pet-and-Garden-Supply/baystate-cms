@@ -37,6 +37,8 @@ export default defineConfig({
       'src/tests/unit/onboarding-approval-gates.test.ts',
       // e10s01 review-completeness gate — bun:sqlite/bun:test, run under bun test (test:db)
       'src/tests/unit/review-completeness-gate.test.ts',
+      // P2 mapping audit — imports repository modules that load bun:sqlite; run under bun test (test:db)
+      'src/tests/unit/mapping-audit.test.ts',
       // e10s04 media route/resolution — bun:sqlite/bun:test, run under bun test (test:db)
       'src/tests/unit/review-media-route.test.ts',
       'src/tests/unit/review-media-resolution.test.ts',
@@ -246,6 +248,11 @@ export default defineConfig({
       'src/tests/unit/pr6-acceptance.test.ts',
       // PR4 C3 pure resolver (bun:test imports — vitest cannot collect it)
       'src/tests/unit/cohort-product-type-resolver.test.ts',
+      // P4 taxonomy release wiring (bun:test imports + bun:sqlite transitive —
+      // run under bun test via test:db)
+      'src/tests/unit/release-compiler.test.ts',
+      'src/tests/unit/release-routes.test.ts',
+      'src/tests/unit/release-shadow.test.ts',
       // PR5 effective-curation-type suites (bun:test imports — vitest cannot collect them)
       'src/tests/unit/effective-curation-type.test.ts',
       'src/tests/unit/effective-curation-stages.test.ts',
