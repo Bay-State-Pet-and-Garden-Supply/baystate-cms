@@ -142,6 +142,7 @@ export default defineConfig({
       'src/tests/unit/sourcing-resolution.test.ts',
       'src/tests/unit/sourcing-stage-order.test.ts',
       'src/tests/unit/sourcing-safety-routes.test.ts',
+      'src/tests/unit/fetch-html-ssrf.test.ts',
       'src/tests/unit/distributor-v2.test.ts',
       'src/tests/unit/acceptance-migration.test.ts',
       'src/tests/unit/conflict-resolution.test.ts',
