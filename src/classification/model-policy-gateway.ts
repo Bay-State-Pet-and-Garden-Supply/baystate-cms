@@ -290,6 +290,9 @@ export function redactImageUrl(url: string): string {
     const parsed = new URL(url);
     parsed.search = '';
     parsed.hash = '';
+    // P2 redaction pass: never persist or log userinfo credentials.
+    parsed.username = '';
+    parsed.password = '';
     return parsed.toString();
   } catch {
     // Non-URL string: keep a bounded prefix, never query-looking content.

@@ -364,3 +364,88 @@ describe('dual-run comparison writer', () => {
     }
   });
 });
+
+// ─── P2 follow-ups: stale-shadow hygiene + dual-run baseline-drift guard ──────
+
+describe('P2 stale-shadow hygiene', () => {
+  it('shadow-only run on a NO-IMAGE item clears a stale shadowPackagingOcrData key', async () => {
+    seedWorkspace();
+    const item = seedItem({
+      title: 'Lost Its Image',
+      // No primaryImage → the coded no_image branch.
+      shadowPackagingOcrData: { productName: 'Stale Observation', confidenceByField: {} },
+    });
+    overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: true });
+
+    const result = await packagingOcrStage.execute(
+      { sku: item.upc, onboardingItemId: item.id, sourceKind: 'catalog_product', evidence: [], acceptedProposals: [], allProposals: [] },
+      { workspacePath, workspaceId, configSnapshotRef: { id: 's', hash: 'h', sourceCommit: null, createdAt: new Date().toISOString() }, runId: 'run-stale-1' } as any,
+    );
+    expect(result.status).toBe('succeeded');
+
+    // JSON.stringify drops the null-valued key — absence IS the cleared state.
+    expect(findItemById(item.id)!.extractionData?.shadowPackagingOcrData ?? null).toBeNull();
+  });
+
+  it('shadow-only run on a distributor_record item clears a stale shadowPackagingOcrData key', async () => {
+    seedWorkspace();
+    const batchId = createBatch({ workspaceId, name: 'B3', fileName: 'b3.xlsx', totalItems: 1 }).id;
+    const [raw] = insertItems(batchId, [{ upc: randomUUID().slice(0, 13), name: 'Distro Item', brandHint: null, rowNumber: 1 }]);
+    getDb().query("UPDATE onboarding_items SET source_type = 'distributor_record', extraction_data_json = ? WHERE id = ?")
+      .run(JSON.stringify({ title: 'Distro Title', shadowPackagingOcrData: { productName: 'Stale Observation' } }), raw.id);
+    const item = findItemById(raw.id)!;
+    overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: true });
+
+    const result = await packagingOcrStage.execute(
+      { sku: item.upc, onboardingItemId: item.id, sourceKind: 'catalog_product', evidence: [], acceptedProposals: [], allProposals: [] },
+      { workspacePath, workspaceId, configSnapshotRef: { id: 's', hash: 'h', sourceCommit: null, createdAt: new Date().toISOString() }, runId: 'run-stale-2' } as any,
+    );
+    expect(result.status).toBe('succeeded');
+
+    // JSON.stringify drops the null-valued key — absence IS the cleared state.
+    expect(findItemById(item.id)!.extractionData?.shadowPackagingOcrData ?? null).toBeNull();
+  });
+});
+
+describe('P2 dual-run baseline-drift guard', () => {
+  it('second consecutive non-shadow stage run writes NO further comparison row (stage-authored baseline)', async () => {
+    const { server, port } = await startOllamaServer(STAGE_OCR_JSON);
+    try {
+      seedWorkspace();
+      const img = seedLocalImage();
+      const snapshot = makeSnapshot(`http://127.0.0.1:${port}`);
+      const item = seedItem({
+        title: 'Web Title',
+        primaryImage: img,
+        packagingOcrData: { productName: 'Legacy Name', brand: 'Acme', confidenceByField: { productName: 0.8 } },
+        ocrOutcome: { status: 'succeeded', model: 'legacy-vlm', imageCount: 1 },
+      });
+      overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: false, packagingOcrDualRunCompare: true });
+      const makeCtx = () => ({
+        workspacePath,
+        workspaceId,
+        configSnapshotRef: { id: 's', hash: 'h', sourceCommit: null, createdAt: new Date().toISOString() },
+        runId: String(createRun(workspaceId, 'SKU-SHADOW', null, null, { sourceKind: 'onboarding' }).id),
+        snapshot,
+        modelFetchFn: ((globalThis as any).Bun?.fetch ?? globalThis.fetch),
+      } as any);
+      const input = { sku: item.upc, onboardingItemId: item.id, sourceKind: 'catalog_product', evidence: [], acceptedProposals: [], allProposals: [] };
+
+      // Run 1: genuine legacy baseline present → exactly one comparison row.
+      const first = await packagingOcrStage.execute(input as any, makeCtx());
+      expect(first.status).toBe('succeeded');
+      expect(countPackagingOcrShadowComparisons(item.id)).toBe(1);
+
+      // Run 2: live keys are now STAGE-authored (marker written with them) —
+      // comparing stage-vs-stage would be meaningless; no new row.
+      const second = await packagingOcrStage.execute(input as any, makeCtx());
+      expect(second.status).toBe('succeeded');
+      expect(countPackagingOcrShadowComparisons(item.id)).toBe(1);
+
+      // The marker key was persisted alongside the live authority keys.
+      expect(typeof findItemById(item.id)!.extractionData?.packagingOcrStageRunId).toBe('string');
+    } finally {
+      server.close();
+    }
+  });
+});

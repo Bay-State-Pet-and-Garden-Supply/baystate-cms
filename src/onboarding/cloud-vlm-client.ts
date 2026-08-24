@@ -29,6 +29,7 @@ import {
 } from '../db/repositories/classification-model-call-repo';
 import { PACKAGING_OCR_PROMPT, parseJsonFromVlmResponse, coercePackagingOcrData } from './packaging-ocr';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
+import { sha256Hex } from '../shared/stable-id';
 import type { LlmTask } from '../db/repositories/llm-task-config-repo';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -400,7 +401,9 @@ export async function extractPackagingOcrFromCloud(
 
     // 6. Coerce to the standard PackagingOcrData shape
     const metadata = {
-      imageSourceUrl: imageUrl,
+      // P2 redaction pass: strip credentials/query from the persisted ref.
+      imageSourceUrl: imageUrl ? redactImageUrl(imageUrl) : null,
+      imageSourceDigest: imageUrl ? sha256Hex(imageUrl) : null,
       imageLocalPath: null,
       model: `${config.provider}:${config.model}`,
       extractedAt: new Date().toISOString(),

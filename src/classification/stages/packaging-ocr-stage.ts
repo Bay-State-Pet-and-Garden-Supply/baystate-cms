@@ -185,6 +185,9 @@ export const PackagingOcrStagePersistPayloadSchema = z.object({
   ocrOutcome: z.record(z.string(), z.unknown()).nullable(),
   ocrInputHash: z.string().nullable(),
   ocrExecutionDigest: z.string().nullable(),
+  /** P2 baseline-drift guard marker — persisted as extraction_data_json key
+   *  `packagingOcrStageRunId` by the repository (absent for legacy writes). */
+  stageRunId: z.string().min(1).optional(),
 });
 
 /**
@@ -370,12 +373,24 @@ export const packagingOcrStage: StageDefinition = {
         localStatus: 'skipped',
         imageCount: 0,
       });
+      // P2 stale-shadow hygiene: a distributor transition must not leave a
+      // stale shadow observation presenting itself as current. Shadow mode
+      // clears its namespaced key before this early return.
+      if (flags.packagingOcrStageShadowOnly) {
+        persistItemShadowPackagingOcrResult(item.id, null);
+      }
       return succeededEmpty({ ocrOutcome, skipped: 'distributor_record', shadowOnly: flags.packagingOcrStageShadowOnly });
     }
 
     // Legacy inline result captured BEFORE any write — the dual-run baseline.
     const legacyOutcome = (ext.ocrOutcome && typeof ext.ocrOutcome === 'object' ? ext.ocrOutcome : null) as Record<string, any> | null;
     const legacyData = (ext.packagingOcrData && typeof ext.packagingOcrData === 'object' ? ext.packagingOcrData : null);
+    // P2 baseline-drift guard: once THIS stage has persisted live authority
+    // keys, those keys are stage-authored — a later run reading them as the
+    // "legacy" side would compare stage-vs-stage. The marker key is written
+    // together with the live keys by persistItemPackagingOcrResult and is
+    // never set by the legacy inline path.
+    const baselineIsStageAuthored = typeof ext.packagingOcrStageRunId === 'string' && ext.packagingOcrStageRunId.length > 0;
 
     // Image set: primary + additionalImages up to a TOTAL of 2 — the exact cap
     // loop used by product-evidence-extractor.ts / cohort-curator.ts today.
@@ -408,7 +423,12 @@ export const packagingOcrStage: StageDefinition = {
           ocrOutcome,
           ocrInputHash: null,
           ocrExecutionDigest: null,
+          ...(context.runId ? { stageRunId: context.runId } : {}),
         });
+      } else {
+        // P2 stale-shadow hygiene: shadow runs own ONLY the namespaced key;
+        // a no-image run must still clear any prior observation.
+        persistItemShadowPackagingOcrResult(item.id, null);
       }
       return succeededEmpty({ ocrOutcome, shadowOnly: flags.packagingOcrStageShadowOnly });
     }
@@ -605,13 +625,21 @@ export const packagingOcrStage: StageDefinition = {
         ocrOutcome: ocrOutcome as unknown as Record<string, unknown>,
         ocrInputHash,
         ocrExecutionDigest,
+        ...(context.runId ? { stageRunId: context.runId } : {}),
       });
       persistItemPackagingOcrResult(payload);
     }
 
     // Dual-run comparison (P2-T4): only when BOTH sides exist for the same
-    // item/run — the legacy inline result must already be stored.
-    if (flags.packagingOcrDualRunCompare && (legacyOutcome !== null || legacyData !== null)) {
+    // item/run — the legacy inline result must already be stored AND must not
+    // be stage-authored from an earlier non-shadow persist (baseline-drift
+    // guard above): comparing the stage against its own earlier output would
+    // produce meaningless agreement rows.
+    if (
+      flags.packagingOcrDualRunCompare &&
+      !baselineIsStageAuthored &&
+      (legacyOutcome !== null || legacyData !== null)
+    ) {
       try {
         const fieldAgreement = comparePackagingOcrResults(
           legacyData as PackagingOcrData | null,

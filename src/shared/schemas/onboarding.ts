@@ -93,6 +93,11 @@ export const PackagingOcrDataSchema = z.object({
     rawResponseExcerpt: z.string().nullable().default(null),
     /** Durable model-call IDs that produced this OCR (issue #17 E). */
     modelCallIds: z.array(z.string()).optional(),
+    /** P2 redaction pass: SHA-256 of the raw image source reference. The raw
+     *  ref itself is never persisted — `imageSourceUrl` keeps only a bounded,
+     *  credential/query-stripped form for debugging. Optional so hand-built
+     *  fixtures without it stay assignable. */
+    imageSourceDigest: z.string().nullable().optional(),
   }).nullable().default(null),
 });
 

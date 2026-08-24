@@ -1131,6 +1131,11 @@ export interface PersistItemPackagingOcrInput {
   ocrOutcome: Record<string, unknown> | null;
   ocrInputHash: string | null;
   ocrExecutionDigest: string | null;
+  /** P2 baseline-drift guard: when set, the extraction_data_json key
+   *  `packagingOcrStageRunId` marks the live OCR keys as STAGE-authored so a
+   *  later dual-run comparison never mistakes this stage output for a legacy
+   *  inline baseline. The legacy inline write-back path omits it. */
+  stageRunId?: string | null;
 }
 
 export function persistItemPackagingOcrResult(input: PersistItemPackagingOcrInput): void {
@@ -1150,6 +1155,7 @@ export function persistItemPackagingOcrResult(input: PersistItemPackagingOcrInpu
     ocrOutcome: input.ocrOutcome,
     ocrInputHash: input.ocrInputHash,
     ocrExecutionDigest: input.ocrExecutionDigest,
+    ...(input.stageRunId ? { packagingOcrStageRunId: input.stageRunId } : {}),
   };
   updateItemExtractionData(input.itemId, JSON.stringify(updatedExt));
 }

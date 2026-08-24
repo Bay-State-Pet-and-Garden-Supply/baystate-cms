@@ -541,6 +541,11 @@ export const evidenceExtractionStage: StageDefinition = {
           ...extData,
           ...(mergedOcr ? { packagingOcrData: mergedOcr, packagingTitle: mergedOcr.productName } : {}),
           ...(result.ocrOutcome ? { ocrOutcome: result.ocrOutcome } : {}),
+          // The legacy inline path is re-authoring the live OCR keys — clear
+          // any stale stage-authored marker (P2 baseline-drift guard) so a
+          // later dual-run comparison still sees a genuine legacy baseline.
+          // JSON.stringify drops undefined-valued keys.
+          packagingOcrStageRunId: undefined,
         };
         setItemExtractionDataJson(input.onboardingItemId, JSON.stringify(updatedExt));
       } catch (persistErr: any) {

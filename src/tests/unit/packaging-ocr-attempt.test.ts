@@ -31,6 +31,7 @@ import {
 import { generateCandidate } from '../../classification/config-generator';
 import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
 import { buildRuntimeSnapshot, requireModelCallContext } from '../../classification/runtime-snapshot';
+import { sha256Hex } from '../../shared/stable-id';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createRun } from '../../db/repositories/classification-run-repo';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
@@ -673,5 +674,32 @@ describe('runPackagingOcrAttempt propagates HeartbeatLostError from the terminal
     if (!result.ok) {
       expect(result.reasonCode).toBe('http_error');
     }
+  });
+});
+
+// ─── P2 metadata redaction: raw image-source refs never persisted ─────────────
+
+describe('runPackagingOcrAttempt — P2 metadata redaction', () => {
+  it('persists a stripped imageSourceUrl + sha256 digest, never the raw credential/query-bearing ref', async () => {
+    seedLegacyVlm();
+    const rawRef = 'https://key-123:topsecret@example.com/signed/primary.jpg?Signature=abc&Expires=42';
+    const result = await runPackagingOcrAttempt(
+      makeParams({
+        imageUrl: 'https://example.com/img.jpg',
+        imageSourceUrl: rawRef,
+        modelFetchFn: contentTransport('{"productName":"Redacted Provenance"}').fn,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const meta = result.data.metadata as Record<string, unknown> | null;
+    expect(typeof meta?.imageSourceUrl).toBe('string');
+    const redacted = meta!.imageSourceUrl as string;
+    expect(redacted).toBe('https://example.com/signed/primary.jpg');
+    expect(redacted).not.toContain('key-123');
+    expect(redacted).not.toContain('topsecret');
+    expect(redacted).not.toContain('Signature=abc');
+    // Exact provenance stays recoverable only via the digest.
+    expect(meta?.imageSourceDigest).toBe(sha256Hex(rawRef));
   });
 });

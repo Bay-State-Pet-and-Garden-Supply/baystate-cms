@@ -1036,8 +1036,15 @@ export async function runPackagingOcrAttempt(
   }
 
   // Coerce and validate
+  // P2 redaction pass: the persisted metadata never carries raw credentials,
+  // query strings, or signed-URL payloads. `imageSourceUrl` keeps a bounded,
+  // stripped reference for debugging; `imageSourceDigest` preserves exact
+  // provenance correlation via SHA-256 of the raw value. Non-string values
+  // are passed through UNCHANGED so the schema still fails closed on them.
+  const rawSourceRef = imageSourceUrl ?? imageUrl;
   const metadata = {
-    imageSourceUrl: imageSourceUrl ?? imageUrl,
+    imageSourceUrl: typeof rawSourceRef === 'string' ? redactImageUrl(rawSourceRef) : rawSourceRef ?? null,
+    imageSourceDigest: typeof rawSourceRef === 'string' ? sha256Hex(rawSourceRef) : null,
     imageLocalPath: imageLocalPath ?? null,
     model: executedVlmTarget ? `${executedVlmTarget.connectionId}:${executedVlmTarget.modelId}` : vlmConfig.model,
     extractedAt: new Date().toISOString(),
