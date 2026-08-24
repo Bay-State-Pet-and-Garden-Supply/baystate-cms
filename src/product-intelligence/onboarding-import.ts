@@ -400,29 +400,6 @@ function mergeField(
  * the originating run exists, the result hash matches, and the import
  * record is active. Items without imported evidence pass unconditionally.
  */
-export function verifyImportedResultGate(item: OnboardingItem): { ok: true } | { ok: false; error: string } {
-  const payloads = item.extractionData?.productIntelligenceEvidence;
-  if (!payloads || payloads.length === 0) return { ok: true };
-
-  // Every imported origin must still verify (fail closed): a deleted run, a
-  // mismatched result hash, or a stale import record blocks promotion.
-  for (const payload of payloads) {
-    const run = getPiRun(payload.runId);
-    if (!run) return { ok: false, error: `imported Agent Lab result ${payload.runId.slice(0, 8)}… is missing (run deleted)` };
-
-    const result = getPiResult(payload.runId);
-    if (!result || result.resultHash !== payload.resultHash) {
-      return { ok: false, error: `imported Agent Lab result ${payload.runId.slice(0, 8)}… hash no longer matches the run result` };
-    }
-
-    const record = getPiImportByRunAndItem(payload.runId, item.id);
-    if (!record || record.status !== 'active') {
-      return { ok: false, error: `imported Agent Lab record ${payload.runId.slice(0, 8)}… is stale or missing` };
-    }
-  }
-
-  return { ok: true };
-}
 
 /**
  * Import a reviewed run into an onboarding item. Runs atomically inside one

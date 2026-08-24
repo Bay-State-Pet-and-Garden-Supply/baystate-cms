@@ -9,7 +9,7 @@ import { listItemsByBatch, completePromotionStage, findItemById } from '../db/re
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
 import { getReviewState, type OnboardingReviewState } from '../db/repositories/onboarding-review-repo';
 import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
-import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
+import { verifyImportedResultGate } from './imported-result-gate';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
 import {
