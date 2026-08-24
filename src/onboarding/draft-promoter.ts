@@ -9,7 +9,6 @@ import { listItemsByBatch, completePromotionStage, findItemById } from '../db/re
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
 import { getReviewState, type OnboardingReviewState } from '../db/repositories/onboarding-review-repo';
 import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
-import { verifyImportedResultGate } from './imported-result-gate';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
 import {
@@ -648,7 +647,6 @@ export async function promoteItems(
     // including accepted/current-generation ones — contribute ZERO commerce
     // downloads. The `item_id OR lookup_upc` evidence query is DELETED; only
     // official extracted images (extractionData.primaryImage/additionalImages)
-    // and the separately verified PI-import gate (verifyImportedResultGate)
     // may reach the downloader. Distributor images reach commerce ONLY
     // through explicit APPROVALS (Amendment B addendum 3, store-owner
     // opt-in 2026-08-15): the materializer writes rights-attested approvals
@@ -769,18 +767,10 @@ export async function promoteItems(
       // only keeps the type narrow.
       if (!extractionData) continue;
 
-      // ── Imported Agent Lab result gate (PI-8) ─────────────────────────
-      // An item whose extraction data carries imported PI evidence is only
-      // promotable while its origin is verifiable: the run exists, the
-      // result hash matches, and the import record is active.
-      const importGate = verifyImportedResultGate(item);
-      if (!importGate.ok) {
-        const errMsg = importGate.error;
-        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
-        completePromotionStage(item.id, false, errMsg);
-        failures.push({ itemId: item.id, error: errMsg });
-        continue;
-      }
+      // ── Imported Agent Lab result gate — RETIRED (ADR-0030 Phase 4) ────
+      // The PI runs/results/imports tables are dropped; promotion proceeds on
+      // approvals-based gating alone. Historical imported-evidence items were
+      // verified at every promotion attempt while the gate existed.
 
       // Determine if product already exists
       const existingApproved = readProductFile(workspacePath, item.upc);

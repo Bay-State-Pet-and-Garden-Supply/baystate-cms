@@ -1,6 +1,6 @@
 # ADR 0030: Agent Lab (Product Intelligence) Decommission
 
-- **Status:** Accepted (2026-08)
+- **Status:** Accepted (2026-08). **Phase 4 executed 2026-08-24** — PI-only tables dropped (assets rebuilt FK-free first, row counts preserved), imported-result gate removed from promotion. `BAYSTATE_CMS_PI_KILL_SWITCH` alias retained until the next release cycle.
 - **Supersedes (operationally):** ADR 0010 (PI execution boundary), ADR 0026–0028 (specialists), ADR 0029 (shadow rollout); those records remain as historical context.
 - **Rollback tag:** `pre-agent-lab-decommission` (phase 0 baseline, commit `14c5121`).
 - **Plan:** `docs/plans/agent-lab-decommission-plan.md`
@@ -18,9 +18,9 @@ Execution is **staged**: salvage-first relocation → frontend removal → serve
 | `policy/ip-classifier.ts` (`classifyIp`, `isPrivateOrLinkLocal`) | `src/shared/ssrf.ts` | Also used by extraction-worker + image-repair |
 | `evaluation/metrics.ts` (`wilsonInterval`) | `src/onboarding/ocr-eval/stats.ts` |
 | `assets/*` (verification, rights, discovery, image-hash, schema, network gate) | `src/onboarding/image-verification/*` | Live-written by onboarding `distributor-imagery.ts`; re-export shims existed until Phase 3 |
-| `onboarding-import.ts` (`verifyImportedResultGate`) | `src/onboarding/imported-result-gate.ts` | Now narrow inline SQL; deleted again in Phase 4 with the tables |
+| `onboarding-import.ts` (`verifyImportedResultGate`) | `src/onboarding/imported-result-gate.ts` | Narrow inline SQL; deleted in Phase 4 together with the pi_* tables |
 | Big PI repos (assets/reuse rows) | `src/db/repositories/onboarding-pi-asset-repo.ts`, `image-reuse-policy-repo.ts` | Table names unchanged |
-| `extraction/` ladder layers 1–3 (+ platforms) | `src/onboarding/extraction-ladder/` | Unwired salvage; layers 5–8 (browser/managed/LLM) discarded; profile seam deferred to a follow-up integration into `page-extractor.ts` |
+| `extraction/` ladder layers 1–4 (+ platforms) | `src/onboarding/extraction-ladder/` | Unwired salvage: layers 1–3 deterministic + layer-4 profile seam implemented but NOT production-wired (follow-up integration into `page-extractor.ts`); layers 5–8 (browser/managed/LLM) discarded |
 
 ## Deleted
 
@@ -35,7 +35,7 @@ Execution is **staged**: salvage-first relocation → frontend removal → serve
 ## Observable behavior deltas (sanctioned)
 
 1. **Onboarding imagery fetches no longer write `product_intelligence_policy_decisions` audit rows** — the PolicyGateway runtime is gone; the deterministic network gate enforces the same SSRF/protocol/size rules without recording decisions.
-2. No new Agent Lab runs/imports/policies can be created; existing run/import/policy rows become inert until Phase 4 retirement.
+2. No new Agent Lab runs/imports/policies can be created. Existing run/import/policy rows are read-only but import rows remain **promotion-authoritative** until Phase 4 removes the `verifyImportedResultGate` call from `draft-promoter.ts`; after that they are fully inert.
 3. Workspace bootstrap no longer seeds a default approved PI policy row.
 
 ## Data dispositions
@@ -45,11 +45,11 @@ Execution is **staged**: salvage-first relocation → frontend removal → serve
 | `product_intelligence_assets` | **KEPT** — live-written by onboarding distributor imagery; name retained deliberately (naming footnote in CONTEXT.md) |
 | `pi_reuse_policies` | **KEPT** — live-written reuse grants |
 | `benchmark_*` | **SHARED with classification (#14)** — untouched; `benchmark-routes.ts` verified 100% classification-owned |
-| runs / results / imports / policies / versions / evaluations / teaching / corrections / specialist workflows | Dropped or pending Phase 4 drop (dev DB); JSON archives in gitignored `archive/pi-decommission-20260824/` (28 dumps) |
+| runs / results / imports / policies / versions / evaluations / teaching / corrections / specialist workflows | Dropped or pending Phase 4 drop (dev DB); JSON archives in gitignored `archive/pi-decommission-20260824/` (28 dumps). The drop set includes `agent_corrections` and `agent_teaching_events`. **Ordering constraint:** `product_intelligence_assets.run_id` carries `ON DELETE CASCADE` toward `product_intelligence_runs` (migrations.ts), so Phase 4 FIRST rebuilds `product_intelligence_assets` without the FK (row-preserving copy) BEFORE dropping the runs family — all asset rows must survive with unchanged counts |
 
 ## Kill switch alias window
 
-`BAYSTATE_CMS_OCR_KILL_SWITCH` is now the primary OCR kill-switch env var. `BAYSTATE_CMS_PI_KILL_SWITCH` remains honored as a documented deprecated alias during the alias window (either explicitly truthy ⇒ armed); it will be removed together with the Phase 4 table drops.
+`BAYSTATE_CMS_OCR_KILL_SWITCH` is now the primary OCR kill-switch env var. `BAYSTATE_CMS_PI_KILL_SWITCH` remains honored as a documented deprecated alias during the alias window (either explicitly truthy ⇒ armed); it is retained through Phase 4 and scheduled for removal at the next release cycle.
 
 ## Residual risks
 

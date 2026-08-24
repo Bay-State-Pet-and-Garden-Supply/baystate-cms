@@ -3479,14 +3479,19 @@ export function runMigrations(): void {
   //   FK cannot express "artifact must belong to this candidate's run").
   // - product_intelligence_assets gains candidate_id (exact FK to the
   //   pi_image_candidates row the asset was verified from), same-run enforced.
+  // ADR-0030 Phase 4: the PI-only tables are dropped on decommissioned
+  // databases. Each probe below must therefore also require its target table
+  // to exist before attempting DDL against it.
+  const piTableExists = (name: string): boolean =>
+    !!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
   const artifactColumns = db.query("SELECT name FROM pragma_table_info('pi_page_artifacts') WHERE name = 'artifact_type'").get();
-  if (!artifactColumns) {
+  if (!artifactColumns && piTableExists('pi_page_artifacts')) {
     db.exec("ALTER TABLE pi_page_artifacts ADD COLUMN artifact_type TEXT NOT NULL DEFAULT 'page_html';");
   }
   const candidateRunTrigger = db
     .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_pi_candidate_attestation_same_run'")
     .get();
-  if (!candidateRunTrigger) {
+  if (!candidateRunTrigger && piTableExists('pi_image_candidates') && piTableExists('pi_page_artifacts')) {
     db.exec(`
       CREATE TRIGGER trg_pi_candidate_attestation_same_run
       BEFORE INSERT ON pi_image_candidates
@@ -3509,7 +3514,7 @@ export function runMigrations(): void {
   const assetCandidateTrigger = db
     .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_pi_asset_candidate_same_run'")
     .get();
-  if (!assetCandidateTrigger) {
+  if (!assetCandidateTrigger && piTableExists('product_intelligence_assets') && piTableExists('pi_image_candidates')) {
     db.exec(`
       CREATE TRIGGER trg_pi_asset_candidate_same_run
       BEFORE INSERT ON product_intelligence_assets
@@ -5190,6 +5195,137 @@ export function runMigrations(): void {
     );
   } catch (e) {
     console.error('Failed to create packaging_ocr_shadow_comparisons table:', e);
+  }
+
+  // ── ADR-0030 Phase 4: Agent Lab data retirement ────────────────────────
+  // Drops every PI-only table after the Agent Lab runtime deletion (Phase 3).
+  // KEPT: product_intelligence_assets (live-written by onboarding distributor
+  // imagery), pi_reuse_policies (live reuse grants), benchmark_* (shared with
+  // the classification program, ADR #14). Historical JSON dumps live in the
+  // gitignored archive/pi-decommission-20260824/ directory.
+  try {
+    const decommissionVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('decommission_pi_schema_version') as { value: string } | undefined;
+    if (!decommissionVersion) {
+      console.log('[Migrations] Running ADR-0030 Phase 4 PI data retirement migration...');
+      db.transaction(() => {
+        const countAssets = () =>
+          (db.query('SELECT COUNT(*) AS n FROM product_intelligence_assets').get() as { n: number }).n;
+        const before = countAssets();
+
+        // Step 1: rebuild product_intelligence_assets WITHOUT the run_id FK
+        // (ON DELETE CASCADE toward product_intelligence_runs would otherwise
+        // wipe every asset row when runs is dropped) and WITHOUT the
+        // source_id FK (sources is dropped too). The onboarding_item_id FK is
+        // preserved. Column set mirrors the live table exactly.
+        db.exec('DROP TRIGGER IF EXISTS trg_pi_asset_candidate_same_run;');
+        db.exec(`
+          CREATE TABLE product_intelligence_assets_new (
+            id TEXT PRIMARY KEY,
+            run_id TEXT,
+            source_id TEXT,
+            source_url TEXT NOT NULL,
+            source_page_url TEXT,
+            source_type TEXT NOT NULL,
+            source_path TEXT,
+            source_artifact_id TEXT,
+            extraction_method TEXT NOT NULL CHECK (extraction_method IN ('json_ld', 'platform_api', 'network_response', 'profile_selector', 'media_api', 'manual', 'image_ocr', 'decoder')),
+            retrieved_at TEXT NOT NULL,
+            original_content_hash TEXT NOT NULL,
+            perceptual_hash TEXT,
+            variant_reference TEXT,
+            rights_status TEXT NOT NULL CHECK (rights_status IN ('approved', 'restricted', 'unknown')),
+            rights_basis TEXT,
+            rights_evidence_ref TEXT,
+            observed_brand TEXT,
+            observed_product_name TEXT,
+            observed_variant TEXT,
+            observed_net_content_json TEXT,
+            observed_pack_count INTEGER,
+            observed_gtin TEXT,
+            exact_product_match INTEGER NOT NULL DEFAULT 0,
+            exact_variant_match INTEGER,
+            quality_status TEXT NOT NULL CHECK (quality_status IN ('usable', 'low_quality', 'invalid')),
+            commerce_approved INTEGER NOT NULL DEFAULT 0,
+            conflicts_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            verified_against_json TEXT,
+            verified_against_hash TEXT,
+            declared_source_type TEXT,
+            candidate_id TEXT,
+            brand_evidence_id TEXT,
+            brand_evidence_hash TEXT,
+            origin TEXT NOT NULL DEFAULT 'pi_run',
+            onboarding_item_id TEXT REFERENCES onboarding_items(id) ON DELETE CASCADE
+          );`);
+        db.exec(`
+          INSERT INTO product_intelligence_assets_new SELECT * FROM product_intelligence_assets;`);
+        db.exec('DROP TABLE product_intelligence_assets;');
+        db.exec('ALTER TABLE product_intelligence_assets_new RENAME TO product_intelligence_assets;');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_pi_assets_onboarding_item ON product_intelligence_assets(onboarding_item_id);');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pi_assets_onboarding_url
+            ON product_intelligence_assets(onboarding_item_id, source_url)
+            WHERE origin = 'onboarding_distributor' AND onboarding_item_id IS NOT NULL;`);
+        const after = countAssets();
+        if (after !== before) {
+          throw new Error(`product_intelligence_assets row-count mismatch after rebuild: before=${before} after=${after}`);
+        }
+        console.log(`[Migrations] product_intelligence_assets rebuilt without PI FKs (${after} rows preserved).`);
+
+        // Step 2: drop the PI-only family, children before parents. With
+        // foreign_keys disabled during the transaction this order is a
+        // formality, but it keeps manual/foreign_keys-ON recoveries sane.
+        const piDropOrder = [
+          'product_intelligence_imports',
+          'agent_evaluation_cases',
+          'agent_evaluation_snapshots',
+          'agent_teaching_events',
+          'agent_corrections',
+          'agent_version_states',
+          'agent_version_snapshots',
+          'pi_image_candidates',
+          'pi_source_authorities',
+          'pi_page_artifacts',
+          'product_intelligence_tool_calls',
+          'product_intelligence_steps',
+          'product_intelligence_events',
+          'product_intelligence_policy_decisions',
+          'product_intelligence_comparisons',
+          'product_intelligence_conflicts',
+          'product_intelligence_evidence',
+          'product_intelligence_results',
+          'pi_review_decisions',
+          'product_intelligence_sources',
+          'pi_approved_policies',
+          'pi_budget_policies',
+          'pi_retention_policies',
+          'pi_evaluation_runs',
+          'product_intelligence_runs',
+        ];
+        for (const t of piDropOrder) {
+          db.exec(`DROP TABLE IF EXISTS ${t};`);
+        }
+
+        // Step 3: app_meta bookkeeping. NOTE: we deliberately KEEP the
+        // historical *_schema_version guard keys (product_intelligence_*,
+        // pi_*): the migration blocks they guard still exist above in this
+        // file, and deleting their keys would cause those blocks to RE-RUN on
+        // the next startup against the now-dropped tables and crash. They are
+        // inert markers for already-applied code paths.
+        db.exec("INSERT INTO app_meta (key, value) VALUES ('decommission_pi_schema_version', '1');");
+      })();
+
+      const violations = db.query("PRAGMA foreign_key_check('product_intelligence_assets')").all();
+      if (violations.length > 0) {
+        console.warn(`[Migrations] ${violations.length} FK violations in kept product_intelligence_assets post-retirement:`, violations.slice(0, 5));
+      }
+      console.log('[Migrations] ADR-0030 Phase 4 PI data retirement complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] ADR-0030 Phase 4 PI data retirement failed:', e);
+    throw e;
   }
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
