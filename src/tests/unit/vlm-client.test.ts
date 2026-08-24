@@ -120,19 +120,22 @@ describe('VLM client — AI Compute route inheritance (getVlmConfig)', () => {
       Buffer.alloc(1100),
     ]).toString('base64');
 
-    // Live local stand-in for the openai-compatible endpoint; captures the
-    // request body so the data-URI media type is observable end-to-end.
+    // OpenAI-compatible endpoint STAND-IN via a hermetic global fetch stub
+    // (no live server): captures the request body so the data-URI media type
+    // is observable end-to-end.
+    // HERMETIC TRANSPORT: the dispatcher path has no fetchFn injection seam,
+    // so this test replaces globalThis.fetch outright for its duration —
+    // cross-file global-fetch stubs left behind by earlier suites in the
+    // same bun test process would otherwise intercept the call and return
+    // their own canned content. Restored in finally.
     const bodies: string[] = [];
-    const server = Bun.serve({
-      port: 0,
-      hostname: '127.0.0.1',
-      fetch: async (req) => {
-        bodies.push(await req.text());
-        return Response.json({ choices: [{ message: { content: 'ok' } }] });
-      },
-    });
-    const port = server.port;
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: any, _init?: any) => {
+      bodies.push(typeof _init?.body === 'string' ? _init.body : '');
+      return Response.json({ choices: [{ message: { content: 'ok' } }] });
+    }) as typeof fetch;
     try {
+      const port = 45931; // dispatcher never dials: fetch is fully stubbed
       upsertProviderConnection({
         id: 'mime-dispatch',
         label: 'MIME Dispatch Endpoint',
@@ -158,7 +161,7 @@ describe('VLM client — AI Compute route inheritance (getVlmConfig)', () => {
       expect(bodies.some(b => b.includes(`data:image/png;base64,${png}`))).toBe(true);
       expect(bodies.some(b => b.includes('data:image/jpeg'))).toBe(false);
     } finally {
-      server.stop(true);
+      globalThis.fetch = previousFetch;
     }
   });
 });
