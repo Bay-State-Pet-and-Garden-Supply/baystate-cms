@@ -19,7 +19,7 @@
  *   labeled-null fields would only deflate the rate for broken candidates).
  */
 
-import { wilsonInterval } from '../../product-intelligence/evaluation/metrics';
+import { wilsonInterval } from './stats';
 import type { GoldenOcrExpected } from './golden-dataset';
 import type { PackagingOcrData } from '../../shared/schemas/onboarding';
 
