@@ -1,5 +1,7 @@
 # Default-On Distributor Sourcing and Discovery-Skip Implementation Plan
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 ## Objective and verified planning baseline
 
 Implement the product-owner directive: **“Default on. We always want to check our distributors first, and skip Discovery if we find the product on our distributors.”**

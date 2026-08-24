@@ -20,8 +20,13 @@ import { SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION } from '../shopsite/built-in-o
 
 export type { ProtectedOperation };
 
+/** Category Page correctness validator version (e09 B2 P1-P12) — single source of truth lives in
+ *  category-page-correctness.ts (consumed by cohort-page-hash for the P-hash); re-exported here so
+ *  registry consumers reference one constant instead of a drifting copy. */
+export { CATEGORY_PAGE_CORRECTNESS_VERSION } from './category-page-correctness';
+
 /** Bump ONLY when the operation→rule/prompt/parameter contract changes. */
-export const MODEL_OPERATION_REGISTRY_VERSION = 2;
+export const MODEL_OPERATION_REGISTRY_VERSION = 3;
 
 /**
  * Built-in ShopSite output policy version participating in runs. Single
@@ -49,6 +54,7 @@ export const PROMPT_TEMPLATE_VERSIONS: Readonly<Record<ProtectedOperation, strin
   discovery_name_consolidation: 'discovery-name-consolidation-prompt-v1',
   brand_inference: 'brand-inference-prompt-v1',
   sitemap_selection: 'sitemap-selection-prompt-v1',
+  value_gap_resolution: 'value-gap-resolution-prompt-v1',
 };
 
 /**
@@ -64,11 +70,12 @@ export const RULE_VERSIONS: Readonly<Record<ProtectedOperation, string>> = {
   cohort_page_assignment: 'cohort-page-assignment-rules-v1',
   cohort_page_assignment_parent: 'cohort-page-assignment-parent-rules-v2',
   title_consolidation: 'title-consolidation-rules-v1',
-  cohort_title_consolidation: 'cohort-title-consolidation-rules-v1',
+  cohort_title_consolidation: 'cohort-title-consolidation-rules-v2', // B1 family-title consistency (T2-T7) + title-lint — FAMILY_TITLE_CONSISTENCY_VERSION v2
   distributor_copy_consolidation: 'distributor-copy-consolidation-rules-v1',
   discovery_name_consolidation: 'discovery-name-consolidation-rules-v1',
   brand_inference: 'brand-inference-rules-v1',
   sitemap_selection: 'sitemap-selection-rules-v1',
+  value_gap_resolution: 'value-gap-resolution-rules-v1',
 };
 
 /**
@@ -91,6 +98,7 @@ export const OPERATION_PARAMETERS: Readonly<
   discovery_name_consolidation: { temperature: 0.1, maxTokens: null },
   brand_inference: { temperature: 0.0, maxTokens: null },
   sitemap_selection: { temperature: 0.0, maxTokens: null },
+  value_gap_resolution: { temperature: 0.0, maxTokens: null },
 };
 
 /**
@@ -111,6 +119,7 @@ export const OPERATION_TO_STAGE: Readonly<Record<ProtectedOperation, Classificat
   discovery_name_consolidation: 'name_consolidation',
   brand_inference: null,
   sitemap_selection: null,
+  value_gap_resolution: 'value_gap_abstain',
 };
 
 /** Run-bound protected operations (those mapped to a classification stage). */

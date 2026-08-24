@@ -16,11 +16,14 @@
  */
 import { getLlmConfigForTask, callLlmForTask, callLlmForTaskWithProvenance } from './llm-client';
 import { redactTransportText } from '../classification/model-policy-gateway';
-import { normalizeBrand, extractNameStem } from './product-line-grouper';
+import { familyGroupingIdentityFor, knownBrandsForBatch } from './product-line-grouper';
 import { buildCohortPrompt, FORMAT_RULES } from './title-prompt-template';
 import type { CohortExecutionTypeContext } from './title-prompt-template';
 import { normalizeTitleAuthorityString, TITLE_AUTHORITY_TRUNCATION } from './cohort-title-hash';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
+import { validateFamilyTitleSet } from '../classification/family-title-consistency';
+import type { TitleFrozenFacts } from '../classification/family-title-consistency';
+import { lintTitleSet, DEFAULT_BRAND_CASE_MAP } from '../classification/title-lint';
 import type { ModelCallContext } from '../classification/model-operation-registry';
 import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
@@ -84,6 +87,13 @@ export interface CohortCoordinationOptions {
    * calls), even when the items carry OCR/web data.
    */
   includeTitleHashSignals?: boolean;
+  /**
+   * T1 authoritative: when set, the caller asserts that `items` are the frozen
+   * cohort_members for this cohortId and must NOT be regrouped via
+   * familyGroupingIdentityFor/extractNameStem. The coordinator treats the
+   * entire `items` array as one authoritative family (T10 grouping boundary).
+   */
+  authoritativeCohortId?: string;
 }
 
 /** Stable fingerprint inputs for cache. Excludes volatile fields. */
@@ -210,6 +220,11 @@ export function clearCohortCoordinationCache(): void {
 /**
  * Known abbreviation expansions for deterministic title cleaning.
  * Applied case-insensitively; the output uses the canonical form.
+ * Includes distributor abbreviations (vnsn, hypo, frzn, vgg) so fallback
+ * titles are consistent with LLM-coordinated titles.
+ * Common subset chkn/ckn/slmn/trky/vnsn/frzn/vgg must stay in sync with
+ * product-line-token-normalizer.ts EXPAND_ABBREVIATIONS; coordinator adds
+ * hypo/hypoallergenic formatter-only.
  */
 const ABBREVIATIONS: Record<string, string> = {
   sm: 'Small',
@@ -223,6 +238,11 @@ const ABBREVIATIONS: Record<string, string> = {
   slmn: 'Salmon',
   trky: 'Turkey',
   dntl: 'Dental',
+  vnsn: 'Venison',
+  hypo: 'Hypoallergenic',
+  hypoallergenic: 'Hypoallergenic',
+  frzn: 'Frozen',
+  vgg: 'Veggie',
 };
 
 /** Units to normalize after title casing. */
@@ -239,8 +259,8 @@ const UNIT_PATTERNS: Array<[RegExp, string]> = [
 /**
  * Deterministically produce a store-ready title from a spreadsheet name.
  *
- * Handles: SM/MD/LG/XL expansion, CHKN/CKN/SLMN/TRKY/DNTL expansion,
- * OZ/LB/CT/PK normalization, parenthesis removal (content preserved),
+ * Handles: SM/MD/LG/XL expansion, CHKN/CKN/SLMN/TRKY/DNTL/VNSN/HYPO/FRZN/VGG
+ * expansion, OZ/LB/CT/PK normalization, parenthesis removal (content preserved),
  * brand prefixing, whitespace normalization, title casing.
  */
 export function formatDeterministicTitle(
@@ -308,6 +328,129 @@ export function formatDeterministicTitle(
 // ─── Core Coordination Logic ──────────────────────────────────────────────────
 
 /**
+ * Canonicalize an abbreviation flavor token to its rendered form.
+ */
+function canonicalFlavorToken(token: string): string {
+  return token.replace(/vnsn/, 'venison').replace(/chkn|ckn/, 'chicken').replace(/slmn/, 'salmon').replace(/trky/, 'turkey').replace(/vgg/, 'veggie');
+}
+
+const FLAVOR_TOKEN_RE = /\b(beef|venison|vnsn|chicken|chkn|ckn|salmon|slmn|turkey|trky|veggie|vgg|duck|lamb|pork|bison|fish|tuna)\b/g;
+
+/**
+ * Derive minimal frozenFacts for pure family-title validation (B1 T4/T5).
+ * Heuristic: modifiers/flavor/size inferred from the spreadsheet name so the
+ * validator can enforce always-visible + no-leakage without DB access.
+ * T10: never calls extractNameStem / grouping — local regex only.
+ *
+ * Round-3 slot unification: ALL distinct flavor words normalize into the
+ * {flavor} slot (first match = flavorOrColorOrSubline, remaining matches are
+ * emitted as extraFlavorTokens rather than silently dropped); a weight and a
+ * size word occupying the same title BOTH normalize into the single adjudicated
+ * Size/Weight/Count {size} slot (weight wins as primary, the size word is kept
+ * as an extraSizeToken) so a family mixing "...Small" and "...5 lb" siblings
+ * produces matching skeletons instead of hard-failing T7.
+ */
+// fallow-ignore-next-line unused-export — exported for direct slot-unification tests (round-3 FIX 2)
+export function deriveFrozenFactsForValidation(item: OnboardingItem): TitleFrozenFacts {
+  const raw = (item.name ?? '').toLowerCase();
+  const brand = item.brandHint?.trim() ?? '';
+  const productLine = brand;
+  const modifiers = {
+    soft: /\bsoft\b/.test(raw) || undefined,
+    hard: /\bhard\b/.test(raw) || undefined,
+    classic: /\bclassic\b/.test(raw) || undefined,
+    hypoallergenic: /\b(hypoallergenic|hypo)\b/.test(raw) || undefined,
+  };
+  const flavorMatches = [...raw.matchAll(FLAVOR_TOKEN_RE)].map(match => canonicalFlavorToken(match[1]));
+  // Dedupe while preserving order — repeated mentions of the SAME flavor are one
+  // logical value; only DISTINCT flavors become extra slot tokens.
+  const distinctFlavors = [...new Set(flavorMatches)];
+  const flavorOrColorOrSubline = distinctFlavors[0];
+  const extraFlavorTokens = distinctFlavors.length > 1 ? distinctFlavors.slice(1) : undefined;
+  const sizeMatch = raw.match(/\b(small|medium|large|x-?large|xx-?large|x-small|sm|md|lg|xl|xxl|xs)\b/);
+  const sizeMap: Record<string,string> = { sm:'Small', md:'Medium', lg:'Large', xl:'X-Large', xxl:'XX-Large', xs:'X-Small' };
+  // Weight/count slot (adjudicated Size/Weight/Count slot, plan §6.2): families legitimately
+  // vary by packaged weight/count ("Chicken 5 lb" vs "Beef 10 lb") — without this extraction
+  // the literal stays in the T2 skeleton and every weight-variant family hard-fails T7.
+  // Token is emitted in the SAME rendered form formatDeterministicTitle produces
+  // ("1 lb" spaced; "6 ct" → "6-count" per UNIT_PATTERNS) so deriveSkeleton's word-boundary
+  // match aligns with candidate/fallback titles. Regex-only, idempotent.
+  const weightMatch = raw.match(/\b(\d+(?:\.\d+)?)[ \t]*(lbs|lb|oz|kg|count|ct|pack)\b/);
+  const sizeWord = sizeMatch ? (sizeMap[sizeMatch[1].toLowerCase()] ?? sizeMatch[1]) : undefined;
+  // Explicit numbered sizes ("Sz 4", "Size 10", "sz. 6") carry NO weight unit,
+  // so the weight regex above never sees them — the literal digit previously
+  // stayed in the T2 skeleton and every numbered-size family hard-failed T7
+  // ("shared skeleton mismatch: ... muzzle sz 4 | ... muzzle sz 5"). The FULL
+  // match text is kept verbatim (whitespace-collapsed) so deriveSkeleton's
+  // standalone-token rule matches the rendered candidate/fallback title exactly.
+  const szNumMatch = raw.match(/\b(?:sizes?|sz)\.?[ \t]*(\d+(?:\.\d+)?)\b/);
+  const szNumToken = szNumMatch ? szNumMatch[0].replace(/\s+/g, ' ').trim() : undefined;
+  let sizeOrCount: string | undefined;
+  let extraSizeTokens: string[] | undefined;
+  if (weightMatch) {
+    const num = weightMatch[1];
+    const unit = weightMatch[2];
+    sizeOrCount = unit === 'ct' ? `${num}-count` : unit === 'lbs' ? `${num} lb` : `${num} ${unit}`;
+    // A weight must NOT displace a co-present size word — both occupy the SAME
+    // {size} slot; the deriveSkeleton same-slot unification collapses them onto
+    // one placeholder so mixed Small/weight members still skeleton-match.
+    if (sizeWord && sizeWord.toLowerCase() !== sizeOrCount.toLowerCase()) {
+      extraSizeTokens = [sizeWord];
+    }
+    if (szNumToken && szNumToken.toLowerCase() !== sizeOrCount.toLowerCase()
+      && !(extraSizeTokens ?? []).some(t => t.toLowerCase() === szNumToken.toLowerCase())) {
+      extraSizeTokens = [...(extraSizeTokens ?? []), szNumToken];
+    }
+  } else if (sizeWord && szNumToken) {
+    // Co-present size word + numbered size both occupy the SAME {size} slot —
+    // adjacent placeholders collapse in deriveSkeleton so mixed
+    // "Small Sz 4"-style families still skeleton-match.
+    sizeOrCount = sizeWord;
+    if (sizeWord.toLowerCase() !== szNumToken.toLowerCase()) {
+      extraSizeTokens = [szNumToken];
+    }
+  } else if (szNumToken) {
+    sizeOrCount = szNumToken;
+  } else if (sizeWord) {
+    sizeOrCount = sizeWord;
+  }
+  return { brand, productLine, flavorOrColorOrSubline, extraFlavorTokens, sizeOrCount, extraSizeTokens, modifiers };
+}
+
+/**
+ * Title-lint evidence strings for one member: every string leaf of the frozen
+ * extraction payload (title, description, OCR fields...). Bounded walk so a
+ * pathological payload cannot blow up the corpus.
+ */
+function extractionEvidenceStrings(item: OnboardingItem): string[] {
+  const out: string[] = [];
+  const walk = (v: unknown, depth: number) => {
+    if (depth > 4 || out.length >= 60) return;
+    if (typeof v === 'string') { if (v.trim()) out.push(v.slice(0, 500)); return; }
+    if (Array.isArray(v)) { v.forEach(x => walk(x, depth + 1)); return; }
+    if (v && typeof v === 'object') Object.values(v).forEach(x => walk(x, depth + 1));
+  };
+  if (item.extractionData && typeof item.extractionData === 'object') {
+    walk(item.extractionData as unknown, 0);
+  }
+  return out;
+}
+
+/**
+ * Brand casing map for the lint: census defaults, then canonical spellings
+ * derived from the batch's own known-brand set for keys the defaults do not
+ * already cover (defaults win so batch drift like "kong" cannot undo KONG).
+ */
+function brandCaseMapFor(items: OnboardingItem[]): Record<string, string> {
+  const map: Record<string, string> = { ...DEFAULT_BRAND_CASE_MAP };
+  for (const b of knownBrandsForBatch(items)) {
+    const key = b.trim().toLowerCase();
+    if (key && !(key in map)) map[key] = b.trim();
+  }
+  return map;
+}
+
+/**
  * Validate that the LLM response covers every expected UPC, contains no
  * duplicate titles (case/whitespace-insensitive), and has no structural issues.
  * Returns null on validation failure (caller must use fallback for the group).
@@ -346,30 +489,81 @@ function validateCohortResponse(
 }
 
 /**
- * Generate deterministic fallback titles for all items in a group.
+ * Deterministic fallback for every sibling — linted then family-consistency
+ * validated before any commit (T7). Shared by the authoritative-cohort path
+ * and the per-group path so the lint/T7 contract cannot drift between them.
+ *
+ * Throws (with `cause`) when the fallback set fails title lint or family
+ * consistency; otherwise returns the LINTED titles.
  */
-function getGroupFallbackTitles(groupItems: OnboardingItem[]): Map<string, CoordinatedTitle> {
-  const fallbacks = new Map<string, CoordinatedTitle>();
-  for (const item of groupItems) {
-    fallbacks.set(item.upc, {
-      title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
-      source: 'cohort_fallback',
-    });
+function lintAndValidateFallbackTitles(
+  familyId: string,
+  group: OnboardingItem[],
+  cause: unknown,
+): Array<{ upc: string; title: string }> {
+  const fallbackTitles = group.map(item => ({
+    upc: item.upc,
+    title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
+  }));
+  // Title Lint (e09 follow-through): the fallback is a candidate set like any
+  // other — lint first (blocked => fail closed, zero rows), then validate the
+  // LINTED titles for family consistency (T7).
+  const fbCaseMap = brandCaseMapFor(group);
+  const fallbackLint = lintTitleSet(
+    group.map((item, i) => ({
+      upc: item.upc,
+      candidateTitle: fallbackTitles[i].title,
+      rawTitle: item.name ?? '',
+      // The fallback is derived from rawTitle by construction — B1
+      // (spreadsheet_fallback_leak) is an LLM-echo detector and must not
+      // fire on it.
+      candidateSource: 'deterministic_fallback' as const,
+      extractionStrings: extractionEvidenceStrings(item),
+    })),
+    { brandCaseMap: fbCaseMap },
+  );
+  if (fallbackLint.anyBlocked) {
+    const first = fallbackLint.results.find(r => r.blocked);
+    throw new Error(`Deterministic fallback failed title lint (${first?.blockReason ?? 'blocked'}): upc ${first?.upc ?? 'unknown'}`, { cause });
   }
-  return fallbacks;
+  for (const r of fallbackLint.results) {
+    const ft = fallbackTitles.find(f => f.upc === r.upc);
+    if (ft && r.changed) ft.title = r.title;
+  }
+  const fallbackValidation = validateFamilyTitleSet({
+    familyId,
+    members: group.map(item => ({
+      onboardingItemId: item.id,
+      upc: item.upc,
+      frozenEvidenceHash: 'fallback:' + item.upc,
+      frozenFacts: deriveFrozenFactsForValidation(item),
+    })),
+    candidateTitles: fallbackTitles,
+  });
+  if (!fallbackValidation.valid) {
+    throw new Error(`Deterministic fallback title set failed family consistency (T7): ${fallbackValidation.reason ?? fallbackValidation.perMember.find(p => !p.valid)?.reason ?? 'unknown'}`, { cause });
+  }
+  return fallbackTitles;
 }
 
+
 /**
- * Coordinate titles for a single multi-item group, executing LLM coordination
- * or returning fallback titles on failure. Rethrows HeartbeatLostError.
+ * Coordinate titles for a single multi-item group: run LLM coordination, or on
+ * failure produce the deterministic fallback set via lintAndValidateFallbackTitles.
+ * Rethrows HeartbeatLostError unchanged (PR6 C3: ownership loss never becomes a
+ * fallback outcome).
  */
 async function coordinateSingleGroup(
   groupItems: OnboardingItem[],
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
   opts?: CohortCoordinationOptions,
 ): Promise<Map<string, CoordinatedTitle>> {
+  const groupResultMap = new Map<string, CoordinatedTitle>();
   try {
-    return await coordinateGroup(groupItems, modelPolicy, opts);
+    const groupResult = await coordinateGroup(groupItems, modelPolicy, opts);
+    for (const [upc, ct] of groupResult) {
+      groupResultMap.set(upc, ct);
+    }
   } catch (err: any) {
     // PR6 C3: ownership loss is NEVER converted into an 'LLM unavailable →
     // fallback' outcome. `HeartbeatLostError` (a sibling worker reclaimed
@@ -383,9 +577,14 @@ async function coordinateSingleGroup(
     console.warn(
       `[CohortCoordinator] Coordination failed for group, using fallbacks: ${redactTransportText(err.message)}`,
     );
-    // All-or-nothing: deterministic fallback for every sibling
-    return getGroupFallbackTitles(groupItems);
+    // All-or-nothing: deterministic fallback for every sibling (linted + T7-validated in the shared helper)
+    const fallbackTitles = lintAndValidateFallbackTitles(groupItems.map(i => i.upc).sort().join(','), groupItems, err);
+    for (const item of groupItems) {
+      const t = fallbackTitles.find(f => f.upc === item.upc)?.title ?? formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
+      groupResultMap.set(item.upc, { title: t, source: 'cohort_fallback' });
+    }
   }
+  return groupResultMap;
 }
 
 /**
@@ -407,6 +606,31 @@ export async function coordinateCohortItems(
 
   if (items.length === 0) return result;
 
+  // T1 authoritative: do not regroup existing cohort — the caller-provided
+  // member list IS the frozen cohort membership. Regrouping via
+  // familyGroupingIdentityFor -> extractNameStem is only for pre-cohort
+  // routing (initial grouping). For an existing cohort we treat the entire
+  // items array as one authoritative family so validateFamilyTitleSet sees
+  // the ORIGINAL frozen set, not a re-derived chunk. T10: no new
+  // extractNameStem calls are added by validation (deriveFrozenFactsForValidation is regex-only).
+  if (opts?.authoritativeCohortId) {
+    if (items.length <= 1) return result;
+    const authoritativeGroup = items;
+    try {
+      const groupResult = await coordinateGroup(authoritativeGroup, modelPolicy, opts);
+      for (const [upc, ct] of groupResult) result.set(upc, ct);
+    } catch (err: any) {
+      if (err instanceof HeartbeatLostError) throw err;
+      console.warn(`[CohortCoordinator] Authoritative coordination failed for cohort ${opts.authoritativeCohortId}: ${redactTransportText(err.message)}`);
+      const fallbackTitles = lintAndValidateFallbackTitles(opts.authoritativeCohortId, authoritativeGroup, err);
+      for (const item of authoritativeGroup) {
+        const t = fallbackTitles.find(f => f.upc === item.upc)?.title ?? formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
+        result.set(item.upc, { title: t, source: 'cohort_fallback' });
+      }
+    }
+    return result;
+  }
+
   const groups = groupByProductLine(items);
 
   for (const [, groupItems] of groups) {
@@ -422,7 +646,7 @@ export async function coordinateCohortItems(
 }
 
 /**
- * Group items by product line using normalizeBrand + extractNameStem.
+ * Group items by product line using familyGroupingIdentityFor (batch-aware).
  *
  * PR6 C4 (issue #30): exported so the parent title op
  * (`ensureCohortTitlesCoordinated`) can compute the exact multi-item-group
@@ -432,18 +656,16 @@ export async function coordinateCohortItems(
 export function groupByProductLine(
   items: OnboardingItem[],
 ): Map<string, OnboardingItem[]> {
+  const knownBrands = knownBrandsForBatch(items);
   const groups = new Map<string, OnboardingItem[]>();
 
   for (const item of items) {
-    const brand = normalizeBrand(item.brandHint);
-    const stem = extractNameStem(item.name || '');
-
-    if (!stem) {
+    const identity = familyGroupingIdentityFor(item, knownBrands);
+    if (!identity.stem) {
       groups.set(`single-${item.upc}`, [item]);
       continue;
     }
-
-    const key = `${brand}|${stem}`;
+    const key = identity.key;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(item);
   }
@@ -593,6 +815,52 @@ async function coordinateGroup(
 
   if (!validated) {
     throw new Error('LLM response validation failed (missing UPCs or duplicate titles)');
+  }
+
+  // Title Lint (e09 follow-through): normalize mechanically-repairable defects
+  // (tight units, decimals, casing, dup trailing size) and BLOCK unverifiable
+  // garbage (spreadsheet fallback leaks, phantom weights) BEFORE the family
+  // gate. Blocked => throw so the caller falls through to the deterministic
+  // fallback (which is itself linted + revalidated, T7). Changed titles are
+  // written back so the family gate below validates the LINTED set — only a
+  // linted+revalidated set may commit durably (T8: the lint is a
+  // post-processing rule change covered by FAMILY_TITLE_CONSISTENCY_VERSION).
+  const brandCaseMap = brandCaseMapFor(items);
+  const lint = lintTitleSet(
+    items.map(item => ({
+      upc: item.upc,
+      candidateTitle: validated.get(item.upc) ?? '',
+      rawTitle: item.name ?? '',
+      candidateSource: 'llm' as const,
+      extractionStrings: extractionEvidenceStrings(item),
+    })),
+    { brandCaseMap },
+  );
+  if (lint.anyBlocked) {
+    const first = lint.results.find(r => r.blocked);
+    throw new Error(`LLM title set failed title lint (${first?.blockReason ?? 'blocked'}): upc ${first?.upc ?? 'unknown'}`);
+  }
+  if (lint.anyChanged) {
+    for (const r of lint.results) {
+      if (r.changed && r.upc !== null) validated.set(r.upc, r.title);
+    }
+  }
+
+  // Phase B1 (e09 T7/T8): pure family-title consistency gate — validated set must share skeleton Brand→Line→Form→Flavor→Size,
+  // preserve always-visible modifiers (Soft/Hard/Classic/Hypo), and have no sibling leakage. On valid=false the caller
+  // writes zero durable rows and may try the deterministic fallback (which is also validated before commit).
+  const familyValidation = validateFamilyTitleSet({
+    familyId: items.map(i => i.upc).sort().join(','),
+    members: items.map(item => ({
+      onboardingItemId: item.id,
+      upc: item.upc,
+      frozenEvidenceHash: 'llm:' + item.upc,
+      frozenFacts: deriveFrozenFactsForValidation(item),
+    })),
+    candidateTitles: [...validated.entries()].map(([upc, title]) => ({ upc, title })),
+  });
+  if (!familyValidation.valid) {
+    throw new Error(`LLM title set failed family consistency (T2-T6): ${familyValidation.reason ?? familyValidation.perMember.find(p => !p.valid)?.reason ?? 'unknown'}`);
   }
 
   const result = new Map<string, CoordinatedTitle>();

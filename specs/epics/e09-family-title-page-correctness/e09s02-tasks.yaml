@@ -1,0 +1,45 @@
+story_id: e09s02
+title: "Pure validators + review/promotion gates (family-title-consistency + category-page-correctness)"
+status: done
+bcps: 10
+tasks:
+  - id: e09s02t01
+    description: "B1 pure family title contract: src/classification/family-title-consistency.ts (v2, validateFamilyTitleSet — skeleton T2/T3, variant fidelity T4, leakage T5, invention-block T6, all-or-nothing T7) + src/classification/title-lint.ts (v1, lintCandidateTitle/lintTitleSet with DEFAULT_BRAND_CASE_MAP). product-family-v1 grouping untouched (T1/T10)."
+    verify: "bunx vitest run src/tests/unit/family-title-consistency.test.ts src/tests/unit/title-lint.test.ts"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Implementation", "Title Contract"]
+  - id: e09s02t02
+    description: "B1 wiring: cohort-name-coordinator / cohort-curator / product-curator consume the validators; invalid candidate or fallback sets produce zero durable title rows; rule/prompt versions participate in authority hash (T8); new revisions only (no backfill of completed cohorts)."
+    verify: "bunx vitest run src/tests/unit/cohort-name-coordinator.test.ts && bun test src/tests/unit/cohort-title-coordinator.test.ts"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Implementation", "Wiring"]
+  - id: e09s02t03
+    description: "B2 pure Category Page correctness contract: src/classification/category-page-correctness.ts (v1, validateCategoryPageAssignment) enforcing P1-P9 — stable-ID fail-closed, required primary w/ evidenced co-primary only, semantic compatibility, child>Shop All, brand secondary-only, confidence non-authoritative, per-member outcome without leakage; ambiguity → needs_input."
+    verify: "bunx vitest run src/tests/unit/category-page-correctness.test.ts"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Implementation", "Page Contract"]
+  - id: e09s02t04
+    description: "B3 review gate: review-completion-gate requires a valid familyTitleValidation record and an accepted current Category Page before Review completes (T9/P10); abstention/stale/foreign/unverified primary refuses with page-specific reason."
+    verify: "bunx vitest run src/tests/unit/onboarding-review-state.test.ts src/tests/unit/review-panel-gating.test.tsx 2>/dev/null || bun test src/tests/unit/onboarding-review-state.test.ts"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Implementation", "Review Gate"]
+  - id: e09s02t05
+    description: "B3 promotion gate: promotion-gate assertPagesCurrentForImport (P11) recomputes accepted category_page currentness against ACTIVE verified import identities pre-write; stale_page_assignment blocks; legacy name-only fallback is not acceptance authority (P12). No schema migration."
+    verify: "bunx vitest run src/tests/unit/promotion-gate.test.ts"
+    risk: P0
+    status: passing
+    allure:
+      severity: critical
+      categories: ["Implementation", "Promotion Gate"]

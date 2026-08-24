@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { getClassificationConfig } from '../../onboarding-api';
 import type { AttributeMappingConfig } from '../../../shared/schemas/classification';
+import { FrozenBanner } from '../settings/FrozenBanner';
+import { StatusBadge } from '../settings/StatusBadge';
+import { KeyValueList } from '../settings/KeyValueList';
 
 export function TypesAttributesView() {
   const [config, setConfig] = useState<any>(null);
@@ -34,6 +37,7 @@ export function TypesAttributesView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
+      <FrozenBanner />
       {productTypes.length > 0 && (
         <section>
           <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 8px', color: '#0f172a' }}>
@@ -47,13 +51,16 @@ export function TypesAttributesView() {
               const profile = attributeProfiles.find((ap: any) => ap.id === pt.attributeProfileId);
               return (
                 <div key={pt.id} style={{ background: 'var(--color-white-surface, #fff)', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 'var(--rounded-lg, 8px)', padding: 16, boxShadow: 'var(--shadow-sm)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <strong style={{ fontSize: 14, color: 'var(--color-uniform-green, #14532D)' }}>{pt.name}</strong>
-                      <code style={{ marginLeft: 8, fontSize: 11, color: '#666' }}>{pt.id}</code>
-                    </div>
-                    {profile && <span style={{ fontSize: 11, color: 'var(--color-uniform-green, #14532D)', fontWeight: 600 }}>{profile.attributes.length} attributes</span>}
+                  <div style={{ marginBottom: 8 }}>
+                    <strong style={{ fontSize: 14, color: 'var(--color-uniform-green, #14532D)' }}>{pt.name}</strong>
                   </div>
+                  <KeyValueList
+                    stacked={false}
+                    items={[
+                      { label: 'Type ID', value: <code style={{ fontSize: 11 }}>{pt.id}</code> },
+                      ...(profile ? [{ label: 'Attribute Profile', value: `${profile.attributes.length} attributes` }] : []),
+                    ]}
+                  />
                   {pt.description && <p style={{ fontSize: 12, color: '#525252', margin: '4px 0 0' }}>{pt.description}</p>}
                   {profile && profile.attributes.length > 0 && (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
@@ -115,7 +122,7 @@ export function TypesAttributesView() {
                         {mapping ? (
                           <div>
                             <code style={{ fontSize: 11, color: 'var(--color-seedling-green, #16844D)' }}>{mapping.catalogField}</code>
-                            {mapping.isStale && <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-signet-burgundy, #760C19)' }}>stale</span>}
+                            {mapping.isStale && <span style={{ marginLeft: 4 }}><StatusBadge variant="stale" /></span>}
                           </div>
                         ) : (
                           <span style={{ fontSize: 11, color: '#a3a3a3' }}>— unmapped</span>
@@ -123,11 +130,11 @@ export function TypesAttributesView() {
                       </td>
                       <td style={td}>
                         {mapping?.isStale ? (
-                          <span style={{ color: 'var(--color-signet-burgundy, #760C19)', fontSize: 11, fontWeight: 600 }}>stale</span>
+                          <StatusBadge variant="stale" />
                         ) : mapping ? (
-                          <span style={{ color: 'var(--color-uniform-green, #14532D)', fontSize: 11, fontWeight: 600 }}>mapped</span>
+                          <StatusBadge variant="mapped" />
                         ) : (
-                          <span style={{ color: 'var(--color-warning-text, #78350f)', fontSize: 11, fontWeight: 600 }}>unmapped</span>
+                          <StatusBadge variant="unmapped" />
                         )}
                       </td>
                     </tr>

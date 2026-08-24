@@ -1,5 +1,7 @@
 # Store Manager Epic #42 Hardening Plan
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 ## Goal
 
 Harden Store Manager from a route-level tool-calling prototype into an evidence-grounded CMS operational assistant that may investigate autonomously but can perform persistent actions only through deterministic, workspace-owned, explicitly approved, bounded, and verifiable server boundaries.

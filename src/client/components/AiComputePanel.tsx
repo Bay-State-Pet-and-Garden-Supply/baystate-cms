@@ -26,6 +26,7 @@ import type {
   DataSharingPolicy,
 } from '../../ai/provider-connections';
 import type { ConnectionHealthReport, DiscoveredModel } from '../../ai/connection-health-monitor';
+import { DEFAULT_LOCAL_VISION_MODEL } from '../../shared/vision-model-defaults';
 import { colors, fonts, rounded } from '../theme';
 
 /** Derive the operator-approved host/port pin from a base URL, mirroring the
@@ -53,7 +54,7 @@ function defaultModelForConnection(connId: string, healthMap: Record<string, Con
   const curated: Record<string, string> = {
     'deepseek-cloud': 'deepseek-v4-flash',
     'openai-cloud': 'gpt-4o-mini',
-    'local-ollama': 'qwen2.5vl:latest',
+    'local-ollama': DEFAULT_LOCAL_VISION_MODEL,
   };
   return curated[connId] ?? '';
 }

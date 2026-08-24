@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseJsonFromVlmResponse, coercePackagingOcrData } from '../../onboarding/packaging-ocr';
+import { parseJsonFromVlmResponse, coercePackagingOcrData, mergeOcrResults } from '../../onboarding/packaging-ocr';
 import type { PackagingOcrData } from '../../shared/schemas/onboarding';
 
 // ─── parseJsonFromVlmResponse ──────────────────────────────────────────────────
@@ -214,6 +214,44 @@ describe('coercePackagingOcrData', () => {
     expect(result!.metadata?.parser).toBe('test');
   });
 
+  it('coerces placeholder strings ("null", "none", "N/A", "unknown") to null (FIX-8)', () => {
+    const result = coercePackagingOcrData({
+      productName: 'null',
+      brand: ' NONE ',
+      flavorVariety: 'n/a',
+      color: 'NA',
+      material: 'Unknown',
+      size: 'N.A.',
+      weight: 'Real Weight',
+      count: 12,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.productName).toBeNull();
+    expect(result!.brand).toBeNull();
+    expect(result!.flavorVariety).toBeNull();
+    expect(result!.color).toBeNull();
+    expect(result!.material).toBeNull();
+    expect(result!.size).toBeNull();
+    // Real values (and non-string scalars) are untouched.
+    expect(result!.weight).toBe('Real Weight');
+    expect(result!.count).toBe('12');
+  });
+
+  it('drops placeholder entries from arrays too (FIX-D round 2)', () => {
+    const result = coercePackagingOcrData({
+      productName: 'Test',
+      visibleTextLines: ['NA', 'REAL LINE'],
+      claims: ['NULL', 'none', 'Unknown', 'REAL CLAIM'],
+      ingredients: ['N/A', 'chicken'],
+    });
+    expect(result).not.toBeNull();
+    // Placeholder entries are VLM non-answers — dropped like scalar
+    // placeholders; a placeholder-only array normalizes to empty.
+    expect(result!.visibleTextLines).toEqual(['REAL LINE']);
+    expect(result!.claims).toEqual(['REAL CLAIM']);
+    expect(result!.ingredients).toEqual(['chicken']);
+  });
+
   it('returns null for invalid input that fails schema validation', () => {
     // productName is fine but confidenceByField must be an object of numbers
     const result = coercePackagingOcrData({
@@ -223,5 +261,77 @@ describe('coercePackagingOcrData', () => {
     // should still work since we normalize confidence values
     expect(result).not.toBeNull();
     expect(result!.confidenceByField).toEqual({}); // invalid values filtered out
+  });
+});
+
+// ─── mergeOcrResults (post-review fixup 3) ─────────────────────────────────────
+
+describe('mergeOcrResults', () => {
+  it('carries the primary image contentHash forward instead of dropping it', () => {
+    const base = {
+      productName: 'Primary Name',
+      brand: null,
+      species: [],
+      upc: null,
+      flavorVariety: null,
+      color: null,
+      material: null,
+      size: null,
+      weight: null,
+      count: null,
+      lifeStage: null,
+      breedSize: null,
+      productForm: null,
+      healthConcernFunction: [],
+      dietaryLabels: [],
+      ingredients: [],
+      ingredientKeywords: [],
+      claims: [],
+      visibleTextLines: [],
+      confidenceByField: {},
+      metadata: null,
+    };
+    const primary = { ...base, productName: 'Primary Name', contentHash: 'a'.repeat(64) } as PackagingOcrData & { contentHash: string | null };
+    const secondary = { ...base, productName: 'Secondary Name', species: ['cat'], contentHash: 'b'.repeat(64) } as PackagingOcrData & { contentHash: string | null };
+
+    const merged = mergeOcrResults([primary, secondary]);
+    expect((merged as { contentHash?: string | null }).contentHash).toBe('a'.repeat(64));
+    expect(merged.productName).toBe('Primary Name');
+    expect(merged.species).toEqual(['cat']);
+  });
+
+  it('merges two UPC-only results without discarding the barcode (FIX-C round 2)', () => {
+    const base = {
+      productName: null,
+      brand: null,
+      species: [],
+      upc: null,
+      flavorVariety: null,
+      color: null,
+      material: null,
+      size: null,
+      weight: null,
+      count: null,
+      lifeStage: null,
+      breedSize: null,
+      productForm: null,
+      healthConcernFunction: [],
+      dietaryLabels: [],
+      ingredients: [],
+      ingredientKeywords: [],
+      claims: [],
+      visibleTextLines: [],
+      confidenceByField: {},
+      metadata: null,
+      contentHash: null,
+    };
+    const first = { ...base, upc: '035585507101' } as PackagingOcrData & { contentHash: string | null };
+    const second = { ...base, upc: null } as PackagingOcrData & { contentHash: string | null };
+
+    const merged = mergeOcrResults([first, second]);
+    // Before FIX-C `upc` was missing from the scalar merge list, so the merge
+    // produced an all-null result and callers discarded the transcription.
+    expect(merged.upc).toBe('035585507101');
+    expect(merged.productName).toBeNull();
   });
 });

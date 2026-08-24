@@ -561,3 +561,114 @@ export function deleteBrandUrlsByDomain(domain: string): number {
   })();
 }
 
+export interface VariantUrlInput {
+  url: string;
+  baseUrl?: string | null;
+  title?: string | null;
+  upc?: string | null;
+  sku?: string | null;
+  mpn?: string | null;
+  brand?: string | null;
+  variantTokens?: string[];
+  price?: number | null;
+}
+
+/**
+ * Inserts or updates variant URLs with their specific UPCs, SKUs, and titles in brand_url_index.
+ * This enables instant Tier 1 (UPC exact) and Tier 2 (SKU exact) lookups on variant URLs.
+ */
+export function indexVariantUrls(domain: string, variants: VariantUrlInput[]): number {
+  if (variants.length === 0) return 0;
+  const db = getDb();
+  const normDomain = normalizeDomain(domain);
+  const nowIso = new Date().toISOString();
+
+  return db.transaction(() => {
+    let affected = 0;
+    const findStmt = db.prepare('SELECT rowid, id, upc, sku, title FROM brand_url_index WHERE domain = ? AND url = ?');
+    const updateStmt = db.prepare(`
+      UPDATE brand_url_index
+      SET title = COALESCE(?, title),
+          upc = COALESCE(?, upc),
+          sku = COALESCE(?, sku),
+          mpn = COALESCE(?, mpn),
+          brand = COALESCE(?, brand),
+          variant_tokens_json = COALESCE(?, variant_tokens_json),
+          last_seen_at = ?,
+          active = 1
+      WHERE domain = ? AND url = ?
+    `);
+    const insertStmt = db.prepare(`
+      INSERT INTO brand_url_index (
+        id, domain, url, path, slug, page_type, sitemap_source_url,
+        first_seen_at, last_seen_at, last_sitemap_refresh_at, active,
+        title, upc, sku, mpn, brand, variant_tokens_json
+      ) VALUES (?, ?, ?, ?, ?, 'product', 'variant_resolver', ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+    `);
+    const ftsDeleteStmt = db.prepare('DELETE FROM brand_url_fts WHERE rowid = ?');
+    const ftsInsertStmt = db.prepare(`
+      INSERT INTO brand_url_fts (rowid, domain, url, path, slug, title, h1, brand)
+      SELECT rowid, domain, url, path, slug, title, h1, brand FROM brand_url_index WHERE rowid = ?
+    `);
+
+    for (const v of variants) {
+      const u = v.url.trim();
+      if (!u || !u.startsWith('http')) continue;
+
+      const cleanUpc = v.upc ? v.upc.replace(/\D/g, '').trim() : null;
+      const cleanSku = v.sku ? v.sku.trim() : null;
+      const cleanMpn = v.mpn ? v.mpn.trim() : null;
+      const variantJson = v.variantTokens && v.variantTokens.length > 0 ? JSON.stringify(v.variantTokens) : null;
+
+      const existing = findStmt.get(normDomain, u) as { rowid: number; id: string; upc: string | null; sku: string | null; title: string | null } | undefined;
+
+      if (existing) {
+        updateStmt.run(
+          v.title || null,
+          cleanUpc,
+          cleanSku,
+          cleanMpn,
+          v.brand || null,
+          variantJson,
+          nowIso,
+          normDomain,
+          u,
+        );
+        try {
+          ftsDeleteStmt.run(existing.rowid);
+          ftsInsertStmt.run(existing.rowid);
+        } catch { /* non-fatal */ }
+        affected++;
+      } else {
+        const { path, slug } = parseUrlPathAndSlug(u);
+        const id = `bui_${randomUUID()}`;
+        insertStmt.run(
+          id,
+          normDomain,
+          u,
+          path,
+          slug,
+          nowIso,
+          nowIso,
+          nowIso,
+          v.title || null,
+          cleanUpc,
+          cleanSku,
+          cleanMpn,
+          v.brand || null,
+          variantJson,
+        );
+        const newRow = db.query('SELECT rowid FROM brand_url_index WHERE id = ?').get(id) as { rowid: number } | undefined;
+        if (newRow) {
+          try {
+            ftsInsertStmt.run(newRow.rowid);
+          } catch { /* non-fatal */ }
+        }
+        affected++;
+      }
+    }
+    return affected;
+  })();
+}
+
+

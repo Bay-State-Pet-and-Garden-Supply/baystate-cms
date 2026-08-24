@@ -32,6 +32,7 @@ import type { ClassificationRunRow } from '../db/repositories/classification-run
 import type { CohortRun } from '../shared/schemas/cohorts';
 import { hashCanonicalJson } from '../shared/stable-id';
 import { getEffectivePrimaryProductTypeId } from './assignment-projection';
+import { getPageIdentityId } from '../shared/proposal-display';
 import { resolveEffectiveCurationType, getReviewedTypeFromSnapshot } from './effective-curation-type';
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 
@@ -48,7 +49,8 @@ export type PromotionGateResult =
         | 'parent_not_completed'
         | 'workspace_mismatch'
         | 'reviewed_product_type_required'
-        | 'stale_proposal';
+        | 'stale_proposal'
+        | 'stale_page_assignment';
       reason: string;
     };
 
@@ -91,6 +93,15 @@ export interface PromotionGateInput {
    * production caller always supplies it.
    */
   currentAuthorityHashes?: { execution?: string | null; reviewed?: string | null };
+  /**
+   * e09 B3 (P11): the CURRENT verified Page identities of the active Page
+   * import, loaded by the caller. When provided, every accepted
+   * `category_page` proposal must resolve into this set — a missing,
+   * deleted, foreign-import, or name-only identity refuses the item
+   * fail-closed BEFORE any draft write. Absent = synthetic callers keep the
+   * prior behavior; legacy items (no run pointer) never reach this check.
+   */
+  verifiedPageIds?: ReadonlySet<string>;
 }
 
 /** A cohort parent is terminal (promotion-eligible) only in these states. */
@@ -383,5 +394,44 @@ export function validatePromotionGate(input: PromotionGateInput): PromotionGateR
     }
   }
 
+  // 5. e09 B3 (P11): Category Page currentness against the ACTIVE verified
+  //    import — the last fail-closed check before any draft write.
+  const pageCurrentness = assertPagesCurrentForImport(input);
+  if (pageCurrentness) return pageCurrentness;
+
   return { ok: true };
+}
+
+/**
+ * e09 B3 (P11): recompute Category Page assignment currentness against the
+ * ACTIVE verified import. An accepted `category_page` proposal whose stable
+ * identity is absent from `verifiedPageIds` (deleted page, foreign import,
+ * or a name-only proposal with no verifiable identity) refuses the item —
+ * defense-in-depth BEFORE any product draft / `product_pages` /
+ * `ProductOnPages` write. Never runs for legacy items (they returned ok at
+ * step 1) and never when the caller did not supply the verified set.
+ */
+function assertPagesCurrentForImport(input: PromotionGateInput): PromotionGateResult | null {
+  if (!input.verifiedPageIds) return null;
+  // P11 fail-closed by design: ANY accepted category_page proposal that does
+  // not resolve into the active verified import blocks promotion — including
+  // optional secondaries and a stale half of an evidenced dual-species
+  // co-primary pair. The draft serializer's visible non-blocking skip for
+  // unverified secondary pages applies only POST-gate; the gate itself never
+  // lets an item through with an unresolved accepted assignment.
+  for (const proposal of input.acceptedProposals) {
+    if (proposal.proposalType !== 'category_page') continue;
+    const identity = getPageIdentityId(proposal);
+    if (!identity || !input.verifiedPageIds.has(identity)) {
+      return {
+        ok: false,
+        code: 'stale_page_assignment',
+        reason:
+          `Accepted Category Page assignment for item ${input.itemId} (SKU ${input.productSku}) does not resolve ` +
+          `into the active verified Page import${identity ? ` (Page ${identity})` : ' (name-only, no verifiable identity)'}; ` +
+          'promotion blocked before any draft write (P11).',
+      };
+    }
+  }
+  return null;
 }

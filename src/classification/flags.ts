@@ -142,3 +142,80 @@ export function getCohortCurationFlags(): CohortCurationFlags {
   const base = loadCohortCurationFlags();
   return runtimeOverride ? { ...base, ...runtimeOverride } : base;
 }
+
+// ---------------------------------------------------------------------------
+// P3 value-production ladder flags (classification roadmap plan B.P3)
+// ---------------------------------------------------------------------------
+
+/**
+ * P3 runtime feature flags (plan B.P3.1/B.P3.3). Both default OFF so the
+ * legacy pipeline stays byte-identical until shadow validation completes
+ * (mirrors the P4 gate discipline). Flags re-read env on every load call and
+ * support an in-memory override for tests, exactly like the cohort flags
+ * above.
+ *
+ * - `universalTierWideningEnabled` (BAYSTATE_CMS_UNIVERSAL_TIER_WIDENING):
+ *   when ON, the widened universal tier (size/color/material/flavor) is
+ *   PROPOSABLE from deterministic evidence without an accepted Primary
+ *   Product Type. Profile enforcement is unchanged: once a type is accepted,
+ *   requiredness/cardinality/applicability still evaluate under the
+ *   effective type. Widened pre-type proposals carry NO product-type
+ *   dependency rows (PR9 DECISION-B invariant — they are produced while no
+ *   reviewed/execution type drives the member, so dependency stamping never
+ *   fires for them).
+ * - `valueGapLlmEnabled` (BAYSTATE_CMS_VALUE_GAP_LLM): when ON, the
+ *   flag-gated `value_gap_abstain` stage joins the curation pipeline and
+ *   resolves residual gap attributes with ONE id-constrained LLM call per
+ *   attribute (out-of-constraint output is a deterministic
+ *   `value_gap_abstained`, never invention).
+ */
+export interface UniversalTierFlags {
+  /** Widen the universally-proposable tier to size/color/material/flavor. */
+  universalTierWideningEnabled: boolean;
+  /** Compose the value_gap_abstain residual-gap resolution stage. */
+  valueGapLlmEnabled: boolean;
+}
+
+export const DEFAULT_UNIVERSAL_TIER_FLAGS: UniversalTierFlags = {
+  universalTierWideningEnabled: false,
+  valueGapLlmEnabled: false,
+};
+
+const UNIVERSAL_TIER_FLAG_ENV: Record<keyof UniversalTierFlags, string> = {
+  universalTierWideningEnabled: 'BAYSTATE_CMS_UNIVERSAL_TIER_WIDENING',
+  valueGapLlmEnabled: 'BAYSTATE_CMS_VALUE_GAP_LLM',
+};
+
+export function loadUniversalTierFlags(
+  env: Record<string, string | undefined> = process.env,
+): UniversalTierFlags {
+  return {
+    universalTierWideningEnabled: parseBooleanEnv(
+      env[UNIVERSAL_TIER_FLAG_ENV.universalTierWideningEnabled],
+      DEFAULT_UNIVERSAL_TIER_FLAGS.universalTierWideningEnabled,
+    ),
+    valueGapLlmEnabled: parseBooleanEnv(
+      env[UNIVERSAL_TIER_FLAG_ENV.valueGapLlmEnabled],
+      DEFAULT_UNIVERSAL_TIER_FLAGS.valueGapLlmEnabled,
+    ),
+  };
+}
+
+let universalTierRuntimeOverride: Partial<UniversalTierFlags> | null = null;
+
+/** Apply an in-memory override of the effective P3 flags. Returns the new flags. */
+export function overrideUniversalTierFlags(next: Partial<UniversalTierFlags>): UniversalTierFlags {
+  universalTierRuntimeOverride = { ...universalTierRuntimeOverride, ...next };
+  return getUniversalTierFlags();
+}
+
+/** Clear any P3 in-memory override. */
+export function resetUniversalTierFlagsOverride(): void {
+  universalTierRuntimeOverride = null;
+}
+
+/** Effective P3 flags: env-derived defaults merged with the in-memory override. */
+export function getUniversalTierFlags(): UniversalTierFlags {
+  const base = loadUniversalTierFlags();
+  return universalTierRuntimeOverride ? { ...base, ...universalTierRuntimeOverride } : base;
+}

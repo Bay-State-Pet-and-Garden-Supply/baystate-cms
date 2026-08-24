@@ -12,6 +12,7 @@ import {
   validatePageResponseEntries,
   type PageAssignmentResult,
 } from './page-assignment-llm';
+import { validateCategoryPageAssignment } from './category-page-correctness';
 
 export interface CohortPageOption {
   id: string;
@@ -91,6 +92,37 @@ function abstainAll(products: ProductLineItemSnapshot[], reason: string): Map<st
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractCleanJson(raw: string): string {
+  let cleaned = raw.trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*|```\s*$/gi, '').trim();
+  const jsonStart = cleaned.indexOf('{');
+  const jsonEnd = cleaned.lastIndexOf('}');
+  if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+    cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+  }
+  return cleaned;
+}
+
+function findMatchingKey(keys: string[], targetSku: string): string | null {
+  if (keys.includes(targetSku)) return targetSku;
+  const targetLower = targetSku.toLowerCase().trim();
+  for (const k of keys) {
+    if (k.toLowerCase().trim() === targetLower) return k;
+  }
+  for (const k of keys) {
+    const norm = k.replace(/^sku[\s_:-]*/i, '').toLowerCase().trim();
+    if (norm === targetLower) return k;
+  }
+  const targetDigits = targetSku.replace(/^0+/, '');
+  if (targetDigits.length > 0) {
+    for (const k of keys) {
+      const kDigits = k.replace(/^sku[\s_:-]*/i, '').trim().replace(/^0+/, '');
+      if (kDigits === targetDigits) return k;
+    }
+  }
+  return null;
 }
 
 function hasExactlyOneTopLevelKey(raw: string, sku: string): boolean {
@@ -328,13 +360,11 @@ export async function coordinateCohortPagesCore(
   opts?.afterCoordinatedCall?.();
   const raw = rawResult.content;
   const modelCallIds = [rawResult.callId];
-  if (params.products.some(product => !hasExactlyOneTopLevelKey(raw!, product.sku))) {
-    return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
-  }
+  const cleaned = extractCleanJson(raw ?? '');
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw.trim());
+    parsed = JSON.parse(cleaned);
   } catch {
     return abstainAll(params.products, 'Cohort page response was not valid JSON.');
   }
@@ -342,16 +372,35 @@ export async function coordinateCohortPagesCore(
     return abstainAll(params.products, 'Cohort page response must be a direct object keyed by SKU.');
   }
   const response = parsed as Record<string, unknown>;
-  const expectedSkus = new Set(params.products.map(product => product.sku));
-  const responseSkus = Object.keys(response);
-  if (responseSkus.length !== expectedSkus.size || responseSkus.some(sku => !expectedSkus.has(sku))) {
+  const responseKeys = Object.keys(response);
+
+  const skuToKeyMap = new Map<string, string>();
+  const usedKeys = new Set<string>();
+
+  for (const product of params.products) {
+    const matchedKey = findMatchingKey(responseKeys, product.sku);
+    if (!matchedKey) {
+      return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
+    }
+    if (usedKeys.has(matchedKey)) {
+      return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
+    }
+    if (!hasExactlyOneTopLevelKey(cleaned, matchedKey)) {
+      return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
+    }
+    skuToKeyMap.set(product.sku, matchedKey);
+    usedKeys.add(matchedKey);
+  }
+
+  if (responseKeys.length !== params.products.length || usedKeys.size !== responseKeys.length) {
     return abstainAll(params.products, 'Cohort page response contains missing or unknown SKUs.');
   }
 
   const { nameToPage, idToPage } = buildPageMaps(params.pages);
   const result = new Map<string, CohortPageMemberResult>();
   for (const product of params.products) {
-    const entries = response[product.sku];
+    const responseKey = skuToKeyMap.get(product.sku) ?? product.sku;
+    const entries = response[responseKey];
     if (!Array.isArray(entries) || entries.length === 0) {
       return abstainAll(params.products, `Cohort page response has no assignment for SKU ${product.sku}.`);
     }
@@ -376,6 +425,41 @@ export async function coordinateCohortPagesCore(
     );
     if (normalized.length === 0) {
       return abstainAll(params.products, `Cohort page response had no safe assignment for SKU ${product.sku}.`);
+    }
+    // e09 B2 (P1-P9): per-member Page correctness gate — no sibling copying.
+    // Builds a frozen-evidence view from the ProductLineItemSnapshot (member-owned only, P4)
+    // and validates against the frozen verified catalog (P1/P2). outcome != assigned → per-member abstained.
+    const verifiedCatalogForValidation = params.pages.map(p => ({
+      id: p.id,
+      name: p.name,
+      parentId: null as string | null,
+    }));
+    const correctnessInput = {
+      member: {
+        onboardingItemId: product.sku,
+        frozenEvidenceHash: `snapshot:${product.sku}`,
+        frozenEvidence: {
+          species: product.species,
+          form: product.productForm ?? null,
+          title: product.webTitle ?? product.name ?? null,
+          description: product.description ?? null,
+          productType: null,
+          brand: product.brand ?? null,
+          extraction: { title: product.webTitle ?? null, description: product.description ?? null, productForm: product.productForm ?? null },
+        },
+      },
+      candidate: {
+        primaryPageId: normalized[0]?.pageId ?? null,
+        secondaryPageIds: normalized.slice(1).map(p => p.pageId),
+        primaryPageName: normalized[0]?.pageName ?? null,
+      },
+      verifiedPageCatalog: verifiedCatalogForValidation,
+      activePageImportHash: params.snapshot?.pageImportHash ?? 'unknown',
+    };
+    const correctness = validateCategoryPageAssignment(correctnessInput);
+    if (!correctness.valid || correctness.outcome !== 'assigned') {
+      result.set(product.sku, { status: 'abstained', reason: correctness.reason ?? `Page correctness gate blocked assignment for SKU ${product.sku} (P5/P6/P7).` });
+      continue;
     }
     result.set(product.sku, { status: 'assigned', pages: normalized, modelCallIds });
   }

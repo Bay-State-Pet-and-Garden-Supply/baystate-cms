@@ -32,6 +32,10 @@ development_status:
   e08s01: done
   e08s02: done
   e08s03: done
+  e09: in_progress
+  e09s01: done
+  e09s02: done
+  e09s03: in_progress
 # story timestamps (build_epic survey-context writes started_at; release-branch writes completed_at)
 stories:
   e02s01:

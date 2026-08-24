@@ -9,6 +9,8 @@
  * active requests, and queries Ollama runtime status without app-level model cache management.
  */
 
+import { getCircuitBreakerStats, type CircuitBreakerRouteStats } from '../onboarding/vlm-circuit-breaker';
+
 let activeRequests = 0;
 const requestQueue: Array<() => void> = [];
 
@@ -61,6 +63,27 @@ export function getLocalConcurrencyStats() {
     maxConcurrency: getMaxLocalConcurrency(),
     activeRequests,
     queuedRequests: requestQueue.length,
+  };
+}
+
+export interface LocalRuntimeHealth {
+  concurrency: {
+    maxConcurrency: number;
+    activeRequests: number;
+    queuedRequests: number;
+  };
+  circuitBreakers: Record<string, CircuitBreakerRouteStats>;
+}
+
+/**
+ * Additive combined health view (P1-T2): local concurrency stats merged with
+ * the VLM circuit-breaker snapshot for observability. Read-only; additive
+ * only — existing exports and signatures are unchanged.
+ */
+export function getLocalRuntimeHealth(): LocalRuntimeHealth {
+  return {
+    concurrency: getLocalConcurrencyStats(),
+    circuitBreakers: getCircuitBreakerStats(),
   };
 }
 

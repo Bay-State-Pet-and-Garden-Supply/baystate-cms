@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS classification_runs (
 CREATE TABLE IF NOT EXISTS classification_stage_results (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
-  stage_name TEXT NOT NULL CHECK (stage_name IN ('evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
+  stage_name TEXT NOT NULL CHECK (stage_name IN ('packaging_ocr', 'evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
   output_json TEXT,
   error_message TEXT,

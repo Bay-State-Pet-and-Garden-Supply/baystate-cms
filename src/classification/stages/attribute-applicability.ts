@@ -38,6 +38,7 @@ import { getCachedAttributeProfiles } from '../../db/repositories/classification
 import { loadClassificationConfig } from '../config-loader';
 import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { getEffectiveCurationProductType, resolveEffectiveTypeProfile } from '../effective-curation-type';
+import { getUniversalTierFlags } from '../flags';
 import { evaluateAttributeApplicability, type ApplicabilityState, type ApplicabilityInput, type AttributeApplicability } from '../applicability-evaluator';
 
 export type { ApplicabilityState, AttributeApplicability };
@@ -56,6 +57,8 @@ function evaluateTargetApplicability(
     acceptedTypeId: string | null;
     profile: { attributes: Array<{ attributeId: string; applicabilityConditions?: unknown[] }> } | null;
     reviewedFacts: import('../reviewed-facts').ReviewedFact[];
+    /** P3 widened universal tier (plan B.P3.1) — flag OFF is byte-identical. */
+    widenedUniversal?: boolean;
   },
 ): AttributeApplicability[] {
   const profileAttributeIds = options.profile
@@ -76,6 +79,7 @@ function evaluateTargetApplicability(
         acceptedTypeId: options.acceptedTypeId,
         typeTargetEnabled: options.typeTargetEnabled,
         reviewedFacts: options.reviewedFacts,
+        widenedUniversal: options.widenedUniversal,
       });
     });
 }
@@ -138,6 +142,9 @@ export const attributeApplicabilityStage: StageDefinition = {
         acceptedTypeId: effectiveTypeId,
         profile: profile ?? null,
         reviewedFacts: context.snapshot?.reviewedFacts ?? [],
+        // P3 widened universal tier (plan B.P3.1): flag OFF (default) passes
+        // false — byte-identical legacy gating.
+        widenedUniversal: getUniversalTierFlags().universalTierWideningEnabled,
       },
     );
 

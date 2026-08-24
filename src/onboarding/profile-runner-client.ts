@@ -28,6 +28,9 @@ export interface ProfileRunnerOptions {
     name: string;
     brandHint?: string | null;
     price?: string | null;
+    /** UPC/GTIN when known — forwarded for ADR-0031 ladder identity
+     * classification on the worker side (ExtractRequest already accepts it). */
+    upc?: string | null;
   };
 }
 
@@ -73,6 +76,7 @@ export async function runProfileExtraction(
       brandHint: expected.brandHint ?? null,
       price: expected.price ?? null,
       spreadsheetHints: {},
+      upc: expected.upc || undefined,
     },
     profile: {
       runtime: profile.runtime ?? 'rendered',

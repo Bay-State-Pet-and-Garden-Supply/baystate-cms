@@ -280,6 +280,15 @@ export async function ensureCohortTitlesCoordinated(
   // DECISION-O: singletons are never coordinated and never get an output row.
   // Compute the exact multi-item-group member set with the SAME grouping the
   // coordinator uses (single source of truth).
+  //
+  // e09 T1 INVARIANT (round-3 FIX 3): production groups via
+  // groupByProductLine(frozenItems) → familyGroupingIdentityFor →
+  // extractNameStem, which is BYTE-EQUIVALENT to durable product-family-v1
+  // membership ONLY while GROUPING_VERSION and the frozen raw inputs are
+  // unchanged. The `authoritativeCohortId` seam in coordinateCohortItems
+  // exists for future direct-cohort callers; any divergence between re-derived
+  // stems and frozen cohort membership (e.g. manual membership corrections)
+  // MUST route through that seam instead of relying on this equivalence.
   const multiMemberSkus = new Set<string>();
   for (const groupItems of groupByProductLine(frozenItems).values()) {
     if (groupItems.length <= 1) continue;
