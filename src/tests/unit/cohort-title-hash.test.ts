@@ -480,8 +480,12 @@ describe('computeCohortTitleInputHash — model execution authority slice (PR6 C
     // e09 title-lint (T8): recomputed when `titleLintVersion` joined the
     // hashed composition next to it — lint-rule bumps now invalidate
     // committed sets.
-    expect(hash(makeParams())).toBe('18c15514b3e421a28e52b5c03eb52cafa6898837ed7d09bb48a52de7659bf02c');
-    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('c434812b6e643a3ce52adffe25010f7a3f769eea0d1c14f98d7c5a347aacd832');
+    const baseBaseline = '18c15514b3e421a28e52b5c03eb52cafa6898837ed7d09bb48a52de7659bf02c';
+    expect(hash(makeParams())).toBe(baseBaseline);
+    // PR6 exclusion doctrine: the BROAD model policy digest is dropped by
+    // resolveParams (only the title-plan entry's narrow execution authority
+    // participates), so overriding it must leave the frozen baseline unchanged.
+    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe(baseBaseline);
   });
 
   it('the plan entry provider/model/promptTemplateVersion/ruleVersion each participate', () => {
