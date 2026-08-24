@@ -8,7 +8,7 @@
  */
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import type { ItemDetailResponse } from '../../../onboarding-api';
-import { isReviewed, itemDisplayName, sourceTypeLabel } from './review-logic';
+import { distributorApprovedImages, groupQueueItems, isReviewed, itemDisplayName, sourceTypeLabel } from './review-logic';
 
 export interface ReviewQueueProps {
   items: OnboardingWorkState[];
@@ -22,6 +22,8 @@ export interface ReviewQueueProps {
   /** Bulk-review selection (epic #46 follow-up, phase 4). */
   selectedIds?: Set<string>;
   onToggleSelected?: (itemId: string) => void;
+  /** Toggle every visible member of a family group (family header checkbox). */
+  onToggleFamilySelected?: (itemIds: string[]) => void;
   emptyMessage: string;
   onSelect: (itemId: string) => void;
 }
@@ -34,6 +36,7 @@ export function ReviewQueue({
   editedIds,
   selectedIds = new Set(),
   onToggleSelected,
+  onToggleFamilySelected,
   emptyMessage,
   onSelect,
 }: ReviewQueueProps) {
@@ -41,22 +44,78 @@ export function ReviewQueue({
     return <div className="rv-state-note">{emptyMessage}</div>;
   }
 
+  const groups = groupQueueItems(items);
+
   return (
-    <ul className="rv-queue-list" role="listbox" aria-label="Review queue" aria-activedescendant={currentItemId ?? undefined}>
-      {items.map(item => (
-        <ReviewQueueRow
-          key={item.itemId}
-          item={item}
-          active={item.itemId === currentItemId}
-          detail={details.get(item.itemId) ?? null}
-          warned={warnedIds.has(item.itemId)}
-          edited={editedIds.has(item.itemId)}
-          selected={onToggleSelected ? selectedIds.has(item.itemId) : false}
-          onSelect={onSelect}
-          onToggleSelected={onToggleSelected}
-        />
+    <div className="rv-queue-container">
+      {groups.map(group => (
+        <div key={group.key} className="rv-family-group">
+          {group.title && (
+            <div className={`rv-family-group-header${group.type === 'individual' ? ' rv-family-group-header--individual' : ''}`}>
+              {group.type === 'family' && onToggleFamilySelected && (() => {
+                const itemIds = group.items.map(i => i.itemId);
+                const selectedCount = itemIds.filter(id => selectedIds.has(id)).length;
+                const allSelected = selectedCount === itemIds.length;
+                return (
+                  <span className="rv-family-group-checkbox" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select all shown products in ${group.title ?? 'this family'} for bulk review`}
+                      checked={allSelected}
+                      ref={el => {
+                        if (el) el.indeterminate = !allSelected && selectedCount > 0;
+                      }}
+                      onChange={() => onToggleFamilySelected(itemIds)}
+                    />
+                  </span>
+                );
+              })()}
+              <span className="rv-family-group-title">
+                {group.type === 'family' ? '👪' : '📦'} {group.title}
+              </span>
+              {group.family ? (
+                <span className="rv-family-group-count">
+                  {group.family.readyCount}/{group.family.memberCount} ready
+                </span>
+              ) : (
+                <span className="rv-family-group-count">
+                  {group.items.length} {group.items.length === 1 ? 'item' : 'items'}
+                </span>
+              )}
+            </div>
+          )}
+          {/* Each group's list is its own listbox so the family header
+              (with a focusable checkbox) never sits inside one — ARIA's
+              listbox content model only allows option/group children.
+              activedescendant is scoped to the listbox that owns the
+              current row. */}
+          <ul
+            className="rv-queue-list"
+            role="listbox"
+            aria-label={group.title ?? 'Review queue'}
+            aria-activedescendant={
+              currentItemId && group.items.some(i => i.itemId === currentItemId)
+                ? currentItemId
+                : undefined
+            }
+          >
+            {group.items.map(item => (
+              <ReviewQueueRow
+                key={item.itemId}
+                item={item}
+                active={item.itemId === currentItemId}
+                detail={details.get(item.itemId) ?? null}
+                warned={warnedIds.has(item.itemId)}
+                edited={editedIds.has(item.itemId)}
+                selected={onToggleSelected ? selectedIds.has(item.itemId) : false}
+                onSelect={onSelect}
+                onToggleSelected={onToggleSelected}
+              />
+            ))}
+          </ul>
+        </div>
       ))}
-    </ul>
+    </div>
   );
 }
 
@@ -80,8 +139,14 @@ function ReviewQueueRow({
   onToggleSelected?: (itemId: string) => void;
 }) {
   const ext = detail?.extraction ?? detail?.item.extractionData ?? null;
-  const image = ext?.primaryImage ?? null;
-  const curatedTitle = detail?.item.curationData?.curatedTitle ?? null;
+  const approved = distributorApprovedImages(ext);
+  const image =
+    ext?.primaryImage ??
+    approved?.primary ??
+    (ext as any)?.distributorImageCandidates?.[0]?.url ??
+    item.imageUrl ??
+    null;
+  const curatedTitle = detail?.item.curationData?.curatedTitle ?? item.curatedTitle ?? null;
   const title = itemDisplayName(item, curatedTitle);
   const brand = item.brand ?? detail?.item.brandHint ?? null;
   const reviewed = isReviewed(item);

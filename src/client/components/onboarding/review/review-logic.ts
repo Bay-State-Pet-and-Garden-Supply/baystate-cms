@@ -8,6 +8,9 @@
  */
 import type { OnboardingWorkState, ReviewState } from '../../../../shared/schemas/onboarding-work-state';
 import type { SourceType } from '../../../../shared/schemas/onboarding';
+import type { ItemDetailResponse } from '../../../onboarding-api';
+import { deriveReadiness } from './review-readiness';
+import type { ReviewDraft } from './review-types';
 
 // ─── Review header progress ────────────────────────────────────────────────────
 
@@ -58,7 +61,7 @@ export function sortForReview(items: OnboardingWorkState[]): OnboardingWorkState
     const da = REVIEW_STATE_ORDER[ra] ?? 3;
     const db = REVIEW_STATE_ORDER[rb] ?? 3;
     if (da !== db) return da - db;
-    return a.name.localeCompare(b.name);
+    return itemDisplayName(a).localeCompare(itemDisplayName(b));
   });
 }
 
@@ -268,7 +271,7 @@ export function itemDisplayName(
   workState: OnboardingWorkState,
   curatedTitle?: string | null,
 ): string {
-  const title = curatedTitle?.trim();
+  const title = curatedTitle?.trim() || workState.curatedTitle?.trim();
   return title ? title : workState.name;
 }
 
@@ -288,6 +291,23 @@ export function toggleQueueSelection(selectedIds: string[], itemId: string): str
 /** Select every visible (filtered) item. */
 export function selectAllVisible(visibleIds: string[]): string[] {
   return Array.from(new Set(visibleIds));
+}
+
+/**
+ * Toggle a whole group (e.g. one product family's visible members) in the
+ * bulk-review selection: if EVERY group id is already selected, remove them
+ * all; otherwise add the missing ids. Order-stable and deduped.
+ */
+export function toggleGroupSelection(selectedIds: string[], groupItemIds: string[]): string[] {
+  if (groupItemIds.length === 0) return selectedIds;
+  const group = [...new Set(groupItemIds)];
+  const allSelected = group.every(id => selectedIds.includes(id));
+  if (allSelected) {
+    const groupSet = new Set(group);
+    return selectedIds.filter(id => !groupSet.has(id));
+  }
+  const existing = new Set(selectedIds);
+  return [...selectedIds, ...group.filter(id => !existing.has(id))];
 }
 
 /** Drop ids that are no longer in the queue (prune after reload). */
@@ -347,4 +367,111 @@ export function distributorApprovedImages(
   )];
   if (urls.length === 0) return null;
   return { primary: urls[0], additional: urls.slice(1) };
+}
+
+// ─── Queue grouping by family (epic #46 follow-up) ────────────────────────────
+
+export interface QueueGroup {
+  key: string;
+  type: 'family' | 'individual';
+  title: string | null;
+  family: OnboardingWorkState['family'];
+  items: OnboardingWorkState[];
+}
+
+export function groupQueueItems(items: OnboardingWorkState[]): QueueGroup[] {
+  const groups: QueueGroup[] = [];
+  const familyMap = new Map<string, QueueGroup>();
+  const individualGroup: QueueGroup = {
+    key: 'individual',
+    type: 'individual',
+    title: 'Individual Products',
+    family: null,
+    items: [],
+  };
+
+  const hasAnyFamily = items.some(i => Boolean(i.family));
+
+  for (const item of items) {
+    if (item.family) {
+      const cohortId = item.family.cohortId;
+      let group = familyMap.get(cohortId);
+      if (!group) {
+        group = {
+          key: `family:${cohortId}`,
+          type: 'family',
+          title: item.family.label || 'Product Family',
+          family: item.family,
+          items: [],
+        };
+        familyMap.set(cohortId, group);
+        groups.push(group);
+      }
+      group.items.push(item);
+    } else {
+      individualGroup.items.push(item);
+    }
+  }
+
+  if (individualGroup.items.length > 0) {
+    if (!hasAnyFamily) {
+      individualGroup.title = null;
+    }
+    groups.push(individualGroup);
+  }
+
+  return groups;
+}
+
+// ─── Bulk-review gate counting (e10s03) ──────────────────────────────────────
+
+/**
+ * How many of the selected items are blocked by the completeness gate or a
+ * blocking warning. Pure so the "cannot approve through any UI path"
+ * acceptance criterion is unit-testable without rendering the workspace;
+ * the server review-complete gate stays the final authority.
+ */
+export function countGateBlockedItems(
+  ids: string[],
+  getView: (
+    id: string,
+  ) => { detail: ItemDetailResponse | null; workState: OnboardingWorkState | null } | null | undefined,
+): number {
+  let count = 0;
+  for (const id of ids) {
+    const view = getView(id);
+    if (!view) continue;
+    if (deriveReadiness(view.detail, view.workState).blockers.length > 0) count++;
+    else if (warningInfoFromDetail(view.detail ?? ({} as ItemDetailResponse)).blocked) count++;
+  }
+  return count;
+}
+
+// ─── Flag-off save payload (blind review F3) ──────────────────────────────────
+
+/**
+ * The flag-off (V1) listing save payload: the pre-epic legacy shape PLUS
+ * `curatedWeight` write-back, because the V1 panel renders a Weight editor
+ * whose value must persist. Documented deviation from byte-equivalence —
+ * benign for instant rollback (`convertToLbs` is idempotent; the same
+ * consequential-invalidation path fires server-side).
+ */
+export function buildLegacyListingUpdatePayload(draft: ReviewDraft): {
+  curation_data: {
+    curatedTitle: string | null;
+    curatedWeight: string | null;
+    curatedDescription: string | null;
+    searchKeywords: string | null;
+  };
+  brandHint: string | null;
+} {
+  return {
+    curation_data: {
+      curatedTitle: draft.curatedTitle.trim() || null,
+      curatedWeight: draft.curatedWeight.trim() || null,
+      curatedDescription: draft.curatedDescription.trim() || null,
+      searchKeywords: draft.searchKeywords.trim() || null,
+    },
+    brandHint: draft.brandHint.trim() || null,
+  };
 }

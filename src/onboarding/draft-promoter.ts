@@ -660,14 +660,56 @@ export async function promoteItems(
           .filter((u): u is string => typeof u === 'string' && u.length > 0)
       : [];
 
+    // e10s04: the reviewer's persisted media selection (curation_data.
+    // reviewedMedia, written only by PUT /items/:id/media after candidate-set
+    // validation) wins FIRST; the chain below is byte-identical to the
+    // pre-e10s04 behavior when no selection exists. Suppressed URLs are
+    // removed from consideration (OVERWRITE semantics); a distributor primary
+    // designation is honored only while it remains an approved URL.
+    const reviewedMedia = (item.curationData as { reviewedMedia?: { primaryImage?: string | null; orderedAdditional?: string[]; suppressed?: string[] } | null } | null | undefined)?.reviewedMedia ?? null;
+    const suppressedUrls = new Set(reviewedMedia?.suppressed ?? []);
+    let downloaderPrimary: string | null;
+    let downloaderAdditional: string[];
+    if (isDistributorSource) {
+      const approvedUnsuppressed = distributorApprovedImages.filter((u) => !suppressedUrls.has(u));
+      const designated = reviewedMedia?.primaryImage ?? null;
+      downloaderPrimary = designated && approvedUnsuppressed.includes(designated)
+        ? designated
+        : (approvedUnsuppressed[0] ?? null);
+      downloaderAdditional = approvedUnsuppressed.filter((u) => u !== downloaderPrimary);
+    } else {
+      const orderedSelection = (reviewedMedia?.orderedAdditional ?? []).filter(
+        (u) => typeof u === 'string' && u.length > 0 && !suppressedUrls.has(u),
+      );
+      const fallbackAdditional = (extractionData.additionalImages || []).filter(
+        (u): u is string => !suppressedUrls.has(u),
+      );
+      // Suppression removes a URL from consideration ENTIRELY (OVERWRITE
+      // semantics): neither the designated primary nor the extraction
+      // fallback may resolve to a suppressed URL, or hiding the current
+      // primary would still ship it as the commerce image.
+      const designated = reviewedMedia?.primaryImage ?? null;
+      const designatedPrimary =
+        designated && !suppressedUrls.has(designated) ? designated : null;
+      const extractionPrimary =
+        typeof extractionData.primaryImage === 'string' && extractionData.primaryImage.length > 0
+          ? extractionData.primaryImage
+          : null;
+      const fallbackPrimary =
+        extractionPrimary && !suppressedUrls.has(extractionPrimary) ? extractionPrimary : null;
+      downloaderPrimary = designatedPrimary || fallbackPrimary;
+      downloaderAdditional =
+        orderedSelection.length > 0 ? orderedSelection : fallbackAdditional;
+    }
+
     try {
       const processed = await downloadAndProcessImages(
         workspacePath,
         item.upc,
         brandFolder,
         imageStem,
-        isDistributorSource ? (distributorApprovedImages[0] ?? null) : extractionData.primaryImage ?? null,
-        isDistributorSource ? distributorApprovedImages.slice(1) : [...(extractionData.additionalImages || [])],
+        downloaderPrimary,
+        downloaderAdditional.filter((u) => u !== downloaderPrimary),
       );
       processedImagesMap.set(item.id, processed);
     } catch (err) {

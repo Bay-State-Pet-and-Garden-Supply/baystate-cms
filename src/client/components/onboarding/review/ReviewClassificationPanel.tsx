@@ -15,16 +15,25 @@
  *   free-text targets producing the same text) collapse into one row.
  * - Confidence renders as a qualitative chip + percent.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import type { ClassificationProposal } from '../../../../shared/schemas/classification';
 import type { CurationData } from '../../../../shared/schemas/onboarding';
+import { listPages, listVerifiedPageOptionSummaries } from '../../../api';
+
+/** e09 round-3 FIX 1 (adjudication #10): correction payload written alongside
+ *  suggestedPages when the added page resolves to a VERIFIED Page ID. */
+export interface CategoryPageCorrection {
+  pageId: string;
+  activePageImportHash: string;
+}
 
 export interface ReviewClassificationPanelProps {
   detail: ItemDetailResponse | null;
   onDecision: (proposal: ClassificationProposal, decision: 'accepted' | 'rejected') => Promise<void>;
   /** Item id currently performing a decision write (disables row buttons). */
   busyDecisionId: string | null;
+  onUpdatePages?: (suggestedPages: string[], correction?: CategoryPageCorrection) => Promise<void>;
 }
 
 export const PROPOSAL_TYPE_LABELS: Record<string, string> = {
@@ -135,8 +144,39 @@ export function ReviewClassificationPanel({
   detail,
   onDecision,
   busyDecisionId,
+  onUpdatePages,
 }: ReviewClassificationPanelProps) {
   const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [availablePages, setAvailablePages] = useState<string[]>([]);
+  // e09 round-3 FIX 1: verified options + active import hash for corrections.
+  const [verifiedPages, setVerifiedPages] = useState<Array<{ id: string; name: string }>>([]);
+  const [activeImportHash, setActiveImportHash] = useState<string | null>(null);
+  const [isAddingPage, setIsAddingPage] = useState(false);
+  const [pageSearch, setPageSearch] = useState('');
+  const [savingPages, setSavingPages] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    listPages()
+      .then(res => {
+        if (mounted && res?.pages) {
+          const names = [...new Set(res.pages.map(p => p.name).filter(Boolean))].sort();
+          setAvailablePages(names);
+        }
+      })
+      .catch(() => {});
+    listVerifiedPageOptionSummaries()
+      .then(res => {
+        if (!mounted) return;
+        setVerifiedPages((res?.pages ?? []).map(p => ({ id: p.id, name: p.name })));
+        setActiveImportHash(res?.activeImportHash ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const curation = detail?.item.curationData as CurationData | null;
   const proposals = curation?.classificationProposals ?? [];
   const suggestedPages = curation?.suggestedPages ?? [];
@@ -157,10 +197,43 @@ export function ReviewClassificationPanel({
     }
   };
 
+  const handleRemovePage = async (pageToRemove: string) => {
+    if (!onUpdatePages || savingPages) return;
+    setSavingPages(true);
+    try {
+      const next = suggestedPages.filter(p => p !== pageToRemove);
+      await onUpdatePages(next);
+    } finally {
+      setSavingPages(false);
+    }
+  };
+
+  const handleAddPage = async (pageToAdd: string) => {
+    if (!onUpdatePages || savingPages || suggestedPages.includes(pageToAdd)) return;
+    setSavingPages(true);
+    try {
+      const next = [...suggestedPages, pageToAdd];
+      // e09 round-3 FIX 1: when the added page resolves to a verified identity,
+      // stamp the correction record so an abstained durable decision can be
+      // resolved by this manual selection (adjudication #10). Non-verified
+      // additions keep today's name-only behavior (never acceptance authority).
+      const verified = verifiedPages.find(p => p.name === pageToAdd);
+      const correction: CategoryPageCorrection | undefined =
+        verified && activeImportHash
+          ? { pageId: verified.id, activePageImportHash: activeImportHash }
+          : undefined;
+      await onUpdatePages(next, correction);
+      setIsAddingPage(false);
+      setPageSearch('');
+    } finally {
+      setSavingPages(false);
+    }
+  };
+
   const primary = proposals.find(p => p.proposalType === 'primary_product_type');
   const abstentions = proposals.filter(p => p.proposalType === 'reviewable_abstention');
-  // Attributes/category pages only — the primary type lives in its own
-  // headline row above, never duplicated here.
+  // Attributes/category pages/brand field assignments — the primary type lives
+  // in its own headline row above, never duplicated here.
   const reviewable = proposals.filter(
     p =>
       p.proposalType !== 'reviewable_abstention' &&
@@ -186,8 +259,17 @@ export function ReviewClassificationPanel({
   }, []);
   const dedupeCount = reviewable.length - dedupedReviewable.length;
 
+  const filteredPageOptions = availablePages.filter(
+    p => !suggestedPages.includes(p) && p.toLowerCase().includes(pageSearch.toLowerCase().trim()),
+  );
+
   return (
-    <section className="rv-panel" aria-label="Classification">
+    <section
+      className="rv-panel"
+      aria-label="Classification"
+      id="rv-classification-panel"
+      tabIndex={-1}
+    >
       <header className="rv-panel-head">Classification</header>
       <div className="rv-panel-body">
         {withoutResults && (
@@ -207,6 +289,110 @@ export function ReviewClassificationPanel({
             <ReviewProposalRow proposal={primary} onDecision={handleDecision} busy={busyDecisionId} />
           </div>
         )}
+
+        {/* Assigned or Suggested Category Pages with Interactive Editing */}
+        <div className="rv-field" style={{ marginTop: '0.875rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div className="rv-field-label">Category Pages</div>
+            {onUpdatePages && (
+              <button
+                type="button"
+                className="rv-btn rv-btn-secondary"
+                style={{ fontSize: '0.75rem', padding: '0.125rem 0.5rem', height: 'auto' }}
+                onClick={() => setIsAddingPage(prev => !prev)}
+                disabled={savingPages}
+              >
+                {isAddingPage ? 'Done' : '+ Add Page'}
+              </button>
+            )}
+          </div>
+          {suggestedPages.length > 0 ? (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.375rem', marginTop: '0.25rem' }}>
+              {suggestedPages.map(page => (
+                <span
+                  key={page}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '0.25rem 0.625rem',
+                    borderRadius: '9999px',
+                    fontSize: '0.8125rem',
+                    fontWeight: 500,
+                    background: '#eff6ff',
+                    color: '#1d4ed8',
+                    border: '1px solid #bfdbfe',
+                  }}
+                >
+                  📁 {page}
+                  {onUpdatePages && (
+                    <button
+                      type="button"
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#1d4ed8',
+                        cursor: 'pointer',
+                        fontWeight: 'bold',
+                        marginLeft: '0.375rem',
+                        padding: 0,
+                        fontSize: '0.875rem',
+                        lineHeight: 1,
+                      }}
+                      title={`Remove ${page}`}
+                      disabled={savingPages}
+                      onClick={() => void handleRemovePage(page)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="rv-field-value" style={{ color: 'var(--text-muted, #64748b)', fontStyle: 'italic' }}>
+              No category pages assigned yet.
+            </div>
+          )}
+
+          {isAddingPage && (
+            <div style={{ marginTop: '0.5rem', background: '#f8fafc', padding: '0.5rem', borderRadius: '4px', border: '1px solid #e2e8f0' }}>
+              <input
+                type="text"
+                className="rv-input"
+                style={{ fontSize: '0.8125rem', width: '100%', marginBottom: '0.375rem' }}
+                placeholder="Search category pages to add..."
+                value={pageSearch}
+                onChange={e => setPageSearch(e.target.value)}
+                autoFocus
+              />
+              <div style={{ maxHeight: '140px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                {filteredPageOptions.slice(0, 20).map(page => (
+                  <button
+                    key={page}
+                    type="button"
+                    style={{
+                      textAlign: 'left',
+                      padding: '0.25rem 0.5rem',
+                      background: '#fff',
+                      border: '1px solid #cbd5e1',
+                      borderRadius: '3px',
+                      cursor: 'pointer',
+                      fontSize: '0.8125rem',
+                    }}
+                    onClick={() => void handleAddPage(page)}
+                  >
+                    + {page}
+                  </button>
+                ))}
+                {filteredPageOptions.length === 0 && (
+                  <div style={{ fontSize: '0.75rem', color: '#64748b', padding: '0.25rem' }}>
+                    {pageSearch ? 'No matching pages found.' : 'All store pages already added.'}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
 
         {dedupedReviewable.length > 0 && (
           <div className="rv-field">
@@ -240,7 +426,6 @@ export function ReviewClassificationPanel({
                 <span className="rv-abstention-reason">{abstentionReason(proposal) ?? 'No evidence available.'}</span>
               </div>
             ))}
-            {/* e05s01: when category_page_proposals abstained, replace generic note with gating provenance */}
             {gating && (gating.needsReviewedType || gating.needsVerifiedPages) && abstentions.some(a => String(a.targetId) === 'category_page_proposals') ? (
               <p className="rv-meta-note">
                 {gating.needsReviewedType
@@ -253,84 +438,6 @@ export function ReviewClassificationPanel({
                 review. You never need to accept or reject an abstention.
               </p>
             )}
-          </div>
-        )}
-
-        {/* e05s01: attribute applicability — replaces silent 'succeeded empty' */}
-        {applicability.length > 0 && (
-          <div className="rv-field" aria-label="Attribute applicability">
-            <div className="rv-field-label">Attribute applicability ({applicability.length})</div>
-            {applicability.map(entry => (
-              <div key={entry.attributeId} className="rv-abstention">
-                <span className="rv-abstention-target">{humanizeId(entry.attributeId)}</span>
-                <span className={`rv-applicability-state rv-applicability-${entry.state}`}>{entry.state}</span>
-                <span className="rv-abstention-reason">
-                  {entry.state === 'unknown'
-                    ? entry.reason ?? 'type not reviewed'
-                    : entry.state === 'not_applicable'
-                      ? entry.reason ?? 'not in profile'
-                      : entry.reason ?? 'applicable'}
-                </span>
-              </div>
-            ))}
-            <p className="rv-meta-note">
-              Unknown means the attribute is type-gated and no reviewed Product Type exists yet; not_applicable means the attribute is not in the accepted type&apos;s profile.
-            </p>
-          </div>
-        )}
-
-        {/* e05s02: taxonomy provenance — bundle/snapshot/verified identity, no invented IDs */}
-        {provenance && (
-          <div className="rv-field" aria-label="Taxonomy provenance">
-            <div className="rv-field-label">Taxonomy provenance</div>
-            <div className="rv-abstention">
-              <span className="rv-abstention-target">Bundle</span>
-              <span className="rv-abstention-reason" title={provenance.bundleHash ?? ''}>
-                {provenance.bundleVersion ? `${provenance.bundleVersion} · ${String(provenance.bundleHash).slice(0, 12)}` : provenance.bundleHash ?? '—'}
-              </span>
-            </div>
-            <div className="rv-abstention">
-              <span className="rv-abstention-target">Snapshot</span>
-              <span className="rv-abstention-reason" title={provenance.snapshotHash ?? ''}>
-                {provenance.snapshotHash ? `${String(provenance.snapshotHash).slice(0, 8)} · ${String(provenance.snapshotHash).slice(0, 12)}` : '—'}
-              </span>
-            </div>
-            <div className="rv-abstention">
-              <span className="rv-abstention-target">Verified pages</span>
-              <span className="rv-abstention-reason">
-                {(provenance.verifiedPageCount ?? 0).toString()} verified — IDs: {(provenance.verifiedPageIdSet ?? []).slice(0, 5).join(', ') || '—'}
-                {(provenance.verifiedPageIdSet ?? []).length > 5 ? ` +${(provenance.verifiedPageIdSet?.length ?? 0) - 5} more` : ''}
-              </span>
-            </div>
-            {provenance.attributeProfileId ? (
-              <div className="rv-abstention">
-                <span className="rv-abstention-target">Attribute profile</span>
-                <span className="rv-abstention-reason">{provenance.attributeProfileId}</span>
-              </div>
-            ) : null}
-            {provenance.classificationRunId ? (
-              <div className="rv-abstention">
-                <span className="rv-abstention-target">Run</span>
-                <span className="rv-abstention-reason">{String(provenance.classificationRunId).slice(0, 8)}</span>
-              </div>
-            ) : null}
-            <p className="rv-meta-note">SoT: store/classification/*.json → RuntimeClassificationSnapshot (snapshotHash) → verified Pages/Fields catalog → promotion. Non-technical UI is deferred; safe path is JSON-file edit + bundle release via config-store. No invented IDs (ADR 0012).</p>
-          </div>
-        )}
-
-        {/* e05s01: species-guard dropped pages — hard guard unchanged, only provenance surfaced */}
-        {dropped.length > 0 && (
-          <div className="rv-field" aria-label="Filtered by species guard">
-            <div className="rv-field-label">Filtered by species guard ({dropped.length})</div>
-            {dropped.map(item => (
-              <div key={item.pageName} className="rv-abstention">
-                <span className="rv-abstention-target">{item.pageName}</span>
-                <span className="rv-abstention-reason">
-                  species_incompatible — species &quot;{item.species}&quot; vs term &quot;{item.matchedTerm ?? ''}&quot;
-                </span>
-              </div>
-            ))}
-            <p className="rv-meta-note">Safety net — cross-species pages are dropped by curation. This list is provenance only.</p>
           </div>
         )}
 
@@ -348,11 +455,101 @@ export function ReviewClassificationPanel({
           </div>
         )}
 
-        {suggestions && (
-          <div className="rv-field" style={{ marginTop: '0.875rem' }}>
-            <div className="rv-field-label">Suggested Category Pages</div>
-            <div className="rv-field-value">{suggestedPages.join(', ') || '—'}</div>
-          </div>
+        {/* Collapsible Technical Provenance & Gating Details */}
+        {(provenance || applicability.length > 0 || dropped.length > 0) && (
+          <details
+            className="rv-advanced-details"
+            style={{
+              marginTop: '1.25rem',
+              padding: '0.625rem 0.875rem',
+              background: 'var(--surface-muted, #f8fafc)',
+              border: '1px solid var(--border-subtle, #e2e8f0)',
+              borderRadius: '6px',
+            }}
+          >
+            <summary style={{ cursor: 'pointer', fontSize: '0.8125rem', fontWeight: 500, color: 'var(--text-muted, #64748b)' }}>
+              Technical Provenance & Gating Details
+            </summary>
+            <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {/* e05s01: attribute applicability */}
+              {applicability.length > 0 && (
+                <div className="rv-field" aria-label="Attribute applicability" style={{ marginBottom: 0 }}>
+                  <div className="rv-field-label">Attribute applicability ({applicability.length})</div>
+                  {applicability.map(entry => (
+                    <div key={entry.attributeId} className="rv-abstention">
+                      <span className="rv-abstention-target">{humanizeId(entry.attributeId)}</span>
+                      <span className={`rv-applicability-state rv-applicability-${entry.state}`}>{entry.state}</span>
+                      <span className="rv-abstention-reason">
+                        {entry.state === 'unknown'
+                          ? entry.reason ?? 'type not reviewed'
+                          : entry.state === 'not_applicable'
+                            ? entry.reason ?? 'not in profile'
+                            : entry.reason ?? 'applicable'}
+                      </span>
+                    </div>
+                  ))}
+                  <p className="rv-meta-note">
+                    Unknown means the attribute is type-gated and no reviewed Product Type exists yet; not_applicable means the attribute is not in the accepted type&apos;s profile.
+                  </p>
+                </div>
+              )}
+
+              {/* e05s02: taxonomy provenance — bundle/snapshot/verified identity, no invented IDs */}
+              {provenance && (
+                <div className="rv-field" aria-label="Taxonomy provenance" style={{ marginBottom: 0 }}>
+                  <div className="rv-field-label">Taxonomy provenance</div>
+                  <div className="rv-abstention">
+                    <span className="rv-abstention-target">Bundle</span>
+                    <span className="rv-abstention-reason" title={provenance.bundleHash ?? ''}>
+                      {provenance.bundleVersion ? `${provenance.bundleVersion} · ${String(provenance.bundleHash).slice(0, 12)}` : provenance.bundleHash ?? '—'}
+                    </span>
+                  </div>
+                  <div className="rv-abstention">
+                    <span className="rv-abstention-target">Snapshot</span>
+                    <span className="rv-abstention-reason" title={provenance.snapshotHash ?? ''}>
+                      {provenance.snapshotHash ? `${String(provenance.snapshotHash).slice(0, 8)} · ${String(provenance.snapshotHash).slice(0, 12)}` : '—'}
+                    </span>
+                  </div>
+                  <div className="rv-abstention">
+                    <span className="rv-abstention-target">Verified pages</span>
+                    <span className="rv-abstention-reason">
+                      {(provenance.verifiedPageCount ?? 0).toString()} verified — IDs: {(provenance.verifiedPageIdSet ?? []).slice(0, 5).join(', ') || '—'}
+                      {(provenance.verifiedPageIdSet ?? []).length > 5 ? ` +${(provenance.verifiedPageIdSet?.length ?? 0) - 5} more` : ''}
+                    </span>
+                  </div>
+                  {provenance.attributeProfileId ? (
+                    <div className="rv-abstention">
+                      <span className="rv-abstention-target">Attribute profile</span>
+                      <span className="rv-abstention-reason">{provenance.attributeProfileId}</span>
+                    </div>
+                  ) : null}
+                  {provenance.classificationRunId ? (
+                    <div className="rv-abstention">
+                      <span className="rv-abstention-target">Run</span>
+                      <span className="rv-abstention-reason">{String(provenance.classificationRunId).slice(0, 8)}</span>
+                    </div>
+                  ) : null}
+                  <p className="rv-meta-note">SoT: store/classification/*.json → RuntimeClassificationSnapshot (snapshotHash) → verified Pages/Fields catalog → promotion. Non-technical UI is deferred; safe path is JSON-file edit + bundle release via config-store. No invented IDs (ADR 0012).</p>
+                </div>
+              )}
+
+              {/* e05s01: species-guard dropped pages */}
+              {dropped.length > 0 && (
+                <div className="rv-field" aria-label="Filtered by species guard" style={{ marginBottom: 0 }}>
+                  <div className="rv-field-label">Filtered by species guard ({dropped.length})</div>
+                  {dropped.map(item => (
+                    <div key={item.pageName} className="rv-abstention">
+                      <span className="rv-abstention-target">{item.pageName}</span>
+                      <span className="rv-abstention-reason">
+                        species_incompatible — species &quot;{item.species}&quot; vs term &quot;{item.matchedTerm ?? ''}&quot;
+                      </span>
+                    </div>
+                  ))}
+                  <p className="rv-meta-note">Safety net — cross-species pages are dropped by curation. This list is provenance only.</p>
+                </div>
+              )}
+            </div>
+          </details>
         )}
 
         {decisionError && <div className="rv-error-banner" style={{ marginTop: '0.625rem' }}>{decisionError}</div>}
