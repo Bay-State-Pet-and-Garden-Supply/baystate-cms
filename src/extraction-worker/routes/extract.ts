@@ -33,7 +33,7 @@ import { ExtractionDataSchema } from '../../shared/schemas/onboarding';
 import type { ExtractionData } from '../../shared/schemas/onboarding';
 import { sha256Hex } from '../../shared/stable-id';
 import { lookup } from 'node:dns/promises';
-import { classifyIp } from '../../product-intelligence/policy/policy-gateway';
+import { classifyIp } from '../../shared/ssrf';
 import { extractDomainFromUrl, generateJobId, resolveArtifactDir, writeArtifact } from '../artifacts';
 
 // ─── HTTP constants (sourced from page-extractor.ts) ──────────────────────────
@@ -109,12 +109,17 @@ function collectImageSourcesFromElement(
     const $t = $(t);
 
   const directAttrs = [
-    'src',
-    'data-src',
-    'data-lazy-src',
+    'data-zoom-src',
     'data-original',
+    'data-src',
+    'src',
+    'data-lazy-src',
     'data-image',
     'data-zoom-image',
+    'data-full-image',
+    'data-master',
+    'data-photoswipe-src',
+    'data-highres',
   ];
   for (const attr of directAttrs) {
     const value = $t.attr(attr);
@@ -129,6 +134,74 @@ function collectImageSourcesFromElement(
   });
 
   return sources;
+}
+
+/**
+ * Clean, upgrade Shopify CDN URLs to width=1200, and deduplicate image URLs.
+ */
+function cleanAndDeduplicateImages(
+  urls: string[],
+  baseUrl?: string,
+): string[] {
+  const seenCanonical = new Set<string>();
+  const bestUrls: string[] = [];
+
+  for (const urlStr of urls) {
+    if (!urlStr || typeof urlStr !== 'string') continue;
+    let canonical = urlStr.trim();
+    if (!canonical || canonical.toLowerCase().startsWith('data:')) continue;
+
+    if (canonical.startsWith('//')) {
+      canonical = 'https:' + canonical;
+    }
+
+    try {
+      const parsedUrl = baseUrl
+        ? new URL(canonical, baseUrl)
+        : new URL(canonical);
+      parsedUrl.search = '';
+      let pathname = parsedUrl.pathname;
+      pathname = pathname.replace(
+        /_(?:[0-9]+x[0-9]*|[0-9]*x[0-9]+|small|thumb|medium|large|icon|grande|compact)(?:_crop_[a-z_]+)?(?=\.[a-z0-9]+$)/i,
+        '',
+      );
+
+      const canonicalKey = parsedUrl.host + pathname;
+      if (!seenCanonical.has(canonicalKey)) {
+        seenCanonical.add(canonicalKey);
+
+        let targetUrl = urlStr.trim();
+        if (targetUrl.startsWith('//')) {
+          targetUrl = 'https:' + targetUrl;
+        }
+
+        const originalUrlObj = baseUrl
+          ? new URL(targetUrl, baseUrl)
+          : new URL(targetUrl);
+        targetUrl = originalUrlObj.href;
+        const isShopify =
+          originalUrlObj.hostname.includes('shopify.com') ||
+          originalUrlObj.pathname.includes('/cdn/shop/');
+        if (isShopify) {
+          const vParam = originalUrlObj.searchParams.get('v');
+          originalUrlObj.search = '';
+          if (vParam) {
+            originalUrlObj.searchParams.set('v', vParam);
+          }
+          originalUrlObj.searchParams.set('width', '1200');
+          targetUrl = originalUrlObj.href;
+        }
+
+        bestUrls.push(targetUrl);
+      }
+    } catch {
+      if (urlStr.trim().startsWith('http')) {
+        bestUrls.push(urlStr.trim());
+      }
+    }
+  }
+
+  return bestUrls;
 }
 
 /**
@@ -251,6 +324,120 @@ function collectImagesFromSelector(
   // Cap at 30 images to prevent gallery explosions
   if (images.length > 30) images.length = 30;
   return images;
+}
+
+/**
+ * Evaluate any profile selector (CSS selector, jsonld:*, or meta[...]) against Cheerio DOM.
+ */
+function evaluateSelectorCheerio(
+  $: cheerio.CheerioAPI,
+  selector: string | null | undefined,
+  jsonLd: Record<string, unknown> | null,
+  metaTags: Record<string, string>,
+): string | null {
+  if (!selector || !selector.trim()) return null;
+  const trimmed = selector.trim();
+
+  // 1) JSON-LD property
+  if (trimmed.startsWith('jsonld:')) {
+    const prop = trimmed.slice('jsonld:'.length);
+    if (!jsonLd) return null;
+    if (prop === 'Product.name' || prop === 'name') return (jsonLd.name as string)?.trim() || null;
+    if (prop === 'Product.description' || prop === 'description') return (jsonLd.description as string)?.trim() || null;
+    if (prop === 'Product.offers.price' || prop === 'offers.price' || prop === 'price') {
+      const offers = jsonLd.offers as any;
+      const price = offers?.price ?? (Array.isArray(offers) ? offers[0]?.price : null) ?? jsonLd.price;
+      return price != null ? String(price).trim() : null;
+    }
+    if (prop === 'Product.brand' || prop === 'brand') {
+      const b = jsonLd.brand as any;
+      const name = typeof b === 'string' ? b : b?.name;
+      return name ? String(name).trim() : null;
+    }
+    return null;
+  }
+
+  // 2) Meta tags
+  if (trimmed.startsWith('meta[')) {
+    const propMatch = trimmed.match(/property=["']([^"']+)["']/i) || trimmed.match(/name=["']([^"']+)["']/i);
+    if (propMatch && metaTags[propMatch[1]]) {
+      return metaTags[propMatch[1]].trim();
+    }
+    try {
+      const content = $(trimmed).first().attr('content');
+      if (content) return content.trim();
+    } catch {}
+  }
+
+  // 3) Standard CSS selector
+  try {
+    const el = $(trimmed).first();
+    if (el.length > 0) {
+      return el.text().trim() || null;
+    }
+  } catch {}
+
+  return null;
+}
+
+/**
+ * Collect images from any selector (CSS selector, jsonld:*, or meta[...]) against Cheerio DOM.
+ */
+function collectImagesCheerio(
+  $: cheerio.CheerioAPI,
+  imagesSelector: string | null | undefined,
+  jsonLd: Record<string, unknown> | null,
+  metaTags: Record<string, string>,
+  baseUrl: string,
+): string[] {
+  if (!imagesSelector || !imagesSelector.trim()) return [];
+  const trimmed = imagesSelector.trim();
+
+  // 1) JSON-LD images
+  if (trimmed.startsWith('jsonld:')) {
+    if (!jsonLd) return [];
+    const raw = jsonLd.image ?? (jsonLd as any).images;
+    const list: string[] = [];
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        const u = typeof item === 'object' ? item?.url ?? item?.contentUrl : item;
+        if (u && typeof u === 'string') {
+          const res = resolveUrl(u, baseUrl);
+          if (res) list.push(res);
+        }
+      }
+    } else if (typeof raw === 'object' && (raw as any)?.url) {
+      const res = resolveUrl((raw as any).url, baseUrl);
+      if (res) list.push(res);
+    } else if (typeof raw === 'string') {
+      const res = resolveUrl(raw, baseUrl);
+      if (res) list.push(res);
+    }
+    return list;
+  }
+
+  // 2) Meta tag image
+  if (trimmed.startsWith('meta[')) {
+    const propMatch = trimmed.match(/property=["']([^"']+)["']/i) || trimmed.match(/name=["']([^"']+)["']/i);
+    if (propMatch && metaTags[propMatch[1]]) {
+      const res = resolveUrl(metaTags[propMatch[1]], baseUrl);
+      if (res) return [res];
+    }
+    try {
+      const content = $(trimmed).first().attr('content');
+      if (content) {
+        const res = resolveUrl(content, baseUrl);
+        if (res) return [res];
+      }
+    } catch {}
+  }
+
+  // 3) Standard CSS selector
+  try {
+    return collectImagesFromSelector($, trimmed, baseUrl);
+  } catch {
+    return [];
+  }
 }
 
 // ─── Helper: evaluate a text selector in Playwright ──────────────────────────
@@ -529,27 +716,25 @@ export async function doStaticExtract(
   let titleProvenance = '';
   let titleOrigin: string | null = null;
   if (titleSelector) {
-    title = $(titleSelector).first().text().trim() || null;
+    title = evaluateSelectorCheerio($, titleSelector, jsonLd, metaTags);
     if (title) {
-      titleProvenance = 'profile-selector';
+      titleProvenance = titleSelector.startsWith('jsonld:') ? 'json-ld' : titleSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
       titleOrigin = titleSelector;
       // Concatenate optional title selectors (e.g. subheadings, taglines)
       const toSel = request.profile.titleOptionalSelectors;
       if (toSel && toSel.length > 0) {
         const extras = toSel
-          .map(sel => $(sel).first().text().trim())
+          .map(sel => evaluateSelectorCheerio($, sel, jsonLd, metaTags))
           .filter(Boolean)
           .join(' — ');
         if (extras) {
           title += ' — ' + extras;
         }
       }
-    } else {
-      warnings.push(`titleSelector "${titleSelector}" returned empty — failing extraction`);
-      return buildFailedResult(request, warnings);
     }
-  } else {
-    // No selector configured — try JSON-LD / meta
+  }
+  if (!title) {
+    // Try JSON-LD / meta
     title =
       (jsonLd?.name as string) ||
       metaTags['og:title'] ||
@@ -574,9 +759,9 @@ export async function doStaticExtract(
   let brandProvenance = '';
   let brandOrigin: string | null = null;
   if (brandSelector) {
-    brand = $(brandSelector).first().text().trim() || null;
+    brand = evaluateSelectorCheerio($, brandSelector, jsonLd, metaTags);
     if (brand) {
-      brandProvenance = 'profile-selector';
+      brandProvenance = brandSelector.startsWith('jsonld:') ? 'json-ld' : brandSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
       brandOrigin = brandSelector;
     }
   }
@@ -607,15 +792,13 @@ export async function doStaticExtract(
   let descriptionProvenance = '';
   let descriptionOrigin: string | null = null;
   if (descriptionSelector) {
-    description = $(descriptionSelector).first().text().trim() || null;
+    description = evaluateSelectorCheerio($, descriptionSelector, jsonLd, metaTags);
     if (description) {
-      descriptionProvenance = 'profile-selector';
+      descriptionProvenance = descriptionSelector.startsWith('jsonld:') ? 'json-ld' : descriptionSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
       descriptionOrigin = descriptionSelector;
-    } else {
-      warnings.push(`descriptionSelector "${descriptionSelector}" returned empty — failing extraction`);
-      return buildFailedResult(request, warnings);
     }
-  } else {
+  }
+  if (!description) {
     description =
       (jsonLd?.description as string) ||
       metaTags['og:description'] ||
@@ -638,20 +821,18 @@ export async function doStaticExtract(
     priceProvenance = 'spreadsheet-import';
     priceOrigin = 'expected:price';
   } else if (priceSelector) {
-    price = $(priceSelector).first().text().trim() || null;
+    price = evaluateSelectorCheerio($, priceSelector, jsonLd, metaTags);
     if (price) {
-      priceProvenance = 'profile-selector';
+      priceProvenance = priceSelector.startsWith('jsonld:') ? 'json-ld' : priceSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
       priceOrigin = priceSelector;
       // Clean to numeric representation
       const match = price.match(/\$?(\d+\.?\d*)/);
       if (match) {
         price = match[0];
       }
-    } else {
-      warnings.push(`priceSelector "${priceSelector}" returned empty — failing extraction`);
-      return buildFailedResult(request, warnings);
     }
-  } else {
+  }
+  if (!price) {
     const jsonLdOffers = jsonLd?.offers as Record<string, unknown> | undefined;
     const priceFromJsonLd =
       jsonLdOffers?.price as string | undefined;
@@ -669,17 +850,16 @@ export async function doStaticExtract(
   let imageOrigin: string | null = null;
 
   if (imagesSelector) {
-    const rawImages = collectImagesFromSelector($, imagesSelector, finalUrl);
-    if (rawImages.length > 0) {
-      primaryImage = rawImages[0];
-      additionalImages.push(...rawImages.slice(1));
-      imageProvenance = 'profile-selector';
+    const rawImages = collectImagesCheerio($, imagesSelector, jsonLd, metaTags, finalUrl);
+    const cleanImgs = cleanAndDeduplicateImages(rawImages, finalUrl);
+    if (cleanImgs.length > 0) {
+      primaryImage = cleanImgs[0];
+      additionalImages.push(...cleanImgs.slice(1).slice(0, 29));
+      imageProvenance = imagesSelector.startsWith('jsonld:') ? 'json-ld' : imagesSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
       imageOrigin = imagesSelector;
-    } else {
-      warnings.push(`imagesSelector "${imagesSelector}" returned empty — failing extraction`);
-      return buildFailedResult(request, warnings);
     }
-  } else {
+  }
+  if (!primaryImage) {
     // If no images from selector, try JSON-LD
     if (!primaryImage && jsonLd?.image) {
       const jsonLdImage = jsonLd.image as string | string[];
@@ -949,9 +1129,46 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       const priceSelector = selectors['priceSelector'] || selectors['price'] || null;
       const imagesSelector = selectors['imagesSelector'] || selectors['images'] || selectors['imageSelector'] || selectors['image'] || null;
 
-      const evalText = async (sel: string): Promise<string> => {
+      const evalText = async (sel: string | null | undefined): Promise<string> => {
+        if (!sel || !sel.trim()) return '';
+        const trimmed = sel.trim();
+
+        // 1) JSON-LD
+        if (trimmed.startsWith('jsonld:')) {
+          const prop = trimmed.slice('jsonld:'.length);
+          if (!jsonLd) return '';
+          if (prop === 'Product.name' || prop === 'name') return (jsonLd.name as string)?.trim() || '';
+          if (prop === 'Product.description' || prop === 'description') return (jsonLd.description as string)?.trim() || '';
+          if (prop === 'Product.offers.price' || prop === 'offers.price' || prop === 'price') {
+            const offers = jsonLd.offers as any;
+            const price = offers?.price ?? (Array.isArray(offers) ? offers[0]?.price : null) ?? jsonLd.price;
+            return price != null ? String(price).trim() : '';
+          }
+          if (prop === 'Product.brand' || prop === 'brand') {
+            const b = jsonLd.brand as any;
+            const name = typeof b === 'string' ? b : b?.name;
+            return name ? String(name).trim() : '';
+          }
+          return '';
+        }
+
+        // 2) Meta tags
+        if (trimmed.startsWith('meta[')) {
+          const propMatch = trimmed.match(/property=["']([^"']+)["']/i) || trimmed.match(/name=["']([^"']+)["']/i);
+          if (propMatch && metaTags[propMatch[1]]) {
+            return metaTags[propMatch[1]].trim();
+          }
+          try {
+            const rawVal = await page.evaluate(`document.querySelector(${JSON.stringify(trimmed)})?.getAttribute('content') || ''`);
+            return String(rawVal ?? '').trim();
+          } catch {
+            return '';
+          }
+        }
+
+        // 3) Standard DOM selector
         try {
-          return await page.evaluate(makeTextSelectorEvaluator(sel));
+          return await page.evaluate(makeTextSelectorEvaluator(trimmed));
         } catch {
           return '';
         }
@@ -963,9 +1180,9 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       let titleOrigin: string | null = null;
 
       if (titleSelector) {
-        title = await evalText(titleSelector);
+        title = (await evalText(titleSelector)) || null;
         if (title) {
-          titleProvenance.push('profile-selector');
+          titleProvenance.push(titleSelector.startsWith('jsonld:') ? 'json-ld' : titleSelector.startsWith('meta[') ? 'meta' : 'profile-selector');
           titleOrigin = titleSelector;
           // Concatenate optional title selectors (e.g. subheadings, taglines)
           const toSel = request.profile.titleOptionalSelectors;
@@ -977,11 +1194,9 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
               }
             }
           }
-        } else {
-          warnings.push(`titleSelector "${titleSelector}" returned empty — failing extraction`);
-          return buildFailedResult(request, warnings);
         }
-      } else {
+      }
+      if (!title) {
         title =
           (jsonLd?.name as string) ||
           metaTags['og:title'] ||
@@ -996,13 +1211,22 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         }
       }
 
+      // If no title at all, this is a hard failure
+      if (!title) {
+        warnings.push('Title could not be extracted — returning ok: false');
+        return buildFailedResult(request, warnings);
+      }
+
       // ── Brand ─────────────────────────────────────────────────────────
       let brand: string | null = null;
       let brandProvenance = '';
       let brandOrigin: string | null = null;
       if (brandSelector) {
-        brand = await evalText(brandSelector);
-        if (brand) { brandProvenance = 'profile-selector'; brandOrigin = brandSelector; }
+        brand = (await evalText(brandSelector)) || null;
+        if (brand) {
+          brandProvenance = brandSelector.startsWith('jsonld:') ? 'json-ld' : brandSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
+          brandOrigin = brandSelector;
+        }
       }
       if (!brand) {
         const jb = jsonLd?.brand as Record<string, unknown> | string | undefined;
@@ -1015,15 +1239,13 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       let descriptionProvenance = '';
       let descriptionOrigin: string | null = null;
       if (descriptionSelector) {
-        description = await evalText(descriptionSelector);
+        description = (await evalText(descriptionSelector)) || null;
         if (description) {
-          descriptionProvenance = 'profile-selector';
+          descriptionProvenance = descriptionSelector.startsWith('jsonld:') ? 'json-ld' : descriptionSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
           descriptionOrigin = descriptionSelector;
-        } else {
-          warnings.push(`descriptionSelector "${descriptionSelector}" returned empty — failing extraction`);
-          return buildFailedResult(request, warnings);
         }
-      } else {
+      }
+      if (!description) {
         description =
           (jsonLd?.description as string) ||
           metaTags['og:description'] ||
@@ -1046,17 +1268,15 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         priceProvenance = 'spreadsheet-import';
         priceOrigin = 'expected:price';
       } else if (priceSelector) {
-        price = await evalText(priceSelector);
+        price = (await evalText(priceSelector)) || null;
         if (price) {
-          priceProvenance = 'profile-selector';
+          priceProvenance = priceSelector.startsWith('jsonld:') ? 'json-ld' : priceSelector.startsWith('meta[') ? 'meta' : 'profile-selector';
           priceOrigin = priceSelector;
           const m = price.match(/\$?(\d+\.?\d*)/);
           if (m) price = m[0];
-        } else {
-          warnings.push(`priceSelector "${priceSelector}" returned empty — failing extraction`);
-          return buildFailedResult(request, warnings);
         }
-      } else {
+      }
+      if (!price) {
         const offers = jsonLd?.offers as Record<string, unknown> | undefined;
         price = (offers?.price as string) || metaTags['product:price:amount'] || null;
         if (price) {
@@ -1072,72 +1292,96 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       let imageOrigin: string | null = null;
 
       if (imagesSelector) {
-        try {
-          const rawImages: string[] = await page.evaluate(
-            `((sel, baseUrl) => {
-              const seen = new Set();
-              const images = [];
-              const els = document.querySelectorAll(sel);
-              for (const el of els) {
-                const targets = el.tagName === 'IMG' || el.tagName === 'SOURCE'
-                  ? [el]
-                  : Array.from(el.querySelectorAll('img,source'));
-                for (const target of targets) {
-                  const tryAdd = (src) => {
-                    if (!src) return;
-                    const t = src.trim();
-                    if (!t) return;
-                    const l = t.toLowerCase();
-                    if (l.startsWith('data:')) return;
-                    if (l.startsWith('blob:')) return;
-                    const p = l.split(/[?#]/)[0];
-                    if (p.endsWith('.svg')) return;
-                    if (seen.has(p)) return;
-                    seen.add(p);
-                    images.push(t);
-                  };
-                  if (target.tagName === 'IMG') tryAdd(target.currentSrc);
-                  for (const attr of ['src','data-src','data-lazy-src','data-original','data-image','data-zoom-image']) {
-                    tryAdd(target.getAttribute(attr));
-                  }
-                  for (const attr of ['srcset','data-srcset']) {
-                    const srcset = target.getAttribute(attr);
-                    if (srcset) {
-                      for (const part of srcset.split(',')) {
-                        const url = part.trim().split(' ')[0];
-                        if (url && !url.startsWith('data:')) {
-                          const lUrl = url.toLowerCase();
-                          const p = lUrl.split(/[?#]/)[0];
-                          if (!seen.has(p)) {
-                            seen.add(p);
-                            images.push(url);
+        const trimmed = imagesSelector.trim();
+        const rawUrls: string[] = [];
+
+        if (trimmed.startsWith('jsonld:')) {
+          if (jsonLd?.image) {
+            const raw = jsonLd.image as any;
+            if (Array.isArray(raw)) {
+              for (const item of raw) {
+                const u = typeof item === 'object' ? item?.url ?? item?.contentUrl : item;
+                if (u && typeof u === 'string') {
+                  const res = resolveUrl(u, finalUrl);
+                  if (res) rawUrls.push(res);
+                }
+              }
+            } else if (typeof raw === 'object' && raw?.url) {
+              const res = resolveUrl(raw.url, finalUrl);
+              if (res) rawUrls.push(res);
+            } else if (typeof raw === 'string') {
+              const res = resolveUrl(raw, finalUrl);
+              if (res) rawUrls.push(res);
+            }
+          }
+        } else if (trimmed.startsWith('meta[')) {
+          let content = metaTags['og:image'] || '';
+          if (!content) {
+            try {
+              const rawVal = await page.evaluate(`document.querySelector(${JSON.stringify(trimmed)})?.getAttribute('content') || ''`);
+              content = String(rawVal ?? '').trim();
+            } catch {}
+          }
+          if (content) {
+            const resolved = resolveUrl(content.trim(), finalUrl);
+            if (resolved) rawUrls.push(resolved);
+          }
+        } else {
+          // 1) Extract from rendered page content via Cheerio (captures all static and dynamically loaded images across markup, hidden carousel slides, and thumbnails)
+          try {
+            const pageHtml = await page.content();
+            const $page = cheerio.load(pageHtml);
+            const cheerioImgs = collectImagesCheerio($page, trimmed, jsonLd, metaTags, finalUrl);
+            rawUrls.push(...cheerioImgs);
+          } catch {}
+
+          // 2) Also extract from live Playwright DOM elements
+          try {
+            const domImgs: string[] = await page.evaluate(
+              `((sel, baseUrl) => {
+                const results = [];
+                try {
+                  const els = document.querySelectorAll(sel);
+                  for (const el of els) {
+                    const targets = el.tagName === 'IMG' || el.tagName === 'SOURCE'
+                      ? [el]
+                      : Array.from(el.querySelectorAll('img,source'));
+                    for (const target of targets) {
+                      const add = (val) => {
+                        if (val && typeof val === 'string' && val.trim()) results.push(val.trim());
+                      };
+                      if (target.tagName === 'IMG') add(target.currentSrc);
+                      for (const attr of ['data-zoom-src','data-original','data-src','src','data-lazy-src','data-image','data-zoom-image','data-full-image','data-master','data-photoswipe-src','data-highres']) {
+                        add(target.getAttribute(attr));
+                      }
+                      for (const attr of ['srcset','data-srcset']) {
+                        const s = target.getAttribute(attr);
+                        if (s) {
+                          for (const part of s.split(',')) {
+                            const u = part.trim().split(' ')[0];
+                            if (u) add(u);
                           }
                         }
                       }
                     }
                   }
-                }
-              }
-              return images.map(s => {
-                try { return new URL(s, baseUrl).href; }
-                catch { return s; }
-              }).filter(s => s.startsWith('http'));
-            })(${JSON.stringify(imagesSelector)}, ${JSON.stringify(finalUrl)})`
-          );
-          if (rawImages.length > 0) {
-            primaryImage = rawImages[0];
-            additionalImages.push(...rawImages.slice(1).slice(0, 29));
-            imageProvenance = 'profile-selector';
-            imageOrigin = imagesSelector;
-          } else {
-            warnings.push(`imagesSelector "${imagesSelector}" returned empty — failing extraction`);
-            return buildFailedResult(request, warnings);
-          }
-        } catch (err: any) {
-          warnings.push(`imagesSelector "${imagesSelector}" evaluation failed: ${err.message} — failing extraction`);
-          return buildFailedResult(request, warnings);
+                } catch {}
+                return results;
+              })(${JSON.stringify(trimmed)}, ${JSON.stringify(finalUrl)})`
+            );
+            rawUrls.push(...domImgs);
+          } catch {}
         }
-      } else {
+
+        const cleanImgs = cleanAndDeduplicateImages(rawUrls, finalUrl);
+        if (cleanImgs.length > 0) {
+          primaryImage = cleanImgs[0];
+          additionalImages.push(...cleanImgs.slice(1).slice(0, 29));
+          imageProvenance = trimmed.startsWith('jsonld:') ? 'json-ld' : trimmed.startsWith('meta[') ? 'meta' : 'profile-selector';
+          imageOrigin = imagesSelector;
+        }
+      }
+      if (!primaryImage) {
         // Fallback images from JSON-LD / meta
         if (!primaryImage && jsonLd?.image) {
           const img = jsonLd.image as string | string[];
