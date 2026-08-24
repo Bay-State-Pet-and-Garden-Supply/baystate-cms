@@ -323,6 +323,24 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(computeExtractionHash(items[2])).toBeNull();
   });
 
+  it('excludes the packagingOcrStageRunId drift-guard marker from the extraction hash', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    makeItemExtractionReady(items[0].id, makeExtractionData());
+    makeItemExtractionReady(items[1].id, makeExtractionData());
+    const loadedA = listItemsByBatch(batchId).find(i => i.id === items[0].id)!;
+    const loadedB = listItemsByBatch(batchId).find(i => i.id === items[1].id)!;
+
+    // Same evidence but DIFFERENT authoring-run markers → identical hash
+    // (the marker is bookkeeping, never evidence identity).
+    updateItemExtractionData(items[1].id, JSON.stringify({
+      ...makeExtractionData(),
+      packagingOcrStageRunId: 'run-entirely-different-author',
+    }));
+    const loadedB2 = listItemsByBatch(batchId).find(i => i.id === items[1].id)!;
+    expect(computeExtractionHash(loadedB2)).toBe(computeExtractionHash(loadedA));
+  });
+
   it('safely computes extraction hash when sourcingDecision has undefined properties', () => {
     const item = {
       id: randomUUID(),

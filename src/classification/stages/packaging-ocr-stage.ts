@@ -375,9 +375,14 @@ export const packagingOcrStage: StageDefinition = {
       });
       // P2 stale-shadow hygiene: a distributor transition must not leave a
       // stale shadow observation presenting itself as current. Shadow mode
-      // clears its namespaced key before this early return.
+      // clears its namespaced key before this early return — ownership-
+      // asserted and CAS-guarded against the value observed at stage start,
+      // so a concurrent writer is never erased by a stale owner.
       if (flags.packagingOcrStageShadowOnly) {
-        persistItemShadowPackagingOcrResult(item.id, null);
+        context.assertHeld?.();
+        persistItemShadowPackagingOcrResult(item.id, null, {
+          expectedPrevious: (item.extractionData as Record<string, unknown> | null | undefined)?.shadowPackagingOcrData ?? null,
+        });
       }
       return succeededEmpty({ ocrOutcome, skipped: 'distributor_record', shadowOnly: flags.packagingOcrStageShadowOnly });
     }
@@ -427,8 +432,12 @@ export const packagingOcrStage: StageDefinition = {
         });
       } else {
         // P2 stale-shadow hygiene: shadow runs own ONLY the namespaced key;
-        // a no-image run must still clear any prior observation.
-        persistItemShadowPackagingOcrResult(item.id, null);
+        // a no-image run must still clear any prior observation — ownership-
+        // asserted and CAS-guarded like the distributor branch above.
+        context.assertHeld?.();
+        persistItemShadowPackagingOcrResult(item.id, null, {
+          expectedPrevious: (item.extractionData as Record<string, unknown> | null | undefined)?.shadowPackagingOcrData ?? null,
+        });
       }
       return succeededEmpty({ ocrOutcome, shadowOnly: flags.packagingOcrStageShadowOnly });
     }

@@ -1,5 +1,6 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
+import { hashCanonicalJson } from '../../shared/stable-id';
 import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus, SourcingDecision, SourcingDecisionV2 } from '../../shared/schemas/onboarding';
 import { getAcceptedAttemptIdsForItem, isAcceptanceMigrationCompleted } from './onboarding-acceptance-repo';
 import { supersedeCurrentSourcingGeneration, getCurrentSourcingGeneration, getEvidenceAttemptsByItemAndGeneration } from './onboarding-evidence-repo';
@@ -1167,15 +1168,29 @@ export function persistItemPackagingOcrResult(input: PersistItemPackagingOcrInpu
  * `ocrExecutionDigest`) are NEVER touched, so a shadow run can never become a
  * reusable execution authority.
  */
-export function persistItemShadowPackagingOcrResult(itemId: string, shadowPackagingOcrData: Record<string, unknown> | null): void {
+export function persistItemShadowPackagingOcrResult(
+  itemId: string,
+  shadowPackagingOcrData: Record<string, unknown> | null,
+  /** P2 race guard: when provided, the write proceeds ONLY if the CURRENTLY
+   *  stored shadow key canonically equals this observed value. A concurrent
+   *  writer that changed the key since the caller read it is never erased
+   *  (stale-owner CAS). Returns false when skipped. */
+  options?: { expectedPrevious?: unknown },
+): boolean {
   const row = findExtractionDataJsonRowById(itemId);
-  if (!row) return;
+  if (!row) return false;
   let ext: Record<string, unknown> = {};
   if (row.extraction_data_json) {
     try { ext = JSON.parse(String(row.extraction_data_json)) as Record<string, unknown>; } catch { ext = {}; }
   }
+  if (options && 'expectedPrevious' in options) {
+    const current = ext.shadowPackagingOcrData ?? null;
+    const expected = options.expectedPrevious ?? null;
+    if (hashCanonicalJson(current) !== hashCanonicalJson(expected)) return false;
+  }
   const updatedExt = { ...ext, shadowPackagingOcrData };
   updateItemExtractionData(itemId, JSON.stringify(updatedExt));
+  return true;
 }
 
 /** Write the item's curation_data_json (used by the legacy worker and by the

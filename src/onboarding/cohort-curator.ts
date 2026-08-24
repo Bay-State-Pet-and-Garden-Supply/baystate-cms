@@ -661,7 +661,13 @@ export async function runFrozenOcrPullForward(params: {
    * keeper's `assertHeld`; legacy/absent → the transport is unchanged.
    */
   assertHeld?: () => void;
-}): Promise<{ packagingOcrData: PackagingOcrData | null; ocrOutcome: OcrAttemptOutcome }> {
+}): Promise<{ packagingOcrData: PackagingOcrData | null; ocrOutcome: OcrAttemptOutcome;
+  /** P2 drift-guard: WHO authored the persisted live keys — 'stage' means the
+   *  delegated stage wrote them (marker packagingOcrStageRunId must be set to
+   *  childRunId by the caller's write-back); 'legacy' means this body did
+   *  (the write-back must CLEAR any stale marker so dual-run comparisons
+   *  never mistake legacy output for stage output). */
+  authoredBy: 'stage' | 'legacy'; }> {
   // P2-T6 (packaging-OCR overhaul, ordered consumer migration — producer
   // FIRST): when the packaging_ocr stage master flag is ON **and shadow-only
   // mode is OFF**, the freeze DELEGATES its OCR moment to the stage
@@ -685,7 +691,8 @@ export async function runFrozenOcrPullForward(params: {
     && params.item.id
     && findItemById(params.item.id)
   ) {
-    return runPackagingOcrStageForFreeze(params);
+    const staged = await runPackagingOcrStageForFreeze(params);
+    return { ...staged, authoredBy: 'stage' as const };
   }
   const { snapshot, childRunId, item, workspacePath } = params;
   const sku = item.upc;
@@ -836,7 +843,7 @@ export async function runFrozenOcrPullForward(params: {
     ...(localFailureReason ? { localFailureReason } : {}),
     ...(localAttempts > 0 ? { attempts: localAttempts } : {}),
   };
-  return { packagingOcrData: packagingOcrData ?? null, ocrOutcome };
+  return { packagingOcrData: packagingOcrData ?? null, ocrOutcome, authoredBy: 'legacy' as const };
 }
 
 // ─── Two-phase freeze service (contract D) ────────────────────────────────────
@@ -1246,6 +1253,14 @@ export async function freezeCohortForExecution(
           ...(ocr.ocrOutcome ? { ocrOutcome: ocr.ocrOutcome } : {}),
           ocrInputHash: currentOcrInputHash,
           ocrExecutionDigest: currentOcrExecutionDigest,
+          // P2 drift-guard marker lifecycle: the write-back rebuilds from the
+          // PRE-call extraction snapshot, so without this the marker written
+          // by delegated-stage persistence would be dropped (or a stale one
+          // restored). Stage-authored ⇒ bind to THIS member run; legacy-
+          // authored ⇒ clear (JSON.stringify drops undefined keys).
+          ...(ocr.authoredBy === 'stage'
+            ? { packagingOcrStageRunId: memberRun.id }
+            : { packagingOcrStageRunId: undefined }),
         };
         updateItemExtractionData(item.id, JSON.stringify(updatedExt));
         frozenItem = { ...item, extractionData: updatedExt as OnboardingItem['extractionData'] };

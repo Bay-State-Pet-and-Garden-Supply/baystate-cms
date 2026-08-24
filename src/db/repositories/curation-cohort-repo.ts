@@ -127,8 +127,12 @@ export function mapCohortMemberRow(row: Record<string, any>): CurationCohortMemb
 export function computeExtractionHash(item: OnboardingItem): string | null {
   let extractionData = item.extractionData;
   if (!extractionData) return null;
-  if ('shadowPackagingOcrData' in extractionData) {
-    const { shadowPackagingOcrData: _shadow, ...rest } = extractionData as Record<string, unknown>;
+  // Both OCR bookkeeping keys are EXCLUDED from evidence identity: the shadow
+  // observation payload (established precedent below) and the P2 drift-guard
+  // marker (packagingOcrStageRunId varies per authoring run and must never
+  // make two otherwise-identical extractions hash differently).
+  if ('shadowPackagingOcrData' in extractionData || 'packagingOcrStageRunId' in extractionData) {
+    const { shadowPackagingOcrData: _shadow, packagingOcrStageRunId: _stageMarker, ...rest } = extractionData as Record<string, unknown>;
     extractionData = rest as typeof extractionData;
   }
   const piResultHashes = ((extractionData as any).productIntelligenceEvidence ?? [])
