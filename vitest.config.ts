@@ -184,6 +184,7 @@ export default defineConfig({
       'src/tests/unit/store-manager-scheduler.test.ts',
       'src/tests/unit/store-manager-scope.test.ts',
       'src/tests/unit/store-manager-trigger-repo.test.ts',
+      'src/tests/unit/cancel-overdue-benchmark.test.ts',
       'src/tests/unit/sourcing-default-on-e2e.test.ts',
       'src/tests/unit/sourcing-observe-mode.test.ts',
       'src/tests/unit/distributor-record-materializer.test.ts',
