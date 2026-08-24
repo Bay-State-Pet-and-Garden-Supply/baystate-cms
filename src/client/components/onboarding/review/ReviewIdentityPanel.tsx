@@ -6,7 +6,7 @@
  */
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import type { ItemDetailResponse } from '../../../onboarding-api';
-import { itemDisplayName, sourceTypeLabel } from './review-logic';
+import { sourceTypeLabel } from './review-logic';
 
 export interface ReviewIdentityPanelProps {
   workState: OnboardingWorkState;
@@ -19,73 +19,39 @@ function extraction(detail: ItemDetailResponse | null) {
 
 export function ReviewIdentityPanel({ workState, detail }: ReviewIdentityPanelProps) {
   const ext = extraction(detail);
-  const curatedTitle = detail?.item.curationData?.curatedTitle ?? null;
-  const brand = workState.brand ?? detail?.item.brandHint ?? ext?.brand ?? null;
-  const variant =
-    detail?.item.curationData?.curatedWeight ?? ext?.weight ?? null;
-  const displayTitle = itemDisplayName(workState, curatedTitle);
 
   return (
-    <section className="rv-panel" aria-label="Product identity">
-      <header className="rv-panel-head">Identity</header>
+    <section className="rv-panel" aria-label="Product identification">
+      <header className="rv-panel-head">Product Identification</header>
       <div className="rv-panel-body">
-        <div className="rv-compare">
-          <div>
-            <div className="rv-compare-col-label">Imported</div>
-            <div className="rv-field-value rv-imported" title={workState.name}>
-              {workState.name || '—'}
-            </div>
-          </div>
-          <div>
-            <div className="rv-compare-col-label">Curated</div>
-            <div className="rv-field-value" title={displayTitle}>
-              {displayTitle || '—'}
-            </div>
-          </div>
-        </div>
-
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-            gap: '0.5rem 1rem',
-            marginTop: '0.875rem',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+            gap: '0.75rem 1.25rem',
           }}
         >
           <div className="rv-field" style={{ marginBottom: 0 }}>
             <div className="rv-field-label">UPC / GTIN</div>
-            <div className="rv-field-value" style={{ fontFamily: 'var(--font-mono)' }}>
+            <div className="rv-field-value" style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
               {workState.upc || '—'}
             </div>
           </div>
+
           <div className="rv-field" style={{ marginBottom: 0 }}>
-            <div className="rv-field-label">Brand</div>
-            <div className="rv-field-value">{brand || '—'}</div>
-          </div>
-          {variant && (
-            <div className="rv-field" style={{ marginBottom: 0 }}>
-              <div className="rv-field-label">Size / variant</div>
-              <div className="rv-field-value">{variant}</div>
+            <div className="rv-field-label">Register Name (Imported)</div>
+            <div className="rv-field-value" style={{ fontWeight: 500 }} title={workState.name}>
+              {workState.name || '—'}
             </div>
-          )}
-        </div>
+          </div>
 
-        {workState.family && (
-          <div className="rv-field" style={{ marginTop: '0.875rem' }}>
-            <div className="rv-field-label">Family</div>
+          <div className="rv-field" style={{ marginBottom: 0 }}>
+            <div className="rv-field-label">Source</div>
             <div className="rv-field-value">
-              {workState.family.label ?? 'Product family'} · {workState.family.readyCount}/
-              {workState.family.memberCount} members ready
+              {sourceTypeLabel(workState.sourceType)}
+              {workState.domain ? ` · ${workState.domain}` : ''}
+              {ext?.distributorProviderId ? ` · ${ext.distributorProviderId}` : ''}
             </div>
-          </div>
-        )}
-
-        <div className="rv-field" style={{ marginTop: '0.875rem' }}>
-          <div className="rv-field-label">Source</div>
-          <div className="rv-field-value">
-            {sourceTypeLabel(workState.sourceType)}
-            {workState.domain ? ` · ${workState.domain}` : ''}
-            {ext?.distributorProviderId ? ` · ${ext.distributorProviderId}` : ''}
           </div>
         </div>
       </div>

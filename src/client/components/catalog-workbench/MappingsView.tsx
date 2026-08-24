@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { listAttributeMappings, listCatalogFields } from '../../api';
 import { getClassificationConfig } from '../../onboarding-api';
 import type { AttributeMappingView, CatalogFieldSummary } from './types';
+import { FrozenBanner } from '../settings/FrozenBanner';
+import { StatusBadge } from '../settings/StatusBadge';
 
 /**
  * Editable mirror of ShopSite's Extra Fields configuration.
@@ -151,9 +153,7 @@ export function MappingsView() {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, padding: 10, background: '#fef9c3', border: '1px solid #fde047', borderRadius: 6, fontSize: 12, color: '#713f12', lineHeight: 1.4 }}>
-        🔒 Taxonomy frozen — field mappings are read-only. Changes require a new immutable taxonomy release.
-      </div>
+      <FrozenBanner note="Field mappings mirror the active taxonomy release and cannot be edited here." />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
         <p style={{ fontSize: 12, color: '#64748b', margin: 0 }}>
           Mirrors ShopSite's <strong>Extra Fields</strong> configuration. Read-only view of how each Catalog Field maps to a
@@ -213,11 +213,11 @@ export function MappingsView() {
                   </td>
                   <td style={td}>
                     {row.mapping?.isStale ? (
-                      <span style={{ color: '#dc2626', fontSize: 11, fontWeight: 600 }}>stale</span>
+                      <StatusBadge variant="stale" />
                     ) : row.mapping ? (
-                      <span style={{ color: '#059669', fontSize: 11, fontWeight: 600 }}>active</span>
+                      <StatusBadge variant="active" />
                     ) : (
-                      <span style={{ color: '#9ca3af', fontSize: 11 }}>unmapped</span>
+                      <StatusBadge variant="unmapped" />
                     )}
                   </td>
                 </tr>

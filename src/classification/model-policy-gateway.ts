@@ -37,7 +37,10 @@ export type ProtectedOperation =
   | 'distributor_copy_consolidation'
   | 'discovery_name_consolidation'
   | 'brand_inference'
-  | 'sitemap_selection';
+  | 'sitemap_selection'
+  // P3 value-production ladder (plan B.P3.3): id-constrained residual-gap
+  // resolution for the flag-gated `value_gap_abstain` stage.
+  | 'value_gap_resolution';
 
 /**
  * Classification stage key used for `stageOverrides` lookup per protected
@@ -57,6 +60,7 @@ const PROTECTED_OPERATION_STAGE: Readonly<Record<ProtectedOperation, string | nu
   discovery_name_consolidation: 'name_consolidation',
   brand_inference: null,
   sitemap_selection: null,
+  value_gap_resolution: 'value_gap_abstain',
 };
 
 /** Stable denial reason codes (typed; serializable). */
@@ -286,6 +290,9 @@ export function redactImageUrl(url: string): string {
     const parsed = new URL(url);
     parsed.search = '';
     parsed.hash = '';
+    // P2 redaction pass: never persist or log userinfo credentials.
+    parsed.username = '';
+    parsed.password = '';
     return parsed.toString();
   } catch {
     // Non-URL string: keep a bounded prefix, never query-looking content.

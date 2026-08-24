@@ -25,16 +25,16 @@
  *    contained regular file decodes within bounds;
  *  - bounded per-SKU/per-image structured outcomes with redacted URLs.
  *
- * The IP private/link-local floor is shared with Product Intelligence
- * (`classifyIp`/`isPrivateOrLinkLocal` are pure helpers imported from the PI
- * policy gateway). This service never writes to PI tables and never
- * manufactures PI run ids.
+ * The IP private/link-local floor is shared (`classifyIp`/`isPrivateOrLinkLocal`
+ * are pure helpers from `src/shared/ssrf.ts`, relocated from the PI policy
+ * gateway during the Agent Lab decommission). This service never writes to PI
+ * tables and never manufactures PI run ids.
  */
 
 import path from 'node:path';
 import fs from 'node:fs';
 import { lookup } from 'node:dns/promises';
-import { classifyIp } from '../../product-intelligence/policy/policy-gateway';
+import { classifyIp } from '../../shared/ssrf';
 import { findChangeSetByWorkspaceId } from '../../db/repositories/change-set-repo';
 import { listChangeSetItems } from '../../db/repositories/change-set-repo';
 import { findExtractionDataByWorkspaceAndUpc } from '../../db/repositories/onboarding-item-repo';
@@ -239,7 +239,7 @@ class ImageRepairNetworkBoundary {
   /**
    * Destination validation: http(s) only, ports 80/443, explicit loopback
    * rejection, DNS resolution with a private/link-local floor. This is the
-   * same SSRF floor PI uses (classifyIp is imported from the PI gateway).
+   * same SSRF floor (classifyIp, src/shared/ssrf.ts).
    */
   private async validateDestination(
     url: string,

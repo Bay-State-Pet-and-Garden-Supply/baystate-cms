@@ -45,6 +45,10 @@ function makeWorkState(
     brand: null,
     sourceType: null,
     domain: null,
+    curatedTitle: null,
+    imageUrl: null,
+    description: null,
+    weight: null,
   };
 }
 

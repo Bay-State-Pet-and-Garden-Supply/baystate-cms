@@ -37,6 +37,12 @@ import {
 import { ModelPolicyDeniedError, buildModelPolicyView } from '../../classification/model-policy-gateway';
 import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../../classification/model-operation-registry';
 
+// Captured at MODULE LOAD — never a stale cross-file mock. A beforeEach-time
+// capture can race with another test file's pending afterEach restore when bun
+// runs suites sequentially in one process, poisoning later files that rely on
+// native globalThis.fetch (e.g. local HTTP-server OCR stage tests).
+const PRISTINE_FETCH = globalThis.fetch;
+
 describe('LLM Client — task-specific routing', () => {
   const testDbPath = 'src/tests/unit/llm-client-routing-test.db';
   let originalFetch: typeof fetch;
@@ -75,7 +81,7 @@ describe('LLM Client — task-specific routing', () => {
   });
 
   beforeEach(() => {
-    originalFetch = globalThis.fetch;
+    originalFetch = PRISTINE_FETCH;
   });
 
   /** Local-only Ollama policy view (protected routing helper). */

@@ -257,6 +257,7 @@ describe('SQLite Migration', () => {
       'classification_refresh_queue',
       'classification_refresh_deferrals',
       'classification_model_calls',
+      'packaging_ocr_shadow_comparisons',
     ];
 
     for (const table of tables) {
@@ -2344,5 +2345,132 @@ describe('Default-On Sourcing schema migration (Amendment A)', () => {
     // Column lists (order-sensitive), types, NOT NULL flags, defaults, and PK
     // roles must be identical between the two databases.
     expect(upgraded).toEqual(fresh);
+  });
+});
+
+// ─── Post-review fixup 3/4: packaging_ocr CHECK expansion migration ───────────
+
+describe('classification_stage_results packaging_ocr CHECK expansion (P2-T6 + post-review fixup 4)', () => {
+  const dbPath = `/tmp/baystate-cms-ocr-stage-mig-${randomUUID()}.db`;
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(dbPath);
+    runMigrations();
+
+    const db = getDb();
+    // FK-clean parent row for stage results, plus one orphaned run_id to
+    // prove the fixup-4 orphan cleanup fires before the copy.
+    const now = new Date().toISOString();
+    const wsId = randomUUID();
+    insertWorkspace({
+      id: wsId,
+      name: 'OCR Stage Mig WS',
+      workspacePath: `/tmp/ocr-stage-mig-${wsId}`,
+      gitPath: '',
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const runId = randomUUID();
+    db.run(
+      `INSERT INTO classification_runs (id, workspace_id, product_sku, source_kind, config_snapshot_hash, status, started_at)
+       VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?)`,
+      [runId, wsId, 'OCR-MIG-SKU', 'f'.repeat(64), now],
+    );
+
+    // Simulate a LEGACY database: classification_stage_results with the
+    // seven-name CHECK constraint (name_consolidation present,
+    // packaging_ocr absent) holding a few pre-existing rows.
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec('DROP TABLE classification_stage_results');
+        db.exec(`
+          CREATE TABLE classification_stage_results (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+            stage_name TEXT NOT NULL CHECK (stage_name IN ('evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
+            output_json TEXT,
+            error_message TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT
+          )
+        `);
+        for (const [stage, status] of [
+          ['evidence_extraction', 'succeeded'],
+          ['category_page_proposals', 'abstained'],
+        ] as const) {
+          db.run(
+            `INSERT INTO classification_stage_results (id, run_id, stage_name, status, started_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [randomUUID(), runId, stage, status, now],
+          );
+        }
+        // Orphaned dead data from a prior foreign_keys=OFF operation.
+        db.run(
+          `INSERT INTO classification_stage_results (id, run_id, stage_name, status, started_at)
+           VALUES (?, 'orphaned-run-id', 'evidence_extraction', 'failed', ?)`,
+          [randomUUID(), now],
+        );
+      })();
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(dbPath); } catch { /* ok */ }
+  });
+
+  it('runMigrations rebuilds the CHECK with packaging_ocr, preserves pre-existing rows, prunes orphans transactionally, and accepts the new stage name', () => {
+    const db = getDb();
+
+    expect(() => runMigrations()).not.toThrow();
+
+    // The rebuilt table's CHECK constraint includes packaging_ocr.
+    const tableSql = (db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='classification_stage_results'").get() as { sql: string }).sql;
+    expect(tableSql).toContain("'packaging_ocr'");
+    expect(tableSql).toContain("'product_draft_projection'");
+
+    // Pre-existing rows survived the rebuild.
+    const rows = db.query('SELECT stage_name, status FROM classification_stage_results ORDER BY stage_name').all() as Array<{ stage_name: string; status: string }>;
+    expect(rows.some(r => r.stage_name === 'evidence_extraction' && r.status === 'succeeded')).toBe(true);
+    expect(rows.some(r => r.stage_name === 'category_page_proposals' && r.status === 'abstained')).toBe(true);
+
+    // Fixup-4 hardening: the orphaned row was cleaned up BEFORE the copy —
+    // it can never block the FK-enforcing rebuild or linger silently.
+    const orphans = db.query("SELECT COUNT(*) AS cnt FROM classification_stage_results WHERE run_id = 'orphaned-run-id'").get() as { cnt: number };
+    expect(Number(orphans.cnt)).toBe(0);
+    // No _new remnant blocks a retry.
+    const remnant = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='classification_stage_results_new'").get();
+    expect(remnant).toBeFalsy();
+
+    // The new stage name is writable.
+    const newId = randomUUID();
+    expect(() =>
+      db.run(
+        `INSERT INTO classification_stage_results (id, run_id, stage_name, status, started_at)
+         SELECT ?, id, 'packaging_ocr', 'abstained', ? FROM classification_runs LIMIT 1`,
+        [newId, new Date().toISOString()],
+      ),
+    ).not.toThrow();
+    expect(
+      (db.query('SELECT status FROM classification_stage_results WHERE id = ?').get(newId) as { status: string }).status,
+    ).toBe('abstained');
+
+    // An invalid stage name still fails the rebuilt CHECK.
+    expect(() =>
+      db.run(
+        `INSERT INTO classification_stage_results (id, run_id, stage_name, status, started_at)
+         SELECT ?, id, 'bogus_stage', 'succeeded', ? FROM classification_runs LIMIT 1`,
+        [randomUUID(), new Date().toISOString()],
+      ),
+    ).toThrow();
   });
 });

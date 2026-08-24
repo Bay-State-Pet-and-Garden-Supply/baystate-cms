@@ -111,3 +111,21 @@ PR12 left the per-item curation claim and the transient family-barrier
 of default-on operation, those paths are candidates for deletion. Tracked as
 follow-up — not required to close #30's rollout gate, which is satisfied by
 measurable default-on operation with a reversible kill switch.
+
+## Family Grouping Accuracy — v1 Corrective Release (2026-08-22)
+
+**What changed:** `MINI|JUMBO` attached suffix, guarded `LGHARVEST` prefix (`harvest` allowlist), `veggie` flavor, whole-word `soft|hard|classic|hypo|hypoallergenic`, `SZ N` designator, and `vnsn/hypo/frzn/vgg` fallback expansions. All via `familyGroupingIdentityFor` so `determineProductGroup`, `groupByProductLine`, and `groupItemsByFamily` agree.
+
+**Audit metrics (148-row synthetic scenario fixture `family-grouping-accuracy-148.json`, not attested production export):** BetterBone 10→1 family (22 members), multi-member families 13→19, items in families 39→62, exactly 27 stems changed. No cross-brand merges; KONG Squeakz Stick vs Star and Fromm Classic vs Gold negative controls are covered in `product-line-grouper.test.ts` (SmallBrand1..16 generic families in fixture).
+
+**Failure shapes now fixed:** `BEEFMINI`/`VNSNJUMBO` glued suffix, `LGHARVEST` glued prefix, `VEGGIE`/`VGG`/`VEGGGIE` convergence, `SOFT`/`HARD`/`CLASSIC`/`HYPO` sub-line fragmentation, `SZ 4`/`SZ4` designators.
+
+**Checking after deploy:** run the same `cohort_shadow_observations` query; synthetic fixture expects `betterbone::better bone` with `member_count=22` as one row. Live verification should check batch-relative grouping (all BetterBone stems coalesce into one `group_key`) rather than hard-coding 22. Any BetterBone split across two `group_key`s is a regression.
+
+**Preflight:** create verified SQLite backup via `bun run classification:integrity backup --db <app.db> --backup <timestamped.db>` before deploying/re-running; prohibit ad-hoc SQL activation or repair.
+
+**Re-running affected completed cohorts:** use `POST /api/onboarding/cohorts/:id/re-run` for idle cohorts in `review`/`curation` whose family was corrected; never auto-re-run actively leased or Promotion-stage members. The `refreshCandidateCohorts` path supersedes old `product-family-v1` rows via membership hash (no migration, `GROUPING_VERSION` unchanged).
+
+**Rollback:** revert deployment; candidate supersession is append-only, historical `classification_cohort_outputs` rows are never mutated. Restoring a DB backup is only for maintenance windows; never run manual `UPDATE/DELETE` on cohorts.
+
+**Verification:** `bunx vitest run src/tests/unit/product-line-grouper.test.ts src/tests/unit/cohort-name-coordinator.test.ts src/tests/unit/family-grouping-accuracy.test.ts` and `bun test src/tests/unit/curation-cohort-repo.test.ts` must pass; `bun run typecheck` clean. Do not bump `GROUPING_VERSION` for this corrective release.

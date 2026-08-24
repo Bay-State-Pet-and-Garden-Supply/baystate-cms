@@ -1,0 +1,632 @@
+/**
+ * Onboarding extraction ladder tests (ADR-0030 Phase 1 salvage).
+ *
+ * Deterministic layers 1-4 of the relocated ladder, adapted from the PI
+ * pi-extraction-ladder suite: platform detection, structured-signal parsing,
+ * platform payload parsers, layer escalation, profile-layer merging, and the
+ * identity-status contract. Browser/interaction/managed/LLM layers were not
+ * relocated and their tests are not carried over.
+ */
+import { describe, it, expect, vi } from 'vitest';
+import {
+  detectPlatform,
+  parseStructuredSignals,
+  parseNextJsData,
+  parseNuxtData,
+  shopifyProductUrl,
+  gtinFromAny,
+  fetchPageHtml,
+} from '../../onboarding/extraction-ladder/platforms';
+import { runExtractionLadder, exactGtinMatch, createLadderExtractionContract } from '../../onboarding/extraction-ladder/ladder';
+import type { FetchedPage } from '../../onboarding/extraction-ladder/platforms';
+import type { PageExtractionContract } from '../../onboarding/extraction-ladder/result-shape';
+
+
+const JSON_LD_HTML = `
+<html><head>
+<title>Stella &amp; Chewy's Chicken Broth 16oz</title>
+<meta property="og:title" content="Stella &amp; Chewy's Chicken Broth 16oz" />
+<meta property="og:image" content="https://img.example.com/broth.jpg" />
+<link rel="canonical" href="https://example.com/p/stella-broth-16oz" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"Stella & Chewy's Chicken Broth 16oz","sku":"SC-BROTH-16","brand":{"name":"Stella & Chewy's"},"gtin":"085000079585","image":["https://img.example.com/broth.jpg","https://img.example.com/broth-2.jpg"],"offers":{"price":"6.99","availability":"https://schema.org/InStock"}}
+</script>
+</head><body><h1>Chicken Broth</h1></body></html>`;
+
+const SHOPIFY_HTML = `
+<html><head>
+<title>Pet Treats — Example Pet</title>
+<script src="/cdn/shop/t/1/main.js"></script>
+<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{}}}</script>
+</head><body></body></html>`;
+
+const SHOPIFY_PRODUCT_JSON = {
+  id: 123,
+  title: 'Chicken Broth 16oz',
+  vendor: 'Example Pet Co',
+  product_type: 'Food',
+  handle: 'chicken-broth-16oz',
+  variants: [
+    { id: 111, title: '16 oz', sku: 'EB-16', available: true, price: '6.99', option1: '16 oz' },
+    { id: 222, title: '32 oz', sku: 'EB-32', available: true, price: '11.99', option1: '32 oz' },
+  ],
+  images: [{ src: 'https://cdn.example.com/broth.jpg', variant_ids: [] }],
+  options: [{ name: 'Size', values: ['16 oz', '32 oz'] }],
+};
+
+const WOOCOMMERCE_HTML = `
+<html><head>
+<title>Fish Flakes</title>
+<link rel="stylesheet" href="/wp-content/plugins/woocommerce/assets/css/woocommerce.css" />
+<script type="application/json">{"id":42,"name":"Fish Flakes 2oz","sku":"FF-2","prices":{"price":"3.49"},"images":[{"src":"https://img.example.com/flakes.jpg"}],"attributes":[{"name":"Size","terms":[{"name":"2 oz","slug":"2-oz"}]}]}</script>
+</head><body></body></html>`;
+
+const NEXTJS_HTML = `
+<html><head><title>Dog Biscuits</title>
+<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"product":{"title":"Dog Biscuits Bacon 12ct","sku":"DB-12","gtin":"012345678905","brand":"Bark Co","images":["https://img.example.com/biscuits.jpg"],"variants":[{"id":1,"title":"12 ct","sku":"DB-12"}]}}}}</script>
+</head><body></body></html>`;
+
+const NUXT_HTML = `
+<html><head><title>Catnip Toy</title></head>
+<body><script>window.__NUXT__={"data":[{"product":{"title":"Catnip Toy Mouse","sku":"CT-1","gtin":"098765432109","brand":"Paws Inc","images":["https://img.example.com/mouse.jpg"],"variants":[{"id":1,"title":"Mouse","sku":"CT-1"}]}}]}</script></body></html>`;
+
+function fetched(html: string, finalUrl = 'https://example.com/p/1'): FetchedPage {
+  return { html, finalUrl, status: 200, contentHash: `hash-${html.length}` };
+}
+
+describe('platform detection', () => {
+  it('detects each platform family from page markup', () => {
+    expect(detectPlatform(SHOPIFY_HTML, 'https://shop.example.com/products/x')).toBe('shopify');
+    expect(detectPlatform(WOOCOMMERCE_HTML, 'https://wc.example.com/p/x')).toBe('woocommerce');
+    expect(detectPlatform(NEXTJS_HTML, 'https://next.example.com/p/x')).toBe('nextjs');
+    expect(detectPlatform(NUXT_HTML, 'https://nuxt.example.com/p/x')).toBe('nuxt');
+    expect(detectPlatform('<html><body>plain</body></html>', 'https://x.example.com')).toBe('generic');
+  });
+});
+
+describe('structured signal parsing', () => {
+  it('extracts JSON-LD products with gtin, sku, brand, and images', () => {
+    const signals = parseStructuredSignals(JSON_LD_HTML);
+    expect(signals.jsonLdProducts).toHaveLength(1);
+    const product = signals.jsonLdProducts[0];
+    expect(product.name).toContain('Chicken Broth');
+    expect(product.sku).toBe('SC-BROTH-16');
+    expect(product.gtin).toBe('085000079585');
+    expect(product.brand).toBe("Stella & Chewy's");
+    expect(product.images).toHaveLength(2);
+    expect(signals.ogImage).toBe('https://img.example.com/broth.jpg');
+    expect(signals.canonicalUrl).toBe('https://example.com/p/stella-broth-16oz');
+  });
+});
+
+describe('platform payload parsers', () => {
+  it('maps a /products/<handle> URL to the Shopify .js endpoint', () => {
+    expect(shopifyProductUrl('https://shop.example.com/products/chicken-broth-16oz')).toBe(
+      'https://shop.example.com/products/chicken-broth-16oz.js',
+    );
+    expect(shopifyProductUrl('https://shop.example.com/collections/all')).toBeNull();
+  });
+
+  it('parses Next.js __NEXT_DATA__ product state', () => {
+    const data = parseNextJsData(NEXTJS_HTML);
+    expect(data.product).not.toBeNull();
+    expect(data.product?.title).toBe('Dog Biscuits Bacon 12ct');
+    expect(gtinFromAny(data.product!)).toBe('012345678905');
+  });
+
+  it('parses Nuxt hydration state', () => {
+    const data = parseNuxtData(NUXT_HTML);
+    expect(data.product?.title).toBe('Catnip Toy Mouse');
+    expect(gtinFromAny(data.product!)).toBe('098765432109');
+  });
+
+  it('normalizes gtin candidates from arbitrary payloads', () => {
+    expect(gtinFromAny({ gtin: '085000079585' })).toBe('085000079585');
+    expect(gtinFromAny({ upc: '0 85000 07958 5' })).toBe('085000079585');
+    expect(gtinFromAny({ mpn: 'XYZ' })).toBeNull();
+    expect(gtinFromAny({ sku: 'short' })).toBeNull();
+  });
+});
+
+describe('extraction ladder', () => {
+  it('extracts a JSON-LD page with exact GTIN identity (structured corroboration alone is not exact_match — probable_match)', async () => {
+    const fetchPage = vi.fn(async () => fetched(JSON_LD_HTML, 'https://example.com/p/stella-broth-16oz'));
+    const fetchShopify = vi.fn(async () => {
+      throw new Error('should not be called');
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://example.com/p/stella-broth-16oz',
+      { gtin: '085000079585', name: "Stella & Chewy's Chicken Broth 16oz" },
+      new AbortController().signal,
+      5000,
+      { fetchPage, fetchShopify },
+    );
+    // P0-5 round 3: a JSON-LD single-offer claim is CORROBORATION only —
+    // without a platform payload affirmatively seeing the variant set, the
+    // identity settles below exact_match.
+    expect(result.identityStatus).toBe('probable_match');
+    expect(result.identityReasons.join(' ')).toContain('variant status unproven');
+    expect(result.gtins.map((g) => g.value)).toContain('085000079585');
+    expect(result.productName).toContain('Chicken Broth');
+    expect(result.sku).toBe('SC-BROTH-16');
+    expect(result.brand).toBe("Stella & Chewy's");
+    // P0-5 round 2: the platform layer always runs before settling, so the
+    // fetch-modes now include the platform probe even for non-platform pages.
+    expect(result.fetchModes).toEqual(expect.arrayContaining(['http', 'structured_data']));
+    expect(layersUsed).toContain('platform_none');
+    expect(result.deterministicOnly).toBe(true);
+    expect(layersUsed).toContain('http');
+    expect(fetchShopify).not.toHaveBeenCalled();
+  });
+
+  it('escalates to the Shopify platform API when structured evidence is thin and records the parent-page signal', async () => {
+    const fetchPage = vi.fn(async () => fetched(SHOPIFY_HTML, 'https://shop.example.com/products/chicken-broth-16oz'));
+    const fetchShopify = vi.fn(async () => SHOPIFY_PRODUCT_JSON as never);
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://shop.example.com/products/chicken-broth-16oz',
+      { gtin: '085000079585', name: 'Chicken Broth 16oz' },
+      new AbortController().signal,
+      5000,
+      { fetchPage, fetchShopify },
+    );
+    expect(layersUsed).toContain('shopify');
+    expect(fetchShopify).toHaveBeenCalledTimes(1);
+    expect(result.productName).toBe('Chicken Broth 16oz');
+    expect(result.brand).toBe('Example Pet Co');
+    // Two variants -> parent page, never an exact match without the GTIN.
+    expect(result.identityStatus).toBe('parent_product_only');
+    expect(result.images[0].url).toBe('https://cdn.example.com/broth.jpg');
+    expect(result.variant?.sku).toBe('EB-16');
+  });
+
+  it('extracts from an embedded WooCommerce Store API payload', async () => {
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://wc.example.com/product/fish-flakes',
+      { name: 'Fish Flakes 2oz' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(WOOCOMMERCE_HTML, 'https://wc.example.com/product/fish-flakes') },
+    );
+    expect(layersUsed).toContain('woocommerce');
+    expect(result.productName).toBe('Fish Flakes 2oz');
+    expect(result.sku).toBe('FF-2');
+    expect(result.fields.some((f) => f.field === 'attribute_size')).toBe(true);
+    expect(result.identityStatus).toBe('probable_match');
+  });
+
+  it('extracts from Next.js application state with a GTIN-driven exact match', async () => {
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://next.example.com/p/dog-biscuits',
+      { gtin: '012345678905', name: 'Dog Biscuits Bacon 12ct' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(NEXTJS_HTML, 'https://next.example.com/p/dog-biscuits') },
+    );
+    expect(layersUsed).toContain('nextjs');
+    expect(result.identityStatus).toBe('exact_match');
+    expect(result.sku).toBe('DB-12');
+    expect(result.variant?.sku).toBe('DB-12');
+  });
+
+  it('extracts from Nuxt hydration state', async () => {
+    const { result } = await runExtractionLadder(
+      'https://nuxt.example.com/p/catnip-mouse',
+      { gtin: '098765432109', name: 'Catnip Toy Mouse' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(NUXT_HTML, 'https://nuxt.example.com/p/catnip-mouse') },
+    );
+    expect(result.identityStatus).toBe('exact_match');
+    expect(result.productName).toBe('Catnip Toy Mouse');
+    expect(result.brand).toBe('Paws Inc');
+    expect(result.variant?.id).toBe('1');
+    expect(result.fields.find((field) => field.field === 'sku' && field.variantRef === '1')).toMatchObject({ value: 'CT-1', variantRef: '1' });
+  });
+
+  it('emits provenance/variantRef for EVERY Nuxt variant entry (multi-variant regression)', async () => {
+    const html = `<html><head><title>Catnip Toy</title></head>
+<body><script>window.__NUXT__={"data":[{"product":{"title":"Catnip Toy Mouse","brand":"Paws Inc","images":["https://img.example.com/mouse.jpg"],"variants":[
+      {"id":1,"title":"Mouse","sku":"CT-1","gtin":"098765432109","option1":"Mouse"},
+      {"id":2,"title":"Mouse 2-pack","sku":"CT-2","gtin":"098765432116"},
+      {"id":3,"title":"Mouse 3-pack","sku":"CT-3","gtin":"098765432123"}
+    ]}}]}</script></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://nuxt.example.com/p/catnip-mouse',
+      {},
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(html, 'https://nuxt.example.com/p/catnip-mouse') },
+    );
+    // Every variant entry carries its own provenance + variantRef, not just variants[0].
+    const variantNames = result.fields.filter((f) => f.field === 'variant_name');
+    expect(variantNames.map((f) => f.variantRef)).toEqual(['1', '2', '3']);
+    expect(variantNames.every((f) => f.method === 'platform_api' && f.sourcePath?.startsWith('__NUXT__ product.variants['))).toBe(true);
+    expect(result.fields.find((f) => f.field === 'sku' && f.variantRef === '1')).toMatchObject({ value: 'CT-1', sourcePath: '__NUXT__ product.variants[0].sku' });
+    expect(result.fields.find((f) => f.field === 'variant_sku' && f.variantRef === '2')).toMatchObject({ value: 'CT-2', sourcePath: '__NUXT__ product.variants[1].sku' });
+    expect(result.fields.find((f) => f.field === 'variant_sku' && f.variantRef === '3')).toMatchObject({ value: 'CT-3', sourcePath: '__NUXT__ product.variants[2].sku' });
+    // Every variant's GTIN is recorded with its variantRef.
+    expect(result.gtins.filter((g) => g.variantRef).map((g) => ({ value: g.value, variantRef: g.variantRef }))).toEqual([
+      { value: '098765432109', variantRef: '1' },
+      { value: '098765432116', variantRef: '2' },
+      { value: '098765432123', variantRef: '3' },
+    ]);
+    // Product-level fields still resolve and the multi-variant state is reported.
+    expect(result.productName).toBe('Catnip Toy Mouse');
+    expect(result.brand).toBe('Paws Inc');
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+
+  it('runs the registered profile layer and merges its evidence', async () => {
+    const profile = {
+      name: 'test-profile',
+      matches: (url: string) => url.includes('profiled.example'),
+      extract: async () => ({
+        fields: [
+          { field: 'product_name', value: 'Profiled Product 8oz', method: 'selectors', sourcePath: 'h1.title' },
+          { field: 'sku', value: 'PP-8', method: 'selectors', sourcePath: '.sku' },
+        ],
+        images: [{ url: 'https://img.example.com/profiled.jpg', sourcePath: 'img.main' }],
+      }),
+    };
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://profiled.example.com/p/x',
+      { gtin: '999999999999' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>minimal</body></html>', 'https://profiled.example.com/p/x'),
+        profiles: [profile],
+      },
+    );
+    expect(layersUsed).toContain('profile_selector');
+    // The resolver's declared method is preserved verbatim (never overwritten
+    // with profile_selector — blocker fix 1).
+    expect(result.fields.some((f) => f.method === 'selectors' && f.field === 'product_name')).toBe(true);
+    expect(result.images[0].url).toBe('https://img.example.com/profiled.jpg');
+    expect(result.identityStatus).toBe('probable_match');
+  });
+
+  it('returns insufficient_evidence for an empty page and records the retrieval failure', async () => {
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://empty.example.com/p/x',
+      { gtin: '085000079585' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched('<html><body>no data</body></html>', 'https://empty.example.com/p/x') },
+    );
+    expect(result.identityStatus).toBe('insufficient_evidence');
+    expect(result.fields).toHaveLength(0);
+    expect(result.deterministicOnly).toBe(true);
+    expect(layersUsed).toContain('platform_none');
+  });
+
+  it('surfaces conflicting GTIN evidence durably', async () => {
+    const conflictingHtml = `
+<html><head><title>T</title>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"A","gtin":"111111111111","offers":{"price":"1"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"B","gtin":"222222222222","offers":{"price":"2"}}</script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://conflict.example.com/p/x',
+      { gtin: '111111111111' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(conflictingHtml, 'https://conflict.example.com/p/x') },
+    );
+    expect(result.conflicts.some((c) => c.field === 'gtin')).toBe(true);
+    // P0-5 round 3: exact GTIN is represented but structured corroboration
+    // alone cannot settle exact identity.
+    expect(result.identityStatus).toBe('probable_match');
+  });
+
+  it('fails retrieval into a durable conflict rather than throwing', async () => {
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://down.example.com/p/x',
+      { gtin: '085000079585' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => {
+          throw new Error('HTTP 503 for https://down.example.com/p/x');
+        },
+      },
+    );
+    expect(result.identityStatus).toBe('insufficient_evidence');
+    expect(result.conflicts.some((c) => c.field === '_retrieval')).toBe(true);
+    expect(layersUsed).toEqual(['http']);
+  });
+
+  it('never marks a multi-variant page exact when the default variant is another size (P0-5 adversarial)', async () => {
+    const shopifyHtml = `<html><head><title>Wormeze Feline</title>
+<script src="/cdn/shop/t/1/main.js"></script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://shop.example.com/products/wormeze-feline',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched(shopifyHtml, 'https://shop.example.com/products/wormeze-feline'),
+        fetchShopify: async () =>
+          ({
+            id: 7,
+            title: 'Wormeze Feline Anthelmintic',
+            vendor: 'Durvet',
+            product_type: 'Pet',
+            handle: 'wormeze-feline',
+            // The product payload carries the requested CHILD GTIN (the page
+            // represents the whole family), while the default variant is
+            // another size — the review P0-5 danger case.
+            gtin: '745801105447',
+            variants: [
+              { id: 701, title: '8 oz', sku: 'W-8', available: true },
+              { id: 702, title: '16 oz', sku: 'W-16', available: true },
+            ],
+            images: [],
+          }) as never,
+      },
+    );
+    expect(result.gtins.map((g) => g.value)).toContain('745801105447');
+    // Exact GTIN is represented, but the selected/default variant is another
+    // size and there is no positive single-variant or child-linkage proof.
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+
+  it('exact-matches a page the platform API affirms is single-variant (P0-5 positive proof)', async () => {
+    const singleHtml = `<html><head><title>Single Variant</title>
+<script src="/cdn/shop/t/1/main.js"></script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://shop.example.com/products/single',
+      { gtin: '555566667777', name: 'Single Variant 8oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched(singleHtml, 'https://shop.example.com/products/single'),
+        fetchShopify: async () =>
+          ({
+            id: 8,
+            title: 'Single Variant 8oz',
+            vendor: 'Vendor Co',
+            handle: 'single',
+            gtin: '555566667777',
+            // Platform API affirmatively reports exactly one variant.
+            variants: [{ id: 1, title: '8 oz', sku: 'SV-8', available: true }],
+            images: [],
+          }) as never,
+      },
+    );
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('does not exact-match when a group page declares the GTIN but no positive proof exists (P0-5)', async () => {
+    // A leaf Product node carries the exact GTIN, but the SAME page also
+    // carries ProductGroup/hasVariant markers — so single-variant proof is
+    // invalidated and the ladder must fall through instead of settling.
+    const groupHtml = `<html><head>
+<script type="application/ld+json">{"@type":"Product","name":"Wormeze Feline 4oz","sku":"W-4","gtin":"745801105447"}</script>
+<script type="application/ld+json">{"@type":"ProductGroup","name":"Wormeze Feline (all sizes)","hasVariant":[{"@type":"Product","name":"Wormeze Feline 8oz"}]}</script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://group.example.com/p/wormeze',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(groupHtml, 'https://group.example.com/p/wormeze') },
+    );
+    expect(result.gtins.map((g) => g.value)).toContain('745801105447');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match');
+    expect(result.identityReasons.join(' ')).toContain('variant status unproven');
+  });
+});
+
+describe('ladder contract adapter + helpers', () => {
+  it('exactGtinMatch compares digit-normalized values', () => {
+    expect(exactGtinMatch('0 85000 07958 5', [{ value: '085000079585' }])).toBe(true);
+    expect(exactGtinMatch('111111111111', [{ value: '222222222222' }])).toBe(false);
+    expect(exactGtinMatch(undefined, [{ value: '085000079585' }])).toBe(false);
+  });
+
+  it('createLadderExtractionContract satisfies the PageExtractionContract seam', async () => {
+    const contract: PageExtractionContract = createLadderExtractionContract({
+      fetchPage: async () => fetched(JSON_LD_HTML, 'https://example.com/p/stella-broth-16oz'),
+    });
+    expect(contract.name).toBe('extraction_ladder');
+    expect(contract.version).toBe('1.0.0');
+    const result = await contract.extract({
+      url: 'https://example.com/p/stella-broth-16oz',
+      expected: { gtin: '085000079585' },
+      signal: new AbortController().signal,
+      timeoutMs: 5000,
+    });
+    expect(result.identityStatus).toBe('probable_match'); // structured corroboration only (P0-5 round 3)
+    expect(result.fields.every((f) => f.method.length > 0)).toBe(true);
+  });
+
+  it('fails closed for rendered profiles instead of static-fetching them', async () => {
+    const fetchPage = vi.fn(async () => fetched('<html><body><h1>Generic fallback title</h1></body></html>', 'https://rendered.example.com/p/x'));
+    const contract = createLadderExtractionContract({ fetchPage });
+    const result = await contract.extractWithProfile!({
+      url: 'https://rendered.example.com/p/x',
+      expected: { name: 'Generic fallback title' },
+      signal: new AbortController().signal,
+      timeoutMs: 5000,
+      profile: { runtime: 'rendered', selectors: { titleSelector: 'h1' } },
+    });
+    expect(result.identityStatus).toBe('insufficient_evidence');
+    expect(result.fetchModes).toEqual(['profile_unsupported']);
+    expect(result.conflicts).toEqual([expect.objectContaining({ field: '_profile' })]);
+    expect(result.identityReasons.join(' ')).toMatch(/rendered profile runtime is unsupported/i);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('requires an authorized transport for static profile extraction', async () => {
+    const fetchPage = vi.fn(async () => fetched('<html><body><h1>must not fetch</h1></body></html>'));
+    const contract = createLadderExtractionContract({ fetchPage });
+    const result = await contract.extractWithProfile!({
+      url: 'https://profiled.example.com/p/x',
+      expected: { name: 'must not fetch' },
+      signal: new AbortController().signal,
+      timeoutMs: 5000,
+      profile: { runtime: 'static', selectors: { titleSelector: 'h1' } },
+    });
+    expect(result.identityStatus).toBe('insufficient_evidence');
+    expect(result.conflicts[0]).toMatchObject({ field: '_profile' });
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before the default transport when the network policy denies a destination', async () => {
+    const fetchMock = vi.fn(async () => new Response('<html>must not fetch</html>', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const gate = vi.fn(async () => ({ allowed: false, code: 'private_ip', detail: 'link-local destination' }));
+      const { result, layersUsed } = await runExtractionLadder(
+        'http://169.254.169.254/latest/meta-data',
+        {},
+        new AbortController().signal,
+        5000,
+        { networkGate: gate },
+      );
+      expect(result.conflicts[0]).toMatchObject({ field: '_retrieval' });
+      expect(layersUsed).toEqual(['http']);
+      expect(gate).toHaveBeenCalledWith('http://169.254.169.254/latest/meta-data', expect.any(AbortSignal));
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('fetchPageHtml records the final URL, status, and content hash', async () => {
+    const fetchMock = vi.fn(async () => new Response('<html>fixture</html>', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const page = await fetchPageHtml('https://fixture.example.com/p/x', new AbortController().signal, 5000);
+      expect(page.status).toBe(200);
+      expect(page.finalUrl).toBe('https://fixture.example.com/p/x');
+      expect(page.contentHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('recurses into WebPage.mainEntity JSON-LD wrappers', async () => {
+    const html = `<html><head>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","mainEntity":{"@type":"Product","name":"Wrapped Product 4oz","sku":"WP-4","gtin":"123456789012","offers":{"price":"1"}}}</script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://wrapped.example.com/p/x',
+      { gtin: '123456789012' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(html, 'https://wrapped.example.com/p/x') },
+    );
+    expect(result.identityStatus).toBe('probable_match'); // structured corroboration only (P0-5 round 3)
+    expect(result.productName).toBe('Wrapped Product 4oz');
+  });
+
+  it('accepts ld+json script types with charset suffixes', async () => {
+    const html = `<html><head>
+<script type="application/ld+json; charset=utf-8">{"@type":"Product","name":"Charset Product","sku":"CS-1","gtin":"222222222222","offers":{"price":"1"}}</script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://charset.example.com/p/x',
+      { gtin: '222222222222' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(html, 'https://charset.example.com/p/x') },
+    );
+    expect(result.identityStatus).toBe('probable_match'); // structured corroboration only (P0-5 round 3)
+  });
+
+  it('falls back from a failed Shopify .js fetch to embedded Next.js state (Hydrogen)', async () => {
+    const hydrogenHtml = `<html><head><title>Hydrogen Store</title>
+<script src="https://cdn.shopify.com/s/files/1/0000/main.js"></script>
+<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"product":{"title":"Hydrogen Product 6oz","sku":"H-6","gtin":"333333333333","variants":[{"id":1,"title":"6 oz","sku":"H-6"}]}}}}</script>
+</head><body></body></html>`;
+    const fetchShopify = vi.fn(async () => {
+      throw new Error('HTTP 404 for .js endpoint');
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://hydrogen.example.com/products/h-6',
+      { gtin: '333333333333' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(hydrogenHtml, 'https://hydrogen.example.com/products/h-6'), fetchShopify },
+    );
+    expect(layersUsed).toContain('shopify_failed');
+    expect(layersUsed).toContain('nextjs');
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('does not early-exit on an exact GTIN alone when fields are thin', async () => {
+    const thinHtml = `<html><head>
+<script type="application/ld+json">{"@type":"Product","gtin":"444444444444"}</script>
+</head><body></body></html>`;
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://thin.example.com/p/x',
+      { gtin: '444444444444' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(thinHtml, 'https://thin.example.com/p/x') },
+    );
+    // GTIN matched but only one field -> no early exit; platform layer ran.
+    // P0-5 round 2: a bare Product JSON-LD with no offer declaration is not
+    // affirmative single-variant proof, so the identity cannot be exact.
+    expect(layersUsed).toContain('platform_api');
+    expect(result.identityStatus).not.toBe('exact_match');
+  });
+
+  it('parses Nuxt 3 __NUXT_DATA__ devalue payloads', async () => {
+    const html = `<html><head><title>T</title></head><body>
+<script id="__NUXT_DATA__" type="application/json">["ShallowRef:1",{"product":{"title":"Nuxt3 Product 8oz","sku":"N3-8","gtin":"555555555555","variants":[{"id":1,"title":"8 oz","sku":"N3-8"}]},"$sconfig":{}}]</script>
+</body></html>`;
+    const data = parseNuxtData(html);
+    expect(data.product?.title).toBe('Nuxt3 Product 8oz');
+    expect(gtinFromAny(data.product!)).toBe('555555555555');
+    const { result } = await runExtractionLadder(
+      'https://nuxt3.example.com/p/x',
+      { gtin: '555555555555' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(html, 'https://nuxt3.example.com/p/x') },
+    );
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('rejects loose 6-digit pseudo-GTINs as identity evidence', () => {
+    expect(gtinFromAny({ gtin: '123456' })).toBeNull();
+    expect(gtinFromAny({ gtin: '12345678' })).toBe('12345678');
+  });
+
+  it('does not exact-match a multi-variant storefront that renders leaf JSON-LD only (P0-5 round 2 adversarial)', async () => {
+    // The storefront emits a single-offer leaf Product JSON-LD for the
+    // RENDERED child, but serves multiple variants via its platform API.
+    const leafOnlyHtml = `<html><head><title>Wormeze Feline 4oz</title>
+<script src="/cdn/shop/t/1/main.js"></script>
+<script type="application/ld+json">{"@type":"Product","name":"Wormeze Feline 4oz","gtin":"745801105447","offers":{"price":"8.99"}}</script>
+</head><body></body></html>`;
+    const fetchPage = vi.fn(async () => fetched(leafOnlyHtml, 'https://shop.example.com/products/wormeze-4oz'));
+    const fetchShopify = vi.fn(async () => ({
+      title: 'Wormeze Feline',
+      vendor: 'Farnam',
+      variants: [
+        { id: 1, title: '2 oz', sku: 'WF-2' },
+        { id: 2, title: '4 oz', sku: 'WF-4' },
+      ],
+    }) as never);
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://shop.example.com/products/wormeze-4oz',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      { fetchPage, fetchShopify },
+    );
+    // The platform layer ran and revealed >1 variants: the leaf JSON-LD
+    // proof must NOT survive the contradiction.
+    expect(layersUsed).toContain('shopify');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+});

@@ -36,7 +36,6 @@ import {
   type CohortPageCoordinationParams,
 } from '../../classification/cohort-page-coordinator';
 import { llmAssignCategoryPages } from '../../classification/page-assignment-llm';
-import { getLlmConfigForTask } from '../../onboarding/llm-client';
 
 const pages = [
   { id: 'cat-wet', name: 'Cat Food Wet', parentName: 'Cat Food Shop All' },
@@ -52,7 +51,7 @@ function product(sku: string, species: string[] = ['Cat']): ProductLineItemSnaps
     name: `Acme Pate ${sku}`,
     webTitle: `Acme Pate ${sku}`,
     brand: 'Acme',
-    description: 'Wet food in a cup.',
+    description: 'Complete and balanced nutrition.',
     species,
     flavor: sku,
     lifeStage: null,
@@ -173,6 +172,25 @@ describe('cohort page coordinator', () => {
     const changedPage = { ...changedProduct, pages: [...pages, { id: 'new-page', name: 'New Page', parentName: null }] };
     await coordinateCohortPagesOnce(changedPage);
     expect(mocks.callLlmForTask).toHaveBeenCalledTimes(3);
+  });
+
+  it('handles markdown-fenced responses, "SKU <sku>" keys, and leading zero variations', async () => {
+    const input = params([product('01234'), product('SKU2')]);
+    mocks.callLlmForTask.mockResolvedValue(`\`\`\`json
+{
+  "SKU 01234": [
+    { "pageId": "cat-wet", "pageName": "Cat Food Wet", "confidence": 0.85 }
+  ],
+  "SKU2": [
+    { "pageId": "cat-wet", "pageName": "Cat Food Wet", "confidence": 0.8 }
+  ]
+}
+\`\`\``);
+    const result = await coordinateCohortPagesOnce(input);
+    const item1 = result.get('01234');
+    const item2 = result.get('SKU2');
+    expect(item1?.status).toBe('assigned');
+    expect(item2?.status).toBe('assigned');
   });
 });
 
