@@ -12,6 +12,20 @@
   min-height: 480px;
 }
 
+/* ── Keyboard focus (WCAG 2.4.7) ─────────────────────────────────────── */
+/* One scoped ring for every interactive element in the review surface.
+   Brand green (#14532D) against the white/cream surfaces clears the 3:1
+   non-text contrast minimum; resting visuals are untouched because
+   :focus-visible only fires for keyboard-initiated focus. */
+.rv-workspace :focus-visible {
+  outline: 2px solid var(--color-uniform-green);
+  outline-offset: 2px;
+}
+
+.rv-workspace .rv-queue-row:focus-visible {
+  outline-offset: -2px; /* rows are flush to the pane edge */
+}
+
 /* ── Header bar ──────────────────────────────────────────────────────────── */
 .rv-header {
   display: flex;
@@ -53,11 +67,14 @@
   align-self: center;
 }
 
+/* Layout-thrash fix (impeccable critique): animate transform, not width —
+   width transitions reflow every frame; scaleX composites on the GPU. */
 .rv-progress-fill {
   height: 100%;
   background: var(--color-uniform-green);
   border-radius: var(--rounded-full);
-  transition: width var(--transition-normal);
+  transform-origin: left center;
+  transition: transform var(--transition-normal);
 }
 
 .rv-filters {
@@ -130,6 +147,145 @@
   background: var(--color-feed-bag-cream);
   border: 1px solid var(--color-card-border);
   border-radius: var(--rounded-xs);
+}
+
+.rv-header {
+  position: relative; /* anchor for the filter popover */
+}
+
+.rv-filter-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4375rem 0.75rem;
+  min-height: 32px;
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-ledger-charcoal);
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  cursor: pointer;
+}
+
+.rv-filter-trigger:hover {
+  background: var(--color-feed-bag-cream);
+}
+
+.rv-filter-trigger[aria-expanded='true'] {
+  background: var(--color-feed-bag-cream);
+  border-color: var(--color-uniform-green);
+}
+
+.rv-filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 0.3125rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-white-surface);
+  background: var(--color-uniform-green);
+  border-radius: var(--rounded-full);
+}
+
+/* Applied-filter chips stay visible beside the trigger while any filter is
+   active; each chip removes its dimension on click. */
+.rv-filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.rv-filter-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1875rem 0.5rem;
+  min-height: 24px;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-ledger-charcoal);
+  background: var(--color-feed-bag-cream);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  cursor: pointer;
+}
+
+.rv-filter-chip-remove:hover {
+  border-color: var(--color-uniform-green);
+}
+
+.rv-filter-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 240px;
+  max-width: min(340px, 90vw);
+  padding: var(--spacing-md);
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  box-shadow: 0 4px 16px rgb(20 83 45 / 0.12);
+}
+
+.rv-filter-popover .rv-select {
+  width: 100%;
+}
+
+.rv-filter-popover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.rv-legend-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  font-size: 0.6875rem;
+  line-height: 1;
+  color: var(--color-mulch-brown);
+  background: transparent;
+  border: none;
+  border-radius: var(--rounded-xs);
+  cursor: pointer;
+}
+
+.rv-legend-dismiss:hover {
+  color: var(--color-ledger-charcoal);
+  background: var(--color-feed-bag-cream);
+}
+
+.rv-legend-reopen {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  min-height: 28px;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+  background: transparent;
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  cursor: pointer;
+}
+
+.rv-legend-reopen:hover {
+  color: var(--color-ledger-charcoal);
+  background: var(--color-feed-bag-cream);
 }
 
 /* ── Two-pane body ───────────────────────────────────────────────────────── */
@@ -296,7 +452,9 @@
   gap: var(--spacing-sm);
   align-items: center;
   padding: 0.5rem 0.625rem;
-  border-bottom: 1px solid var(--color-card-border);
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--rounded-md);
   cursor: pointer;
   text-align: left;
   font-family: var(--font-body);
@@ -317,12 +475,15 @@
   justify-content: center;
 }
 
+/* Checkbox-selected rows stay visually QUIETER than the keyboard-active row:
+   selection is a set operation, activity is where the reviewer is looking.
+   Neutral warm tint (not brand green — green is reserved for "you are here"). */
 .rv-queue-row.rv-row-selected {
-  background: color-mix(in srgb, var(--color-uniform-green) 5%, var(--color-white-surface));
+  background: color-mix(in srgb, var(--color-feed-bag-cream) 55%, var(--color-white-surface));
 }
 
 .rv-queue-row.rv-row-selected:hover {
-  background: color-mix(in srgb, var(--color-uniform-green) 9%, var(--color-white-surface));
+  background: var(--color-feed-bag-cream);
 }
 
 .rv-queue-row:hover,
@@ -330,9 +491,12 @@
   background: var(--color-feed-bag-cream);
 }
 
+/* Tinted emphasis replaces the side-tab inset bar (detector-flagged slop
+   tell): the active row reads as elevated via a green wash + soft border,
+   not a hard edge pinned to the pane side. */
 .rv-queue-row.rv-row-active {
   background: color-mix(in srgb, var(--color-uniform-green) 8%, var(--color-white-surface));
-  box-shadow: inset 3px 0 0 var(--color-uniform-green);
+  border-color: color-mix(in srgb, var(--color-uniform-green) 35%, transparent);
 }
 
 .rv-row-thumb {

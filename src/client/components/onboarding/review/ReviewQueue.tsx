@@ -164,7 +164,7 @@ function ReviewQueueRow({
           onSelect(item.itemId);
         }
       }}
-      tabIndex={-1}
+      tabIndex={active ? 0 : -1}
     >
       {onToggleSelected && (
         <span className="rv-row-checkbox" onClick={e => e.stopPropagation()}>

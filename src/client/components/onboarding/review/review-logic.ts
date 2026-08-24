@@ -115,14 +115,63 @@ export function applyQueueFilters(
 }
 
 export function hasActiveQueueFilters(filters: ReviewQueueFilters): boolean {
-  return Boolean(
-    filters.reviewStates?.length ||
-      filters.warningsOnly ||
-      filters.editedOnly ||
-      filters.familyCohortId ||
-      filters.brand ||
-      (filters.sourceType && filters.sourceType !== 'all'),
-  );
+  return countActiveQueueFilters(filters) > 0;
+}
+
+/** Number of independently active filter dimensions (impeccable polish: the
+ *  collapsed filter trigger shows this as an active-count badge). */
+export function countActiveQueueFilters(filters: ReviewQueueFilters): number {
+  let count = 0;
+  if (filters.reviewStates && filters.reviewStates.length > 0) count += 1;
+  if (filters.warningsOnly) count += 1;
+  if (filters.editedOnly) count += 1;
+  if (filters.familyCohortId) count += 1;
+  if (filters.brand) count += 1;
+  if (filters.sourceType && filters.sourceType !== 'all') count += 1;
+  return count;
+}
+
+export interface QueueFilterChip {
+  /** Stable key identifying which filter dimension the chip removes. */
+  key: 'reviewStates' | 'warningsOnly' | 'editedOnly' | 'familyCohortId' | 'brand' | 'sourceType';
+  label: string;
+}
+
+/** Removable chips for the applied filters (impeccable polish: applied
+ *  filters stay visible next to the collapsed filter trigger). Pure — the
+ *  labels are display strings only; family/brand use raw values since the
+ *  workspace owns facet labels. */
+export function activeFilterChips(
+  filters: ReviewQueueFilters,
+  ctx: { familyLabel?: string } = {},
+): QueueFilterChip[] {
+  const chips: QueueFilterChip[] = [];
+  if (filters.reviewStates?.includes('unreviewed')) chips.push({ key: 'reviewStates', label: 'Unreviewed' });
+  else if (filters.reviewStates?.includes('reviewed')) chips.push({ key: 'reviewStates', label: 'Reviewed' });
+  if (filters.warningsOnly) chips.push({ key: 'warningsOnly', label: '⚠ Warnings' });
+  if (filters.editedOnly) chips.push({ key: 'editedOnly', label: 'Edited' });
+  if (filters.familyCohortId)
+    chips.push({ key: 'familyCohortId', label: ctx.familyLabel ?? filters.familyCohortId });
+  if (filters.brand) chips.push({ key: 'brand', label: filters.brand });
+  if (filters.sourceType && filters.sourceType !== 'all')
+    chips.push({ key: 'sourceType', label: filters.sourceType === 'distributor_record' ? 'Distributor record' : 'Official page' });
+  return chips;
+}
+
+/** Remove one chip's dimension from the filter set (pure update). */
+export function removeFilterChip(filters: ReviewQueueFilters, key: QueueFilterChip['key']): ReviewQueueFilters {
+  const next = { ...filters };
+  switch (key) {
+    case 'reviewStates':
+      delete next.reviewStates;
+      break;
+    case 'sourceType':
+      next.sourceType = 'all';
+      break;
+    default:
+      delete next[key];
+  }
+  return next;
 }
 
 // ─── Next/previous navigation ──────────────────────────────────────────────────

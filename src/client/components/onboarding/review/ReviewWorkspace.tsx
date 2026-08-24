@@ -21,7 +21,9 @@ import { completeReviewStage, getItemDetail, moveToPreviousStage, submitDecision
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import type { ClassificationProposal } from '../../../../shared/schemas/classification';
 import {
+  activeFilterChips,
   applyQueueFilters,
+  countActiveQueueFilters,
   distinctBrands,
   distinctFamilies,
   findNextQueuedItem,
@@ -29,6 +31,7 @@ import {
   findPreviousReviewTarget,
   formatReviewProgress,
   hasActiveQueueFilters,
+  removeFilterChip,
   countGateBlockedItems,
   buildLegacyListingUpdatePayload,
   pruneQueueSelection,
@@ -141,6 +144,17 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const doneIds = useRef<Set<string>>(new Set());
   const queueVersionRef = useRef(0);
+  /** Set by keyboard navigation so the active row receives DOM focus
+   *  (visible :focus-visible ring follows arrow-key selection). */
+  const keyboardNavRef = useRef(false);
+
+  // Keyboard focus follow: after an arrow-key selection, move DOM focus to the
+  // active queue row so the focus ring and screen-reader position track it.
+  useEffect(() => {
+    if (!keyboardNavRef.current || !currentItemId) return;
+    keyboardNavRef.current = false;
+    document.getElementById(currentItemId)?.focus();
+  }, [currentItemId]);
 
   // ── Queue loading ───────────────────────────────────────────────────────
   const loadQueue = useCallback(
@@ -227,6 +241,23 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       unsubscribe();
     };
   }, [batchId, loadQueue]);
+
+  // Dirty-draft guard (impeccable polish): an unsaved edit draft must never
+  // die silently to a tab close/refresh. Item-switching within the workspace
+  // is already guarded by selectItem → attemptCancelEdit; the SSE refresh
+  // path only replaces queue rows and never evicts the actively-edited
+  // item's detail cache, so the open draft cannot be clobbered by it.
+  const draftDirty = v2 && editing && isDraftDirty(draftSeedRef.current, draft);
+  useEffect(() => {
+    if (!draftDirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      // Chrome requires returnValue; legacy convention.
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [draftDirty]);
 
   // ── Enrichment: load item details for queue rows in parallel chunks ─────
   const sortedAll = useMemo(() => sortForReview(items), [items]);
@@ -783,11 +814,13 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
         case 'ArrowDown':
         case 'ArrowRight':
           e.preventDefault();
+          keyboardNavRef.current = true;
           moveTo('next');
           break;
         case 'ArrowUp':
         case 'ArrowLeft':
           e.preventDefault();
+          keyboardNavRef.current = true;
           moveTo('previous');
           break;
         case 'g':
@@ -1072,7 +1105,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
         </div>
       </div>
 
-      <Legend />
+      <KeyboardLegend />
 
       {lightbox && (
         <Lightbox url={lightbox.url} caption={lightbox.caption} onClose={() => setLightbox(null)} />
@@ -1113,8 +1146,6 @@ function FilterBar({
   shownCount: number;
 }) {
   const pct = progress.total > 0 ? Math.round((progress.reviewedCount / progress.total) * 100) : 0;
-  const toggle = (key: keyof ReviewQueueFilters, value: boolean) =>
-    onChange({ ...filters, [key]: filters[key] ? undefined : value });
 
   return (
     <div className="rv-header">
@@ -1125,127 +1156,277 @@ function FilterBar({
           {total > shownCount ? ` · showing first ${shownCount}` : ''}
         </span>
         <span className="rv-progress-track" aria-hidden="true">
-          <span className="rv-progress-fill" style={{ width: `${pct}%` }} />
+          <span className="rv-progress-fill" style={{ transform: `scaleX(${pct / 100})` }} />
         </span>
       </div>
 
-      <div className="rv-filters" role="group" aria-label="Queue filters">
-        <button
-          type="button"
-          className={`rv-chip${filters.reviewStates?.includes('unreviewed') ? ' rv-chip-active' : ''}`}
-          aria-pressed={filters.reviewStates?.includes('unreviewed') ?? false}
-          onClick={() =>
-            onChange(
-              filters.reviewStates?.includes('unreviewed')
-                ? { ...filters, reviewStates: undefined }
-                : { ...filters, reviewStates: ['unreviewed'] },
-            )
-          }
-        >
-          Unreviewed
-        </button>
-        <button
-          type="button"
-          className={`rv-chip${filters.reviewStates?.includes('reviewed') ? ' rv-chip-active' : ''}`}
-          aria-pressed={filters.reviewStates?.includes('reviewed') ?? false}
-          onClick={() =>
-            onChange(
-              filters.reviewStates?.includes('reviewed')
-                ? { ...filters, reviewStates: undefined }
-                : { ...filters, reviewStates: ['reviewed'] },
-            )
-          }
-        >
-          Reviewed
-        </button>
-        <button
-          type="button"
-          className={`rv-chip rv-chip-warning${filters.warningsOnly ? ' rv-chip-active' : ''}`}
-          aria-pressed={filters.warningsOnly ?? false}
-          onClick={() => toggle('warningsOnly', !filters.warningsOnly)}
-        >
-          ⚠ Warnings
-        </button>
-        <button
-          type="button"
-          className={`rv-chip${filters.editedOnly ? ' rv-chip-active' : ''}`}
-          aria-pressed={filters.editedOnly ?? false}
-          onClick={() => toggle('editedOnly', !filters.editedOnly)}
-        >
-          Edited during review
-        </button>
-
-        {facets.families.length > 0 && (
-          <select
-            className="rv-select"
-            aria-label="Filter by family"
-            value={filters.familyCohortId ?? ''}
-            onChange={e => onChange({ ...filters, familyCohortId: e.target.value || undefined })}
-          >
-            <option value="">All families</option>
-            {facets.families.map(f => (
-              <option key={f.cohortId} value={f.cohortId}>
-                {f.label}
-              </option>
-            ))}
-          </select>
-        )}
-
-        {facets.brands.length > 0 && (
-          <select
-            className="rv-select"
-            aria-label="Filter by brand"
-            value={filters.brand ?? ''}
-            onChange={e => onChange({ ...filters, brand: e.target.value || undefined })}
-          >
-            <option value="">All brands</option>
-            {facets.brands.map(b => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        )}
-
-        <select
-          className="rv-select"
-          aria-label="Filter by source"
-          value={filters.sourceType ?? 'all'}
-          onChange={e =>
-            onChange({ ...filters, sourceType: (e.target.value || 'all') as 'official_page' | 'distributor_record' | 'all' })
-          }
-        >
-          <option value="all">Any source</option>
-          <option value="distributor_record">Distributor record</option>
-          <option value="official_page">Official page</option>
-        </select>
-
-        {hasActiveQueueFilters(filters) && (
-          <button type="button" className="rv-chip" onClick={() => onChange({})}>
-            Clear filters
-          </button>
-        )}
-      </div>
+      <FilterControls filters={filters} onChange={onChange} facets={facets} />
     </div>
   );
 }
 
-// ─── Shortcut legend ──────────────────────────────────────────────────────────
+// ─── Collapsed filter controls (impeccable polish) ───────────────────────────
 
-function Legend() {
+const LEGEND_DISMISS_KEY = 'rv-shortcuts-dismissed';
+
+/**
+ * Collapsed filter surface: one trigger with an active-count badge opens a
+ * popover holding all six controls; applied filters remain visible as
+ * removable chips. All filter capabilities and their pure logic are unchanged.
+ */
+function FilterControls({
+  filters,
+  onChange,
+  facets,
+}: {
+  filters: ReviewQueueFilters;
+  onChange: (f: ReviewQueueFilters) => void;
+  facets: { brands: string[]; families: { cohortId: string; label: string }[] };
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const activeCount = countActiveQueueFilters(filters);
+  const chips = activeFilterChips(filters, {
+    familyLabel: facets.families.find(f => f.cohortId === filters.familyCohortId)?.label,
+  });
+
+  // Close on outside click or Escape (Escape must not bubble into the
+  // workspace's item-navigation Esc handler).
+  useEffect(() => {
+    if (!open) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKeyDown, true); // capture: beats workspace handler
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [open]);
+
+  const toggle = (key: keyof ReviewQueueFilters, value: boolean) =>
+    onChange({ ...filters, [key]: filters[key] ? undefined : value });
+
   return (
-    <div className="rv-legend" aria-hidden="true">
-      <span>
-        <kbd>G</kbd> Looks Good &amp; Next
-      </span>
-      <span>
-        <kbd>←</kbd> <kbd>→</kbd> previous / next product
-      </span>
-      <span>
-        <kbd>Esc</kbd> close product / image
-      </span>
+    <div className="rv-filters" role="group" aria-label="Queue filters" ref={containerRef}>
+      <button
+        type="button"
+        className="rv-filter-trigger"
+        aria-expanded={open}
+        aria-haspopup="true"
+        onClick={() => setOpen(prev => !prev)}
+      >
+        <span aria-hidden="true">☰</span> Filters
+        {activeCount > 0 && (
+          <span className="rv-filter-count" aria-label={`${activeCount} active filters`}>
+            {activeCount}
+          </span>
+        )}
+      </button>
+
+      {chips.length > 0 && (
+        <span className="rv-filter-chips">
+          {chips.map(chip => (
+            <button
+              key={chip.key}
+              type="button"
+              className="rv-filter-chip-remove"
+              onClick={() => onChange(removeFilterChip(filters, chip.key))}
+              title={`Remove ${chip.label} filter`}
+            >
+              {chip.label} ✕
+            </button>
+          ))}
+        </span>
+      )}
+
+      {open && (
+        <div className="rv-filter-popover">
+          <div className="rv-filter-popover-row">
+            <button
+              type="button"
+              className={`rv-chip${filters.reviewStates?.includes('unreviewed') ? ' rv-chip-active' : ''}`}
+              aria-pressed={filters.reviewStates?.includes('unreviewed') ?? false}
+              onClick={() =>
+                onChange(
+                  filters.reviewStates?.includes('unreviewed')
+                    ? { ...filters, reviewStates: undefined }
+                    : { ...filters, reviewStates: ['unreviewed'] },
+                )
+              }
+            >
+              Unreviewed
+            </button>
+            <button
+              type="button"
+              className={`rv-chip${filters.reviewStates?.includes('reviewed') ? ' rv-chip-active' : ''}`}
+              aria-pressed={filters.reviewStates?.includes('reviewed') ?? false}
+              onClick={() =>
+                onChange(
+                  filters.reviewStates?.includes('reviewed')
+                    ? { ...filters, reviewStates: undefined }
+                    : { ...filters, reviewStates: ['reviewed'] },
+                )
+              }
+            >
+              Reviewed
+            </button>
+          </div>
+          <div className="rv-filter-popover-row">
+            <button
+              type="button"
+              className={`rv-chip rv-chip-warning${filters.warningsOnly ? ' rv-chip-active' : ''}`}
+              aria-pressed={filters.warningsOnly ?? false}
+              onClick={() => toggle('warningsOnly', !filters.warningsOnly)}
+            >
+              ⚠ Warnings
+            </button>
+            <button
+              type="button"
+              className={`rv-chip${filters.editedOnly ? ' rv-chip-active' : ''}`}
+              aria-pressed={filters.editedOnly ?? false}
+              onClick={() => toggle('editedOnly', !filters.editedOnly)}
+            >
+              Edited during review
+            </button>
+          </div>
+
+          {facets.families.length > 0 && (
+            <select
+              className="rv-select"
+              aria-label="Filter by family"
+              value={filters.familyCohortId ?? ''}
+              onChange={e => onChange({ ...filters, familyCohortId: e.target.value || undefined })}
+            >
+              <option value="">All families</option>
+              {facets.families.map(f => (
+                <option key={f.cohortId} value={f.cohortId}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {facets.brands.length > 0 && (
+            <select
+              className="rv-select"
+              aria-label="Filter by brand"
+              value={filters.brand ?? ''}
+              onChange={e => onChange({ ...filters, brand: e.target.value || undefined })}
+            >
+              <option value="">All brands</option>
+              {facets.brands.map(b => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          )}
+
+          <select
+            className="rv-select"
+            aria-label="Filter by source"
+            value={filters.sourceType ?? 'all'}
+            onChange={e =>
+              onChange({ ...filters, sourceType: (e.target.value || 'all') as 'official_page' | 'distributor_record' | 'all' })
+            }
+          >
+            <option value="all">Any source</option>
+            <option value="distributor_record">Distributor record</option>
+            <option value="official_page">Official page</option>
+          </select>
+
+          {hasActiveQueueFilters(filters) && (
+            <button type="button" className="rv-chip" onClick={() => onChange({})}>
+              Clear all filters
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
+}
+
+// ─── Shortcut legend (dismissible — persisted) ──────────────────────────────
+
+/** Pure read of the persisted dismissal so tests can exercise it without jsdom
+ *  localStorage flakiness leaking between cases. */
+export function isLegendDismissed(store: Pick<Storage, 'getItem'> = localStorage): boolean {
+  try {
+    return store.getItem(LEGEND_DISMISS_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function dismissLegend(store: Pick<Storage, 'setItem'> = localStorage): void {
+  try {
+    store.setItem(LEGEND_DISMISS_KEY, '1');
+  } catch {
+    /* storage unavailable — legend simply reappears next mount */
+  }
+}
+
+export function KeyboardLegend() {
+  const [dismissed, setDismissed] = useState(() => isLegendDismissed());
+
+  if (dismissed) {
+    return (
+      <button
+        type="button"
+        className="rv-legend-reopen"
+        aria-label="Show keyboard shortcuts"
+        onClick={() => {
+          dismissLegendRestore();
+          setDismissed(false);
+        }}
+        title="Show keyboard shortcuts"
+      >
+        ⌨ Shortcuts
+      </button>
+    );
+  }
+
+  return (
+    <div className="rv-legend">
+      <span aria-hidden="true">
+        <kbd>G</kbd> Looks Good &amp; Next
+      </span>
+      <span aria-hidden="true">
+        <kbd>←</kbd> <kbd>→</kbd> previous / next product
+      </span>
+      <span aria-hidden="true">
+        <kbd>Esc</kbd> close product / image
+      </span>
+      <button
+        type="button"
+        className="rv-legend-dismiss"
+        aria-label="Hide keyboard shortcuts"
+        title="Hide shortcuts"
+        onClick={() => {
+          dismissLegend();
+          setDismissed(true);
+        }}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function dismissLegendRestore(): void {
+  try {
+    localStorage.removeItem(LEGEND_DISMISS_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
 // ─── Lightbox ─────────────────────────────────────────────────────────────────
