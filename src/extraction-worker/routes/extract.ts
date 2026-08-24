@@ -23,6 +23,7 @@ import * as cheerio from 'cheerio';
 import type { Element, AnyNode } from 'domhandler';
 import { runRenderedPage } from '../browser/rendered-page-runner';
 import { loadWorkerBrowserConfig } from '../browser/config';
+import { applyLadderEnrichment } from '../../onboarding/extraction-ladder/enrich';
 import {
   ExtractRequestSchema,
   ExtractResponseSchema,
@@ -941,6 +942,20 @@ export async function doStaticExtract(
     data.customFields = customFields;
   }
 
+  // ADR-0031: embedded-only ladder enrichment on the production profile
+  // path. Uses the HTML this handler already fetched — no second request.
+  // Additive-only: profile values are never overwritten; failures degrade.
+  try {
+    await applyLadderEnrichment({
+      html,
+      url: finalUrl,
+      data,
+      expected: { name: expected.name, brandHint: expected.brandHint ?? null, price: expected.price ?? null, gtin: expected.upc },
+    });
+  } catch (enrichErr) {
+    warnings.push(`Ladder enrichment failed (non-blocking): ${enrichErr instanceof Error ? enrichErr.message : String(enrichErr)}`);
+  }
+
   const retained = retainProfileSource(finalUrl, html);
   const fieldProvenanceDetails = buildFieldProvenanceDetails(provenance, origins);
   return { data, warnings, sourceContentHash: retained.sourceContentHash, sourceArtifactId: retained.sourceArtifactId, fieldProvenanceDetails };
@@ -951,7 +966,7 @@ export async function doStaticExtract(
 /**
  * Run deterministic extraction via Playwright with JS execution.
  */
-async function doRenderedExtract(request: ExtractRequest): Promise<{
+export async function doRenderedExtract(request: ExtractRequest, deps: ProfileTransportDeps = {}): Promise<{
   data: ExtractionData;
   warnings: string[];
   sourceContentHash?: string | null;
@@ -963,7 +978,7 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   const selectors = profile.selectors || {};
   const allowedSourceDomains = profile.allowedSourceDomains ?? [];
   try {
-    await assertSafeProfileDestination(sourceUrl, allowedSourceDomains);
+    await assertSafeProfileDestination(sourceUrl, allowedSourceDomains, deps);
   } catch (error) {
     warnings.push(`Rendered network denied: ${error instanceof Error ? error.message : String(error)}`);
     return buildFailedResult(request, warnings);
@@ -1428,8 +1443,10 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
 
       // Retain the exact rendered DOM after all deterministic selectors have
       // run. Selector values are not authoritative without this source hash
-      // (and artifact reference) attached to the response.
-      const retained = retainProfileSource(finalUrl, await page.content());
+      // (and artifact reference) attached to the response. The same bytes are
+      // reused for ADR-0031 embedded-only ladder enrichment (no refetch).
+      const renderedHtml = await page.content();
+      const retained = retainProfileSource(finalUrl, renderedHtml);
       const fieldProvenanceDetails = buildFieldProvenanceDetails(provenance, origins);
       return {
         blocked: false as const,
@@ -1444,6 +1461,10 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         sourceContentHash: retained.sourceContentHash,
         sourceArtifactId: retained.sourceArtifactId,
         customFields,
+        renderedHtml,
+        // The redirected URL the DOM was actually captured at — enrichment
+        // must resolve provenance/images against reality, not the request URL.
+        renderedFinalUrl: finalUrl,
       };
     },
     runnerConfig,
@@ -1496,6 +1517,23 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   // Merge custom fields into result
   if (Object.keys(extracted.customFields).length > 0) {
     (data as ExtractionData).customFields = extracted.customFields;
+  }
+
+  // ADR-0031: embedded-only ladder enrichment on the production rendered
+  // profile path. Reuses the exact DOM bytes the runner captured — no second
+  // fetch, single profile-execution authority preserved. Additive-only;
+  // failures degrade to a warning.
+  try {
+    await applyLadderEnrichment({
+      html: extracted.renderedHtml,
+      // Final redirected URL the DOM was captured at (falls back to the
+      // request URL if the runner did not report one).
+      url: extracted.renderedFinalUrl || sourceUrl,
+      data,
+      expected: { name: expected.name, brandHint: request.expected?.brandHint ?? null, price: request.expected?.price ?? null, gtin: request.expected?.upc },
+    });
+  } catch (enrichErr) {
+    warnings.push(`Ladder enrichment failed (non-blocking): ${enrichErr instanceof Error ? enrichErr.message : String(enrichErr)}`);
   }
 
   return { data, warnings, sourceContentHash: extracted.sourceContentHash, sourceArtifactId: extracted.sourceArtifactId, fieldProvenanceDetails: extracted.fieldProvenanceDetails };

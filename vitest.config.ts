@@ -274,6 +274,7 @@ export default defineConfig({
       'src/tests/unit/source-discovery-sitemap-priority.test.ts',
       // Page extractor / specialist workflow DB suites
       'src/tests/unit/page-extractor-images.test.ts',
+      'src/tests/unit/page-extractor-ladder-wiring.test.ts',
       'src/tests/unit/page-extractor-profile-generation.test.ts',
       'src/tests/unit/page-extractor-variant-inference.test.ts',
       'src/tests/unit/brand-hub-routes.test.ts',

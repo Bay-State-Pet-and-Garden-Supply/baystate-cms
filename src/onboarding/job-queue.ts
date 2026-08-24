@@ -1644,6 +1644,8 @@ export class OnboardingWorker {
           name: item.expectedName || item.name,
           brandHint: item.brandHint,
           price: item.price,
+          // ADR-0031: enables real identity classification in ladder enrichment.
+          gtin: item.upc || undefined,
         });
 
         if (item.brandHint && !extractedData.brand) extractedData.brand = item.brandHint;

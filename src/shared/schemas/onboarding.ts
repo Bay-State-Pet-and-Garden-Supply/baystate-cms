@@ -335,6 +335,22 @@ export const ExtractionDataSchema = z.object({
   confidence: z.number().min(0).max(1).default(0),
   fieldProvenance: z.record(z.string(), z.string()).default(() => ({})),
   // Tracks where each field came from: 'json-ld', 'meta', 'html', 'ai', 'user'
+  /**
+   * ADR-0031 (extraction-ladder wiring): deterministic identity classification
+   * of the extracted page against the requested product. Values match the
+   * PAGE_IDENTITY_STATUSES union in src/onboarding/extraction-ladder/result-shape.ts.
+   * Diagnostics only — never gates extraction success or promotion.
+   */
+  identityStatus: z.enum([
+    'exact_match',
+    'probable_match',
+    'parent_product_only',
+    'wrong_variant',
+    'conflicting_identity',
+    'insufficient_evidence',
+  ]).nullable().optional().default(null),
+  /** Human-readable reasons supporting identityStatus. */
+  identityReasons: z.array(z.string()).optional().default(() => []),
   packagingTitle: z.string().nullable().default(null),
   /** Structured OCR output from the primary product image. Populated once before classification. */
   packagingOcrData: PackagingOcrDataSchema.nullable().default(null),
