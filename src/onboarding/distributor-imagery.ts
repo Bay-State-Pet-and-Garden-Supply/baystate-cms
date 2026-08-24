@@ -22,13 +22,12 @@
  * outcome (display-only until the asset is commerce-approved); the draft
  * promoter already gates commerce downloads on the approvals list.
  */
-import { PolicyGateway } from '../product-intelligence/policy/policy-gateway';
-import { ProductIntelligencePolicySchema } from '../product-intelligence/contracts';
-import { verifyImageCandidate, type ResolvedEvidenceFact } from '../product-intelligence/assets/verification';
-import type { ProductAssetEvidence } from '../product-intelligence/assets/schema';
-import type { ImageVerificationContract } from '../product-intelligence/assets/contract';
-import { buildReuseGrantResolver, upsertReusePolicy } from '../db/repositories/pi-reuse-policy-repo';
-import { insertOnboardingPiAsset, listPiAssetsByOnboardingItem } from '../db/repositories/product-intelligence-repo';
+import { DeterministicNetworkGate } from './image-verification/network-gate';
+import { verifyImageCandidate, type ResolvedEvidenceFact } from './image-verification/verification';
+import type { ProductAssetEvidence } from './image-verification/schema';
+import type { ImageVerificationContract } from './image-verification/contract';
+import { buildReuseGrantResolver, upsertReusePolicy } from '../db/repositories/image-reuse-policy-repo';
+import { insertOnboardingPiAsset, listPiAssetsByOnboardingItem } from '../db/repositories/onboarding-pi-asset-repo';
 import { getDb } from '../db/connection';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
@@ -37,18 +36,9 @@ import { getVlmConfig } from './vlm-client';
 import { isLoopbackBaseUrl } from '../classification/model-policy-gateway';
 import type { DistributorImageApproval } from '../shared/schemas/onboarding';
 
-/** Frozen onboarding verification policy: public network (CDN fetches),
- *  bounded response size, standard SSRF/protocol protections from the
- *  gateway. */
-const ONBOARDING_IMAGERY_POLICY = ProductIntelligencePolicySchema.parse({
-  configId: 'onboarding-distributor-imagery-v1',
-  networkPolicy: 'allowlisted_remote',
-  dataSharingPolicy: 'cloud_models_and_sources',
-  domainAllowlist: [],
-  allowedTools: [],
-  researchTools: [],
-  maxResponseBytes: 10 * 1024 * 1024,
-});
+/** Verification response cap: bounded CDN fetches, standard deterministic
+ *  SSRF/protocol protections from the gate. */
+const ONBOARDING_IMAGERY_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 export interface DistributorImagerySummary {
   items: number;
@@ -188,7 +178,7 @@ export async function verifyDistributorImage(
   workspaceId: string,
   deps: DistributorImageryDeps = {},
 ): Promise<{ record: ProductAssetEvidence; skippedVlmOcr: boolean }> {
-  const gateway = new PolicyGateway(deps.fetchFn ? { fetchFn: deps.fetchFn } : {})
+  const gate = new DeterministicNetworkGate(deps.fetchFn ? { fetchFn: deps.fetchFn } : {});
   const ocr = deps.ocr ?? extractPackagingOcr;
   const evidenceIds: string[] = [];
 
@@ -280,9 +270,8 @@ export async function verifyDistributorImage(
       assetGtinLinkages: [],
     },
     {
-      runId: `onboarding:${item.id}`,
-      policy: ONBOARDING_IMAGERY_POLICY,
-      gateway,
+      gate,
+      maxResponseBytes: ONBOARDING_IMAGERY_MAX_RESPONSE_BYTES,
       signal: new AbortController().signal,
       evidenceResolver,
       contract: deps.contract,

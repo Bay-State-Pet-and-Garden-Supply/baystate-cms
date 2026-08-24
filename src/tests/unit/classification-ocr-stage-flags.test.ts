@@ -71,18 +71,35 @@ describe('loadOcrStageFlags', () => {
 describe('kill switch dominance', () => {
   afterEach(() => resetOcrStageFlagsOverride());
 
-  it('forces packagingOcrStageEnabled false when the PI kill switch is set', () => {
+  it('forces packagingOcrStageEnabled false when the OCR kill switch is set', () => {
     const flags = loadOcrStageFlags({
-      BAYSTATE_CMS_PI_KILL_SWITCH: 'true',
+      BAYSTATE_CMS_OCR_KILL_SWITCH: 'true',
       BAYSTATE_CMS_PACKAGING_OCR_STAGE_ENABLED: 'true',
     });
     expect(flags.packagingOcrStageEnabled).toBe(false);
   });
 
+  it('honors the deprecated BAYSTATE_CMS_PI_KILL_SWITCH alias (ADR-0030 window)', () => {
+    // Alias alone still dominates.
+    expect(
+      loadOcrStageFlags({
+        BAYSTATE_CMS_PI_KILL_SWITCH: 'true',
+        BAYSTATE_CMS_PACKAGING_OCR_STAGE_ENABLED: 'true',
+      }).packagingOcrStageEnabled,
+    ).toBe(false);
+    // Alias falsey does NOT arm the switch when the primary var is unset.
+    expect(
+      loadOcrStageFlags({
+        BAYSTATE_CMS_PI_KILL_SWITCH: 'false',
+        BAYSTATE_CMS_PACKAGING_OCR_STAGE_ENABLED: 'true',
+      }).packagingOcrStageEnabled,
+    ).toBe(true);
+  });
+
   it('accepts the same truthy spellings as product-intelligence flags.ts', () => {
     for (const value of ['true', '1', 'yes']) {
       expect(
-        loadOcrStageFlags({ BAYSTATE_CMS_PI_KILL_SWITCH: value })
+        loadOcrStageFlags({ BAYSTATE_CMS_OCR_KILL_SWITCH: value })
           .packagingOcrStageEnabled,
       ).toBe(false);
     }
@@ -92,13 +109,13 @@ describe('kill switch dominance', () => {
       const env: Record<string, string | undefined> = {
         BAYSTATE_CMS_PACKAGING_OCR_STAGE_ENABLED: 'true',
       };
-      if (value !== undefined) env.BAYSTATE_CMS_PI_KILL_SWITCH = value;
+      if (value !== undefined) env.BAYSTATE_CMS_OCR_KILL_SWITCH = value;
       expect(loadOcrStageFlags(env).packagingOcrStageEnabled).toBe(true);
     }
   });
 
   it('dominates an in-memory override via getOcrStageFlags', () => {
-    vi.stubEnv('BAYSTATE_CMS_PI_KILL_SWITCH', 'true');
+    vi.stubEnv('BAYSTATE_CMS_OCR_KILL_SWITCH', 'true');
     overrideOcrStageFlags({ packagingOcrStageEnabled: true });
     expect(getOcrStageFlags().packagingOcrStageEnabled).toBe(false);
     vi.unstubAllEnvs();
@@ -115,7 +132,7 @@ describe('runtime override', () => {
     vi.stubEnv('BAYSTATE_CMS_PACKAGING_OCR_STAGE_SHADOW_ONLY', '');
     vi.stubEnv('BAYSTATE_CMS_PACKAGING_OCR_DUAL_RUN', '');
     vi.stubEnv('BAYSTATE_CMS_OCR_RETRIES_ENABLED', '');
-    vi.stubEnv('BAYSTATE_CMS_PI_KILL_SWITCH', '');
+    vi.stubEnv('BAYSTATE_CMS_OCR_KILL_SWITCH', '');
   });
   afterEach(() => {
     resetOcrStageFlagsOverride();

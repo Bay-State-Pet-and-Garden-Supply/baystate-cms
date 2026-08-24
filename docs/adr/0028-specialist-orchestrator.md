@@ -1,5 +1,7 @@
 # ADR 0028: Supervised Specialist Orchestrator and Lifecycle Management
 
+**Status update (2026-08): SUPERSEDED operationally by ADR-0030 (Agent Lab decommission); paths below are deleted/historical.**
+
 - Status: Accepted
 - Date: 2026-08-18
 - Issue: #56 (epic #47)

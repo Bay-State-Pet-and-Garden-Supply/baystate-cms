@@ -299,7 +299,10 @@ WHERE i.source_type = 'distributor_record'
 4. Preserve attempts, generations, conflicts, decisions, extraction rows, and
    incident measurements for post-incident review.
 5. Confirm no raw distributor image entered any downloader/draft; if it did,
-   quarantine the affected items and route through PI-6 review.
+   quarantine the affected items and re-verify via
+   `POST /api/onboarding/batches/:id/verify-distributor-imagery` (deterministic
+   image-verification gate), then resolve rights/commerce approval in the
+   review drawer before any retry.
 6. Record before/after capabilities (`configurationReason`) and reconnect
    only after the per-connector gates pass again.
 

@@ -978,25 +978,6 @@ export function PipelineBoard({
                 {item.sourceUrl}
               </div>
             )}
-            {((item.extractionData?.productIntelligenceEvidence?.length ?? 0) > 0) && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
-                <span style={{ display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 8, background: '#fef3c7', color: '#92400e' }}>
-                  🤖 Agent result available
-                </span>
-                <a
-                  href="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const first = item.extractionData?.productIntelligenceEvidence?.[0];
-                    window.location.assign(first?.runId ? `/?view=agentlab&run=${first.runId}` : '/?view=agentlab');
-                  }}
-                  style={{ fontSize: 10, color: '#2563eb', fontWeight: 600, textDecoration: 'underline' }}
-                >
-                  Open in Agent Lab →
-                </a>
-              </div>
-            )}
             {item.errorMessage && (
               <div style={{ fontSize: 10, color: '#dc2626', marginTop: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span>{item.errorMessage}</span>

@@ -1,5 +1,7 @@
 # Product Specification: Agent Lab — The Agent Training & Alignment Interface
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 **Status:** Approved Product Direction & Technical Specification  
 **Target Surface:** `src/client/components/agent-lab/` + `src/product-intelligence/`  
 **Supercedes:** Issue #24 ("Runs | Policies | Metrics" review console framing)  

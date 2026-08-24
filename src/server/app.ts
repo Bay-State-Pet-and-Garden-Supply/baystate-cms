@@ -22,7 +22,6 @@ import catalogRoutes from './routes/catalog-routes';
 import catalogClassificationRoutes from './routes/catalog-classification-routes';
 import embeddingRoutes from './routes/embedding-routes';
 import benchmarkRoutes from './routes/benchmark-routes';
-import productIntelligenceRoutes from './routes/product-intelligence-routes';
 import { sitemapRoutes } from './routes/sitemap-routes';
 import { brandHubRoutes } from './routes/brand-hub-routes';
 import { brandStrategyRoutes } from './routes/brand-strategy-routes';
@@ -98,7 +97,6 @@ app.route('/api', catalogClassificationRoutes);
 app.route('/api', embeddingRoutes);
 // Mounted exactly once under /api; route internals use /benchmark/... paths.
 app.route('/api', benchmarkRoutes);
-app.route('/api', productIntelligenceRoutes);
 app.route('/api', sitemapRoutes);
 app.route('/api', brandHubRoutes);
 app.route('/api', brandStrategyRoutes);
