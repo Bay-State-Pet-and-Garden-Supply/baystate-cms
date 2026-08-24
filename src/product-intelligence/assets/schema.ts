@@ -172,11 +172,5 @@ export const DiscoveredImageCandidateSchema = z.object({
 
 export type DiscoveredImageCandidate = z.infer<typeof DiscoveredImageCandidateSchema>;
 
-/** A #29-style captured network response (JSON body only, no raw payloads). */
-export const NetworkCaptureArtifactSchema = z.object({
-  url: z.string().url(),
-  status: z.number().int().nullish(),
-  responseContentType: z.string().nullish(),
-  jsonBody: z.unknown().nullish(),
-});
-export type NetworkCaptureArtifact = z.infer<typeof NetworkCaptureArtifactSchema>;
+/** A #29-style captured network response — canonical home: src/shared/schemas/extraction-worker.ts (ADR-0030 PR 1.3). */
+export { NetworkCaptureArtifactSchema, type NetworkCaptureArtifact } from '../../shared/schemas/extraction-worker';

@@ -6,7 +6,27 @@
  * granular paired evaluation cases, and promotion requests.
  */
 import { z } from 'zod';
-import { PiDifficultyTagSchema } from '../../product-intelligence/evaluation/gold';
+
+/** Difficulty tags — canonical home here (relocated from product-intelligence/evaluation/gold.ts, ADR-0030 PR 1.3). */
+export const PiDifficultyTagSchema = z.enum([
+  'upc_normalization',
+  'json_ld_static',
+  'shopify_variant',
+  'woocommerce_variant',
+  'multi_variant',
+  'product_family',
+  'xhr_only',
+  'interaction_required',
+  'packaging_redesign',
+  'wrong_size_retailer',
+  'discontinued',
+  'ambiguous_brand',
+  'blocked_official',
+  'distributor_conflict',
+  'image_rights_uncertainty',
+  'abstention_correct',
+]);
+export type PiDifficultyTag = z.infer<typeof PiDifficultyTagSchema>;
 
 // ─── Instruction & Example Schemas ──────────────────────────────────────────
 

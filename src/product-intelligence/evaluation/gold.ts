@@ -10,25 +10,11 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/26
  */
 import { z } from 'zod';
+import { PiDifficultyTagSchema } from '../../shared/schemas/agent-training';
 
-export const PiDifficultyTagSchema = z.enum([
-  'upc_normalization',
-  'json_ld_static',
-  'shopify_variant',
-  'woocommerce_variant',
-  'multi_variant',
-  'product_family',
-  'xhr_only',
-  'interaction_required',
-  'packaging_redesign',
-  'wrong_size_retailer',
-  'discontinued',
-  'ambiguous_brand',
-  'blocked_official',
-  'distributor_conflict',
-  'image_rights_uncertainty',
-  'abstention_correct',
-]);
+// Canonical home: src/shared/schemas/agent-training.ts (ADR-0030 PR 1.3).
+export { PiDifficultyTagSchema };
+export type { PiDifficultyTag } from '../../shared/schemas/agent-training';
 
 const PiExpectedImageSchema = z
   .object({
@@ -92,4 +78,3 @@ export const PiProductInputSchema = z.object({
 
 export type PiGoldLabels = z.infer<typeof PiGoldLabelsSchema>;
 export type PiProductInput = z.infer<typeof PiProductInputSchema>;
-export type PiDifficultyTag = z.infer<typeof PiDifficultyTagSchema>;
