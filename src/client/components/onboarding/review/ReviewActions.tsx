@@ -30,7 +30,7 @@ export interface ReviewActionsProps {
   onLooksGood: () => void;
   onPrevious: () => void;
   onNext: () => void;
-  onToggleEdit: () => void;
+  onToggleEdit?: () => void;
   onSendToCuration?: () => void;
 }
 
@@ -93,15 +93,17 @@ export function ReviewActions({
         Next →
       </button>
 
-      <button
-        type="button"
-        className="rv-btn rv-btn-secondary"
-        onClick={onToggleEdit}
-        disabled={!workState || busy}
-        title={editing ? 'Cancel editing' : 'Edit listing fields'}
-      >
-        {editing ? 'Cancel edit' : 'Edit'}
-      </button>
+      {onToggleEdit && (
+        <button
+          type="button"
+          className="rv-btn rv-btn-secondary"
+          onClick={onToggleEdit}
+          disabled={!workState || busy}
+          title={editing ? 'Cancel editing' : 'Edit listing fields'}
+        >
+          {editing ? 'Cancel edit' : 'Edit'}
+        </button>
+      )}
 
       {onSendToCuration && (
         <button

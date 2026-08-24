@@ -19,6 +19,8 @@ export interface ReviewListingPanelProps {
   onDraftChange: (draft: ReviewDraft) => void;
   onSaveEdit: () => Promise<void>;
   onCancelEdit: () => void;
+  /** V2 always-editable: show Save/Cancel only when the draft is dirty. */
+  showSaveActions?: boolean;
   saving: boolean;
   saveError: string | null;
   onOpenLightbox?: (url: string, caption: string) => void;
@@ -66,6 +68,7 @@ export function ReviewListingPanel({
   onDraftChange,
   onSaveEdit,
   onCancelEdit,
+  showSaveActions = true,
   saving,
   saveError,
   onOpenLightbox,
@@ -608,12 +611,16 @@ export function ReviewListingPanel({
                 />
               </div>
               <div className="rv-proposal-actions">
-                <button type="button" className="rv-btn rv-btn-primary" disabled={saving} onClick={() => void onSaveEdit()}>
-                  {saving ? 'Saving…' : 'Save edits'}
-                </button>
-                <button type="button" className="rv-btn rv-btn-secondary" disabled={saving} onClick={onCancelEdit}>
-                  Cancel
-                </button>
+                {showSaveActions && (
+                  <>
+                    <button type="button" className="rv-btn rv-btn-primary" disabled={saving} onClick={() => void onSaveEdit()}>
+                      {saving ? 'Saving…' : 'Save edits'}
+                    </button>
+                    <button type="button" className="rv-btn rv-btn-secondary" disabled={saving} onClick={onCancelEdit}>
+                      Cancel
+                    </button>
+                  </>
+                )}
               </div>
               {saveError && <div className="rv-error-banner">Could not save edits: {saveError}</div>}
             </div>

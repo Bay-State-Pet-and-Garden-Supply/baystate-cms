@@ -465,6 +465,12 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
    */
   const handleLooksGood = useCallback(async () => {
     if (!currentWorkState) return;
+    // Always-editable guard: unsaved draft values are NOT what approval would
+    // persist — force an explicit Save (or Cancel) before the gate runs.
+    if (v2 && editing && isDraftDirty(draftSeedRef.current, draft)) {
+      setActionError('You have unsaved edits — click “Save edits” (or Cancel) before marking reviewed.');
+      return;
+    }
     const id = currentWorkState.itemId;
     const detail = currentInspector?.detail ?? null;
 
@@ -553,15 +559,21 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     setEditing(true);
   }, [currentInspector, v2]);
 
-  /** Cancel editing; under V2 an unsaved-dirty draft needs explicit confirm. */
+  /** Cancel/revert editing. V2 fields are ALWAYS live inputs, so Cancel
+   * reverts the draft to its seeded values and stays in the form; legacy
+   * mode exits back to the read-only tree. */
   const attemptCancelEdit = useCallback((): boolean => {
     if (v2 && isDraftDirty(draftSeedRef.current, draft)) {
       if (!window.confirm('Discard unsaved changes?')) return false;
     }
+    setSaveError(null);
+    if (v2) {
+      if (draftSeedRef.current) setDraft({ ...draftSeedRef.current });
+      return true;
+    }
     setEditing(false);
     setDraft(null);
     draftSeedRef.current = null;
-    setSaveError(null);
     return true;
   }, [v2, draft]);
 
@@ -640,6 +652,16 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       });
     }
   }, [currentInspector, draft, ensureDetails, loadQueue, v2]);
+
+  // ── V2 always-editable seeding ─────────────────────────────────────────
+  // There is no read-only state to return to under V2: the listing fields are
+  // live text inputs for the item's whole visit. Seed the draft as soon as a
+  // detail is available, and reseed from refreshed server data after each
+  // save (handleSaveEdit clears the draft, this effect re-seeds it).
+  useEffect(() => {
+    if (!v2 || editing || !currentInspector?.detail) return;
+    beginEdit();
+  }, [v2, editing, currentInspector, beginEdit]);
 
   // ── e10s04 media selection ─────────────────────────────────────────────
   // Persist the reviewer media selection via the dedicated endpoint (server
@@ -728,6 +750,12 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
 
   const handleSendToCuration = useCallback(async () => {
     if (!currentWorkState) return;
+    // Always-editable guard: sending back discards the draft — require an
+    // explicit Save/Cancel decision first.
+    if (v2 && editing && isDraftDirty(draftSeedRef.current, draft)) {
+      setActionError('You have unsaved edits — click “Save edits” (or Cancel) before sending back to curation.');
+      return;
+    }
     const id = currentWorkState.itemId;
     setBusyItemIds(prev => new Set(prev).add(id));
     setActionError(null);
@@ -1055,6 +1083,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
                 onCancelEdit={() => {
                   attemptCancelEdit();
                 }}
+                showSaveActions={!v2 || draftDirty}
                 saving={busy}
                 savingMedia={busy}
                 saveError={saveError}
@@ -1091,7 +1120,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
                 onLooksGood={() => void handleLooksGood()}
                 onPrevious={() => moveTo('previous')}
                 onNext={() => moveTo('next')}
-                onToggleEdit={() => (editing ? attemptCancelEdit() : beginEdit())}
+                onToggleEdit={v2 ? undefined : () => (editing ? attemptCancelEdit() : beginEdit())}
                 onSendToCuration={() => void handleSendToCuration()}
               />
             </div>

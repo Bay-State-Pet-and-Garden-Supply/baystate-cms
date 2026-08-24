@@ -182,3 +182,21 @@ describe('ReviewListingPanel V2 form // e10s02', () => {
     r.unmount();
   });
 });
+
+describe('always-editable save bar // post-critique UX pass', () => {
+  it('hides Save/Cancel when showSaveActions is false (clean draft under V2)', async () => {
+    const p = await renderPanel({ v2: true, showSaveActions: false });
+    expect(p.text()).not.toContain('Save edits');
+    expect(p.text()).not.toContain('Cancel');
+    // Fields remain live inputs — always-editable contract.
+    expect(p.input('rv-edit-keywords')).toBeTruthy();
+    p.unmount();
+  });
+
+  it('shows Save/Cancel when dirty (showSaveActions true, the default)', async () => {
+    const p = await renderPanel({ v2: true });
+    expect(p.text()).toContain('Save edits');
+    expect(p.text()).toContain('Cancel');
+    p.unmount();
+  });
+});
