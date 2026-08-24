@@ -631,7 +631,7 @@ try {
     const res = Bun.spawnSync([
       'bash',
       '-c',
-      `ulimit -f 1024; bun '${fixture}' '${source}' '${backup}' '${report}'`,
+      `trap '' XFSZ; ulimit -f 1024; bun '${fixture}' '${source}' '${backup}' '${report}'`,
     ]);
     expect(res.exitCode).toBe(0);
     const result = JSON.parse(fs.readFileSync(report, 'utf-8'));
