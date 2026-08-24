@@ -966,7 +966,7 @@ export async function doStaticExtract(
 /**
  * Run deterministic extraction via Playwright with JS execution.
  */
-async function doRenderedExtract(request: ExtractRequest): Promise<{
+export async function doRenderedExtract(request: ExtractRequest, deps: ProfileTransportDeps = {}): Promise<{
   data: ExtractionData;
   warnings: string[];
   sourceContentHash?: string | null;
@@ -978,7 +978,7 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   const selectors = profile.selectors || {};
   const allowedSourceDomains = profile.allowedSourceDomains ?? [];
   try {
-    await assertSafeProfileDestination(sourceUrl, allowedSourceDomains);
+    await assertSafeProfileDestination(sourceUrl, allowedSourceDomains, deps);
   } catch (error) {
     warnings.push(`Rendered network denied: ${error instanceof Error ? error.message : String(error)}`);
     return buildFailedResult(request, warnings);
@@ -1462,6 +1462,9 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         sourceArtifactId: retained.sourceArtifactId,
         customFields,
         renderedHtml,
+        // The redirected URL the DOM was actually captured at — enrichment
+        // must resolve provenance/images against reality, not the request URL.
+        renderedFinalUrl: finalUrl,
       };
     },
     runnerConfig,
@@ -1523,7 +1526,9 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   try {
     await applyLadderEnrichment({
       html: extracted.renderedHtml,
-      url: sourceUrl,
+      // Final redirected URL the DOM was captured at (falls back to the
+      // request URL if the runner did not report one).
+      url: extracted.renderedFinalUrl || sourceUrl,
       data,
       expected: { name: expected.name, brandHint: request.expected?.brandHint ?? null, price: request.expected?.price ?? null, gtin: request.expected?.upc },
     });

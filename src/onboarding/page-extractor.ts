@@ -268,15 +268,14 @@ export async function extractProductData(
           console.log(`[PageExtractor] HTTP extraction succeeded and passed validation (confidence: ${validation.confidence})`);
           if (domain) recordDomainStatus(domain, 'ok');
           let result = httpResult;
-          result.price = expected?.price || null;
           if (expected?.price) {
+            // Spreadsheet price wins when present...
+            result.price = expected.price;
             result = { ...result };
             result.fieldProvenance = { ...result.fieldProvenance, price: 'spreadsheet-import' };
-          } else {
-            result = { ...result };
-            const { price: _, ...restProvenance } = result.fieldProvenance;
-            result.fieldProvenance = restProvenance;
           }
+          // ...otherwise a ladder-enriched page price survives untouched
+          // (ADR-0031: enrichment is never nulled out post-hoc).
           return result;
         }
       } else if (httpResult.title) {
@@ -310,10 +309,12 @@ export async function extractProductData(
       console.log(`[PageExtractor] Worker extraction succeeded for: ${url}`);
       if (domain) recordDomainStatus(domain, 'ok');
 
-      // Spreadsheet price override
+      // Spreadsheet price override — applied ONLY when the spreadsheet
+      // actually carries a price. A ladder-enriched page price must survive
+      // with its provenance intact (ADR-0031).
       const result = workerResult.data;
-      result.price = expected?.price || null;
       if (expected?.price) {
+        result.price = expected.price;
         result.fieldProvenance = { ...result.fieldProvenance, price: 'spreadsheet-import' };
       }
 

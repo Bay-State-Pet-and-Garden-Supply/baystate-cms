@@ -38,6 +38,7 @@ The ladder contributes two things page-extractor lacks:
 2. **Failure isolation** — each enrichment layer runs in its own try/catch; any failure degrades to "no enrichment" and can never fail extraction. `applyLadderEnrichment` additionally honors a NEVER-THROWS contract for `data` mutations (including the identity fields): even a frozen/sealed target only degrades enrichment — the returned outcome stays authoritative.
 3. **No new network by default** — zero additional requests unless `allowShopifyProductJson` is explicitly enabled.
 4. **Profile execution stays singular** — approved profiles continue to execute exclusively via the extraction worker (Crawlee/Camoufox, ADR 0009). We deliberately did NOT route profiles through the ladder's static-cheerio layer-4 seam: a second execution path with different rendering semantics would produce inconsistent results for the same profile. The seam remains available for future lightweight static validation probes.
+5. **Residual unenriched path (accepted):** the no-profile direct-Playwright fallback inside `extractProductData` remains UNENRICHED. It is only reachable for domains without an approved profile before the profile-required block, and enrichment there would widen the change surface without a production consumer today. Note also that on this path the legacy behavior of nulling `price` when no spreadsheet price exists is deliberately preserved — it predates the ladder and never interacts with ladder provenance.
 
 ## Consequences
 
