@@ -846,8 +846,12 @@ async function processTargetInternal(
   }
 
   const proposals = llmResult.values.map(v => {
-    const singlePacket = buildPacket(v);
-    return builder.buildProposal(v, llmResult.confidence, {
+    const opt = options.find(
+      o => o.label.toLowerCase() === v.toLowerCase() || o.value.toLowerCase() === v.toLowerCase(),
+    );
+    const proposalValue = targetConfig.kind === 'product_type' ? (opt?.value ?? v) : v;
+    const singlePacket = buildPacket(proposalValue);
+    return builder.buildProposal(proposalValue, llmResult.confidence, {
       evidenceIds: singlePacket.evidenceIds,
       supportingEvidenceIds: singlePacket.supportingEvidenceIds,
       contradictingEvidenceIds: singlePacket.contradictingEvidenceIds,
