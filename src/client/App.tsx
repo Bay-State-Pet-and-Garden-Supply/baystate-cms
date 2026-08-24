@@ -177,7 +177,8 @@ function App() {
     // forces a specific tab.
     if (newView === 'settings') {
       const settingsTab = url.searchParams.get('tab');
-      if (settingsTab !== 'ai' && settingsTab !== 'catalog') {
+      const validSettingsTabs = ['ai', 'catalog', 'ai-tasks', 'types', 'mappings-health'];
+      if (!validSettingsTabs.includes(settingsTab ?? '')) {
         url.searchParams.delete('tab');
       }
     } else {
@@ -464,7 +465,7 @@ function App() {
 
         {view === 'syncjobs' && <SyncJobsView />}
 
-        {view === 'settings' && <Settings />}
+        {view === 'settings' && <Settings onSelectProduct={handleOpenProduct} />}
 
             {view === 'agentlab' && <AgentLab />}
           </>

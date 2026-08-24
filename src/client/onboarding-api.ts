@@ -1584,3 +1584,38 @@ export async function getBrandStrategies(): Promise<{ strategies: import('../sha
 }
 
 
+
+// ─── Taxonomy release status + sanctioned activation (P4) ─────────────────────
+
+export interface TaxonomyReleaseRevisionInfo {
+  revision: string;
+  schemaVersion: number | null;
+  lifecycle: string | null;
+  counts: Record<string, number>;
+  manifestHashesOk: boolean;
+  errorCount: number;
+  warningCount: number;
+}
+
+export interface TaxonomyReleaseStatus {
+  activeRevision: string | null;
+  updatedAt: string | null;
+  defaultRevision: string;
+  v4Revision: string;
+  /** Server-side admin gate state — the client NEVER guesses (defense in depth). */
+  adminEnabled: boolean;
+  availableRevisions: TaxonomyReleaseRevisionInfo[];
+}
+
+export async function getTaxonomyReleaseStatus(): Promise<TaxonomyReleaseStatus> {
+  return request<TaxonomyReleaseStatus>('/settings/taxonomy-release');
+}
+
+export async function pinTaxonomyRelease(
+  revision: string,
+): Promise<{ success: boolean; activeRevision: string; updatedAt: string }> {
+  return request('/settings/taxonomy-release/pin', {
+    method: 'POST',
+    body: JSON.stringify({ revision }),
+  });
+}
