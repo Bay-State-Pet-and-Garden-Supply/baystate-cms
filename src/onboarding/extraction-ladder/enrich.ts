@@ -228,10 +228,9 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
   }
 
   // ── Identity classification (additive diagnostics) ───────────────────────
-  let identityStatus: PageIdentityStatus = 'insufficient_evidence';
-  let identityReasons: string[] = [];
+  let identity: { status: PageIdentityStatus; reasons: string[] };
   try {
-    const identity = classifyPageIdentity({
+    identity = classifyPageIdentity({
       requestedGtin: options.expected?.gtin?.replace(/\D/g, '') ?? '',
       extractedGtins: gtins.map((g) => g.value),
       sku: null,
@@ -244,15 +243,13 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
       singleVariantProof: platformVariantCount === 1,
       selectedVariantLinkage: false,
     });
-    identityStatus = identity.status;
-    identityReasons = identity.reasons;
   } catch {
-    identityReasons = ['identity classification failed'];
+    identity = { status: 'insufficient_evidence', reasons: ['identity classification failed'] };
   }
-  data.identityStatus = identityStatus;
-  data.identityReasons = identityReasons;
+  data.identityStatus = identity.status;
+  data.identityReasons = identity.reasons;
 
-  return { layersUsed: [...new Set(layersUsed)], fills, identityStatus, identityReasons };
+  return { layersUsed: [...new Set(layersUsed)], fills, identityStatus: identity.status, identityReasons: identity.reasons };
 }
 
 function countVariants(variants: unknown): number | undefined {
