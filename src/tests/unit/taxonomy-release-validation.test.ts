@@ -7,6 +7,7 @@
  * `ReleaseValidationError` (code `release_invalid`).
  */
 import { afterAll, describe, expect, it } from 'bun:test';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -60,6 +61,78 @@ function readJson<T>(dir: string, fileName: string): T {
 function errorCodes(report: ReleaseValidationReport): string[] {
   return report.findings.filter(f => f.severity === 'error').map(f => f.code);
 }
+
+// ── P2 disposition codification (plan B.P2.1) ────────────────────────────────
+
+describe('taxonomy release validation — P2 disposition rules', () => {
+  it('rule b: removing an exported attribute from every profile fails closed', () => {
+    const dir = trackedTempReleaseCopy('rule-b');
+    const profilesFile = readJson<{ entries: Array<{ id: string; attributes: Array<{ attributeId: string }> }> }>(dir, 'attribute-profiles.json');
+    // 'color' is exported and non-universal in v3; strip it from every profile.
+    for (const profile of profilesFile.entries) {
+      profile.attributes = profile.attributes.filter((a: { attributeId: string }) => a.attributeId !== 'color');
+    }
+    writeJson(dir, 'attribute-profiles.json', profilesFile);
+    const report = validateTaxonomyRelease(dir);
+    expect(report.ok).toBe(false);
+    const finding = report.findings.find(f => f.code === 'exported_attribute_without_profile_membership');
+    expect(finding).toBeDefined();
+    expect(finding?.message).toContain('"color"');
+  });
+
+  it('rule b: universal exported attributes without profile membership stay valid', () => {
+    // The committed release maps brand/product-type (universal, profile-less).
+    // If the universal exemption were missing, this existing test would fail.
+    const report = validateTaxonomyRelease(RELEASE_DIR);
+    expect(errorCodes(report)).not.toContain('exported_attribute_without_profile_membership');
+  });
+
+  it('rule c: an attribute retired across two consecutive releases yields an advisory warning only', () => {
+    // Build baseline + child releases in one temp root: child = full copy of
+    // v3 renamed to bay-state-v9, sourceBaseline pinned at bay-state-v3.
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taxonomy-release-retire-'));
+    tmpDirs.push(tmpRoot);
+    fs.cpSync(RELEASE_DIR, path.join(tmpRoot, 'bay-state-v3'), { recursive: true });
+    const childDir = path.join(tmpRoot, 'bay-state-v9');
+    fs.cpSync(RELEASE_DIR, childDir, { recursive: true });
+    const manifest = readJson<Record<string, unknown>>(childDir, 'manifest.json');
+    manifest.releaseId = 'bay-state-v9';
+    manifest.revision = 'bay-state-v9';
+    manifest.sourceBaseline = 'bay-state-v3';
+    writeJson(childDir, 'manifest.json', manifest);
+    // Rebind envelope provenance to the child id so Rule 12 origin checks pass,
+    // then refresh manifest hashes for every rewritten file.
+    const rewritten = new Set<string>();
+    for (const fileName of ['departments.json', 'product-types.json', 'attributes.json', 'attribute-profiles.json', 'export-mappings.json', 'guidance.json']) {
+      const envelope = readJson<{ bundleOrigin?: { kind?: string; releaseId?: string } }>(childDir, fileName);
+      if (envelope.bundleOrigin?.kind === 'release') {
+        envelope.bundleOrigin.releaseId = 'bay-state-v9';
+        writeJson(childDir, fileName, envelope);
+        rewritten.add(fileName);
+      }
+    }
+    const fileVersions = manifest.fileVersions as Record<string, string>;
+    for (const fileName of rewritten) {
+      fileVersions[fileName] = crypto.createHash('sha256').update(fs.readFileSync(path.join(childDir, fileName))).digest('hex');
+    }
+    writeJson(childDir, 'manifest.json', manifest);
+
+    const report = validateTaxonomyRelease(childDir);
+    // Advisory NEVER blocks.
+    expect(report.ok).toBe(true);
+    const warnings = report.findings.filter(f => f.code === 'retire_candidate');
+    expect(warnings.length).toBe(8); // the eight unmapped attributes
+    expect(warnings.every(w => w.severity === 'warning')).toBe(true);
+    expect(warnings.some(w => w.message.includes('btu-rating'))).toBe(true);
+  });
+
+  it('rule c: no advisory when the baseline release is absent', () => {
+    // The committed v3 declares a snapshot baseline that is not under releases/;
+    // the check must silently skip rather than fabricate findings.
+    const report = validateTaxonomyRelease(RELEASE_DIR);
+    expect(report.findings.filter(f => f.code === 'retire_candidate')).toEqual([]);
+  });
+});
 
 describe('taxonomy release validation — committed bay-state-v3', () => {
   it('validates the committed release with expected counts', () => {

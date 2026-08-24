@@ -241,6 +241,32 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItemWithEntryPolicy {
 
 // ─── INSERT ────────────────────────────────────────────────────────────────────
 
+/** Row projection of curation_data_json for read-only analysis tooling
+ *  (e.g. the P2 mapping-coverage audit). Deliberately minimal: no stage/status
+ *  hydration, no acceptance joins — callers parse the JSON payload themselves. */
+export interface CurationDataHistoryRow {
+  id: string;
+  upc: string;
+  name: string;
+  curationDataJson: string | null;
+}
+
+/** Read-only scan of every onboarding item's persisted curation payload.
+ *  Used by offline audit scripts (repository pattern: SQL lives here, never in
+ *  scripts); NOT used by any runtime pipeline path. */
+export function listCurationDataRows(): CurationDataHistoryRow[] {
+  const db = getDb();
+  const rows = db.query(
+    'SELECT id, upc, name, curation_data_json FROM onboarding_items ORDER BY id ASC',
+  ).all() as Array<Record<string, unknown>>;
+  return rows.map(row => ({
+    id: String(row.id),
+    upc: String(row.upc),
+    name: String(row.name),
+    curationDataJson: row.curation_data_json ? String(row.curation_data_json) : null,
+  }));
+}
+
 export function insertItems(
   batchId: string,
   items: InsertItemData[],
