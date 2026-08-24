@@ -106,6 +106,28 @@ export function getVlmConfig(): VlmConfig | null {
 }
 
 /**
+ * Sniff the image MIME type from the decoded base64 payload's magic header:
+ * JPEG (FF D8 FF), PNG (89 50 4E 47), GIF (47 49 46 38), WebP (RIFF…WEBP).
+ * Anything else (including undecodable payloads) defaults to `image/jpeg` —
+ * the historical hardcoded value — so legacy callers stay byte-compatible.
+ * Pure function; exported for unit tests.
+ */
+export function sniffImageMimeType(base64: string): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
+  const buf = Buffer.from(String(base64 ?? ''), 'base64');
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length >= 4 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif';
+  if (
+    buf.length >= 12 &&
+    buf.toString('latin1', 0, 4) === 'RIFF' &&
+    buf.toString('latin1', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return 'image/jpeg';
+}
+
+/**
  * Result of a dispatcher-routed VLM call.
  */
 export interface DispatchedVlmResult {
@@ -161,7 +183,7 @@ export async function callVlmWithDispatcher(
   // openai-compatible connection. The dispatcher re-resolves the same route
   // with `resolveWorkloadRoute`, so primary/fallback and the image
   // data-sharing policy stay consistent with getVlmConfig().
-  const dataUri = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
+  const dataUri = imageBase64.startsWith('data:') ? imageBase64 : `data:${sniffImageMimeType(imageBase64)};base64,${imageBase64}`;
   const result = await dispatchWorkloadChat(
     'visionOcr',
     [
@@ -208,7 +230,7 @@ export async function callVlm(
     headers.Authorization = `Bearer ${config.credential}`;
   }
 
-  const dataUri = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
+  const dataUri = imageBase64.startsWith('data:') ? imageBase64 : `data:${sniffImageMimeType(imageBase64)};base64,${imageBase64}`;
 
   // P3-T2: apply optional sampling options per transport. Absent options ⇒
   // byte-identical bodies as before (fields are only added when defined).

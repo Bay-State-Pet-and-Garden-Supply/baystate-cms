@@ -12,6 +12,7 @@
  */
 
 import { getVlmConfig, callVlm, callVlmWithDispatcher, type VlmConfig } from './vlm-client';
+import * as nodePath from 'node:path';
 import { isLoopbackBaseUrl, redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
 import { getOcrStageFlags } from '../classification/ocr-stage-flags';
 import { isPrivateLanHost } from '../ai/provider-connections';
@@ -218,18 +219,26 @@ async function loadImageWithReason(
     return null;
   };
 
-  // Try local path first (for items where images were downloaded)
+  // Try local path first (for items where images were downloaded).
+  // Containment: absolute candidates are rejected outright and relative
+  // candidates must resolve INSIDE workspacePath (`..` traversal ⇒ treated
+  // as missing; the loader continues to the next strategy with its coded
+  // failure taxonomy intact).
   if (imageLocalPath && workspacePath) {
-    const resolved = pathResolve(workspacePath, imageLocalPath);
-    const local = await readLocalFile(resolved);
-    if (local) return local;
+    const resolved = resolveWorkspaceContainedPath(workspacePath, imageLocalPath);
+    if (resolved) {
+      const local = await readLocalFile(resolved);
+      if (local) return local;
+    }
   }
 
   // Try resolving the image URL as a local path if it's not a remote URL
   if (!isRemoteUrl(imageUrl) && workspacePath) {
-    const resolved = pathResolve(workspacePath, imageUrl);
-    const local = await readLocalFile(resolved);
-    if (local) return local;
+    const resolved = resolveWorkspaceContainedPath(workspacePath, imageUrl);
+    if (resolved) {
+      const local = await readLocalFile(resolved);
+      if (local) return local;
+    }
   }
 
   // Remote URL — fetch in-memory
@@ -339,7 +348,13 @@ export function coercePackagingOcrData(
   };
 
   const normalizeString = (val: unknown): string | null => {
-    if (typeof val === 'string' && val.trim()) return val.trim();
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      // Placeholder strings ("null", "none", "N/A", "unknown", …) are VLM
+      // non-answers, not data — persist them as null instead of literal junk.
+      if (!trimmed || /^(null|none|n\/a|na|unknown|n\.a\.)$/i.test(trimmed)) return null;
+      return trimmed;
+    }
     if (typeof val === 'number' || typeof val === 'boolean') return String(val);
     return null;
   };
@@ -1103,10 +1118,28 @@ export function mergeOcrResults(results: PackagingOcrData[]): PackagingOcrData {
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Minimal path.resolve that doesn't require importing 'path' at module level.
+ * Resolve a candidate local image path STRICTLY inside the workspace.
+ *
+ * Containment rules (security fix):
+ * - Relative candidates are joined onto the resolved workspace root and
+ *   normalized; any result escaping the root (`..` traversal) returns null.
+ * - Absolute candidates are honored ONLY when they already resolve INSIDE
+ *   the workspace root (legacy extraction rows legitimately store absolute
+ *   paths for downloaded workspace images); an absolute path pointing
+ *   anywhere else returns null. This is the conservative subset of "reject
+ *   absolute outright": full rejection would break every legitimate stored
+ *   absolute workspace image, and containment is the invariant that matters.
+ *
+ * Returns the contained absolute path, or null when the candidate is
+ * empty/escaping (callers treat null as "candidate missing" and continue to
+ * the next load strategy).
  */
-function pathResolve(base: string, relative: string): string {
-  // Simple implementation that handles the common cases
-  if (relative.startsWith('/')) return relative;
-  return `${base.replace(/\/+$/, '')}/${relative.replace(/^\/+/, '')}`;
+function resolveWorkspaceContainedPath(workspacePath: string, candidate: string): string | null {
+  const trimmed = typeof candidate === 'string' ? candidate.trim() : '';
+  if (!trimmed) return null;
+  const base = nodePath.resolve(workspacePath);
+  const isAbsolute = nodePath.isAbsolute(trimmed) || /^[a-zA-Z]:[\\/]/.test(trimmed);
+  const resolved = isAbsolute ? nodePath.resolve(trimmed) : nodePath.resolve(base, trimmed);
+  if (resolved !== base && !resolved.startsWith(base + nodePath.sep)) return null;
+  return resolved;
 }

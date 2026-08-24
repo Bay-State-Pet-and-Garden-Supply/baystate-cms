@@ -21,7 +21,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { initDb, closeDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import { upsertApiKey, deleteApiKey } from '../../db/repositories/api-key-repo';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createRun } from '../../db/repositories/classification-run-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
@@ -39,6 +39,7 @@ import {
 } from '../../classification/ocr-stage-flags';
 import { packagingOcrStage, getAuthoritativePackagingOcrStageOutput } from '../../classification/stages/packaging-ocr-stage';
 import { evidenceExtractionStage } from '../../classification/stages/evidence-extraction';
+import { getVlmConfig } from '../../onboarding/vlm-client';
 import type { StageContext, StageInput } from '../../classification/types';
 
 let tmpDir: string;
@@ -354,15 +355,67 @@ describe('packaging_ocr stage — shadow-mode isolation', () => {
   });
 });
 
-describe('packaging_ocr stage — run-bound plan-compat denial', () => {
-  it('surfaces as a CODED failure outcome, never a throw', async () => {
+describe('packaging_ocr stage — frozen-route authority (FIX-1)', () => {
+  it('executes against the FROZEN route even when mutable settings are disabled afterwards', async () => {
+    const { server, port } = await startOllamaServer(STAGE_OCR_JSON);
+    try {
+      seedWorkspace();
+      const img = seedLocalImage();
+      // Freeze the local VLM route into the snapshot FIRST…
+      const snapshot = makeSnapshot(`http://127.0.0.1:${port}`);
+      // …then remove the mutable settings entirely so getVlmConfig() returns
+      // null. Availability must come from the frozen plan entry, not settings.
+      deleteApiKey('ollama_vlm');
+      expect(getVlmConfig()).toBeNull();
+      const item = seedItem({ ext: { title: 'Web Title', primaryImage: img } });
+      overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: false });
+
+      const result = await packagingOcrStage.execute(makeInput(item.id), makeContext({}, snapshot));
+
+      expect(result.status).toBe('succeeded');
+      if (result.status !== 'succeeded') return;
+      const meta = result.output.metadata as Record<string, any>;
+      expect(meta.shadowOnly).toBe(false);
+      expect((meta.packagingOcrData as any).productName).toBe('Stage Kibble');
+      expect((meta.ocrOutcome as any).status).toBe('succeeded');
+      const stored = JSON.parse(readExtRaw(item.id)!) as Record<string, any>;
+      expect(stored.packagingOcrData.productName).toBe('Stage Kibble');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does NOT attempt when the run snapshot carries NO frozen route (mutable settings never enable a run-bound leg)', async () => {
     seedWorkspace();
     const img = seedLocalImage();
-    // Snapshot built BEFORE the VLM is configured ⇒ frozen plan entry has NO
-    // local VLM route; configuring afterwards keeps the local leg runnable so
-    // the denial comes from the frozen-route guard itself.
+    // Snapshot built BEFORE any VLM is configured ⇒ plan entry has NO local
+    // route. Configuring mutable settings afterwards must NOT enable the leg.
     const snapshot = makeSnapshot(null);
     upsertApiKey('ollama_vlm', 'enabled', 'http://127.0.0.1:1', 'late-model');
+    const item = seedItem({ ext: { title: 'Web Title', primaryImage: img } });
+    overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: false });
+
+    const result = await packagingOcrStage.execute(makeInput(item.id), makeContext({}, snapshot));
+
+    expect(result.status).toBe('succeeded');
+    if (result.status === 'succeeded') {
+      const outcome = (result.output.metadata as any).ocrOutcome;
+      expect(outcome.localStatus).toBe('disabled');
+      expect(outcome.cloudStatus).toBe('disabled');
+      expect(outcome.status).toBe('disabled');
+    }
+    // Zero transports: no model-call rows at all.
+    const calls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
+    expect(calls.cnt).toBe(0);
+  });
+
+  it('surfaces an incompatible FROZEN ROUTE as a CODED failure outcome, never a throw', async () => {
+    seedWorkspace();
+    const img = seedLocalImage();
+    // Freeze a NON-LOOPBACK local VLM route: the plan entry exists (so the
+    // leg is enabled per the frozen-route authority) but the route guard
+    // denies it before any transport — as a coded failure, never a throw.
+    const snapshot = makeSnapshot('http://192.168.1.99:1234');
     const item = seedItem({ ext: { title: 'Web Title', primaryImage: img } });
     overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: false });
 
@@ -428,5 +481,54 @@ describe('evidence_extraction consumes fresh packaging_ocr stage output', () => 
     // Inline OCR was suppressed: zero model-call rows were created.
     const calls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
     expect(calls.cnt).toBe(0);
+  });
+
+  it('suppresses inline OCR when the stage ran THIS RUN non-shadow but FAILED (FIX-2)', async () => {
+    seedWorkspace();
+    const legacyOutcome = { status: 'succeeded', model: 'legacy-vlm', imageCount: 1 };
+    const item = seedItem({
+      ext: {
+        title: 'Acme Web Title',
+        brand: 'Acme',
+        // Remote images: if the pass-through were NOT suppressed, extract
+        // ProductEvidence would attempt a real network fetch for OCR.
+        primaryImage: 'https://img.example.com/primary.jpg',
+        additionalImages: ['https://img.example.com/extra.jpg'],
+        ocrOutcome: legacyOutcome,
+      },
+    });
+    const before = readExtRaw(item.id);
+
+    const result = await evidenceExtractionStage.execute(
+      {
+        ...makeInput(item.id),
+        stageOutputs: {
+          packaging_ocr: {
+            evidence: [],
+            proposals: [],
+            abstained: false,
+            // Non-shadow FAILURE outcome: an ocrOutcome object, shadowOnly
+            // !== true, and NO packagingOcrData — the stage owns this run's
+            // OCR authority keys even though it produced no data.
+            metadata: {
+              ocrOutcome: { status: 'failed', localStatus: 'failed', localFailureReason: 'timeout', imageCount: 2 },
+              shadowOnly: false,
+            },
+          },
+        },
+      } as unknown as StageInput,
+      makeContext(),
+    );
+
+    expect(result.status).toBe('succeeded');
+    if (result.status === 'succeeded') {
+      // No visual evidence was materialized (the stage produced no data).
+      expect(result.output.evidence.some(e => (e.metadata as any)?.provenance === 'packaging_ocr')).toBe(false);
+    }
+    // Zero duplicate transports: inline VLM/cloud OCR never ran.
+    const calls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
+    expect(calls.cnt).toBe(0);
+    // The extraction_data_json write-back was skipped — byte-identical state.
+    expect(readExtRaw(item.id)).toBe(before);
   });
 });

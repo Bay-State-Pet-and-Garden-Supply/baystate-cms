@@ -60,8 +60,10 @@ function jaccard(a: string[], b: string[]): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-/** Digit-exact UPC comparison (both sides expected to be digits-only). */
-export function upcMatches(predicted: string | null | undefined, expected: string | null): boolean {
+/** Digit-exact UPC comparison (both sides expected to be digits-only). The
+ *  expected label accepts undefined because labels are Partial — an omitted
+ *  UPC label is simply "no expected value" (false, like null). */
+export function upcMatches(predicted: string | null | undefined, expected: string | null | undefined): boolean {
   if (!expected) return false;
   if (!predicted) return false;
   return predicted.replace(/\D/g, '') === expected.replace(/\D/g, '');
@@ -209,6 +211,10 @@ export function aggregateCandidateReport(
     if (!expected) continue;
     const predRecord = (outcome.data ?? null) as unknown as Record<string, unknown> | null;
     for (const field of OCR_SCALAR_FIELDS) {
+      // Only explicitly labeled-null scalars enter the denominator. With the
+      // Partial label schema, an OMITTED (undefined) key means "not hand
+      // labeled" — counting it would treat unlabeled arrays/omissions as
+      // asserted-absence labels and skew the rate.
       if (expected[field] !== null) continue;
       labelNullFields += 1;
       const v = predRecord ? predRecord[field] : undefined;

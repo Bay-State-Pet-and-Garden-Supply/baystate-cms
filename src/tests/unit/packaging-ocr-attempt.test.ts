@@ -401,6 +401,63 @@ describe('circuit breaker ignores deterministic HTTP failures', () => {
   });
 });
 
+// ─── loader containment (FIX-4) ───────────────────────────────────────────────
+
+describe('loadImageWithReason workspace containment', () => {
+  it('reads a basename local candidate inside the workspace (existing behavior kept)', async () => {
+    seedLegacyVlm();
+    const transport = contentTransport('{"productName":"Contained OK"}');
+    const result = await runPackagingOcrAttempt(makeParams({ modelFetchFn: transport.fn }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data.productName).toBe('Contained OK');
+    expect(transport.calls()).toBe(1);
+  });
+
+  it('rejects an ABSOLUTE imageLocalPath pointing outside the workspace', async () => {
+    seedLegacyVlm();
+    // A readable image OUTSIDE the workspace — the loader must never touch it.
+    const outsidePath = path.join(path.dirname(tmpDir), `outside-${path.basename(tmpDir)}.bin`);
+    fs.writeFileSync(outsidePath, Buffer.alloc(2048, 0x64));
+    try {
+      // Non-remote imageUrl ⇒ after both contained local strategies fail, the
+      // attempt ends as a coded no_image WITHOUT any transport.
+      const result = await runPackagingOcrAttempt(makeParams({
+        imageUrl: 'definitely-missing-inside-workspace.bin',
+        imageLocalPath: outsidePath,
+        modelFetchFn: contentTransport('{"productName":"MUST NOT RUN"}').fn,
+      }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reasonCode).toBe('no_image');
+    } finally {
+      fs.rmSync(outsidePath, { force: true });
+    }
+  });
+
+  it('rejects a ../ traversal imageLocalPath that escapes the workspace', async () => {
+    seedLegacyVlm();
+    const result = await runPackagingOcrAttempt(makeParams({
+      imageUrl: 'definitely-missing-inside-workspace.bin',
+      // ../img.bin escapes tmpDir (the workspace) even though the target exists.
+      imageLocalPath: `..${path.sep}${path.basename(seedLocalImage())}`,
+      modelFetchFn: contentTransport('{"productName":"MUST NOT RUN"}').fn,
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasonCode).toBe('no_image');
+  });
+
+  it('still normalizes interior .. segments that stay INSIDE the workspace', async () => {
+    seedLegacyVlm();
+    const imgName = path.basename(seedLocalImage());
+    const transport = contentTransport('{"productName":"Interior DotDot OK"}');
+    const result = await runPackagingOcrAttempt(makeParams({
+      imageLocalPath: `sub${path.sep}..${path.sep}${imgName}`,
+      modelFetchFn: transport.fn,
+    }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data.productName).toBe('Interior DotDot OK');
+  });
+});
+
 // ─── heartbeat-loss propagation (post-review fixup 2) ─────────────────────────
 
 /** Minimal catalog evidence fixture (mirrors cohort-freeze.test.ts). */

@@ -250,13 +250,30 @@ function isOcrSettled(item: OnboardingItem): boolean {
   return status === 'succeeded' || status === 'disabled' || status === 'failed' || status === 'no_image';
 }
 
+/** Scalar OCR fields whose non-null presence counts as usable content. */
+const OCR_CONTENT_SCALAR_FIELDS = [
+  'productName', 'brand', 'upc', 'size', 'weight', 'count',
+  'flavorVariety', 'color', 'material', 'lifeStage', 'breedSize', 'productForm',
+] as const;
+
+/** Array OCR fields whose non-empty presence counts as usable content. */
+const OCR_CONTENT_ARRAY_FIELDS = [
+  'species', 'healthConcernFunction', 'dietaryLabels',
+  'ingredients', 'ingredientKeywords', 'claims', 'visibleTextLines',
+] as const;
+
 /** True when a parsed OCR result carries usable content (same rule as the
  *  evidence extractor). */
 function hasOcrContent(ocr: PackagingOcrData | undefined | null): boolean {
   if (!ocr) return false;
-  if (ocr.productName && ocr.productName.trim().length > 0) return true;
-  if (ocr.brand && ocr.brand.trim().length > 0) return true;
-  if (ocr.visibleTextLines && ocr.visibleTextLines.some(b => b && b.trim().length > 0)) return true;
+  for (const field of OCR_CONTENT_SCALAR_FIELDS) {
+    const value = ocr[field];
+    if (typeof value === 'string' && value.trim().length > 0) return true;
+  }
+  for (const field of OCR_CONTENT_ARRAY_FIELDS) {
+    const arr = ocr[field];
+    if (Array.isArray(arr) && arr.some(b => b && b.trim().length > 0)) return true;
+  }
   return false;
 }
 

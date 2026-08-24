@@ -25,6 +25,7 @@ import pathMod from 'node:path';
 import { runPackagingOcrAttempt } from '../packaging-ocr';
 import type { ExtractPackagingOcrParams } from '../packaging-ocr';
 import type { NetworkFetch } from '../vlm-client';
+import { isLoopbackBaseUrl } from '../../classification/model-policy-gateway';
 import {
   decodeInlineImage,
   isInlineImageRef,
@@ -135,6 +136,17 @@ export async function evaluateCandidatesAgainstGolden(
       );
     }
     seenLabels.add(label);
+  }
+
+  // Post-review security fixup (eval loopback-only): every candidate baseUrl
+  // must resolve to THIS machine BEFORE any golden image is staged or any
+  // transport call is made. The harness contract is strictly local-only.
+  for (const candidate of options.candidates) {
+    if (!isLoopbackBaseUrl(candidate.baseUrl)) {
+      throw new Error(
+        `OCR eval candidate "${candidate.label ?? candidate.model}" has a non-loopback baseUrl (${candidate.baseUrl}); the evaluation harness may only target loopback endpoints.`,
+      );
+    }
   }
 
   const resolvedBaselineModel = options.baselineModel ?? 'unknown-baseline';

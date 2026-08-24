@@ -30,27 +30,34 @@ export const GOLDEN_DATASET_SCHEMA_VERSION = 1;
  * (src/shared/schemas/onboarding.ts): UPC labels are digit-exact (8–14
  * digits), string labels compare case-folded + trimmed, array labels compare
  * as sets (see metrics.ts). `confidenceByField`/`metadata` are not labeled.
+ *
+ * PARTIAL semantics: every field is optional — an OMITTED key means "not
+ * hand-labeled" and is skipped by scoring (fieldMatches returns null; the
+ * hallucination denominator excludes it). This is different from an explicit
+ * `null`, which asserts labeled ABSENCE. Arrays deliberately carry NO
+ * `.default([])`: a defaulted empty array would silently turn every omission
+ * into an asserted-absence label.
  */
 export const GoldenOcrExpectedSchema = z.object({
-  productName: z.string().nullable(),
-  brand: z.string().nullable(),
-  species: z.array(z.string()).default([]),
-  upc: z.string().regex(/^\d{8,14}$/).nullable(),
-  flavorVariety: z.string().nullable(),
-  color: z.string().nullable(),
-  material: z.string().nullable(),
-  size: z.string().nullable(),
-  weight: z.string().nullable(),
-  count: z.string().nullable(),
-  lifeStage: z.string().nullable(),
-  breedSize: z.string().nullable(),
-  productForm: z.string().nullable(),
-  healthConcernFunction: z.array(z.string()).default([]),
-  dietaryLabels: z.array(z.string()).default([]),
-  ingredients: z.array(z.string()).default([]),
-  ingredientKeywords: z.array(z.string()).default([]),
-  claims: z.array(z.string()).default([]),
-  visibleTextLines: z.array(z.string()).default([]),
+  productName: z.string().nullable().optional(),
+  brand: z.string().nullable().optional(),
+  species: z.array(z.string()).optional(),
+  upc: z.string().regex(/^\d{8,14}$/).nullable().optional(),
+  flavorVariety: z.string().nullable().optional(),
+  color: z.string().nullable().optional(),
+  material: z.string().nullable().optional(),
+  size: z.string().nullable().optional(),
+  weight: z.string().nullable().optional(),
+  count: z.string().nullable().optional(),
+  lifeStage: z.string().nullable().optional(),
+  breedSize: z.string().nullable().optional(),
+  productForm: z.string().nullable().optional(),
+  healthConcernFunction: z.array(z.string()).optional(),
+  dietaryLabels: z.array(z.string()).optional(),
+  ingredients: z.array(z.string()).optional(),
+  ingredientKeywords: z.array(z.string()).optional(),
+  claims: z.array(z.string()).optional(),
+  visibleTextLines: z.array(z.string()).optional(),
 });
 
 export const GoldenOcrEntrySchema = z.object({
@@ -108,6 +115,15 @@ export function loadGoldenDatasetFromJson(raw: string): LoadedGoldenDataset {
   const result = GoldenOcrDatasetSchema.safeParse(parsed);
   if (!result.success) {
     throw new Error(`Golden OCR dataset failed validation: ${result.error.message}`);
+  }
+  // Fail closed on UNKNOWN FUTURE schema majors: a dataset written by a newer
+  // harness may carry label semantics this build cannot score faithfully —
+  // evaluating it would produce silently wrong metrics. Older versions are
+  // still accepted (the schema itself gates the floor).
+  if (result.data.schemaVersion > GOLDEN_DATASET_SCHEMA_VERSION) {
+    throw new Error(
+      `Golden OCR dataset schemaVersion ${result.data.schemaVersion} is newer than the supported version ${GOLDEN_DATASET_SCHEMA_VERSION}; upgrade Baystate CMS before evaluating.`,
+    );
   }
   const seen = new Set<string>();
   for (const entry of result.data.entries) {

@@ -114,6 +114,28 @@ describe('golden dataset loading', () => {
     expect(() => loadGoldenDatasetFromJson(validDatasetJson([entry]))).toThrow();
   });
 
+  it('accepts PARTIAL labels: omitted keys mean "not hand labeled", not asserted absence (FIX-3)', () => {
+    const entry = validEntryJson({
+      expected: { productName: 'Partial Dog Treats', upc: '036000291452' },
+    });
+    const loaded = loadGoldenDatasetFromJson(validDatasetJson([entry]));
+    const expected = loaded.entries[0]!.expected as unknown as Record<string, unknown>;
+    expect(expected.productName).toBe('Partial Dog Treats');
+    // Omitted keys are ABSENT (no silent default([]) injection).
+    expect(Object.prototype.hasOwnProperty.call(expected, 'brand')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(expected, 'species')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(expected, 'visibleTextLines')).toBe(false);
+  });
+
+  it('fails closed on a FUTURE schemaVersion (FIX-9)', () => {
+    const future = JSON.stringify({
+      schemaVersion: GOLDEN_DATASET_SCHEMA_VERSION + 1,
+      name: 'from-the-future',
+      entries: [validEntryJson()],
+    });
+    expect(() => loadGoldenDatasetFromJson(future)).toThrow(/newer than the supported version/);
+  });
+
   it('supports inline base64 imageRefs with round-trip decoding', () => {
     const bytes = Buffer.alloc(2048, 7);
     const ref = `inline:${bytes.toString('base64')}`;
@@ -200,6 +222,16 @@ describe('fieldMatches normalization rules', () => {
     expect(fieldMatches('upc', pred({ upc: '036000291452' }), NULL_UPC_LABEL)).toBe(false);
     expect(fieldMatches('upc', pred({ upc: '999999999999' }), NULL_UPC_LABEL)).toBe(false);
   });
+
+  it('skips fields OMITTED from a partial label (FIX-3)', () => {
+    const partialLabel = { productName: 'Wormeze Liquid', upc: '036000291452' } as unknown as GoldenOcrExpected;
+    // Unlabeled fields return null (not scored) even when the prediction has data.
+    expect(fieldMatches('brand', pred({ brand: 'Acme' }), partialLabel)).toBeNull();
+    expect(fieldMatches('species', pred({ species: ['dog'] }), partialLabel)).toBeNull();
+    expect(fieldMatches('flavorVariety', pred({ flavorVariety: 'X' }), partialLabel)).toBeNull();
+    // Labeled fields still score normally.
+    expect(fieldMatches('productName', pred({ productName: 'wormeze liquid' }), partialLabel)).toBe(true);
+  });
 });
 
 // ─── aggregation + gate ───────────────────────────────────────────────────────
@@ -276,6 +308,18 @@ describe('aggregateCandidateReport', () => {
     const nullLabeledCount = OCR_SCALAR_FIELDS.filter(f => (LABEL as Record<string, unknown>)[f] === null).length;
     expect(nullLabeledCount).toBeGreaterThan(0);
     expect(report.hallucinationRate).toBeCloseTo(1 / nullLabeledCount);
+  });
+
+  it('excludes OMITTED (undefined/unlabeled) fields from the hallucination-rate denominator (FIX-3)', () => {
+    const outcomes = [outcome(true, pred({ flavorVariety: 'Ghost Flavor' }), 'e0')];
+    // Partial label: ONLY productName is labeled — every other scalar is
+    // omitted/unlabeled and must NOT enter the hallucination denominator.
+    // With zero labeled-null scalars the rate is not computable (null),
+    // proving the ghost flavorVariety prediction was never scored.
+    const report = aggregateCandidateReport('c', outcomes, {
+      datasetEntries: [{ id: 'e0', expected: { productName: 'Wormeze Liquid' } as unknown as GoldenOcrExpected }],
+    });
+    expect(report.hallucinationRate).toBeNull();
   });
 });
 

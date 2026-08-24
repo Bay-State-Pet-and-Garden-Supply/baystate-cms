@@ -69,12 +69,29 @@ import {
   type PackagingOcrData,
 } from '../../shared/schemas/onboarding';
 
+/** Scalar OCR fields whose non-null presence counts as usable content. */
+const OCR_CONTENT_SCALAR_FIELDS = [
+  'productName', 'brand', 'upc', 'size', 'weight', 'count',
+  'flavorVariety', 'color', 'material', 'lifeStage', 'breedSize', 'productForm',
+] as const;
+
+/** Array OCR fields whose non-empty presence counts as usable content. */
+const OCR_CONTENT_ARRAY_FIELDS = [
+  'species', 'healthConcernFunction', 'dietaryLabels',
+  'ingredients', 'ingredientKeywords', 'claims', 'visibleTextLines',
+] as const;
+
 /** True when a parsed OCR result carries usable content (same rule everywhere). */
 function hasOcrContent(ocr: PackagingOcrData | undefined | null): boolean {
   if (!ocr) return false;
-  if (ocr.productName && ocr.productName.trim().length > 0) return true;
-  if (ocr.brand && ocr.brand.trim().length > 0) return true;
-  if (ocr.visibleTextLines && ocr.visibleTextLines.some(b => b && b.trim().length > 0)) return true;
+  for (const field of OCR_CONTENT_SCALAR_FIELDS) {
+    const value = ocr[field];
+    if (typeof value === 'string' && value.trim().length > 0) return true;
+  }
+  for (const field of OCR_CONTENT_ARRAY_FIELDS) {
+    const arr = ocr[field];
+    if (Array.isArray(arr) && arr.some(b => b && b.trim().length > 0)) return true;
+  }
   return false;
 }
 
@@ -373,8 +390,11 @@ export const packagingOcrStage: StageDefinition = {
 
     const sku = item.upc;
 
-    // Null primaryImage ⇒ coded `no_image`, stage SUCCEEDS (skip-not-fail).
-    if (!ext.primaryImage) {
+    // No usable images at all (null primaryImage AND no additionalImages)
+    // ⇒ coded `no_image`, stage SUCCEEDS (skip-not-fail). An item with ONLY
+    // additionalImages still gets its body images OCR'd through the normal
+    // loop below.
+    if (imageUrls.length === 0) {
       const ocrOutcome = OcrAttemptOutcomeSchema.parse({
         status: 'no_image',
         localStatus: 'no_image',
@@ -394,7 +414,16 @@ export const packagingOcrStage: StageDefinition = {
     }
 
     const vlmConfig = getVlmConfig();
-    const canUseLocalVlm = vlmConfig?.enabled === true;
+    // Frozen-route authority: when a run snapshot is bound, local-VLM
+    // availability derives from the FROZEN plan entry only — mutable
+    // `ollama_vlm` settings never enable or disable a run-bound OCR leg.
+    // Legacy (snapshot-less) callers keep the mutable-settings check.
+    const frozenPlanEntry = context.snapshot
+      ? getModelExecutionPlanEntry(context.snapshot, 'evidence_extraction')
+      : null;
+    const canUseLocalVlm = context.snapshot
+      ? Boolean(frozenPlanEntry?.localVlmBaseUrl && frozenPlanEntry?.localVlmModel)
+      : vlmConfig?.enabled === true;
     const dataPolicy = context.snapshot
       ? (context.snapshot.dataSharing as { textPolicy?: string; imagePolicy?: string } | undefined)
       : undefined;
@@ -535,7 +564,7 @@ export const packagingOcrStage: StageDefinition = {
       status: overallStatus,
       localStatus,
       cloudStatus,
-      model: packagingOcrData?.metadata?.model ?? vlmConfig?.model ?? null,
+      model: packagingOcrData?.metadata?.model ?? frozenPlanEntry?.localVlmModel ?? vlmConfig?.model ?? null,
       imageCount: imageUrls.length,
       ...(localFailureReason ? { localFailureReason } : {}),
       ...(localAttempts > 0 ? { attempts: localAttempts } : {}),

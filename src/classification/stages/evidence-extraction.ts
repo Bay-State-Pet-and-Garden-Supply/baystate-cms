@@ -416,6 +416,23 @@ export const evidenceExtractionStage: StageDefinition = {
     // path UNCHANGED (defense in depth stays).
     const stageOcrOutput = getAuthoritativePackagingOcrStageOutput(input.stageOutputs);
 
+    // Distinguish "stage absent/shadow (legacy inline path OK)" from "stage ran
+    // THIS RUN non-shadow but produced NO data (failure outcome)": the latter
+    // is detectable when the stage metadata carries an ocrOutcome object and
+    // shadowOnly !== true, yet no authoritative packagingOcrData resolved
+    // above. In that case the stage ALREADY owns this run's OCR authority keys
+    // (it persisted its failure outcome), so the images must NOT be passed to
+    // the inline extractor (which would re-run full VLM OCR + cloud fallback)
+    // and extraction_data_json must NOT be written back over those keys.
+    const stageMetadata = input.stageOutputs?.packaging_ocr?.metadata as Record<string, unknown> | undefined;
+    const stageRanNonShadowWithoutData =
+      !stageOcrOutput &&
+      !!stageMetadata &&
+      stageMetadata.shadowOnly !== true &&
+      stageMetadata.ocrOutcome != null &&
+      typeof stageMetadata.ocrOutcome === 'object';
+    const suppressInlineOcr = Boolean(stageOcrOutput) || stageRanNonShadowWithoutData;
+
     const normalizedInput: NormalizedEvidenceInput = {
       title: titleField,
       description: descriptionField,
@@ -424,8 +441,8 @@ export const evidenceExtractionStage: StageDefinition = {
       bulletPoints: Array.isArray(extData.bulletPoints) ? extData.bulletPoints : [],
       searchKeywords: extData.searchKeywords ? String(extData.searchKeywords) : null,
       customFields: customFieldsMap,
-      primaryImage: stageOcrOutput ? null : (extData.primaryImage ?? null),
-      additionalImages: stageOcrOutput ? [] : (Array.isArray(extData.additionalImages) ? extData.additionalImages : []),
+      primaryImage: suppressInlineOcr ? null : (extData.primaryImage ?? null),
+      additionalImages: suppressInlineOcr ? [] : (Array.isArray(extData.additionalImages) ? extData.additionalImages : []),
       sourceUrl,
       existingPageNames: [],
       workspacePath: context.workspacePath,
@@ -517,7 +534,7 @@ export const evidenceExtractionStage: StageDefinition = {
     // P2-T2: when the packaging_ocr stage owns this run's OCR, it already
     // persisted the live keys through the repository — never clobber them with
     // the extractor's image-less no_image outcome.
-    if (!stageOcrOutput && (result.ocrOutcome || result.packagingOcrData)) {
+    if (!suppressInlineOcr && (result.ocrOutcome || result.packagingOcrData)) {
       try {
         const mergedOcr = result.packagingOcrData;
         const updatedExt = {

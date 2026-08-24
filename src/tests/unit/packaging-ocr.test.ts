@@ -214,6 +214,39 @@ describe('coercePackagingOcrData', () => {
     expect(result!.metadata?.parser).toBe('test');
   });
 
+  it('coerces placeholder strings ("null", "none", "N/A", "unknown") to null (FIX-8)', () => {
+    const result = coercePackagingOcrData({
+      productName: 'null',
+      brand: ' NONE ',
+      flavorVariety: 'n/a',
+      color: 'NA',
+      material: 'Unknown',
+      size: 'N.A.',
+      weight: 'Real Weight',
+      count: 12,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.productName).toBeNull();
+    expect(result!.brand).toBeNull();
+    expect(result!.flavorVariety).toBeNull();
+    expect(result!.color).toBeNull();
+    expect(result!.material).toBeNull();
+    expect(result!.size).toBeNull();
+    // Real values (and non-string scalars) are untouched.
+    expect(result!.weight).toBe('Real Weight');
+    expect(result!.count).toBe('12');
+  });
+
+  it('leaves array placeholder handling unchanged (scalars only)', () => {
+    const result = coercePackagingOcrData({
+      productName: 'Test',
+      visibleTextLines: ['NA', 'REAL LINE'],
+    });
+    expect(result).not.toBeNull();
+    // Arrays keep their own trimming/filtering semantics.
+    expect(result!.visibleTextLines).toEqual(['NA', 'REAL LINE']);
+  });
+
   it('returns null for invalid input that fails schema validation', () => {
     // productName is fine but confidenceByField must be an object of numbers
     const result = coercePackagingOcrData({

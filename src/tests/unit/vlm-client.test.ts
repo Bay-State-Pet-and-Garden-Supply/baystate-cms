@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeAll, afterAll, describe, expect, it } from 'bun:test';
-import { callVlm, getVlmConfig, parseOcrTimeoutMs, DEFAULT_OCR_TIMEOUT_MS } from '../../onboarding/vlm-client';
+import { callVlm, getVlmConfig, parseOcrTimeoutMs, DEFAULT_OCR_TIMEOUT_MS, sniffImageMimeType } from '../../onboarding/vlm-client';
 import { initDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { upsertApiKey } from '../../db/repositories/api-key-repo';
@@ -112,6 +112,29 @@ describe('VLM client — AI Compute route inheritance (getVlmConfig)', () => {
     expect(cfg?.transport).toBe('ollama-native');
     expect(cfg?.baseUrl).toBe('http://localhost:11434');
     expect(cfg?.model).toBe('qwen2.5vl:latest');
+  });
+});
+
+// ─── image MIME sniffing (FIX-10) ─────────────────────────────────────────────
+
+describe('sniffImageMimeType (magic-header detection)', () => {
+  it('detects JPEG, PNG, GIF, and WebP headers from decoded base64 bytes', () => {
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(1100)]).toString('base64');
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]), Buffer.alloc(1100)]).toString('base64');
+    const gif = Buffer.concat([Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), Buffer.alloc(1100)]).toString('base64');
+    const webp = Buffer.concat([Buffer.from([0x52, 0x49, 0x46, 0x46]), Buffer.alloc(4), Buffer.from('WEBP', 'ascii'), Buffer.alloc(1100)]).toString('base64');
+    expect(sniffImageMimeType(jpeg)).toBe('image/jpeg');
+    expect(sniffImageMimeType(png)).toBe('image/png');
+    expect(sniffImageMimeType(gif)).toBe('image/gif');
+    expect(sniffImageMimeType(webp)).toBe('image/webp');
+  });
+
+  it('defaults undecodable/unknown payloads to image/jpeg', () => {
+    // Not real base64 image data — historical hardcoded value applies.
+    expect(sniffImageMimeType('base64-image')).toBe('image/jpeg');
+    expect(sniffImageMimeType('')).toBe('image/jpeg');
+    const text = Buffer.from('plain text payload', 'utf8').toString('base64');
+    expect(sniffImageMimeType(text)).toBe('image/jpeg');
   });
 });
 

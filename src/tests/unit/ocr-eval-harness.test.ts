@@ -152,6 +152,22 @@ describe('evaluateCandidatesAgainstGolden', () => {
     expect(baseline.vsBaseline.hasBaseline).toBe(false);
   });
 
+  it('rejects non-loopback candidate baseUrls BEFORE staging any image or calling the transport', async () => {
+    const transport = makeTransport(() => GOOD_JSON);
+    const raw = datasetJson([{ id: 'a', upc: '036000291452' }]);
+    await expect(
+      evaluateCandidatesAgainstGolden(loadGoldenDatasetFromJson(raw), {
+        candidates: [
+          { baseUrl: 'http://127.0.0.1:11434', model: BASELINE_MODEL },
+          { baseUrl: 'http://evil.example.com:11434', model: CANDIDATE_MODEL },
+        ],
+        fetchFn: transport.fn,
+      }),
+    ).rejects.toThrow(/non-loopback/);
+    // Zero transports AND zero image staging side effects for a misconfigured run.
+    expect(transport.calls).toHaveLength(0);
+  });
+
   it('rejects duplicate candidate labels before any model call', async () => {
     const transport = makeTransport(() => GOOD_JSON);
     const raw = datasetJson([{ id: 'a', upc: '036000291452' }]);
