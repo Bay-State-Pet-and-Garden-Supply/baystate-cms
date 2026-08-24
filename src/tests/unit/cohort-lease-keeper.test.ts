@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, mock } from 'bun:test';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { CohortLeaseKeeper } from '../../onboarding/cohort-lease-keeper';
 import { HeartbeatLostError } from '../../classification/heartbeat-errors';
 
 let heartbeatMockResult = true;
 let heartbeatCalls: Array<{ runId: string; workerId: string; leaseTtlMs: number }> = [];
 
-mock.module('../../db/repositories/classification-cohort-run-repo', () => ({
+vi.mock('../../db/repositories/classification-cohort-run-repo', () => ({
   heartbeatCohortRun: (runId: string, workerId: string, leaseTtlMs: number) => {
     heartbeatCalls.push({ runId, workerId, leaseTtlMs });
     return heartbeatMockResult;
