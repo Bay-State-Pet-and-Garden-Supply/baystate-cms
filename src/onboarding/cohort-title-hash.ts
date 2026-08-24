@@ -72,6 +72,8 @@
  */
 import { hashCanonicalJson } from '../shared/stable-id';
 import { FORMAT_RULES } from './title-prompt-template';
+import { FAMILY_TITLE_CONSISTENCY_VERSION } from '../classification/family-title-consistency';
+import { TITLE_LINT_VERSION } from '../classification/title-lint';
 import {
   OPERATION_PARAMETERS,
   PROMPT_TEMPLATE_VERSIONS,
@@ -318,6 +320,10 @@ export function computeCohortTitleInputHash(params: CohortTitleInputHashParams):
 export function computeCohortTitleInputHashForFormatRules(
   params: CohortTitleInputHashParams,
   formatRules: string,
+  // e09 title-lint (T8): injectable so tests can prove the lint version
+  // participates without mutating the module constant — same shape as the
+  // format-rules parameter above. Defaults to the single-sourced constant.
+  titleLintVersion: string = TITLE_LINT_VERSION,
 ): string {
   const { run, projection, titlePlanEntry, executionTypeAuthority } = params;
   const members = [...projection.members]
@@ -332,6 +338,8 @@ export function computeCohortTitleInputHashForFormatRules(
   return hashCanonicalJson({
     version: 2,
     kind: 'curated_title',
+    familyTitleConsistencyVersion: FAMILY_TITLE_CONSISTENCY_VERSION,
+    titleLintVersion,
     membership: run.finalMembershipHash,
     members,
     executionProductType: executionTypeAuthority ?? {

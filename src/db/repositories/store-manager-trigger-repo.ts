@@ -471,20 +471,17 @@ export function cancelOverdueTriggerOccurrences(
 ): number {
   const db = getDb();
   const now = new Date().toISOString();
-  const rows = db
+  const result = db
     .query(
-      `SELECT id FROM store_manager_trigger_occurrences
-       WHERE workspace_id = ? AND status = 'pending' AND scheduled_at < ? LIMIT ?`,
-    )
-    .all(workspaceId, cutoffIso, Math.min(limit, 200)) as Array<{ id: string }>;
-  for (const row of rows) {
-    db.query(
       `UPDATE store_manager_trigger_occurrences
        SET status = 'cancelled', error_code = 'catch_up_window_exceeded', completed_at = ?, updated_at = ?
-       WHERE workspace_id = ? AND id = ? AND status = 'pending'`,
-    ).run(now, now, workspaceId, row.id);
-  }
-  return rows.length;
+       WHERE workspace_id = ? AND id IN (
+         SELECT id FROM store_manager_trigger_occurrences
+         WHERE workspace_id = ? AND status = 'pending' AND scheduled_at < ? LIMIT ?
+       )`,
+    )
+    .run(now, now, workspaceId, workspaceId, cutoffIso, Math.min(limit, 200));
+  return Number(result.changes ?? 0);
 }
 
 /** Reset expired leases back to pending so a crashed claim is retried. */

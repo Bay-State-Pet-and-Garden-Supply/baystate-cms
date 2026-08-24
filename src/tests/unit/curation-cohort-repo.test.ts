@@ -323,6 +323,52 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(computeExtractionHash(items[2])).toBeNull();
   });
 
+  it('excludes the packagingOcrStageRunId drift-guard marker from the extraction hash', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    makeItemExtractionReady(items[0].id, makeExtractionData());
+    makeItemExtractionReady(items[1].id, makeExtractionData());
+    const loadedA = listItemsByBatch(batchId).find(i => i.id === items[0].id)!;
+    const loadedB = listItemsByBatch(batchId).find(i => i.id === items[1].id)!;
+
+    // Same evidence but DIFFERENT authoring-run markers → identical hash
+    // (the marker is bookkeeping, never evidence identity).
+    updateItemExtractionData(items[1].id, JSON.stringify({
+      ...makeExtractionData(),
+      packagingOcrStageRunId: 'run-entirely-different-author',
+    }));
+    const loadedB2 = listItemsByBatch(batchId).find(i => i.id === items[1].id)!;
+    expect(computeExtractionHash(loadedB2)).toBe(computeExtractionHash(loadedA));
+  });
+
+  it('safely computes extraction hash when sourcingDecision has undefined properties', () => {
+    const item = {
+      id: randomUUID(),
+      batchId: randomUUID(),
+      upc: '012345678901',
+      name: 'Item with Undefined Prop',
+      brandHint: 'Acme',
+      rowNumber: 1,
+      extractionData: makeExtractionData(),
+      sourcingDecision: {
+        schemaVersion: 2,
+        route: 'fallback_to_discovery',
+        origin: 'operator_override',
+        acceptedEvidenceAttemptIds: [],
+        providerIds: [],
+        sourcingGenerationId: undefined, // explicit undefined property
+        sourceType: 'official_page',
+        target: 'discovery',
+        conflicts: [],
+        warnings: [],
+        decidedAt: new Date().toISOString(),
+      },
+    } as unknown as OnboardingItem;
+
+    const hash = computeExtractionHash(item);
+    expect(hash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   it('binds the selected source into the extraction hash (round-3 R4)', () => {
     const batchId = newBatch();
     const items = insertFamilyItems(batchId);
@@ -433,11 +479,15 @@ describe('family grouping normalization (epic #46 review round, Package A)', () 
     expect(family.groupKey.startsWith('betterbone::')).toBe(true);
     const members = getCohortMembers(family.id);
     expect(members.length).toBe(2);
-    // vnsn → venison is a flavor word → stripped; both members share the stem.
-    expect(members.every(m => m.normalizedNameStem === 'better bone hard')).toBe(true);
+    // vnsn → venison is a flavor word → stripped; HARD is a product-line modifier → stripped; both share 'better bone'.
+    expect(members.every(m => m.normalizedNameStem === 'better bone')).toBe(true);
   });
 
-  it('merges typo stems within a brand (VEGGGIE vs VEGGIE)', () => {
+  it('merges typo stems within a brand (VEGGGIE vs VEGGIE — abbreviation path; genuine Levenshtein path deferred to v2)', () => {
+    // This pair converges via explicit abbreviation `vegggie → veggie` (product-line-token-normalizer.ts:31),
+    // not via the durable Levenshtein merge (curation-cohort-repo.ts:225). A genuine distance-1 typo
+    // like `pupsicle` vs `pupsiclee` would exercise the repository-only fuzzy path, which diverges from
+    // transient grouping — intentionally deferred to v2 (see ADR 0013 and repo comment at :212).
     const batchId = createBatch({ workspaceId, name: 'Veggie Batch', fileName: 'vg.xlsx', totalItems: 2 }).id;
     insertItems(batchId, [
       { upc: '200000000003', name: 'BETTER BONE SOFT CLASSIC VEGGGIE SM', brandHint: 'BetterBone', rowNumber: 1 },
@@ -464,5 +514,53 @@ describe('family grouping normalization (epic #46 review round, Package A)', () 
     const cohorts = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
     expect(cohorts.length).toBe(2);
     expect(cohorts.map(c => c.groupKey.split('::')[0]).sort()).toEqual(['acme', 'betterbone']);
+  });
+
+  it('produces same partition via groupItemsByFamily and groupByProductLine (shared helper)', async () => {
+    const { groupByProductLine: gpl } = await import('../../onboarding/cohort-name-coordinator');
+    const batchId = createBatch({ workspaceId, name: 'Parity Batch', fileName: 'parity.xlsx', totalItems: 4 }).id;
+    insertItems(batchId, [
+      { upc: '300000000001', name: 'BETTER BONE SOFT BEEF SM', brandHint: 'BetterBone', rowNumber: 1 },
+      { upc: '300000000002', name: 'BETTER BONE HARD BEEF LG', brandHint: null, rowNumber: 2 },
+      { upc: '300000000003', name: 'BETTER BONE CLASSIC VEGGIE MD', brandHint: 'Better Bone', rowNumber: 3 },
+      { upc: '300000000004', name: 'BASKERVILLE ULTRA MOLDABLE MUZZLE SZ 4', brandHint: 'Baskerville', rowNumber: 4 },
+    ], 'review', 1);
+    const items = listItemsByBatch(batchId);
+    const cohorts = refreshCandidateCohorts(workspaceId, batchId, items);
+    // Durable grouping should have 2 families: BetterBone (3) + Baskerville (1 singleton)
+    expect(cohorts.length).toBe(2);
+    const bb = cohorts.find(c => c.groupKey.startsWith('betterbone::'))!;
+    expect(bb).toBeDefined();
+    expect(getCohortMembers(bb.id).length).toBe(3);
+    // groupByProductLine should agree (batch-aware)
+    const gplGroups = gpl(items);
+    const multi = [...gplGroups.values()].filter(g => g.length > 1);
+    expect(multi.length).toBe(1);
+    expect(multi[0].map(i => i.upc).sort()).toEqual(['300000000001','300000000002','300000000003'].sort());
+  });
+
+  it('supersession is same-version, append-only, and idempotent', () => {
+    const batchId = createBatch({ workspaceId, name: 'Supersede Batch', fileName: 'sup.xlsx', totalItems: 2 }).id;
+    const _items = insertItems(batchId, [
+      { upc: '400000000001', name: 'BETTER BONE SOFT BEEF SM', brandHint: 'BetterBone', rowNumber: 1 },
+      { upc: '400000000002', name: 'BETTER BONE SOFT BEEF LG', brandHint: 'BetterBone', rowNumber: 2 },
+    ], 'review', 1);
+    const first = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    expect(first.length).toBe(1);
+    const firstId = first[0].id;
+    // Add third sibling -> membership changes -> supersede
+    insertItems(batchId, [{ upc: '400000000003', name: 'BETTER BONE HARD BEEF MD', brandHint: 'BetterBone', rowNumber: 3 }], 'review', 1);
+    const second = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    const oldRow = getCohortById(firstId)!;
+    expect(oldRow.status).toBe('superseded');
+    expect(oldRow.supersededAt).not.toBeNull();
+    expect(second.length).toBe(1);
+    expect(second[0].id).not.toBe(firstId);
+    expect(getCohortMembers(second[0].id).length).toBe(3);
+    // Idempotency: repeat refresh with same membership -> same id
+    const third = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    expect(third[0].id).toBe(second[0].id);
+    const history = listCohortsByBatch(batchId, { includeSuperseded: true });
+    expect(history.filter(c => c.groupKey === second[0].groupKey).length).toBe(2);
   });
 });

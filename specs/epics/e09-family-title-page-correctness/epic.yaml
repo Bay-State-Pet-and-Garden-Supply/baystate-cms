@@ -1,0 +1,27 @@
+id: e09
+title: "Family Title Consistency & Category Page Correctness — harmonized skeleton + verified primary Page"
+wsjf: 18
+total_bcps: 19
+status: in_progress
+delta: NEW
+depends_on: e08
+notes: "Implements docs/plans/family-title-category-page-requirements-plan.md (adjudicated 2026-08-22). Scope lock: titles + primary Page only; no extraction/grouping/type/taxonomy/QoL. Governing contracts: product-family-v1 frozen membership, write-once cohort outputs, stable Page IDs, model confidence non-authoritative. Gold set split by whole family."
+stories:
+  - id: e09s01
+    title: "Requirements & adjudication scaffold — frozen gold set by family (T1-T10/P1-P12)"
+    bcps: 5
+    status: done
+    spec: e09s01-requirements.md
+    tasks: e09s01-tasks.yaml
+  - id: e09s02
+    title: "Pure validators + review/promotion gates (family-title-consistency + category-page-correctness)"
+    bcps: 10
+    status: done
+    spec: e09s02-implementation.md
+    tasks: e09s02-tasks.yaml
+  - id: e09s03
+    title: "Validation & controlled rollout — gold-set regression, determinism, shadow metrics"
+    bcps: 4
+    status: in_progress
+    spec: e09s03-validation.md
+    tasks: e09s03-tasks.yaml

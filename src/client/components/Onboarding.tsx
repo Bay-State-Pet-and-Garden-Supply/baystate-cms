@@ -17,9 +17,9 @@ import { BatchWorkspace } from './onboarding/BatchWorkspace';
 import { WeeklyReportModal } from './WeeklyReportModal';
 import { BatchPreflightModal } from './onboarding/preflight/BatchPreflightModal';
 import type { OnboardingBatch, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
+import type { WorkStateCounts } from '../../shared/schemas/onboarding-work-state';
 import { getProfileWorkspacePath } from './profile-workspace/route';
 import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDomain';
-import type { WorkStateCounts } from '../../shared/schemas/onboarding-work-state';
 import { formatCount, totalItemCount } from './onboarding/batch-workspace-logic';
 import { matchExistingBrand } from '../../shared/brand-matcher';
 import { getOnboardingFeatureFlags } from '../onboarding-feature-flags';
@@ -866,6 +866,8 @@ export function Onboarding() {
   // as a diagnostics escape hatch via `?board=pipeline` (separate query param
   // so App.tsx's `view` routing is untouched), gated by the rollout flags
   // (src/client/onboarding-feature-flags.ts).
+  // e10s05 retirement COMPLETE: the board STAYS diagnostics-only; the legacy
+  // ReviewDrawerShell + CurationStagePanel have been removed.
   if (selectedBatchId && selectedBatch) {
     const { batchWorkspaceEnabled, pipelineDiagnosticsEnabled } = getOnboardingFeatureFlags();
     const forcePipelineDiagnostics =

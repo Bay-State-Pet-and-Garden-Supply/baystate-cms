@@ -240,6 +240,14 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
 
       <AiRouteSummary />
 
+      {/* P1 UI revamp: cross-link to the top-level taxonomy administration
+          surface (Store Settings → Types & Attributes / Mappings & Health). */}
+      <p style={{ fontSize: 13, margin: '0 0 12px' }}>
+        <a href="/?view=settings&tab=types" style={{ color: '#14532D', fontWeight: 600 }}>
+          Manage types, mappings & releases →
+        </a>
+      </p>
+
       {/* ─── Tab Bar — single source via tabRegistry (e35s10) — legacy profiles|sitemaps retired to brands alias ─── */}
       <div style={{ display: 'flex', gap: 0, marginBottom: 24, borderBottom: '1px solid #dee2e6' }}>
         {primaryOnboardingSettingsTabs().map(tab => (

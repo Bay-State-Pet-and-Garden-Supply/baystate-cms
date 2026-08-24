@@ -406,6 +406,14 @@ export function listPages() {
   return request<{ pages: Page[] }>('/pages');
 }
 
+/** e09 round-3 FIX 1: verified Page options + the ACTIVE import hash, so the
+ *  Review UI can stamp a reviewer Category Page correction (adjudication #10). */
+export function listVerifiedPageOptionSummaries() {
+  return request<{ pages: Array<{ id: string; name: string }>; activeImportHash: string | null }>(
+    '/pages/verified-options',
+  );
+}
+
 // --- Page import (ShopSite Pages database sync) ---
 
 export interface PageImportRecordPayload {

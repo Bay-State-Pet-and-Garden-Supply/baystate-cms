@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 
 // story: e35s10 — tab registry is single source for Brands merge (profiles|sitemaps → brands)
@@ -29,5 +30,74 @@ describe('onboarding settings tab registry (e35s10)', () => {
     const sitemaps = ONBOARDING_SETTINGS_TABS.find((t: any) => t.id === 'sitemaps');
     expect(sitemaps.label).toContain('Sitemaps');
     expect(sitemaps.label).toContain('Brand URL Index');
+  });
+});
+
+// ── P1 UI revamp: cross-link from Onboarding Settings to Store Settings ──────
+import { describe as describe2, it as it2, expect as expect2, vi, beforeEach, afterEach } from 'vitest';
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const { default: React } = await import('react');
+const { createRoot } = await import('react-dom/client');
+const { act } = await import('react');
+
+vi.mock('../../client/onboarding-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/onboarding-api')>();
+  return {
+    ...actual,
+    getApiKeys: vi.fn(async () => ({ keys: [] })),
+    updateApiKey: vi.fn(async () => ({})),
+    deleteApiKey: vi.fn(async () => ({})),
+    getCurationTargets: vi.fn(async () => ({ targets: [], candidates: { productFields: [], pages: [] }, applicability: [], findings: [] })),
+    getClassificationReadiness: vi.fn(async () => ({ readiness: {} })),
+    getOnboardingCapabilities: vi.fn(async () => ({})),
+    getExtractionWorkerHealth: vi.fn(async () => ({})),
+  };
+});
+
+vi.mock('../../client/api', () => ({
+  downloadPagesImport: vi.fn(),
+  activatePagesImport: vi.fn(async () => ({ success: true })),
+}));
+
+vi.mock('../../client/components/common/AiRouteSummary', () => ({
+  AiRouteSummary: () => null,
+}));
+vi.mock('../../client/components/onboarding-settings/DistributorConnectionsPanel', () => ({
+  DistributorConnectionsPanel: () => null,
+}));
+vi.mock('../../client/components/sitemap-health/SitemapHealthView', () => ({
+  SitemapHealthView: () => null,
+}));
+vi.mock('../../client/components/brand-strategy/BrandStrategyView', () => ({
+  BrandStrategyView: () => null,
+}));
+
+describe2('OnboardingSettings cross-link to Store Settings taxonomy admin (P1)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+  afterEach(() => {
+    window.history.replaceState(null, '', '/');
+  });
+
+  it2('renders "Manage types, mappings & releases" link to ?view=settings&tab=types', async () => {
+    const { OnboardingSettings } = await import('../../client/components/OnboardingSettings');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(OnboardingSettings, { onBack: () => {} }));
+    });
+    const link = Array.from(container.querySelectorAll('a')).find(
+      (a) => a.getAttribute('href') === '/?view=settings&tab=types',
+    );
+    expect2(link).toBeDefined();
+    expect2(link!.textContent).toContain('Manage types, mappings & releases');
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
   });
 });

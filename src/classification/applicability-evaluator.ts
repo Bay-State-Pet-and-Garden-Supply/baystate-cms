@@ -33,7 +33,33 @@ export interface ApplicabilityInput {
   typeTargetEnabled: boolean;
   /** Accepted/reviewed facts for deterministic condition evaluation. */
   reviewedFacts: ReviewedFact[];
+  /**
+   * P3 widened universal tier (plan B.P3.1): when true (flag
+   * BAYSTATE_CMS_UNIVERSAL_TIER_WIDENING), attributes in
+   * WIDENED_UNIVERSAL_ATTRIBUTE_IDS are PROPOSABLE from deterministic evidence
+   * while NO Product Type exists. Profile enforcement is unchanged — once a
+   * type is accepted the normal profile gating applies below and a widened
+   * attribute outside the profile stays `not_applicable`. Undefined/false is
+   * byte-identical legacy behavior.
+   */
+  widenedUniversal?: boolean;
 }
+
+/**
+ * P3 widened universal tier (plan B.P3.1): high-yield merchandising attributes
+ * that may be PROPOSED from deterministic evidence regardless of Product Type
+ * status while BAYSTATE_CMS_UNIVERSAL_TIER_WIDENING is on. Membership here
+ * widens PROPOSABILITY only — it never bypasses proposal safety validation,
+ * never bypasses profile requiredness/cardinality/applicability once a type
+ * is accepted, and never grants these ids `isUniversal` in config (the frozen
+ * release taxonomy is untouched).
+ */
+export const WIDENED_UNIVERSAL_ATTRIBUTE_IDS: ReadonlySet<string> = new Set([
+  'size',
+  'color',
+  'material',
+  'flavor',
+]);
 
 /**
  * v1 runtime attributes have no `isUniversal` field (it arrives with v2).
@@ -129,6 +155,23 @@ export function evaluateAttributeApplicability(
       attributeId: attribute.id,
       state: 'applicable',
       reason: 'Universal attribute requires no Product Type.',
+    };
+  }
+  // P3 widened universal tier: pre-type proposals only. When a type IS
+  // accepted this branch never fires — the profile gating below still governs
+  // requiredness/cardinality/applicability exactly as before.
+  if (
+    input.widenedUniversal === true
+    && input.typeTargetEnabled
+    && input.acceptedTypeId === null
+    && WIDENED_UNIVERSAL_ATTRIBUTE_IDS.has(attribute.id)
+  ) {
+    return {
+      attributeId: attribute.id,
+      state: 'applicable',
+      reason:
+        'Widened universal tier proposes from evidence without a Product Type; '
+        + 'the Attribute Profile still enforces requiredness/applicability once a type is accepted.',
     };
   }
   if (input.acceptedTypeId === null) {

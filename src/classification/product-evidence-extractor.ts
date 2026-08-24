@@ -8,7 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { getVlmConfig } from '../onboarding/vlm-client';
-import { extractPackagingOcr, mergeOcrResults } from '../onboarding/packaging-ocr';
+import { runPackagingOcrAttempt, mergeOcrResults } from '../onboarding/packaging-ocr';
 import { getLlmConfigForTask, callLlmForTaskWithProvenance } from '../onboarding/llm-client';
 import { redactTransportText } from './model-policy-gateway';
 import { MODEL_CALL_STATUS } from './model-operation-registry';
@@ -96,327 +96,12 @@ export interface EvidenceExtractionResult {
 }
 
 // ─── Packaging OCR evidence conversion ────────────────────────────────────────
-
-interface OcrToEvidenceParams {
-  runId: string;
-  sku: string;
-  model: string;
-  /** Durable model-call IDs that produced the OCR evidence (issue #17 E). */
-  modelCallIds?: string[];
-}
-
-/**
- * Convert a stored PackagingOcrData object into ClassificationEvidence entries.
- * Each visible field produces one or more evidence records with appropriate
- * sourceField, attributeId, and reliability derived from per-field confidence.
- * Exported so the cohort frozen-mode evidence stage can materialize evidence
- * from a FROZEN packagingOcrData snapshot without a new model call (issue #30
- * PR3 M2 amendment 4).
- */
-export function packagingOcrDataToEvidence(
-  ocrData: PackagingOcrData,
-  params: OcrToEvidenceParams,
-): ClassificationEvidence[] {
-  const evidence: ClassificationEvidence[] = [];
-  const { runId, sku, model } = params;
-  /** Resolve reliability — use per-field confidence when available. */
-  const reliability = (field: string, fallback: string): string => {
-    const confidence = ocrData.confidenceByField?.[field];
-    if (confidence == null) return fallback;
-    if (confidence >= 0.7) return 'high';
-    if (confidence >= 0.4) return 'medium';
-    return 'low';
-  };
-
-  const base = {
-    runId,
-    stageName: 'evidence_extraction' as const,
-    productSku: sku,
-    source: 'visual_product_evidence' as const,
-    sourceUrl: null as string | null,
-    capturedAt: now(),
-  };
-
-  // productName
-  if (ocrData.productName) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: null,
-      reliability: reliability('productName', 'high') as ClassificationEvidence['reliability'],
-      sourceField: 'name',
-      snippet: ocrData.productName.slice(0, 300),
-      value: ocrData.productName,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.productName ?? null },
-    });
-  }
-
-  // brand
-  if (ocrData.brand) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: null,
-      reliability: reliability('brand', 'high') as ClassificationEvidence['reliability'],
-      sourceField: 'brand',
-      snippet: ocrData.brand.slice(0, 300),
-      value: ocrData.brand,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.brand ?? null },
-    });
-  }
-
-  // species — one entry per value
-  if (ocrData.species?.length) {
-    for (const val of ocrData.species) {
-      evidence.push({
-        ...base,
-        id: randomUUID(),
-        attributeId: null,
-        reliability: reliability('species', 'medium') as ClassificationEvidence['reliability'],
-        sourceField: 'species',
-        snippet: val.slice(0, 300),
-        value: val,
-        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.species ?? null },
-      });
-    }
-  }
-
-  // flavorVariety
-  if (ocrData.flavorVariety) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: 'flavor',
-      reliability: reliability('flavorVariety', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'flavor',
-      snippet: ocrData.flavorVariety.slice(0, 300),
-      value: ocrData.flavorVariety,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.flavorVariety ?? null },
-    });
-  }
-
-  // color
-  if (ocrData.color) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: 'color',
-      reliability: reliability('color', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'color',
-      snippet: ocrData.color.slice(0, 300),
-      value: ocrData.color,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.color ?? null },
-    });
-  }
-
-  // material
-  if (ocrData.material) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: 'material',
-      reliability: reliability('material', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'material',
-      snippet: ocrData.material.slice(0, 300),
-      value: ocrData.material,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.material ?? null },
-    });
-  }
-
-  // size
-  if (ocrData.size) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: 'size',
-      reliability: reliability('size', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'size',
-      snippet: ocrData.size.slice(0, 300),
-      value: ocrData.size,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.size ?? null },
-    });
-  }
-
-  // weight
-  if (ocrData.weight) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: null,
-      reliability: reliability('weight', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'weight',
-      snippet: ocrData.weight.slice(0, 300),
-      value: ocrData.weight,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.weight ?? null },
-    });
-  }
-
-  // count
-  if (ocrData.count) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: null,
-      reliability: reliability('count', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'count',
-      snippet: ocrData.count.slice(0, 300),
-      value: ocrData.count,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.count ?? null },
-    });
-  }
-
-  // lifeStage
-  if (ocrData.lifeStage) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: 'lifeStage',
-      reliability: reliability('lifeStage', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'lifeStage',
-      snippet: ocrData.lifeStage.slice(0, 300),
-      value: ocrData.lifeStage,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.lifeStage ?? null },
-    });
-  }
-
-  // breedSize
-  if (ocrData.breedSize) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: 'breedSize',
-      reliability: reliability('breedSize', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'breedSize',
-      snippet: ocrData.breedSize.slice(0, 300),
-      value: ocrData.breedSize,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.breedSize ?? null },
-    });
-  }
-
-  // productForm
-  if (ocrData.productForm) {
-    evidence.push({
-      ...base,
-      id: randomUUID(),
-      attributeId: 'productForm',
-      reliability: reliability('productForm', 'medium') as ClassificationEvidence['reliability'],
-      sourceField: 'productForm',
-      snippet: ocrData.productForm.slice(0, 300),
-      value: ocrData.productForm,
-      metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.productForm ?? null },
-    });
-  }
-
-  // healthConcernFunction — one entry per value
-  if (ocrData.healthConcernFunction?.length) {
-    for (const val of ocrData.healthConcernFunction) {
-      evidence.push({
-        ...base,
-        id: randomUUID(),
-        attributeId: 'healthConcern',
-        reliability: reliability('healthConcernFunction', 'medium') as ClassificationEvidence['reliability'],
-        sourceField: 'healthConcern',
-        snippet: val.slice(0, 300),
-        value: val,
-        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.healthConcernFunction ?? null },
-      });
-    }
-  }
-
-  // dietaryLabels — one entry per label
-  if (ocrData.dietaryLabels?.length) {
-    for (const val of ocrData.dietaryLabels) {
-      evidence.push({
-        ...base,
-        id: randomUUID(),
-        attributeId: null,
-        reliability: reliability('dietaryLabels', 'medium') as ClassificationEvidence['reliability'],
-        sourceField: 'dietaryLabel',
-        snippet: val.slice(0, 300),
-        value: val,
-        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.dietaryLabels ?? null },
-      });
-    }
-  }
-
-  // ingredientKeywords — one entry per keyword (low reliability)
-  if (ocrData.ingredientKeywords?.length) {
-    for (const val of ocrData.ingredientKeywords) {
-      evidence.push({
-        ...base,
-        id: randomUUID(),
-        attributeId: null,
-        reliability: reliability('ingredientKeywords', 'low') as ClassificationEvidence['reliability'],
-        sourceField: 'ingredientKeyword',
-        snippet: val.slice(0, 300),
-        value: val,
-        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.ingredientKeywords ?? null },
-      });
-    }
-  }
-
-  // visibleTextLines — emit only first 3 lines to avoid bloat
-  if (ocrData.visibleTextLines?.length) {
-    const lines = ocrData.visibleTextLines.slice(0, 3);
-    for (const val of lines) {
-      if (!val?.trim()) continue;
-      evidence.push({
-        ...base,
-        id: randomUUID(),
-        attributeId: null,
-        reliability: reliability('visibleTextLines', 'low') as ClassificationEvidence['reliability'],
-        sourceField: 'visible_text',
-        snippet: val.slice(0, 300),
-        value: val,
-        metadata: { provenance: 'packaging_ocr', model, visibleText: true, confidence: ocrData.confidenceByField?.visibleTextLines ?? null },
-      });
-    }
-  }
-
-  // ingredients — one entry per ingredient
-  if (ocrData.ingredients?.length) {
-    for (const val of ocrData.ingredients) {
-      if (!val?.trim()) continue;
-      evidence.push({
-        ...base,
-        id: randomUUID(),
-        attributeId: null,
-        reliability: reliability('ingredients', 'medium') as ClassificationEvidence['reliability'],
-        sourceField: 'ingredient',
-        snippet: val.slice(0, 300),
-        value: val,
-        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.ingredients ?? null },
-      });
-    }
-  }
-
-  // claims — one entry per claim
-  if (ocrData.claims?.length) {
-    for (const val of ocrData.claims) {
-      if (!val?.trim()) continue;
-      evidence.push({
-        ...base,
-        id: randomUUID(),
-        attributeId: null,
-        reliability: reliability('claims', 'medium') as ClassificationEvidence['reliability'],
-        sourceField: 'claim',
-        snippet: val.slice(0, 300),
-        value: val,
-        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.claims ?? null },
-      });
-    }
-  }
-
-  // Propagate the durable model-call IDs that produced this OCR evidence so
-  // proposals/stage metadata can trace back to the exact calls (issue #17 E).
-  if (params.modelCallIds?.length) {
-    for (const e of evidence) {
-      e.metadata = { ...(e.metadata ?? {}), modelCallIds: params.modelCallIds };
-    }
-  }
-
-  return evidence;
-}
+// P2-T1: the canonical pure converter now lives in `./ocr-evidence` (shared
+// with the cohort resolver, which previously kept a mirrored copy). Re-exported
+// here so existing consumers (`stages/evidence-extraction.ts`) keep compiling.
+import { packagingOcrDataToEvidence } from './ocr-evidence';
+export { packagingOcrDataToEvidence };
+export type { OcrToEvidenceParams } from './ocr-evidence';
 
 function parseFieldInput<T>(
   fieldInput: T | EvidenceInputField<T> | null | undefined,
@@ -451,11 +136,30 @@ function parseFieldInput<T>(
   };
 }
 
+/** Scalar OCR fields whose non-null presence counts as usable content. */
+const OCR_CONTENT_SCALAR_FIELDS = [
+  'productName', 'brand', 'upc', 'size', 'weight', 'count',
+  'flavorVariety', 'color', 'material', 'lifeStage', 'breedSize', 'productForm',
+] as const;
+
+/** Array OCR fields whose non-empty presence counts as usable content. */
+const OCR_CONTENT_ARRAY_FIELDS = [
+  'species', 'healthConcernFunction', 'dietaryLabels',
+  'ingredients', 'ingredientKeywords', 'claims', 'visibleTextLines',
+] as const;
+
+/** True when a parsed OCR result carries usable content (same rule as the
+ *  packaging-ocr stage and cohort curator). */
 function hasOcrContent(ocr: PackagingOcrData | undefined | null): boolean {
   if (!ocr) return false;
-  if (ocr.productName && ocr.productName.trim().length > 0) return true;
-  if (ocr.brand && ocr.brand.trim().length > 0) return true;
-  if (ocr.visibleTextLines && ocr.visibleTextLines.some((b: string) => b && b.trim().length > 0)) return true;
+  for (const field of OCR_CONTENT_SCALAR_FIELDS) {
+    const value = ocr[field];
+    if (typeof value === 'string' && value.trim().length > 0) return true;
+  }
+  for (const field of OCR_CONTENT_ARRAY_FIELDS) {
+    const arr = ocr[field];
+    if (Array.isArray(arr) && arr.some((b: string) => b && b.trim().length > 0)) return true;
+  }
   return false;
 }
 
@@ -708,6 +412,11 @@ export async function extractProductEvidence(
 
   let localStatus: OcrAttemptOutcome['status'] = canUseLocalVlm ? 'skipped' : 'disabled';
   let cloudStatus: OcrAttemptOutcome['status'] = canUseCloudImages ? 'skipped' : 'disabled';
+  // P1-T5 fixup: persist the coded local failure reason + transport attempt
+  // count on ordinary failures so the outcome carries WHY the local leg
+  // failed (additive fields; success behavior unchanged).
+  let localFailureReason: OcrAttemptOutcome['localFailureReason'] = null;
+  let localAttempts = 0;
   let llmStatus: OcrAttemptOutcome['llmStatus'] = canUseCloudText ? 'skipped' : 'disabled';
 
   const imageUrls: string[] = [];
@@ -767,7 +476,7 @@ export async function extractProductEvidence(
         // Run-bound local VLM calls are audited (issue #17 E): the call
         // context binds the transport to the run snapshot plan and the
         // resulting callId flows into the OCR evidence metadata.
-        const ocrResult = await extractPackagingOcr({
+        const attempt = await runPackagingOcrAttempt({
           imageUrl: imgUrl,
           workspacePath: input.workspacePath,
           imageSourceUrl: imgUrl,
@@ -782,11 +491,18 @@ export async function extractProductEvidence(
             : {}),
         });
 
-        if (ocrResult && hasOcrContent(ocrResult)) {
-          ocrResults.push(ocrResult);
-          console.log(`[EvidenceExtraction] VLM OCR completed for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
+        if (attempt.ok) {
+          const ocrResult = attempt.data;
+          if (hasOcrContent(ocrResult)) {
+            ocrResults.push(ocrResult);
+            console.log(`[EvidenceExtraction] VLM OCR completed for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
+          } else {
+            console.warn(`[EvidenceExtraction] VLM OCR returned no text content for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
+          }
         } else {
-          console.warn(`[EvidenceExtraction] VLM OCR returned no text content for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
+          localFailureReason = attempt.reasonCode;
+          localAttempts = Math.max(localAttempts, attempt.attempts);
+          console.warn(`[EvidenceExtraction] VLM OCR failed (${attempt.reasonCode}) for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${attempt.redactedMessage}`);
         }
       } catch (err: any) {
         console.warn(`[EvidenceExtraction] VLM OCR failed for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${redactTransportText(err.message)}`);
@@ -1013,6 +729,8 @@ export async function extractProductEvidence(
     llmStatus,
     model: packagingOcrData?.metadata?.model ?? vlmConfig?.model ?? null,
     imageCount: imageUrls.length,
+    ...(localFailureReason ? { localFailureReason } : {}),
+    ...(localAttempts > 0 ? { attempts: localAttempts } : {}),
   };
 
   return { evidence, packagingOcrData, ocrOutcome };

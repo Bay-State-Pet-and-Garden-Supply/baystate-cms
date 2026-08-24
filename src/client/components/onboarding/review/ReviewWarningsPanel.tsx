@@ -28,7 +28,9 @@ function evidenceSummary(detail: ItemDetailResponse | null): string[] {
   }
   const piEvidence = ext.productIntelligenceEvidence ?? [];
   if (piEvidence.length > 0) {
-    lines.push(`Product Intelligence imports: ${piEvidence.length}`);
+    // ADR-0030 Phase 4: PI import tables are dropped; this line is purely a
+    // historical display for items that still carry imported-evidence arrays.
+    lines.push(`Product Intelligence imports (historical): ${piEvidence.length}`);
   }
   if (lines.length === 0) lines.push('Extraction evidence present (provenance unknown).');
   return lines;

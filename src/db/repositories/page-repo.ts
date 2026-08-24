@@ -51,6 +51,22 @@ export function listVerifiedPageOptions(workspaceId: string): PageRow[] {
 }
 
 /**
+ * Source hash of the workspace's ACTIVE page import (e09 round-3 FIX 1).
+ * The review completion gate compares a reviewer Category Page correction's
+ * recorded hash against THIS value — a correction captured under a previous
+ * import is stale and fails closed. Returns null when no active import exists.
+ */
+export function getActivePageImportHash(workspaceId: string): string | null {
+  const db = getDb();
+  const row = db.query(
+    `SELECT source_hash FROM page_imports
+     WHERE workspace_id = ? AND status = 'active'
+     ORDER BY created_at DESC LIMIT 1`,
+  ).get(workspaceId) as { source_hash: string } | undefined;
+  return row?.source_hash ?? null;
+}
+
+/**
  * Provisional candidates from scanned ProductOnPages fragments. Review
  * context only — never verified identities. Delegates to the deterministic
  * fragment scanner over the workspace product files.
@@ -195,6 +211,18 @@ export function getProductPageAssignments(productSku: string): Array<{ pageId: s
   const db = getDb();
   const rows = db.query('SELECT page_id, page_name FROM product_pages WHERE product_sku = ?').all(productSku) as Array<{ page_id: string | null; page_name: string }>;
   return rows.map(r => ({ pageId: r.page_id ? String(r.page_id) : null, pageName: String(r.page_name) }));
+}
+
+/**
+ * Distinct assigned page names across ALL products — the catalog-wide name
+ * list behind the legacy hard-coded page-name suggestion fallback in
+ * product-curator (packaging-ocr overhaul P2-T5 repository cleanup of the
+ * inline `SELECT DISTINCT page_name FROM product_pages` query).
+ */
+export function listDistinctProductPageNames(): string[] {
+  const db = getDb();
+  const rows = db.query('SELECT DISTINCT page_name FROM product_pages').all() as Array<{ page_name: string }>;
+  return rows.map(r => r.page_name);
 }
 
 export function clearProductPages(productSku: string): void {

@@ -391,6 +391,15 @@ describe('resolveFallbackRoute — explicit fallback only', () => {
     expect(redacted).toBe('https://cdn.example.com/img/1.jpg');
   });
 
+  it('redactImageUrl strips userinfo credentials (P2 metadata-redaction pass)', () => {
+    const url = 'https://key-123:secret@example.com/signed/img.jpg?token=xyz';
+    const redacted = redactImageUrl(url);
+    expect(redacted).toBe('https://example.com/signed/img.jpg');
+    expect(redacted).not.toContain('key-123');
+    expect(redacted).not.toContain('secret');
+    expect(redacted).not.toContain('token=xyz');
+  });
+
   it('redactIdentifier returns a bounded non-sensitive form', () => {
     expect(redactIdentifier('850067859598')).toContain('…');
     expect(redactIdentifier('850067859598')).not.toContain('5067859');

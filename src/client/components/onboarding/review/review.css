@@ -12,6 +12,20 @@
   min-height: 480px;
 }
 
+/* ── Keyboard focus (WCAG 2.4.7) ─────────────────────────────────────── */
+/* One scoped ring for every interactive element in the review surface.
+   Brand green (#14532D) against the white/cream surfaces clears the 3:1
+   non-text contrast minimum; resting visuals are untouched because
+   :focus-visible only fires for keyboard-initiated focus. */
+.rv-workspace :focus-visible {
+  outline: 2px solid var(--color-uniform-green);
+  outline-offset: 2px;
+}
+
+.rv-workspace .rv-queue-row:focus-visible {
+  outline-offset: -2px; /* rows are flush to the pane edge */
+}
+
 /* ── Header bar ──────────────────────────────────────────────────────────── */
 .rv-header {
   display: flex;
@@ -53,11 +67,14 @@
   align-self: center;
 }
 
+/* Layout-thrash fix (impeccable critique): animate transform, not width —
+   width transitions reflow every frame; scaleX composites on the GPU. */
 .rv-progress-fill {
   height: 100%;
   background: var(--color-uniform-green);
   border-radius: var(--rounded-full);
-  transition: width var(--transition-normal);
+  transform-origin: left center;
+  transition: transform var(--transition-normal);
 }
 
 .rv-filters {
@@ -130,6 +147,145 @@
   background: var(--color-feed-bag-cream);
   border: 1px solid var(--color-card-border);
   border-radius: var(--rounded-xs);
+}
+
+.rv-header {
+  position: relative; /* anchor for the filter popover */
+}
+
+.rv-filter-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4375rem 0.75rem;
+  min-height: 32px;
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-ledger-charcoal);
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  cursor: pointer;
+}
+
+.rv-filter-trigger:hover {
+  background: var(--color-feed-bag-cream);
+}
+
+.rv-filter-trigger[aria-expanded='true'] {
+  background: var(--color-feed-bag-cream);
+  border-color: var(--color-uniform-green);
+}
+
+.rv-filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 0.3125rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-white-surface);
+  background: var(--color-uniform-green);
+  border-radius: var(--rounded-full);
+}
+
+/* Applied-filter chips stay visible beside the trigger while any filter is
+   active; each chip removes its dimension on click. */
+.rv-filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.rv-filter-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1875rem 0.5rem;
+  min-height: 24px;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-ledger-charcoal);
+  background: var(--color-feed-bag-cream);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  cursor: pointer;
+}
+
+.rv-filter-chip-remove:hover {
+  border-color: var(--color-uniform-green);
+}
+
+.rv-filter-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  min-width: 240px;
+  max-width: min(340px, 90vw);
+  padding: var(--spacing-md);
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  box-shadow: 0 4px 16px rgb(20 83 45 / 0.12);
+}
+
+.rv-filter-popover .rv-select {
+  width: 100%;
+}
+
+.rv-filter-popover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.rv-legend-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  font-size: 0.6875rem;
+  line-height: 1;
+  color: var(--color-mulch-brown);
+  background: transparent;
+  border: none;
+  border-radius: var(--rounded-xs);
+  cursor: pointer;
+}
+
+.rv-legend-dismiss:hover {
+  color: var(--color-ledger-charcoal);
+  background: var(--color-feed-bag-cream);
+}
+
+.rv-legend-reopen {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  min-height: 28px;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+  background: transparent;
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  cursor: pointer;
+}
+
+.rv-legend-reopen:hover {
+  color: var(--color-ledger-charcoal);
+  background: var(--color-feed-bag-cream);
 }
 
 /* ── Two-pane body ───────────────────────────────────────────────────────── */
@@ -218,13 +374,75 @@
 }
 
 /* ── Queue table ─────────────────────────────────────────────────────────── */
-.rv-queue-list {
+.rv-queue-container {
   flex: 1;
   overflow-y: auto;
-  /* Epic #46 refinement: wide row content (long curated titles, family
-     labels) must never produce a horizontal scrollbar — clip/ellipsis
-     instead. */
   overflow-x: hidden;
+  outline: none;
+}
+
+.rv-family-group {
+  margin-bottom: 0;
+}
+
+.rv-family-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  padding: 0.375rem 0.625rem;
+  background: color-mix(in srgb, var(--color-muted-gold) 15%, var(--color-feed-bag-cream));
+  border-top: 1px solid var(--color-card-border);
+  border-bottom: 1px solid var(--color-card-border);
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-ledger-charcoal);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.rv-family-group-header--individual {
+  background: var(--color-feed-bag-cream);
+  color: var(--color-mulch-brown);
+}
+
+.rv-family-group-checkbox {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.rv-family-group-checkbox input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.rv-family-group-title {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Keep the title flush beside the header checkbox instead of being
+     spread to the middle by the header's space-between layout. */
+  margin-right: auto;
+}
+
+.rv-family-group-count {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-mulch-brown);
+  white-space: nowrap;
+}
+
+.rv-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   outline: none;
 }
 
@@ -234,7 +452,9 @@
   gap: var(--spacing-sm);
   align-items: center;
   padding: 0.5rem 0.625rem;
-  border-bottom: 1px solid var(--color-card-border);
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--rounded-md);
   cursor: pointer;
   text-align: left;
   font-family: var(--font-body);
@@ -255,12 +475,15 @@
   justify-content: center;
 }
 
+/* Checkbox-selected rows stay visually QUIETER than the keyboard-active row:
+   selection is a set operation, activity is where the reviewer is looking.
+   Neutral warm tint (not brand green — green is reserved for "you are here"). */
 .rv-queue-row.rv-row-selected {
-  background: color-mix(in srgb, var(--color-uniform-green) 5%, var(--color-white-surface));
+  background: color-mix(in srgb, var(--color-feed-bag-cream) 55%, var(--color-white-surface));
 }
 
 .rv-queue-row.rv-row-selected:hover {
-  background: color-mix(in srgb, var(--color-uniform-green) 9%, var(--color-white-surface));
+  background: var(--color-feed-bag-cream);
 }
 
 .rv-queue-row:hover,
@@ -268,18 +491,22 @@
   background: var(--color-feed-bag-cream);
 }
 
+/* Tinted emphasis replaces the side-tab inset bar (detector-flagged slop
+   tell): the active row reads as elevated via a green wash + soft border,
+   not a hard edge pinned to the pane side. */
 .rv-queue-row.rv-row-active {
   background: color-mix(in srgb, var(--color-uniform-green) 8%, var(--color-white-surface));
-  box-shadow: inset 3px 0 0 var(--color-uniform-green);
+  border-color: color-mix(in srgb, var(--color-uniform-green) 35%, transparent);
 }
 
 .rv-row-thumb {
   width: 44px;
   height: 44px;
   border-radius: var(--rounded-md);
-  object-fit: cover;
+  object-fit: contain;
   border: 1px solid var(--color-card-border);
   background: var(--color-feed-bag-cream);
+  padding: 2px;
 }
 
 .rv-row-thumb.rv-no-thumb {
@@ -474,7 +701,7 @@
   width: 100%;
   aspect-ratio: 1;
   border-radius: var(--rounded-md);
-  object-fit: cover;
+  object-fit: contain;
   border: 1px solid var(--color-card-border);
   cursor: zoom-in;
   background: var(--color-feed-bag-cream);
@@ -490,10 +717,135 @@
   display: block;
 }
 
+/* ── Product Listing Layout (Media on left, short fields on right, long fields below) ── */
+.rv-listing-top {
+  display: flex;
+  gap: var(--spacing-lg);
+  align-items: flex-start;
+  margin-bottom: var(--spacing-md);
+}
+
+@media (max-width: 768px) {
+  .rv-listing-top {
+    flex-direction: column;
+  }
+}
+
+.rv-listing-media {
+  flex: 0 0 220px;
+  max-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.rv-listing-media-main {
+  width: 220px;
+  height: 220px;
+  border-radius: var(--rounded-lg);
+  border: 1px solid var(--color-card-border);
+  background: var(--color-feed-bag-cream);
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+
+.rv-listing-media-main img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.rv-listing-media-carousel {
+  display: flex;
+  gap: 0.375rem;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  max-width: 220px;
+}
+
+.rv-listing-media-thumb {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border-radius: var(--rounded-md);
+  border: 1px solid var(--color-card-border);
+  background: var(--color-feed-bag-cream);
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.rv-listing-media-thumb:hover {
+  border-color: var(--color-uniform-green);
+}
+
+.rv-listing-media-thumb.rv-thumb-active {
+  border-color: var(--color-uniform-green);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-uniform-green) 35%, transparent);
+}
+
+.rv-listing-media-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* e10s04 — compact media-picker action buttons under carousel thumbnails. */
+.rv-mini-btn {
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 1px 5px;
+  border-radius: var(--rounded-sm, 4px);
+  border: 1px solid var(--color-card-border);
+  background: var(--color-surface, transparent);
+  color: inherit;
+  cursor: pointer;
+}
+
+.rv-mini-btn:hover:not(:disabled) {
+  background: var(--color-feed-bag-cream);
+}
+
+.rv-mini-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.rv-listing-fields {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.rv-listing-specs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.625rem 1rem;
+}
+
+.rv-listing-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  border-top: 1px solid var(--color-card-border);
+  padding-top: var(--spacing-md);
+}
+
 .rv-provenance {
   font-size: 0.6875rem;
   color: var(--color-mulch-brown);
-  margin-top: 0.375rem;
+  margin-top: 0.25rem;
   font-family: var(--font-body);
 }
 
@@ -882,4 +1234,186 @@
 .rv-proposal-status-abstention {
   background: var(--color-page-cream);
   color: var(--color-mulch-brown);
+}
+
+/* ── e10s02: full-field review form ─────────────────────────────────────── */
+
+/* Locked-field note under a disabled input (never a silent dead field). */
+.rv-lock-note {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-mulch-brown);
+  margin-top: 0.25rem;
+}
+
+/* Curation provenance chips (titleSource / curationMethod / OCR title). */
+.rv-provenance-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+/* Collapsible read-only "Listing facts" group (plan §3 row 15). */
+.rv-listing-facts {
+  border-top: 1px solid var(--color-card-border);
+  padding-top: var(--spacing-sm);
+}
+
+.rv-listing-facts > summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-mulch-brown);
+  padding: 0.125rem 0;
+}
+
+.rv-listing-facts[open] > summary {
+  margin-bottom: var(--spacing-sm);
+}
+
+.rv-listing-facts-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+}
+
+/* ── e10s03: readiness checklist + confirm step ─────────────────────────── */
+
+.rv-readiness-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.rv-readiness-ok {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--color-success-text);
+}
+
+.rv-readiness-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.rv-readiness-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.rv-readiness-status {
+  flex: none;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.0625rem 0.375rem;
+  border-radius: var(--rounded-lg);
+}
+
+.rv-readiness-row-blocker .rv-readiness-status {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+  border: 1px solid var(--color-danger-border);
+}
+
+.rv-readiness-row-warning .rv-readiness-status {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}
+
+/* The whole row label is a control so the field name itself is the target. */
+.rv-readiness-fix {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.375rem;
+}
+
+.rv-readiness-fix:hover .rv-readiness-fix-hint,
+.rv-readiness-fix:focus-visible .rv-readiness-fix-hint {
+  text-decoration: underline;
+}
+
+.rv-readiness-row-blocker .rv-readiness-fix {
+  color: var(--color-danger-text);
+}
+
+.rv-readiness-row-warning .rv-readiness-fix {
+  color: var(--color-warning-text);
+}
+
+.rv-readiness-fix-hint {
+  flex: none;
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.rv-readiness-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+}
+
+/* Text reason next to the blocked Looks Good button (SC 1.4.1 — not color). */
+.rv-actions-blocked {
+  font-size: 0.75rem;
+  color: var(--color-danger-text);
+}
+
+/* Confirm-step diff ledger. */
+.rv-confirm-modal {
+  max-width: 34rem;
+}
+
+.rv-confirm-diff {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--spacing-md) 0;
+  font-size: 0.8125rem;
+}
+
+.rv-confirm-diff th,
+.rv-confirm-diff td {
+  text-align: left;
+  padding: 0.375rem 0.5rem;
+  border-bottom: 1px solid var(--color-card-border);
+  vertical-align: top;
+}
+
+.rv-confirm-diff thead th {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-mulch-brown);
+}
+
+.rv-confirm-diff tbody th {
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+}
+
+.rv-confirm-warnings {
+  margin: 0 0 var(--spacing-md);
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+  color: var(--color-warning-text);
+}
+
+.rv-confirm-note {
+  font-size: 0.75rem;
 }

@@ -46,3 +46,6 @@ test-*-workspace/
 subagents-reports/
 .analysis/
 
+
+# ── PI decommission archival dumps (DB data never enters git) ─────────────────
+archive/
