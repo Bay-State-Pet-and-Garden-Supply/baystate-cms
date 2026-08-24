@@ -127,6 +127,7 @@ import {
 } from '../classification/cohort-semantic-validator';
 import type { CohortSemanticFinding } from '../classification/cohort-semantic-validator';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
+import { FAMILY_TITLE_CONSISTENCY_VERSION } from '../classification/family-title-consistency';
 import { llmRankOptions } from '../classification/curation-target-ranker';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
 export { HeartbeatLostError };
@@ -2837,9 +2838,38 @@ export async function processCohort(
       // atomic commit below — a crash never leaves a member committed without
       // its validation. Additive key: absent in legacy/shadow runs (JSON
       // stringify drops the undefined key).
+      // e09 B3 (T9/P10): persist the gate-status records captured from the
+      // DURABLE coordinated outputs at commit time — never recomputed from
+      // live rows. A committed llm_cohort/cohort_fallback title passed
+      // `validateFamilyTitleSet` before commit (the coordinator throws on an
+      // invalid set, T7), so 'passed' is the only truthful status. The page
+      // decision mirrors the durable output verbatim (assigned/abstained) or
+      // records coordination absence. Additive keys: JSON.stringify drops
+      // them when undefined, so legacy/shadow commits stay byte-identical.
+      // Consumed fail-closed by the review completion gate (adjudication #8:
+      // new revisions only — completed cohorts are never backfilled).
+      const memberSkuForCommit = item.upc ?? item.id;
+      const durableTitleForCommit = prepared.coordinatedTitles?.get(memberSkuForCommit) ?? null;
+      const familyTitleValidation =
+        durableTitleForCommit &&
+        (durableTitleForCommit.source === 'llm_cohort' || durableTitleForCommit.source === 'cohort_fallback')
+          ? {
+              version: FAMILY_TITLE_CONSISTENCY_VERSION,
+              status: 'passed' as const,
+              source: durableTitleForCommit.source,
+            }
+          : undefined;
+      const durablePageOutputForCommit = prepared.coordinatedPages?.get(memberSkuForCommit)?.output ?? null;
+      const pageDecisionStatus = durablePageOutputForCommit
+        ? durablePageOutputForCommit.status === 'abstained'
+          ? { status: 'abstained' as const, reason: durablePageOutputForCommit.reason ?? null }
+          : { status: 'assigned' as const }
+        : { status: 'absent' as const };
       const committedCurationData: CurationData = {
         ...curationData,
         semanticValidation: semanticValidation ?? undefined,
+        familyTitleValidation,
+        pageDecisionStatus,
       };
       getDb().transaction(() => {
         updateItemCurationData(item.id, JSON.stringify(committedCurationData));

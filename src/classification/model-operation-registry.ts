@@ -20,6 +20,11 @@ import { SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION } from '../shopsite/built-in-o
 
 export type { ProtectedOperation };
 
+/** Category Page correctness validator version (e09 B2 P1-P12) — single source of truth lives in
+ *  category-page-correctness.ts (consumed by cohort-page-hash for the P-hash); re-exported here so
+ *  registry consumers reference one constant instead of a drifting copy. */
+export { CATEGORY_PAGE_CORRECTNESS_VERSION } from './category-page-correctness';
+
 /** Bump ONLY when the operation→rule/prompt/parameter contract changes. */
 export const MODEL_OPERATION_REGISTRY_VERSION = 2;
 
@@ -64,7 +69,7 @@ export const RULE_VERSIONS: Readonly<Record<ProtectedOperation, string>> = {
   cohort_page_assignment: 'cohort-page-assignment-rules-v1',
   cohort_page_assignment_parent: 'cohort-page-assignment-parent-rules-v2',
   title_consolidation: 'title-consolidation-rules-v1',
-  cohort_title_consolidation: 'cohort-title-consolidation-rules-v1',
+  cohort_title_consolidation: 'cohort-title-consolidation-rules-v2', // B1 family-title consistency (T2-T7) + title-lint — FAMILY_TITLE_CONSISTENCY_VERSION v2
   distributor_copy_consolidation: 'distributor-copy-consolidation-rules-v1',
   discovery_name_consolidation: 'discovery-name-consolidation-rules-v1',
   brand_inference: 'brand-inference-rules-v1',

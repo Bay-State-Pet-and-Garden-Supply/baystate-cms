@@ -1,0 +1,37 @@
+story_id: e09s03
+title: "Validation & controlled rollout — gold-set regression, determinism, shadow metrics"
+status: in_progress
+bcps: 4
+tasks:
+  - id: e09s03t01
+    description: "Run Phase C validation battery: typecheck, plan §13 vitest command, DB-backed remainder under bun test (cohort-title-coordinator, product-line-grouper), targeted eslint on all e09-touched files."
+    verify: "bun run typecheck && bunx vitest run src/tests/unit/product-line-grouper.test.ts src/tests/unit/family-grouping-accuracy.test.ts src/tests/unit/cohort-name-coordinator.test.ts src/tests/unit/cohort-page-coordinator.test.ts src/tests/unit/cohort-page-prompt.test.ts src/tests/unit/cohort-semantic-validator.test.ts src/tests/unit/family-title-consistency.test.ts src/tests/unit/category-page-correctness.test.ts src/tests/unit/family-title-page-goldset.test.ts && bunx eslint --quiet src/classification/family-title-consistency.ts src/classification/title-lint.ts src/classification/category-page-correctness.ts src/classification/review-completion-gate.ts src/classification/promotion-gate.ts"
+    risk: P1
+    status: passing
+    allure:
+      severity: high
+      categories: ["Validation", "Regression"]
+  - id: e09s03t02
+    description: "Gold-set determinism proof: family split integrity (no SKU-level leakage), synthetic examples isolated from production families, stable Page IDs + import hash recorded; no outcome depends on model confidence."
+    verify: "bunx vitest run src/tests/unit/family-title-page-goldset.test.ts"
+    risk: P1
+    status: passing
+    allure:
+      severity: high
+      categories: ["Validation", "Determinism"]
+  - id: e09s03t03
+    description: "Shadow/replay validation against a verified backup clone: re-run completed-cohort validation read-only; same frozen run replays without new model calls and produces identical canonical artifact. NO live re-run without explicit user approval. New revisions only — no backfill."
+    verify: "manual — requires verified SQLite backup clone; record replay hash comparison here when run"
+    risk: P0
+    status: planned
+    allure:
+      severity: critical
+      categories: ["Rollout", "Replay"]
+  - id: e09s03t04
+    description: "Record shadow metrics into specs/metrics/family-title-page-eval-v1.json after first real cohort revision completes under the new authority hash (replace placeholder modelExecutionPlanHash on freeze)."
+    verify: "node -e \"const j=require('./specs/metrics/family-title-page-eval-v1.json'); if(j.modelExecutionPlanHash.startsWith('placeholder')) throw new Error('not frozen')\""
+    risk: P2
+    status: failing
+    allure:
+      severity: medium
+      categories: ["Metrics", "Rollout"]

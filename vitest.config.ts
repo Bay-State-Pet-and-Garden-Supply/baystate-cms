@@ -35,6 +35,11 @@ export default defineConfig({
       'src/tests/integration/phase3-sync-drift.test.ts',
       'src/tests/unit/onboarding-repos.test.ts',
       'src/tests/unit/onboarding-approval-gates.test.ts',
+      // e10s01 review-completeness gate — bun:sqlite/bun:test, run under bun test (test:db)
+      'src/tests/unit/review-completeness-gate.test.ts',
+      // e10s04 media route/resolution — bun:sqlite/bun:test, run under bun test (test:db)
+      'src/tests/unit/review-media-route.test.ts',
+      'src/tests/unit/review-media-resolution.test.ts',
       'src/tests/unit/durable-approval-promote.test.ts',
       'src/tests/unit/draft-promoter.test.ts',
       'src/tests/unit/onboarding-duplicate-skip.test.ts',
@@ -54,6 +59,7 @@ export default defineConfig({
       'src/tests/unit/sitemap-cache-repo.test.ts',
       'src/tests/unit/sitemap-fetcher.test.ts',
       'src/tests/unit/sitemap-matcher.test.ts',
+      'src/tests/unit/sitemap-sync-service.test.ts',
       'src/tests/unit/profile-generation-revision-repo.test.ts',
       'src/tests/unit/profile-generation-field-decision-repo.test.ts',
       'src/tests/unit/llm-task-config-repo.test.ts',

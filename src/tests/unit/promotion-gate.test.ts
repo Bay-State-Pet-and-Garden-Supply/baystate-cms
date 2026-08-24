@@ -630,6 +630,74 @@ describe('PR11 C1 — validatePromotionGate (pure)', () => {
       expect(result.reason).toContain('wet-dog-food');
     }
   });
+
+  // ── e09 B3 (P11): Category Page currentness against the ACTIVE verified import ──
+
+  it('refuses an accepted category_page proposal whose identity is NOT in the verified set (stale_page_assignment)', () => {
+    const result = validatePromotionGate(gateInput({
+      acceptedProposals: [proposal({
+        id: 'page-proposal-1',
+        proposalType: 'category_page',
+        targetId: 'page-bogus',
+        proposedValue: { pageId: 'page-bogus', pageName: 'Bogus Page' },
+      })],
+      dependencyLookup: () => [],
+      verifiedPageIds: new Set(['page-verified-1']),
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('stale_page_assignment');
+      expect(result.reason).toContain('page-bogus');
+      expect(result.reason).toContain('P11');
+    }
+  });
+
+  it('refuses a NAME-ONLY accepted category_page proposal (no verifiable identity, P2/P12)', () => {
+    const result = validatePromotionGate(gateInput({
+      acceptedProposals: [proposal({
+        id: 'page-name-only',
+        proposalType: 'category_page',
+        targetId: null,
+        proposedValue: 'Legacy Page Name',
+      })],
+      dependencyLookup: () => [],
+      verifiedPageIds: new Set(['page-verified-1']),
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('stale_page_assignment');
+      expect(result.reason).toContain('name-only');
+    }
+  });
+
+  it('passes when every accepted category_page identity resolves into the verified set', () => {
+    const result = validatePromotionGate(gateInput({
+      acceptedProposals: [proposal({
+        id: 'page-proposal-ok',
+        proposalType: 'category_page',
+        targetId: 'page-verified-1',
+        proposedValue: { pageId: 'page-verified-1', pageName: 'Verified Page' },
+      })],
+      dependencyLookup: () => [],
+      verifiedPageIds: new Set(['page-verified-1', 'page-verified-2']),
+    }));
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('skips the page-currentness check when the caller supplies no verified set (synthetic callers unchanged)', () => {
+    const result = validatePromotionGate(gateInput({
+      acceptedProposals: [proposal({
+        id: 'page-proposal-bogus',
+        proposalType: 'category_page',
+        targetId: 'page-bogus',
+        proposedValue: { pageId: 'page-bogus', pageName: 'Bogus Page' },
+      })],
+      dependencyLookup: () => [],
+    }));
+    expect(result).toEqual({ ok: true });
+  });
+
+  // ── PR12 C1 (issue #30): recompute the CURRENT execution-kind authority ──
 });
 
 describe('PR12 C1 — pure authority-hash recomputation helpers (issue #30)', () => {

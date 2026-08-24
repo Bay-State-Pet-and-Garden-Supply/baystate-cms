@@ -643,6 +643,19 @@ export function advanceReviewedItemsToPromotion(
         refused.push({ itemId: id, reason: `semantic_validation_blocked: ${firstMessage}` });
         continue;
       }
+      // Universal Category Page requirement (defense in depth): review
+      // completion already refuses pageless items, so a review/completed row
+      // without an assignment can only be stale data — never approve it into
+      // Promotion. Verified-identity resolution stays with the run gate and
+      // the promotion mandatory-Pages backstop.
+      const assignedPages = item.curationData?.suggestedPages;
+      if (!Array.isArray(assignedPages) || assignedPages.length === 0) {
+        refused.push({
+          itemId: id,
+          reason: 'missing_category_page: no Category Page is assigned; assign pages before approval.',
+        });
+        continue;
+      }
       const result = db.query(
         `UPDATE onboarding_items
          SET stage = 'promotion', stage_status = 'pending', error_message = NULL, retry_count = 0,

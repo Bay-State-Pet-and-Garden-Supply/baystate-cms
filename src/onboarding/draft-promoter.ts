@@ -267,6 +267,11 @@ function computePromotionGate(
     acceptedProposals: activeProposals,
     dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
     currentAuthorityHashes,
+    // e09 B3 (P11): CURRENT verified Page identities of the active import —
+    // an accepted category_page proposal that no longer resolves into this
+    // set refuses the item before any draft write. Legacy items (no run
+    // pointer) never reach the check inside the gate.
+    verifiedPageIds: new Set(listVerifiedPageOptions(workspaceId).map(page => page.id)),
   });
   if (!gate.ok) {
     return {

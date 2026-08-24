@@ -403,6 +403,18 @@ describe('computeCohortTitleInputHash — format rules digest (PR6 C2)', () => {
     expect(computeCohortTitleInputHashForFormatRules(resolved, `${FORMAT_RULES}\n- New rule line`)).not.toBe(hash(base));
     expect(computeCohortTitleInputHashForFormatRules(resolved, 'completely different rules')).not.toBe(hash(base));
   });
+
+  it('the title-lint version participates (e09 T8, parameterized internal)', () => {
+    const base = makeParams();
+    const resolved = resolveParams(base);
+    // The public entry point uses the single-sourced module constant.
+    expect(computeCohortTitleInputHashForFormatRules(resolved, FORMAT_RULES)).toBe(hash(base));
+    // A simulated lint-rule release alters the hash without mutating the module:
+    // committed sets produced under a different lint version fail closed (T8).
+    expect(
+      computeCohortTitleInputHashForFormatRules(resolved, FORMAT_RULES, 'v999'),
+    ).not.toBe(hash(base));
+  });
 });
 
 describe('computeCohortTitleInputHash — model execution authority slice (PR6 C2 / DECISION-P, PR13 C1 / DECISION-C)', () => {
@@ -462,8 +474,14 @@ describe('computeCohortTitleInputHash — model execution authority slice (PR6 C
     // Milestone E: recomputed AGAIN under the v2 composition WITH the
     // `sourceProvenance` slice (official-page normalization for the V1-style
     // fixture member) — an intentional, reviewed composition change.
-    expect(hash(makeParams())).toBe('264bda1109ad5cf535d1e64c7bb764b7bd0e4f4aacdc83ec27779dccc86b16b9');
-    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('264bda1109ad5cf535d1e64c7bb764b7bd0e4f4aacdc83ec27779dccc86b16b9');
+    // e09 B1 (T8): recomputed when `familyTitleConsistencyVersion` joined the
+    // hashed composition — the title-consistency gate version now
+    // participates in the durable title authority.
+    // e09 title-lint (T8): recomputed when `titleLintVersion` joined the
+    // hashed composition next to it — lint-rule bumps now invalidate
+    // committed sets.
+    expect(hash(makeParams())).toBe('18c15514b3e421a28e52b5c03eb52cafa6898837ed7d09bb48a52de7659bf02c');
+    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('c434812b6e643a3ce52adffe25010f7a3f769eea0d1c14f98d7c5a347aacd832');
   });
 
   it('the plan entry provider/model/promptTemplateVersion/ruleVersion each participate', () => {
