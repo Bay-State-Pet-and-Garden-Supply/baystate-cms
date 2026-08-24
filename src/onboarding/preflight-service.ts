@@ -100,7 +100,7 @@ function extractCandidateBrand(name: string, knownBrands: string[]): string | nu
 export interface BrandMaps {
   knownBrandMap: Map<string, string>;
   knownBrandNames: string[];
-  brandToDomainMap: Map<string, string[]>;
+  brandsWithDomain: Set<string>;
   brandToPatternMap: Map<string, string>;
   brandToRoutingMap: Map<string, { preferredDistributorIds: string[]; sourcingPolicy: string }>;
   availableDistributors: PreflightAvailableDistributor[];
@@ -187,15 +187,13 @@ function buildBrandMaps(workspaceId: string): BrandMaps {
 
   const knownBrandNames = Array.from(knownBrandMap.values()).sort((a, b) => a.localeCompare(b));
   
-  const brandToDomainMap = new Map<string, string[]>();
+  const brandsWithDomain = new Set<string>();
   const brandToPatternMap = new Map<string, string>();
   for (const site of allBrandSites) {
     const key = site.brandName.toLowerCase().trim();
-    const existing = brandToDomainMap.get(key) ?? [];
-    if (!existing.includes(site.domain)) {
-      existing.push(site.domain);
+    if (site.domain) {
+      brandsWithDomain.add(key);
     }
-    brandToDomainMap.set(key, existing);
     if (site.urlPattern && !brandToPatternMap.has(key)) {
       brandToPatternMap.set(key, site.urlPattern);
     }
@@ -222,7 +220,7 @@ function buildBrandMaps(workspaceId: string): BrandMaps {
   return {
     knownBrandMap,
     knownBrandNames,
-    brandToDomainMap,
+    brandsWithDomain,
     brandToPatternMap,
     brandToRoutingMap,
     availableDistributors,
@@ -255,8 +253,7 @@ function classifyItems(items: ReturnType<typeof listItemsByBatch>, brandMaps: Br
       const normBrand = rawBrand!.toLowerCase();
 
       // Check official domain
-      const domains = brandMaps.brandToDomainMap.get(normBrand);
-      if (domains && domains.length > 0) {
+      if (brandMaps.brandsWithDomain.has(normBrand)) {
         domainMappedCount++;
       } else {
         const canonicalBrand = brandMaps.knownBrandMap.get(normBrand) || rawBrand!;

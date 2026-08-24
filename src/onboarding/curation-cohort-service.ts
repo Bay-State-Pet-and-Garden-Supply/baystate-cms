@@ -295,10 +295,19 @@ function hasCompletedExtraction(item: OnboardingItem): boolean {
  *  is terminal — there is no package image to OCR. `skipped` stays unsettled:
  *  it can represent an unperformed operation and is under scrutiny for PR3's
  *  evidence freeze. OCR remains informational (non-blocking) for candidate
- *  readiness in this round. */
+ *  readiness in this round.
+ *
+ *  P1-T3 mirror of the freeze rule (cohort-curator.ts `isOcrSettled`): a
+ *  stale-marked OCR outcome (digest-staleness invalidation at freeze) is
+ *  NEVER settled, even when prior `packagingOcrData` was preserved intact.
+ *  Readiness evaluation has no member runtime snapshot available, so the
+ *  persisted stale marker is the observable authority-staleness rule here;
+ *  the full digest comparison happens at freeze and in the frozen evidence
+ *  stage. */
 function isOcrSettled(item: OnboardingItem): boolean {
   const extractionData = item.extractionData;
   if (!extractionData) return false;
+  if (extractionData.ocrOutcome?.stale === true) return false;
   if (extractionData.packagingOcrData) return true;
   const status = extractionData.ocrOutcome?.status;
   if (!status) return false;

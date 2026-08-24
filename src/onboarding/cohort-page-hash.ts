@@ -74,6 +74,7 @@
  */
 import { hashCanonicalJson } from '../shared/stable-id';
 import { getModelExecutionPlanEntry, type RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
+import { CATEGORY_PAGE_CORRECTNESS_VERSION } from '../classification/category-page-correctness';
 import type { ProductLineItemSnapshot } from '../classification/types';
 import {
   type ExecutionTypeTitleAuthority,
@@ -376,6 +377,8 @@ export function pageAuthorityFromProjectionMember(
  * P-hash even when rules/provider/model are unchanged (PR7 review round 3,
  * P1).
  */
+export { CATEGORY_PAGE_CORRECTNESS_VERSION };
+
 export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): string {
   return hashCanonicalJson({
     version: 1,
@@ -386,5 +389,6 @@ export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): s
     pages: bundle.pages,
     selection: bundle.selection,
     modelExecutionAuthority: bundle.modelExecutionAuthority ?? null,
+    categoryPageCorrectnessVersion: CATEGORY_PAGE_CORRECTNESS_VERSION,
   });
 }

@@ -302,3 +302,74 @@ describe('typo tolerance helpers (epic #46 review round, Package A)', () => {
     expect(stemsWithinTypoTolerance('duck', 'duckling')).toBe(false);
   });
 });
+
+describe('family grouping accuracy — token, pipeline, boundary', () => {
+  it('splits attached MINI/JUMBO suffixes (BEEFMINI, VNSNJUMBO)', () => {
+    expect(extractNameStem('BETTER BONE BEEFMINI SM')).toBe('better bone');
+    expect(extractNameStem('BETTER BONE VNSNJUMBO LG')).toBe('better bone');
+    // Idempotency: reapplying split does not change result
+    expect(extractNameStem('BETTER BONE BEEF MINI SM')).toBe('better bone');
+  });
+
+  it('splits guarded LG/XL prefix for LGHARVEST', () => {
+    expect(extractNameStem('LGHARVEST LANE JACKET SM')).toBe('harvest lane jacket');
+    expect(extractNameStem('XLHARVEST LANE JACKET LG')).toBe('harvest lane jacket');
+    expect(extractNameStem('HARVEST LANE JACKET MEDIUM')).toBe('harvest lane jacket');
+    // Allowlist-only: unknown ALL-CAPS remainder does NOT split; mixed-case does not
+    expect(extractNameStem('LGBRAND PRODUCT SM')).toBe('lgbrand product');
+    expect(extractNameStem('SMOOTH PRODUCT SM')).toBe('smooth product');
+    expect(extractNameStem('SMOKED PRODUCT LG')).toBe('smoked product');
+    expect(extractNameStem('LgBrand Product')).not.toBe('brand product');
+    // Idempotency: reapplying split does not change result
+    expect(extractNameStem('LGHARVEST LANE JACKET SM')).toBe(extractNameStem('LG HARVEST LANE JACKET SM'));
+  });
+
+  it('converges VEGGIE, VGG, and VEGGGIE (typo)', () => {
+    expect(extractNameStem('BETTER BONE VEGGIE SM')).toBe('better bone');
+    expect(extractNameStem('BETTER BONE VGG LG')).toBe('better bone');
+    expect(extractNameStem('BETTER BONE VEGGGIE SM')).toBe('better bone');
+  });
+
+  it('strips PRODUCT_LINE_MODIFIERS soft/hard/classic/hypo/hypoallergenic', () => {
+    expect(extractNameStem('BETTER BONE SOFT BEEF SM')).toBe('better bone');
+    expect(extractNameStem('BETTER BONE HARD BEEF LG')).toBe('better bone');
+    expect(extractNameStem('BETTER BONE CLASSIC BEEF SM')).toBe('better bone');
+    expect(extractNameStem('BETTER BONE HYPO BEEF SM')).toBe('better bone');
+    expect(extractNameStem('BETTER BONE HYPOALLERGENIC BEEF SM')).toBe('better bone');
+    // Substrings must remain
+    expect(extractNameStem('SOFTSHELL PRODUCT')).toContain('softshell');
+    expect(extractNameStem('HARDWOOD PRODUCT')).toContain('hardwood');
+    expect(extractNameStem('CLASSICO PRODUCT')).toContain('classico');
+    expect(extractNameStem('HYPOTHESIS PRODUCT')).toContain('hypothesis');
+  });
+
+  it('strips SIZE_DESIGNATOR SZ N', () => {
+    expect(extractNameStem('BASKERVILLE ULTRA MOLDABLE MUZZLE SZ 4')).toBe('baskerville ultra moldable muzzle');
+    expect(extractNameStem('BASKERVILLE ULTRA MOLDABLE MUZZLE SZ4')).toBe('baskerville ultra moldable muzzle');
+    expect(extractNameStem('BASKERVILLE ULTRA MOLDABLE MUZZLE SZ 5')).toBe('baskerville ultra moldable muzzle');
+    // Bare SZ and unrelated numbers remain
+    expect(extractNameStem('SZ PRODUCT')).toContain('sz');
+    expect(extractNameStem('PRODUCT SZ')).toContain('sz');
+  });
+
+  it('preserves distinct KONG and Fromm lines (negative controls)', () => {
+    expect(extractNameStem('KONG SQUEAKZ STICK CHICKEN SM')).toBe('kong squeakz stick');
+    expect(extractNameStem('KONG SQUEAKZ STAR CHICKEN SM')).toBe('kong squeakz star');
+    expect(extractNameStem('KONG SQUEAKZ STICK CHICKEN SM')).not.toBe(extractNameStem('KONG SQUEAKZ STAR CHICKEN SM'));
+    expect(extractNameStem('FROMM CLASSIC CHICKEN RECIPE 5LB')).toBe('fromm');
+    expect(extractNameStem('FROMM GOLD CHICKEN RECIPE 5LB')).toBe('fromm gold');
+    expect(extractNameStem('FROMM CLASSIC CHICKEN RECIPE 5LB')).not.toBe(extractNameStem('FROMM GOLD CHICKEN RECIPE 5LB'));
+  });
+
+  it('pipeline order: split -> lower -> size -> expand -> flavor -> modifiers -> SZ', () => {
+    // BEEFMINI contains flavor (beef) + size (mini) attached; after split, both stripped
+    expect(extractNameStem('BETTER BONE BEEFMINI')).toBe('better bone');
+    // VNSN expands to venison then stripped as flavor
+    expect(extractNameStem('BETTER BONE VNSN SM')).toBe('better bone');
+  });
+
+  it('handles XXL longest-first (XXL not consumed as XL)', () => {
+    expect(extractNameStem('PRODUCT XXL')).toBe('product');
+    expect(extractNameStem('PRODUCT XL')).toBe('product');
+  });
+});

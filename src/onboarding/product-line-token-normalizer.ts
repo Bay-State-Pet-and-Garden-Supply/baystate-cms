@@ -19,6 +19,8 @@
  * included. Expansion makes the token match the existing `FLAVOR_WORDS`
  * regex (venison/chicken/turkey/salmon) or normalizes a non-flavor token
  * (barley) so siblings agree.
+ * Common subset chkn/ckn/slmn/trky/vnsn/frzn/vgg must stay in sync with
+ * cohort-name-coordinator.ts ABBREVIATIONS.
  */
 export const EXPAND_ABBREVIATIONS: Record<string, string> = {
   vnsn: 'venison',
@@ -28,6 +30,7 @@ export const EXPAND_ABBREVIATIONS: Record<string, string> = {
   slmn: 'salmon',
   brly: 'barley',
   vgg: 'veggie',
+  vegggie: 'veggie',
   frzn: 'frozen',
 };
 
@@ -45,8 +48,24 @@ export function expandAbbreviations(text: string): string {
 // ─── Attached size tokens ─────────────────────────────────────────────────────
 
 /** Trailing size tokens that may be glued to a preceding word (all-caps
- *  distributor names): "VNSNLG" → "VNSN LG", "VNSNSM" → "VNSN SM". */
-const ATTACHED_SIZE_SUFFIX = /([A-Za-z]{3,})(SM|MD|LG|XL|XXL)\b/g;
+ *  distributor names): "VNSNLG" → "VNSN LG", "VNSNSM" → "VNSN SM",
+ *  "BEEFMINI" → "BEEF MINI", "REFILLJUMBO" → "REFILL JUMBO". */
+const ATTACHED_SIZE_SUFFIX = /([A-Za-z]{3,})(XXL|MINI|JUMBO|SM|MD|LG|XL)\b/g;
+
+/**
+ * Leading size tokens glued to a following word: "LGHARVEST" → "LG HARVEST".
+ * Prefix splitting is allowlist-only: only `harvest` remainder splits
+ * (e.g., LGHARVEST → LG HARVEST); all other ALL-CAPS words like SMOOTH,
+ * LGBRAND remain intact. Mixed-case or unknown words are never split.
+ * Idempotent: splitAttachedSizeTokens(splitAttachedSizeTokens(v)) === splitAttachedSizeTokens(v).
+ */
+const ATTACHED_SIZE_PREFIX = /\b(SM|MD|LG|XL|XXL)([A-Za-z]{3,})\b/g;
+const KNOWN_PREFIX_REMAINDERS = new Set(['harvest']);
+
+function shouldSplitPrefix(_whole: string, remainder: string): boolean {
+  if (KNOWN_PREFIX_REMAINDERS.has(remainder.toLowerCase())) return true;
+  return false;
+}
 
 /**
  * Split size tokens glued to a preceding word so the standalone
@@ -56,12 +75,19 @@ const ATTACHED_SIZE_SUFFIX = /([A-Za-z]{3,})(SM|MD|LG|XL|XXL)\b/g;
  * Mixed-case words ("Prism", "ClassicLg") are never split.
  * Existing handled forms (SM5CT, MD2CT, 2.64OZ) are untouched — they carry
  * a digit/unit and never match the letter-only suffix here.
+ * Idempotent: splitAttachedSizeTokens(splitAttachedSizeTokens(v)) === splitAttachedSizeTokens(v) for all v.
  */
 export function splitAttachedSizeTokens(text: string): string {
-  return text.replace(ATTACHED_SIZE_SUFFIX, (match, pre: string, size: string) => {
+  const afterSuffix = text.replace(ATTACHED_SIZE_SUFFIX, (match, pre: string, size: string) => {
     const whole = pre + size;
     if (/^[A-Z0-9]+$/.test(whole) || !/[aeiou]/i.test(pre)) {
       return `${pre} ${size}`;
+    }
+    return match;
+  });
+  return afterSuffix.replace(ATTACHED_SIZE_PREFIX, (match, size: string, post: string) => {
+    if (shouldSplitPrefix(match, post)) {
+      return `${size} ${post}`;
     }
     return match;
   });

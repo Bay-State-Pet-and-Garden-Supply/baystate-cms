@@ -46,6 +46,12 @@ describe('validateMemberSemantics — family_invariant Product Type', () => {
     expect(result.findings).toEqual([]);
   });
 
+  it('passes when the member PT matches the parent authority label', () => {
+    const result = validateMemberSemantics(coherentMember({ suggestedProductType: 'Dry Dog Food' }));
+    expect(result.status).toBe('passed');
+    expect(result.findings).toEqual([]);
+  });
+
   it('blocks a member whose PT mismatches the parent authority', () => {
     const result = validateMemberSemantics(coherentMember({ suggestedProductType: 'dog-treats' }));
     expect(result.status).toBe('blocked');
