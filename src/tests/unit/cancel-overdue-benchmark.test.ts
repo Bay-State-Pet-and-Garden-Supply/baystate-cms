@@ -77,8 +77,8 @@ describe('cancelOverdueOccurrences benchmark', () => {
     const trigInput: CreateTriggerInput = {
       workspaceId: ws,
       name: 'Benchmark Trigger',
-      kind: 'on_demand',
-      config: { type: 'on_demand' } as any,
+      kind: 'sync_failed',
+      config: { kind: 'sync_failed' },
       scopeJson: null,
       selectedModel: null,
       objective: 'Benchmark trigger test',
