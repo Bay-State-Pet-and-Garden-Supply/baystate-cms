@@ -222,15 +222,19 @@ export function deriveCurationApplicability(config: ClassificationConfig): Curat
       }
     }
 
-    const scope: CurationApplicabilityScope = matchingProductTypes.length > 0 ? 'profiled' : 'unused';
-
-    if (scope === 'unused' && target?.enabled) {
-      findings.push({
-        code: 'target_unused_by_profiles',
-        severity: 'warning',
-        message: `Global curation target "${target.label}" (${catalogField}) maps to attribute "${attribute.name}", which is used by 0 Product Type profiles.`,
-        details: { catalogField, targetId: target.id, attributeId: attribute.id },
-      });
+    let scope: CurationApplicabilityScope;
+    if (matchingProductTypes.length > 0) {
+      scope = 'profiled';
+    } else {
+      scope = 'unused';
+      if (target?.enabled) {
+        findings.push({
+          code: 'target_unused_by_profiles',
+          severity: 'warning',
+          message: `Global curation target "${target.label}" (${catalogField}) maps to attribute "${attribute.name}", which is used by 0 Product Type profiles.`,
+          details: { catalogField, targetId: target.id, attributeId: attribute.id },
+        });
+      }
     }
 
     applicability.push({
