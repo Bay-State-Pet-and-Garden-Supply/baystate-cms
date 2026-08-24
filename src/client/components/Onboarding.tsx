@@ -866,8 +866,8 @@ export function Onboarding() {
   // as a diagnostics escape hatch via `?board=pipeline` (separate query param
   // so App.tsx's `view` routing is untouched), gated by the rollout flags
   // (src/client/onboarding-feature-flags.ts).
-  // e10s05 retirement policy: the board STAYS diagnostics-only; only the
-  // legacy ReviewDrawerShell is frozen bug-fix-only for post-default-on retirement.
+  // e10s05 retirement COMPLETE: the board STAYS diagnostics-only; the legacy
+  // ReviewDrawerShell + CurationStagePanel have been removed.
   if (selectedBatchId && selectedBatch) {
     const { batchWorkspaceEnabled, pipelineDiagnosticsEnabled } = getOnboardingFeatureFlags();
     const forcePipelineDiagnostics =

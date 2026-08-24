@@ -7,8 +7,8 @@
  * - `pipelineDiagnosticsEnabled`: the legacy six-stage Pipeline Board remains
  *   reachable as a diagnostics/admin surface (`?board=pipeline`). Enabled
  *   unless `VITE_PIPELINE_DIAGNOSTICS_ENABLED` is explicitly 'false'.
- *   e10s05 retirement policy: the board itself STAYS; only the legacy
- *   ReviewDrawerShell is frozen bug-fix-only and retired post-default-on.
+ *   e10s05 retirement COMPLETE: the board itself STAYS; the legacy
+ *   ReviewDrawerShell + CurationStagePanel were removed post-default-on.
  * - `reviewUiV2`: gates the full-field review form, readiness checklist, and
  *   confirmation step (e10s02/s03, epic #review-final-gate). Flag OFF ⇒ the
  *   review workspace renders exactly the pre-V2 component tree and sends the
@@ -58,7 +58,9 @@ const ENV = readViteEnv();
 const CACHED_ENV_FLAGS: OnboardingFeatureFlags = {
   batchWorkspaceEnabled: parseEnvFlag(ENV.VITE_BATCH_WORKSPACE_ENABLED, true),
   pipelineDiagnosticsEnabled: parseEnvFlag(ENV.VITE_PIPELINE_DIAGNOSTICS_ENABLED, true),
-  reviewUiV2: parseEnvFlag(ENV.VITE_REVIEW_UI_V2, false),
+  // Default ON since retirement of the legacy ReviewDrawerShell (post-default-on
+  // cycle complete). VITE_REVIEW_UI_V2=false|0|no remains the emergency rollback.
+  reviewUiV2: parseEnvFlag(ENV.VITE_REVIEW_UI_V2, true),
 };
 
 let overrides: Partial<OnboardingFeatureFlags> = {};

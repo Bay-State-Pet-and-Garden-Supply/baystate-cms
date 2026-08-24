@@ -17,8 +17,8 @@ afterEach(() => {
 });
 
 describe('onboarding feature flags // e10s02', () => {
-  it('reviewUiV2 defaults to false (dark rollout)', () => {
-    expect(getOnboardingFeatureFlags().reviewUiV2).toBe(false);
+  it('reviewUiV2 defaults to true (retirement: legacy drawer removed, post-default-on)', () => {
+    expect(getOnboardingFeatureFlags().reviewUiV2).toBe(true);
   });
 
   // e10s05: sibling epic #46 flags restored — defaults must match HEAD semantics.
@@ -46,9 +46,9 @@ describe('onboarding feature flags // e10s02', () => {
   });
 
   it('reset restores defaults', () => {
-    overrideOnboardingFeatureFlags({ reviewUiV2: true });
+    overrideOnboardingFeatureFlags({ reviewUiV2: false });
     resetOnboardingFeatureFlags();
-    expect(getOnboardingFeatureFlags().reviewUiV2).toBe(false);
+    expect(getOnboardingFeatureFlags().reviewUiV2).toBe(true);
   });
 
   // Plan §tests: VITE_REVIEW_UI_V2 parsing incl. kill-switch values.

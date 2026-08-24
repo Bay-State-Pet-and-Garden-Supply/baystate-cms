@@ -6,66 +6,40 @@ import {
   skipStageItems,
   moveToPreviousStage,
   fallbackSourcingItemsToDiscovery,
-  updateItem,
   getItemDetail,
-  resolveItemConflict,
-  resolveSourcingAction,
-  continueWithOfficialDiscovery,
-  setItemUrl,
-  submitDecisions,
-  completeReviewStage,
   getOnboardingCapabilities,
-  OnboardingApiError,
   getCurationTargets,
   getClassificationReadiness,
-  type CurationTargetsResponse,
   type ConsistencyWarning,
+  type CurationTargetsResponse,
   type SemanticValidationPayload,
   type SourcingGenerationView,
   type SourcingQualificationView,
 } from '../onboarding-api';
+import type { OnboardingEvidenceConflict } from '../../shared/schemas/distributor';
 import type {
   OnboardingItem,
-  OnboardingSource,
   ExtractionData,
   CurationData,
   PipelineStage,
   StageStatus,
   BrandSite,
   DistributorEvidenceAttemptView,
+  OnboardingSource,
 } from '../../shared/schemas/onboarding';
-import type { OnboardingEvidenceConflict } from '../../shared/schemas/distributor';
 import type {
-  ClassificationProposal,
   ClassificationProposalDecision,
   ClassificationEvidence,
-  CurationTargetConfig,
+  ClassificationProposal,
 } from '../../shared/schemas/classification';
 import {
-  ActionQueueResetError,
   SequentialActionQueue,
-  canApplyProposalEdit,
-  editableCurationData,
-  getEffectiveProductTypeId,
-  getEffectiveProposalTargetId,
-  getEffectiveProposalValue,
   isCurrentReviewGeneration,
   isCurrentReviewVersion,
-  isReviewDecision,
-  prepareDecisionAction,
   proposalDecisionSnapshot,
-  withReviewedProductTypeId,
-  withReviewedProposalValue,
   type PreparedDecisionAction,
   type ProposalDecisionSnapshot,
 } from '../pipeline-decision-state';
-import { ReviewDrawerShell } from './pipeline-drawer/ReviewDrawerShell';
-import { ProductImageGallery } from './pipeline-drawer/ProductImageGallery';
-import { DiscoveryStagePanel } from './pipeline-drawer/DiscoveryStagePanel';
-import { ExtractionStagePanel } from './pipeline-drawer/ExtractionStagePanel';
-import { CurationStagePanel } from './pipeline-drawer/CurationStagePanel';
-import { SourcingStagePanel } from './pipeline-drawer/SourcingStagePanel';
-import { SourcingIdentitySummary } from './pipeline-drawer/SourcingIdentitySummary';
 import { readinessViewFromReport } from '../classification-readiness-view';
 import { useCohortFamilyState, type CohortFamilyStateByItem } from '../hooks/useCohortFamilyState';
 
@@ -98,9 +72,6 @@ const STAGE_STATUS_STYLE: Record<StageStatus, { bg: string; text: string; icon: 
   skipped: { bg: '#e5e7eb', text: '#6b7280', icon: '⊘' },
 };
 
-function createDecisionActionToken(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
 
 /**
  * Per-member family badge text/colors for the curation column (issue #30,
@@ -188,6 +159,31 @@ export function PipelineBoard({
   onOpenBrandSetup,
   sourcingEngineEnabled,
 }: PipelineBoardProps) {
+  // Retained write-only state: setters are invoked by shared fetch/refresh paths;
+  // the drawer-only value consumers were removed with the legacy review drawer.
+  const [, setActiveImageIdx] = useState(0);
+  const [, setCitationSelections] = useState<Record<string, string[]>>({});
+  const [, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
+  const [, setClassificationProposals] = useState<ClassificationProposal[]>([]);
+  const [, setConfigurationReason] = useState<string | null>(null);
+  const [, setConsistencyWarnings] = useState<ConsistencyWarning[]>([]);
+  const [, setCurationFields] = useState<Partial<CurationData>>({});
+  const [, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
+  const [, setEditFields] = useState<Partial<ExtractionData>>({});
+  const [, setManualImageUrl] = useState('');
+  const [, setManualUrlInput] = useState('');
+  const [, setReviewConflicts] = useState<OnboardingEvidenceConflict[]>([]);
+  const [, setReviewEvidenceAttempts] = useState<DistributorEvidenceAttemptView[]>([]);
+  const [, setReviewExtraction] = useState<ExtractionData | null>(null);
+  const [, setReviewGenerations] = useState<SourcingGenerationView[]>([]);
+  const [, setReviewQualificationView] = useState<SourcingQualificationView | null>(null);
+  const [, setReviewSources] = useState<OnboardingSource[]>([]);
+  const [, setSaveError] = useState<string | null>(null);
+  const [, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [, setSemanticValidation] = useState<SemanticValidationPayload | null>(null);
+  const [, setShowEditUrl] = useState(false);
+  const [, setStorePages] = useState<string[]>([]);
+
   const [staged, setStaged] = useState<Record<PipelineStage, OnboardingItem[]>>({
     sourcing: [],
     discovery: [],
@@ -208,40 +204,17 @@ export function PipelineBoard({
   const [reviewItem, setReviewItem] = useState<OnboardingItem | null>(null);
   const reviewItemRef = React.useRef<string | null>(null);
   const reviewGenerationRef = React.useRef(0);
-  const [reviewSources, setReviewSources] = useState<OnboardingSource[]>([]);
-  const [reviewEvidenceAttempts, setReviewEvidenceAttempts] = useState<DistributorEvidenceAttemptView[]>([]);
-  const [reviewConflicts, setReviewConflicts] = useState<OnboardingEvidenceConflict[]>([]);
-  const [reviewGenerations, setReviewGenerations] = useState<SourcingGenerationView[]>([]);
-  const [reviewExtraction, setReviewExtraction] = useState<ExtractionData | null>(null);
-  const [editFields, setEditFields] = useState<Partial<ExtractionData>>({});
-  const [activeImageIdx, setActiveImageIdx] = useState(0);
-  const [curationFields, setCurationFields] = useState<Partial<CurationData>>({});
-  const [classificationProposals, setClassificationProposals] = useState<ClassificationProposal[]>([]);
-  const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
   // Reviewer-selected evidence citations per proposal (issue #17 I). Keyed by
   // proposal id; part of the queued decision action and exact retry equality.
-  const [citationSelections, setCitationSelections] = useState<Record<string, string[]>>({});
-  const [consistencyWarnings, setConsistencyWarnings] = useState<ConsistencyWarning[]>([]);
   // PR10 (issue #30, DECISION-A): the first-class active-cohort semantic
   // validation surface threaded from the hydrated item detail into the
   // review drawer (null in legacy mode — the legacy warnings box stays).
-  const [semanticValidation, setSemanticValidation] = useState<SemanticValidationPayload | null>(null);
-  const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
-  const [manualUrlInput, setManualUrlInput] = useState('');
-  const [manualImageUrl, setManualImageUrl] = useState('');
-  const [showEditUrl, setShowEditUrl] = useState(false);
-  const [storePages, setStorePages] = useState<string[]>([]);
-  const [pageSearchQuery, setPageSearchQuery] = useState('');
   const [_drawerBrandName, setDrawerBrandName] = useState('');
   const [_drawerBrandDomain, setDrawerBrandDomain] = useState('');
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [reviewTransitioning, setReviewTransitioning] = useState(false);
   // Amendment A: effective Sourcing mode + configuration reason from
   // /onboarding/capabilities. Defaults degrade to the prop (engineEnabled
   // → automatic) while the fetch is in flight or fails.
   const [sourcingMode, setSourcingMode] = useState<'observe' | 'manual' | 'automatic' | null>(null);
-  const [configurationReason, setConfigurationReason] = useState<string | null>(null);
   // Effective routing capability (Amendment A): engine enabled AND a routing
   // mode. OFF/invalid/observe never reset Sourcing rows in place (that would
   // strand unclaimed items) — the audited fallback path is used instead.
@@ -251,8 +224,6 @@ export function PipelineBoard({
     sourcingEngineEnabled && (sourcingMode === 'manual' || sourcingMode === 'automatic');
   // Server-derived distributor-record qualification + entry-policy version
   // for the open review item (Amendment A manual mode).
-  const [reviewQualificationView, setReviewQualificationView] = useState<SourcingQualificationView | null>(null);
-  const [reviewEntryPolicyVersion, setReviewEntryPolicyVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -348,23 +319,6 @@ export function PipelineBoard({
     return result;
   };
 
-  const toggleCitation = (proposalId: string, evidenceId: string) => {
-    const current = citationSelections[proposalId] ?? [];
-    const next = current.includes(evidenceId)
-      ? current.filter(id => id !== evidenceId)
-      : [...current, evidenceId];
-    setCitationSelections(previous => ({ ...previous, [proposalId]: next }));
-    // Citation changes PERSIST by creating a decision revision (issue #17
-    // pass 5b): when the proposal already has a live decision, enqueue a new
-    // decision action with the updated citations (same decision/revised
-    // values; the semantic key changes → a new revision is created). They
-    // never wait for an unrelated proposal edit.
-    const proposal = classificationProposals.find(p => p.id === proposalId);
-    const itemId = reviewItem?.id;
-    if (proposal && itemId && isReviewDecision(proposal.status)) {
-      enqueueProposalDecision(itemId, reviewGenerationRef.current, proposal, next);
-    }
-  };
 
   const drainAllWrites = async (itemId: string | null | undefined) => {
     if (!itemId) return;
@@ -855,36 +809,6 @@ export function PipelineBoard({
     }
   };
 
-  const closeReview = async () => {
-    if (reviewTransitionRef.current) return;
-    const closingId = reviewItemRef.current;
-    try {
-      await drainAllWrites(closingId);
-    } catch (err) {
-      setSaveStatus('error');
-      setSaveError(err instanceof Error ? err.message : String(err));
-      return;
-    }
-    reviewGenerationRef.current += 1;
-    reviewItemRef.current = null;
-    setReviewItem(null);
-    setReviewSources([]);
-    setReviewEvidenceAttempts([]);
-    setReviewConflicts([]);
-    setReviewGenerations([]);
-    setReviewExtraction(null);
-    setEditFields({});
-    setCurationFields({});
-    setManualImageUrl('');
-    setClassificationProposals([]);
-    setClassificationEvidence([]);
-    setConsistencyWarnings([]);
-    setSemanticValidation(null);
-    setSaveStatus('idle');
-    setSaveError(null);
-    setPageSearchQuery('');
-    await fetchStaged();
-  };
 
   const itemsInStage = reviewItem ? (staged[reviewItem.stage] || []) : [];
   const currentReviewIndex = reviewItem ? itemsInStage.findIndex(item => item.id === reviewItem.id) : -1;
@@ -910,591 +834,50 @@ export function PipelineBoard({
     }
   };
 
-  const handleResetSingle = async () => {
-    if (!reviewItem || reviewTransitionRef.current) return;
-    setLoading(true);
-    try {
-      await drainAllWrites(reviewItem.id);
-      const itemId = reviewItem.id;
-      const generation = reviewGenerationRef.current;
-      const transport = getDecisionTransport(itemId);
-      transport.mutationVersion += 1;
-      const mutationVersion = transport.mutationVersion;
-      // While the sourcing engine is disabled (or observe/invalid), a
-      // Sourcing row cannot be reset in place (that would strand it) — use
-      // the audited fallback repair.
-      if (reviewItem.stage === 'sourcing' && !sourcingCapabilityActive) {
-        const res = await fallbackSourcingItemsToDiscovery([itemId]);
-        if (res.skipped.length > 0) {
-          throw new Error(`Cannot continue item to Discovery: ${res.skipped[0]?.reason ?? 'transition_failed'}`);
-        }
-      } else {
-        await resetStageItems([itemId]);
-      }
-      const res = await getItemDetail(itemId);
-      if (!isCurrentReviewVersion(
-        reviewItemRef.current,
-        reviewGenerationRef.current,
-        transport.mutationVersion,
-        itemId,
-        generation,
-        mutationVersion,
-      )) return;
-      setReviewItem(res.item);
-      setConsistencyWarnings(res.consistencyWarnings ?? []);
-      setSemanticValidation(res.semanticValidation ?? null);
-      const extractionData = res.extraction ?? res.item?.extractionData ?? null;
-      if (extractionData) {
-        setReviewExtraction(extractionData);
-        setEditFields(extractionData);
-      } else {
-        setReviewExtraction(null);
-        setEditFields({});
-      }
-      if (res.item?.curationData) {
-        setCurationFields(res.item.curationData);
-      }
-      // After review→curation reset, proposals are pending and decisions are
-      // superseded — install the hydrated server state, not the cached accept.
-      installCanonicalDecisionState(res.item);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
 
-  const handleAdvanceSingle = async () => {
-    if (!reviewItem || reviewTransitionRef.current) return;
-    setLoading(true);
-    try {
-      await drainAllWrites(reviewItem.id);
-      await advanceItems([reviewItem.id]);
-      await fetchStaged();
-      const res = await getItemDetail(reviewItem.id);
-      setReviewItem(res.item);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
 
-  const handleApproveAndNext = async () => {
-    if (!reviewItem || reviewTransitionRef.current) return;
-    const nextItemToOpen = hasNext ? itemsInStage[currentReviewIndex + 1] : null;
-    await handleApproveReview();
-    if (nextItemToOpen) {
-      void openReview(nextItemToOpen);
-    }
-  };
 
-  const fieldTargetForProposal = (proposal: ClassificationProposal): {
-    target: CurationTargetConfig | null;
-    values: string[];
-    label: string;
-    valueMode: 'controlled' | 'freeText' | 'measured' | null;
-    canonicalUnit: string | null;
-    cardinality: 'single' | 'multiple';
-  } => {
-    const effectiveTargetId = getEffectiveProposalTargetId(proposal);
-    if (proposal.proposalType !== 'field_assignment' || !curationTargetState) {
-      return { target: null, values: [], label: effectiveTargetId || 'Field', valueMode: null, canonicalUnit: null, cardinality: 'single' };
-    }
-    const field = curationTargetState.candidates.productFields.find(candidate =>
-      candidate.attributeId === effectiveTargetId || candidate.target?.attributeId === effectiveTargetId,
-    );
-    const appl = curationTargetState.applicability.find(a =>
-      (field && a.catalogField === field.catalogField) || (effectiveTargetId && a.attributeId === effectiveTargetId),
-    );
-    return {
-      target: field?.target ?? null,
-      values: field?.values ?? [],
-      label: field ? `${field.label} (${field.catalogField})` : effectiveTargetId || 'Field',
-      valueMode: appl?.valueMode ?? null,
-      canonicalUnit: appl?.canonicalUnit ?? null,
-      cardinality: field?.target?.selectionMode ?? 'single',
-    };
-  };
 
-  const productTypeOptions = () => curationTargetState?.candidates.productTypes ?? [];
 
-  const markSavedWhenIdle = (itemId: string, generation: number) => {
-    const transport = getDecisionTransport(itemId);
-    if (transportHasLocalWork(transport)) return;
-    if (!isCurrentReviewGeneration(
-      reviewItemRef.current,
-      reviewGenerationRef.current,
-      itemId,
-      generation,
-    )) return;
-    setSaveStatus('saved');
-    setTimeout(() => {
-      if (isCurrentReviewGeneration(
-        reviewItemRef.current,
-        reviewGenerationRef.current,
-        itemId,
-        generation,
-      )) {
-        setSaveStatus(previous => previous === 'saved' ? 'idle' : previous);
-      }
-    }, 1500);
-  };
 
   /** Save editable item fields only. Proposal decisions use their own endpoint. */
-  const saveItemChangesQuietly = (
-    itemId: string,
-    currentEditFields: Partial<ExtractionData>,
-    currentCurationFields: Partial<CurationData>,
-  ) => {
-    if (reviewTransitionRef.current) return;
-    const generation = reviewGenerationRef.current;
-    const transport = getDecisionTransport(itemId);
-    transport.mutationVersion += 1;
-    const action: ItemSaveAction = JSON.parse(JSON.stringify({
-      extractionData: currentEditFields,
-      curationData: editableCurationData(currentCurationFields),
-    })) as ItemSaveAction;
 
-    if (isCurrentReviewGeneration(
-      reviewItemRef.current,
-      reviewGenerationRef.current,
-      itemId,
-      generation,
-    )) {
-      setSaveStatus('saving');
-      setSaveError(null);
-    }
 
-    const operation = transport.itemSaveQueue.enqueue(action, async captured => {
-      await updateItem(itemId, {
-        extraction_data: captured.extractionData,
-        curation_data: captured.curationData,
-      });
-    });
 
-    void operation
-      .then(() => markSavedWhenIdle(itemId, generation))
-      .catch(err => {
-        if (isCurrentReviewGeneration(
-          reviewItemRef.current,
-          reviewGenerationRef.current,
-          itemId,
-          generation,
-        )) {
-          setSaveStatus('error');
-          setSaveError(err instanceof Error ? err.message : String(err));
-        }
-      });
-  };
 
-  const refreshCanonicalAfterConflict = async (
-    itemId: string,
-    generation: number,
-    conflictMessage: string,
-  ) => {
-    try {
-      const res = await getItemDetail(itemId);
-      if (!isCurrentReviewGeneration(
-        reviewItemRef.current,
-        reviewGenerationRef.current,
-        itemId,
-        generation,
-      )) return;
-      setReviewItem(res.item);
-      installCanonicalDecisionState(res.item, { force: true });
-      setConsistencyWarnings(res.consistencyWarnings ?? []);
-      setSemanticValidation(res.semanticValidation ?? null);
-      setSaveStatus('error');
-      setSaveError(`${conflictMessage} Canonical decisions were refreshed; reapply your edit.`);
-    } catch (refreshError) {
-      setSaveStatus('error');
-      setSaveError(refreshError instanceof Error ? refreshError.message : String(refreshError));
-    }
-  };
 
-  const handleDecisionSuccess = (
-    itemId: string,
-    generation: number,
-    action: PreparedDecisionAction,
-    decision: ClassificationProposalDecision,
-  ) => {
-    const transport = getDecisionTransport(itemId);
-    if (transport.pendingActions[action.input.proposalId]?.input.actionToken === action.input.actionToken) {
-      delete transport.pendingActions[action.input.proposalId];
-    }
-    if (transport.revisionIds[action.input.proposalId] === action.input.id) {
-      transport.revisionIds[action.input.proposalId] = decision.id;
-    }
-    if (isCurrentReviewGeneration(
-      reviewItemRef.current,
-      reviewGenerationRef.current,
-      itemId,
-      generation,
-    ) && !transport.pendingActions[action.input.proposalId]) {
-      setClassificationProposals(previous => previous.map(proposal =>
-        proposal.id === action.input.proposalId
-          ? { ...proposal, currentDecisionId: decision.id }
-          : proposal,
-      ));
-      // Refresh the hydrated live decision paired for citation rendering so
-      // the derived citation state is fresh without waiting for a canonical
-      // refresh (issue #17 pass 5c).
-      setReviewItem(previous => {
-        if (!previous?.curationData) return previous;
-        const existing = previous.curationData.classificationDecisions ?? [];
-        const withoutStale = existing.filter(d => d.proposalId !== action.input.proposalId);
-        return {
-          ...previous,
-          curationData: {
-            ...previous.curationData,
-            classificationDecisions: [...withoutStale, decision],
-          },
-        };
-      });
-    }
-    markSavedWhenIdle(itemId, generation);
-  };
 
-  const enqueueProposalDecision = (
-    itemId: string,
-    generation: number,
-    proposal: ClassificationProposal,
-    explicitCitations?: string[],
-  ) => {
-    const transport = getDecisionTransport(itemId);
-    if (!canApplyProposalEdit(transport.decisionQueue.hasFailure(), reviewTransitionRef.current !== null)) {
-      setSaveStatus('error');
-      setSaveError('A proposal decision failed. Retry the failed save or refresh canonical state before continuing.');
-      return;
-    }
 
-    const priorSnapshot = transport.proposalSnapshots[proposal.id]
-      ?? proposalDecisionSnapshot(proposal);
-    const action = prepareDecisionAction({
-      proposal,
-      priorSnapshot,
-      expectedRevisionId: transport.revisionIds[proposal.id] ?? null,
-      existingAction: transport.pendingActions[proposal.id],
-      evidenceIds: explicitCitations ?? citationSelections[proposal.id],
-      createId: createDecisionActionToken,
-      createActionToken: createDecisionActionToken,
-    });
-    if (!action) return;
-
-    // Capture the semantic state and optimistic predecessor now. Rapid A1/A2
-    // edits form a deterministic client-generated revision chain.
-    transport.pendingActions[proposal.id] = action;
-    transport.proposalSnapshots[proposal.id] = action.snapshot;
-    transport.revisionIds[proposal.id] = action.input.id;
-    transport.mutationVersion += 1;
-    setSaveStatus('saving');
-    setSaveError(null);
-
-    const operation = transport.decisionQueue.enqueue(action, async captured => {
-      const response = await submitDecisions(itemId, [captured.input]);
-      const persisted = response.decisions[0];
-      if (!persisted) throw new Error('Decision endpoint returned no persisted decision.');
-      if (persisted.id !== captured.input.id) {
-        throw new Error('Decision endpoint returned an unexpected decision id.');
-      }
-      return persisted;
-    });
-
-    void operation
-      .then(decision => handleDecisionSuccess(itemId, generation, action, decision))
-      .catch(err => {
-        if (err instanceof ActionQueueResetError) return;
-        if (err instanceof OnboardingApiError && err.status === 409) {
-          void refreshCanonicalAfterConflict(itemId, generation, err.message);
-          return;
-        }
-        if (isCurrentReviewGeneration(
-          reviewItemRef.current,
-          reviewGenerationRef.current,
-          itemId,
-          generation,
-        )) {
-          setSaveStatus('error');
-          setSaveError(err instanceof Error ? err.message : String(err));
-        }
-      });
-  };
-
-  const updateProposal = (proposalId: string, patch: Partial<ClassificationProposal>) => {
-    const current = classificationProposals.find(proposal => proposal.id === proposalId);
-    if (!current || !reviewItem) return;
-    const transport = getDecisionTransport(reviewItem.id);
-    if (!canApplyProposalEdit(transport.decisionQueue.hasFailure(), reviewTransitionRef.current !== null)) {
-      setSaveStatus('error');
-      setSaveError(transport.decisionQueue.hasFailure()
-        ? 'Retry the failed proposal save or refresh canonical state before making another edit.'
-        : 'Review approval is already in progress.');
-      return;
-    }
-    const nextProposal = { ...current, ...patch };
-    if (patch.hasRevisedValue === false) delete nextProposal.revisedValue;
-    if (patch.hasRevisedTargetId === false) delete nextProposal.revisedTargetId;
-    setClassificationProposals(previous => previous.map(proposal =>
-      proposal.id === proposalId ? nextProposal : proposal,
-    ));
-    enqueueProposalDecision(reviewItem.id, reviewGenerationRef.current, nextProposal);
-  };
-
-  const retryFailedWrites = async () => {
-    if (!reviewItem) return;
-    const itemId = reviewItem.id;
-    const generation = reviewGenerationRef.current;
-    const transport = getDecisionTransport(itemId);
-    setSaveStatus('saving');
-    setSaveError(null);
-    try {
-      if (transport.itemSaveQueue.hasFailure()) {
-        await transport.itemSaveQueue.retryFailed();
-      }
-      if (transport.decisionQueue.hasFailure()) {
-        const failedAction = transport.decisionQueue.getFailedAction();
-        const decision = await transport.decisionQueue.retryFailed();
-        if (failedAction) handleDecisionSuccess(itemId, generation, failedAction, decision);
-      }
-      await drainAllWrites(itemId);
-      markSavedWhenIdle(itemId, generation);
-    } catch (err) {
-      if (err instanceof OnboardingApiError && err.status === 409) {
-        await refreshCanonicalAfterConflict(itemId, generation, err.message);
-        return;
-      }
-      setSaveStatus('error');
-      setSaveError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleApproveReview = async () => {
-    if (!reviewItem || reviewTransitionRef.current) return;
-
-    const hasPageProposal = classificationProposals.some(
-      proposal => proposal.proposalType === 'category_page' && proposal.status !== 'rejected',
-    );
-    const hasManualPageAssignment = Boolean(curationFields.suggestedPages?.length);
-    if (!hasPageProposal && !hasManualPageAssignment) {
-      alert('At least one Product Page must be selected before review can be completed.');
-      return;
-    }
-
-    if (!curationFields.curatedWeight || !curationFields.curatedWeight.trim()) {
-      alert('Weight is required.');
-      return;
-    }
-
-    const nextItem = hasNext ? itemsInStage[currentReviewIndex + 1] : null;
-    const itemId = reviewItem.id;
-    const generation = reviewGenerationRef.current;
-    const transition = { itemId, generation };
-    const approvalEditFields = JSON.parse(JSON.stringify(editFields)) as Partial<ExtractionData>;
-    const approvalCurationFields = JSON.parse(JSON.stringify(
-      editableCurationData(curationFields),
-    )) as Partial<CurationData>;
-    const transport = getDecisionTransport(itemId);
-    transport.mutationVersion += 1;
-    reviewTransitionRef.current = transition;
-    setReviewTransitioning(true);
-
-    const transitionIsCurrent = () => reviewTransitionRef.current === transition
-      && isCurrentReviewGeneration(
-        reviewItemRef.current,
-        reviewGenerationRef.current,
-        itemId,
-        generation,
-      );
-    const releaseTransition = () => {
-      if (reviewTransitionRef.current === transition) {
-        reviewTransitionRef.current = null;
-        setReviewTransitioning(false);
-      }
-    };
-
-    try {
-      setSaveStatus('saving');
-      // A failed/conflicted write rejects here; approval never resubmits all
-      // proposals and never outruns the append-only revision queue.
-      await drainAllWrites(itemId);
-      if (!transitionIsCurrent()) return;
-      await updateItem(itemId, {
-        extraction_data: approvalEditFields,
-        curation_data: approvalCurationFields,
-      });
-      if (!transitionIsCurrent()) return;
-      await completeReviewStage([itemId]);
-      if (!transitionIsCurrent()) return;
-      setSaveStatus('saved');
-      releaseTransition();
-      if (nextItem) {
-        await openReview(nextItem);
-      } else {
-        await closeReview();
-      }
-    } catch (err) {
-      if (transitionIsCurrent()) {
-        setSaveStatus('error');
-        setSaveError(err instanceof Error ? err.message : String(err));
-        alert('Error updating item: ' + (err instanceof Error ? err.message : String(err)));
-      }
-    } finally {
-      releaseTransition();
-    }
-  };
-
-  const hasRetryableSaveFailure = reviewItem
-    ? getDecisionTransport(reviewItem.id).decisionQueue.hasFailure()
-      || getDecisionTransport(reviewItem.id).itemSaveQueue.hasFailure()
-    : false;
-  const proposalControlsDisabled = reviewTransitioning || Boolean(
-    reviewItem && getDecisionTransport(reviewItem.id).decisionQueue.hasFailure(),
-  );
 
   /**
    * Refresh the review drawer from the server after ANY sourcing mutation
    * (continue / conflict resolve / retry). Never optimistic: the drawer
    * always reflects the persisted decision, generation, and evidence.
    */
-  const refreshReviewItemDetail = useCallback(async () => {
-    if (!reviewItem) return;
-    // Capture the review version BEFORE the await: a late response for an
-    // item that was closed/replaced must never overwrite the open item.
-    const itemId = reviewItem.id;
-    const generation = reviewGenerationRef.current;
-    const transport = getDecisionTransport(itemId);
-    const mutationVersion = transport.mutationVersion;
-    const detail = await getItemDetail(itemId);
-    if (!isCurrentReviewVersion(
-      reviewItemRef.current,
-      reviewGenerationRef.current,
-      transport.mutationVersion,
-      itemId,
-      generation,
-      mutationVersion,
-    )) return;
-    setReviewItem(detail.item);
-    setReviewSources(detail.sources);
-    setReviewEvidenceAttempts(detail.evidenceAttempts ?? []);
-    setReviewConflicts(detail.conflicts ?? []);
-    setReviewGenerations(detail.generations ?? []);
-    setReviewQualificationView(detail.sourcingQualificationView ?? null);
-    // Amendment A: entry-policy version from the detail payload (server
-    // always sends it); fall back to the hydrated item row at runtime.
-    const itemEntryPolicy = (detail.item as unknown as { sourcingEntryPolicyVersion?: number } | null)
-      ?.sourcingEntryPolicyVersion;
-    setReviewEntryPolicyVersion(detail.sourcingEntryPolicyVersion ?? itemEntryPolicy ?? 0);
-    setConsistencyWarnings(detail.consistencyWarnings ?? []);
-    setSemanticValidation(detail.semanticValidation ?? null);
-    const extractionData = detail.extraction ?? detail.item?.extractionData ?? null;
-    if (extractionData) {
-      setReviewExtraction(extractionData);
-      setEditFields(extractionData);
-    }
-    if (detail.item?.curationData) setCurationFields(detail.item.curationData);
-    installCanonicalDecisionState(detail.item);
-    await fetchStaged();
-  }, [reviewItem, fetchStaged, installCanonicalDecisionState]);
 
   /**
    * Single-item audited continuation: move the review item from Sourcing to
    * Discovery (the only supported Sourcing resolution while the engine is
    * disabled — no distributor-bundle routing exists).
    */
-  const handleContinueToDiscovery = async () => {
-    if (!reviewItem) return;
-    setSaveStatus('saving');
-    setSaveError(null);
-    try {
-      const res = await fetch(`/api/onboarding/items/${reviewItem.id}/resolve-sourcing`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'fallback_to_discovery' }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to continue to discovery');
-      }
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-
-      await refreshReviewItemDetail();
-    } catch (err) {
-      setSaveStatus('error');
-      setSaveError(err instanceof Error ? err.message : String(err));
-    }
-  };
 
   /**
    * Resolve a durable sourcing conflict (ADR 0014): resolve_candidate |
    * custom_value | dismiss. Refreshes the drawer + board after success —
    * never optimistic advancement.
    */
-  const handleResolveConflict = async (
-    conflictId: string,
-    body:
-      | { action: 'resolve_candidate'; candidateId: string }
-      | { action: 'custom_value'; customValue: string }
-      | { action: 'dismiss' },
-  ) => {
-    if (!reviewItem) return;
-    setSaveStatus('saving');
-    setSaveError(null);
-    try {
-      await resolveItemConflict(reviewItem.id, conflictId, body);
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-      await refreshReviewItemDetail();
-    } catch (err) {
-      setSaveStatus('error');
-      setSaveError(err instanceof Error ? err.message : String(err));
-    }
-  };
 
   /**
    * Engine-ON retry: POST /onboarding/items/:id/retry supersedes the
    * current evidence generation and resets the sourcing item for a clean
    * re-run (ADR 0014). Refreshes the drawer + board after success.
    */
-  const handleRetrySourcing = async () => {
-    if (!reviewItem) return;
-    setSaveStatus('saving');
-    setSaveError(null);
-    try {
-      const res = await fetch(`/api/onboarding/items/${reviewItem.id}/retry`, { method: 'POST' });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to re-run sourcing');
-      }
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-      await refreshReviewItemDetail();
-    } catch (err) {
-      setSaveStatus('error');
-      setSaveError(err instanceof Error ? err.message : String(err));
-    }
-  };
 
   /**
    * Manual-mode operator decision: adopt the qualified distributor record.
    * Sends ONLY the action — the server recomputes qualification and derives
    * every accepted-id/hash/provider value (Amendment A).
    */
-  const handleUseDistributorRecord = async () => {
-    if (!reviewItem) return;
-    setSaveStatus('saving');
-    setSaveError(null);
-    try {
-      await resolveSourcingAction(reviewItem.id, 'use_distributor_record');
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-      await refreshReviewItemDetail();
-    } catch (err) {
-      setSaveStatus('error');
-      setSaveError(err instanceof Error ? err.message : String(err));
-    }
-  };
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -2109,286 +1492,6 @@ export function PipelineBoard({
         {STAGES.map(renderColumn)}
       </div>
 
-      {/* ─── REVIEW DRAWER ────────────────────────────────────────────────── */}
-      {reviewItem && (
-        <ReviewDrawerShell
-          reviewItem={reviewItem}
-          hasPrev={hasPrev}
-          hasNext={hasNext}
-          reviewTransitioning={reviewTransitioning}
-          onPrevItem={handlePrevItem}
-          onNextItem={handleNextItem}
-          onClose={closeReview}
-          onOpenProfileBuilder={onOpenProfileBuilder}
-          consistencyWarnings={consistencyWarnings}
-          semanticValidation={semanticValidation}
-          handleResetSingle={handleResetSingle}
-          suppressReset={reviewItem.stage === 'sourcing' && !sourcingCapabilityActive}
-          saveStatus={saveStatus}
-          saveError={saveError}
-          hasRetryableSaveFailure={hasRetryableSaveFailure}
-          retryFailedWrites={retryFailedWrites}
-          onApproveReview={handleApproveReview}
-          onApproveAndNext={handleApproveAndNext}
-          onAdvanceStage={handleAdvanceSingle}
-          leftColumnContent={
-            reviewItem.stage === 'sourcing' ? (
-              <SourcingIdentitySummary reviewItem={reviewItem} />
-            ) : (
-              <ProductImageGallery
-                primaryImage={editFields.primaryImage || null}
-                additionalImages={editFields.additionalImages || []}
-                activeImageIdx={activeImageIdx}
-                setActiveImageIdx={setActiveImageIdx}
-                manualImageUrl={manualImageUrl}
-                setManualImageUrl={setManualImageUrl}
-                onSetPrimary={(newPrimary) => {
-                  const oldPrimary = editFields.primaryImage;
-                  const newAdditional = [
-                    ...(oldPrimary ? [oldPrimary] : []),
-                    ...(editFields.additionalImages || []).filter((x) => x !== newPrimary),
-                  ];
-                  const nextEdit = {
-                    ...editFields,
-                    primaryImage: newPrimary,
-                    additionalImages: newAdditional,
-                  };
-                  setEditFields(nextEdit);
-                  saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
-                }}
-                onRemoveImage={(urlToRemove, isPrimary) => {
-                  let nextEdit;
-                  const additional = editFields.additionalImages || [];
-                  if (isPrimary) {
-                    const newPrimary = additional[0] || null;
-                    const newAdditional = additional.slice(1);
-                    nextEdit = {
-                      ...editFields,
-                      primaryImage: newPrimary,
-                      additionalImages: newAdditional,
-                    };
-                  } else {
-                    nextEdit = {
-                      ...editFields,
-                      additionalImages: additional.filter((x) => x !== urlToRemove),
-                    };
-                  }
-                  setEditFields(nextEdit);
-                  saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
-                  setActiveImageIdx((prev) => Math.max(0, prev - 1));
-                }}
-                onAddManualUrl={(urlToAdd) => {
-                  let nextEdit;
-                  if (!editFields.primaryImage) {
-                    nextEdit = { ...editFields, primaryImage: urlToAdd };
-                    setActiveImageIdx(0);
-                  } else {
-                    const additional = editFields.additionalImages || [];
-                    if (!additional.includes(urlToAdd) && editFields.primaryImage !== urlToAdd) {
-                      nextEdit = {
-                        ...editFields,
-                        additionalImages: [...additional, urlToAdd],
-                      };
-                      setActiveImageIdx((editFields.primaryImage ? 1 : 0) + additional.length);
-                    } else {
-                      nextEdit = editFields;
-                    }
-                  }
-                  setEditFields(nextEdit);
-                  saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
-                }}
-              />
-            )
-          }
-          rightColumnContent={
-            <>
-              {reviewItem.stage === 'sourcing' && (
-                <SourcingStagePanel
-                  reviewItem={reviewItem}
-                  sourcingEngineEnabled={sourcingEngineEnabled}
-                  sourcingMode={sourcingMode}
-                  configurationReason={configurationReason}
-                  sourcingEntryPolicyVersion={reviewEntryPolicyVersion}
-                  sourcingQualificationView={reviewQualificationView}
-                  evidenceAttempts={reviewEvidenceAttempts}
-                  conflicts={reviewConflicts}
-                  generations={reviewGenerations}
-                  onContinueToDiscovery={handleContinueToDiscovery}
-                  onUseDistributorRecord={handleUseDistributorRecord}
-                  onResolveConflict={handleResolveConflict}
-                  onRetry={handleRetrySourcing}
-                />
-              )}
-
-              {reviewItem.stage === 'discovery' && (
-                <DiscoveryStagePanel
-                  reviewItem={reviewItem}
-                  reviewSources={reviewSources}
-                  drawerBrandName={_drawerBrandName}
-                  drawerBrandDomain={_drawerBrandDomain}
-                  setDrawerBrandName={setDrawerBrandName}
-                  setDrawerBrandDomain={setDrawerBrandDomain}
-                  cachedBrandSites={cachedBrandSites}
-                  catalogBrands={_catalogBrands}
-                  onRefreshBrandSites={_onRefreshBrandSites}
-                  onSelectSource={async (sourceId, url) => {
-                    try {
-                      await fetch(`/api/onboarding/items/${reviewItem.id}/select-source`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ sourceId }),
-                      });
-                      setManualUrlInput(url);
-                      const res = await getItemDetail(reviewItem.id);
-                      setReviewItem(res.item);
-                      setReviewSources(res.sources);
-                    } catch (err) {
-                      alert('Failed to select source: ' + String(err));
-                    }
-                  }}
-                  manualUrlInput={manualUrlInput}
-                  setManualUrlInput={setManualUrlInput}
-                  onSetManualUrl={async (url) => {
-                    await setItemUrl(reviewItem.id, url);
-                    const res = await getItemDetail(reviewItem.id);
-                    setReviewItem(res.item);
-                    setManualUrlInput(res.item.sourceUrl || '');
-                    setShowEditUrl(false);
-                  }}
-                  saveStatus={saveStatus}
-                  saveError={saveError}
-                  setSaveStatus={setSaveStatus}
-                  setSaveError={setSaveError}
-                  onUpdateReviewItem={async () => {
-                    const detail = await getItemDetail(reviewItem.id);
-                    setReviewItem(detail.item);
-                    await fetchStaged();
-                  }}
-                />
-              )}
-
-              {reviewItem.stage === 'extraction' && (
-                <ExtractionStagePanel
-                  extractionData={reviewExtraction}
-                  sourceUrl={reviewItem.sourceUrl}
-                  showEditUrl={showEditUrl}
-                  setShowEditUrl={setShowEditUrl}
-                  manualUrlInput={manualUrlInput}
-                  setManualUrlInput={setManualUrlInput}
-                  onSetManualUrl={async (url) => {
-                    await setItemUrl(reviewItem.id, url);
-                    const res = await getItemDetail(reviewItem.id);
-                    setReviewItem(res.item);
-                    setManualUrlInput(res.item.sourceUrl || '');
-                  }}
-                  sourceType={reviewItem.sourceType}
-                  qualificationView={reviewQualificationView}
-                  stageStatus={reviewItem.stageStatus}
-                  onContinueWithOfficialDiscovery={
-                    reviewItem.sourceType === 'distributor_record' &&
-                    ['pending', 'failed', 'completed'].includes(reviewItem.stageStatus)
-                      ? async () => {
-                          try {
-                            await continueWithOfficialDiscovery(reviewItem.id);
-                            const detail = await getItemDetail(reviewItem.id);
-                            setReviewItem(detail.item);
-                            setReviewExtraction(null);
-                            setShowEditUrl(false);
-                            await fetchStaged();
-                          } catch (err) {
-                            alert('Failed to continue with official discovery: ' + String(err));
-                          }
-                        }
-                      : undefined
-                  }
-                />
-              )}
-
-              {(reviewItem.stage === 'curation' ||
-                reviewItem.stage === 'review' ||
-                reviewItem.stage === 'promotion') && (
-                <CurationStagePanel
-                  curatedTitle={curationFields.curatedTitle || ''}
-                  titleSource={curationFields.titleSource}
-                  curatedAt={curationFields.curatedAt}
-                  curationMethod={curationFields.curationMethod}
-                  curatedWeight={curationFields.curatedWeight || ''}
-                  brandName={_drawerBrandName || reviewItem.brandHint}
-                  onUpdateBrand={async (newBrandName) => {
-                    const trimmed = newBrandName.trim();
-                    setDrawerBrandName(trimmed);
-                    setReviewItem((prev) => (prev ? { ...prev, brandHint: trimmed || null } : prev));
-                    setSaveStatus('saving');
-                    try {
-                      await updateItem(reviewItem.id, { brandHint: trimmed || null });
-                      await fetchStaged();
-                      setSaveStatus('saved');
-                      setTimeout(() => setSaveStatus('idle'), 1500);
-                    } catch (err) {
-                      setSaveStatus('error');
-                      setSaveError(err instanceof Error ? err.message : String(err));
-                    }
-                  }}
-                  cachedBrandSites={cachedBrandSites}
-                  catalogBrands={_catalogBrands || []}
-                  suggestedProductType={curationFields.suggestedProductType}
-                  classificationProposals={classificationProposals}
-                  classificationEvidence={classificationEvidence}
-                  citationSelections={citationSelections}
-                  decisionsByProposal={decisionsByProposal}
-                  onToggleCitation={toggleCitation}
-                  proposalControlsDisabled={proposalControlsDisabled}
-                  storePages={storePages}
-                  suggestedPages={curationFields.suggestedPages || []}
-                  pageSearchQuery={pageSearchQuery}
-                  setPageSearchQuery={setPageSearchQuery}
-                  onUpdateTitle={(newTitle) => {
-                    const nextCuration = {
-                      ...curationFields,
-                      curatedTitle: newTitle,
-                      titleSource: 'manual' as const,
-                    };
-                    setCurationFields(nextCuration);
-                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
-                  }}
-                  onUpdateWeight={(newWeight) => {
-                    const nextCuration = {
-                      ...curationFields,
-                      curatedWeight: newWeight,
-                    };
-                    setCurationFields(nextCuration);
-                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
-                  }}
-                  onTogglePage={(pageName, isAssigned) => {
-                    let nextPages: string[];
-                    if (isAssigned) {
-                      nextPages = [...(curationFields.suggestedPages || []), pageName];
-                    } else {
-                      nextPages = (curationFields.suggestedPages || []).filter((n) => n !== pageName);
-                    }
-                    const nextCuration = { ...curationFields, suggestedPages: nextPages };
-                    setCurationFields(nextCuration);
-                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
-                  }}
-                  onRemovePage={(pageName) => {
-                    const nextPages = (curationFields.suggestedPages || []).filter((n) => n !== pageName);
-                    const nextCuration = { ...curationFields, suggestedPages: nextPages };
-                    setCurationFields(nextCuration);
-                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
-                  }}
-                  fieldTargetForProposal={fieldTargetForProposal}
-                  productTypeOptions={productTypeOptions}
-                  getEffectiveProposalValue={getEffectiveProposalValue}
-                  getEffectiveProductTypeId={getEffectiveProductTypeId}
-                  withReviewedProposalValue={withReviewedProposalValue}
-                  withReviewedProductTypeId={withReviewedProductTypeId}
-                  updateProposal={updateProposal}
-                />
-              )}
-            </>
-          }
-        />
-      )}
     </div>
   );
 }
