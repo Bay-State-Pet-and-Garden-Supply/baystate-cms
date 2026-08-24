@@ -95,7 +95,10 @@ import {
   buildFrozenProductLineContext,
   MemberCommitCrashSimulationError,
 } from '../../onboarding/cohort-curator';
-import { ensureCohortPagesCoordinated } from '../../onboarding/cohort-page-coordinator';
+import {
+  ensureCohortPagesCoordinated,
+  CohortPageAuthorityDriftError,
+} from '../../onboarding/cohort-page-coordinator';
 import type { CoordinatedPageMemberValue } from '../../classification/types';
 import type { PreparedCohortContext } from '../../onboarding/cohort-curator';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
@@ -1576,5 +1579,52 @@ describe('PR7 acceptance — durable parent page coordination, replay-safe after
     expect(countPageAuditRowsForRun(finalized.id)).toBe(auditedAfterCommit);
     expect(countCohortPageOutputs(finalized.id)).toBe(3);
     expect(getCohortPageOutputsByRun(finalized.id).every(r => r.inputHash === committedHash)).toBe(true);
+  });
+
+  it('commit race: sibling process commits outputs between pure-read check and insert → CohortPageAuthorityDriftError', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const finalized = await freezeActiveCohort(workspaceId, wsPath);
+
+    const projection = loadFrozenProjection(workspaceId, finalized);
+    const cohort = getCohortById(finalized.cohortId)!;
+    const members = getCohortMembers(cohort.id);
+    const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+
+    let thrown: unknown;
+    try {
+      await ensureCohortPagesCoordinated({
+        run: finalized,
+        workspaceId,
+        workspacePath: wsPath,
+        projection,
+        cohort,
+        members,
+        frozenLineContext,
+        afterCoordinatedCall: () => {
+          // Simulating a racing sibling process committing outputs between pure-read check and insert
+          if (countCohortPageOutputs(finalized.id) === 0) {
+            insertCohortPageOutputsOnce({
+              workspaceId,
+              runId: finalized.id,
+              inputHash: 'racing_input_hash_' + 'a'.repeat(46),
+              outputs: projection.members.map(m => ({
+                productSku: m.productSku ?? '',
+                output: { status: 'abstained', reason: 'racing process output' },
+                modelCallId: null,
+              })),
+            });
+          }
+        },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(CohortPageAuthorityDriftError);
+    const driftErr = thrown as CohortPageAuthorityDriftError;
+    expect(driftErr.runId).toBe(finalized.id);
+    expect(driftErr.storedHashes).toContain('racing_input_hash_' + 'a'.repeat(46));
+    expect(driftErr.rowCount).toBe(3);
   });
 });
