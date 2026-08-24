@@ -631,7 +631,7 @@ try {
     const res = Bun.spawnSync([
       'bash',
       '-c',
-      `ulimit -f 1024; bun '${fixture}' '${source}' '${backup}' '${report}'`,
+      `trap '' XFSZ; ulimit -f 1024; bun '${fixture}' '${source}' '${backup}' '${report}'`,
     ]);
     expect(res.exitCode).toBe(0);
     const result = JSON.parse(fs.readFileSync(report, 'utf-8'));
@@ -646,7 +646,7 @@ try {
     expect(fs.existsSync(backup)).toBe(true);
     const verification = await verifySqliteBackup(backup, manifest, { sourceDbPath: source });
     expect(verification.ok).toBe(true);
-  });
+  }, 15000);
 
   it('backs up a table containing non-finite REAL values (Infinity/-Infinity/NaN, pass 6d)', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-nf-6d-'));

@@ -472,14 +472,12 @@ export function deleteProfileGeneration(id: string): boolean {
   const db = getDb();
   let deleted = false;
   db.transaction(() => {
-    const revisionIds = db
-      .query('SELECT id FROM profile_generation_revisions WHERE generation_id = ?')
-      .all(id) as { id: string }[];
-    for (const rev of revisionIds) {
-      db.query(
-        'DELETE FROM profile_generation_validation_results WHERE revision_id = ?',
-      ).run(rev.id);
-    }
+    db.query(
+      `DELETE FROM profile_generation_validation_results
+       WHERE revision_id IN (
+         SELECT id FROM profile_generation_revisions WHERE generation_id = ?
+       )`,
+    ).run(id);
     db.query('DELETE FROM profile_generation_revisions WHERE generation_id = ?').run(id);
     db.query(
       'DELETE FROM profile_generation_field_decisions WHERE generation_id = ?',
