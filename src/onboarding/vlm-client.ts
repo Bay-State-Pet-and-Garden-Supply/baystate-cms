@@ -134,7 +134,14 @@ export function sniffImageMimeType(base64: string): 'image/jpeg' | 'image/png' |
   ) {
     return 'image/png';
   }
-  if (buf.length >= 6 && buf.toString('latin1', 0, 6).startsWith('GIF8')) return 'image/gif';
+  // FIX-H round 3: EXACT GIF signatures only — any 6-byte prefix starting
+  // with "GIF8" (e.g. "GIF8zz") must NOT classify as image/gif.
+  if (
+    buf.length >= 6 &&
+    (buf.toString('latin1', 0, 6) === 'GIF87a' || buf.toString('latin1', 0, 6) === 'GIF89a')
+  ) {
+    return 'image/gif';
+  }
   if (
     buf.length >= 12 &&
     buf.toString('latin1', 0, 4) === 'RIFF' &&

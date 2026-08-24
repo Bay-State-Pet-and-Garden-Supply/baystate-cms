@@ -96,6 +96,18 @@ function httpStatusTransport(status: number, body: string): TransportMock {
   };
 }
 
+/** Mock IMAGE-fetch transport returning one canned response (FIX-I tests). */
+function imageResponseTransport(body: string, contentType: string): TransportMock {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    fn: (async () => {
+      calls += 1;
+      return new Response(body, { status: 200, headers: { 'content-type': contentType } });
+    }) as unknown as (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  };
+}
+
 function makeParams(overrides: Record<string, unknown> = {}) {
   const imgPath = seedLocalImage();
   return {
@@ -212,6 +224,47 @@ describe('runPackagingOcrAttempt — coded failure taxonomy', () => {
       expect(result.reasonCode).toBe('circuit_open');
     }
     expect(transport.calls()).toBe(0);
+  });
+});
+
+// ─── FIX-I round 3: textual/SVG payload rejection before transport ────────────
+
+describe('runPackagingOcrAttempt — FIX-I non-raster payload rejection', () => {
+  it('rejects a remote HTML-markup payload with image_svg_unsupported and NO VLM transport call', async () => {
+    seedLegacyVlm();
+    const html = '<!DOCTYPE html><html><head><title>error page</title></head><body>not an image</body></html>' +
+      'padding-padding-padding'; // > 1 KiB so the too-small gate never fires first
+    const imgFetch = imageResponseTransport(html, 'Text/HTML; charset=utf-8'); // case-mixed on purpose
+    const vlmTransport = contentTransport('{"productName":"Never Called"}');
+    const result = await runPackagingOcrAttempt(
+      makeParams({ imageLocalPath: null, fetchFn: imgFetch.fn, modelFetchFn: vlmTransport.fn }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reasonCode).toBe('image_svg_unsupported');
+      expect(result.redactedMessage).toContain('not a raster image');
+      expect(result.attempts).toBe(0);
+    }
+    expect(imgFetch.calls()).toBe(1);
+    expect(vlmTransport.calls()).toBe(0);
+  });
+
+  it('rejects a local <svg …> file with image_svg_unsupported and NO VLM transport call', async () => {
+    seedLegacyVlm();
+    const svgPath = path.join(tmpDir, 'img.svg');
+    fs.writeFileSync(svgPath, Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>', 'utf8'));
+    fs.appendFileSync(svgPath, Buffer.alloc(2048, 0x20)); // push past the 1 KiB minimum
+    const vlmTransport = contentTransport('{"productName":"Never Called"}');
+    const result = await runPackagingOcrAttempt(
+      makeParams({ imageLocalPath: path.basename(svgPath), modelFetchFn: vlmTransport.fn }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reasonCode).toBe('image_svg_unsupported');
+      expect(result.redactedMessage).toContain('not a raster image');
+      expect(result.attempts).toBe(0);
+    }
+    expect(vlmTransport.calls()).toBe(0);
   });
 });
 

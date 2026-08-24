@@ -127,6 +127,20 @@ interface ImageLoadOutcome {
 }
 
 /**
+ * FIX-I round 3: textual/SVG payloads must never reach the VLM transports
+ * labeled image/jpeg. Sniff the first ~512 bytes as ASCII: HTML/SVG markup
+ * (after leading whitespace) is rejected as a coded image-load failure.
+ */
+const MARKUP_SNIFF_BYTES = 512;
+const MARKUP_REJECTION_MESSAGE = 'Payload is not a raster image (HTML/SVG markup detected).';
+
+function looksLikeTextualMarkup(buffer: Buffer): boolean {
+  const head = buffer.subarray(0, MARKUP_SNIFF_BYTES).toString('latin1').toLowerCase();
+  const trimmed = head.replace(/^\s+/, '');
+  return trimmed.includes('<svg') || trimmed.includes('<!doctype html') || trimmed.includes('<html');
+}
+
+/**
  * Fetch a remote image and return its base64-encoded contents with a coded
  * failure classification.
  * `fetchFn` defaults to the global fetch (onboarding pipeline unchanged);
@@ -156,7 +170,9 @@ async function fetchRemoteImageOutcome(url: string, fetchFn: NetworkFetch = fetc
     }
 
     const contentType = response.headers.get('content-type') ?? '';
-    if (contentType.includes('svg')) {
+    // FIX-I round 3: case-insensitive — servers may emit "image/SVG+xml",
+    // "Text/HTML", etc.
+    if (contentType.toLowerCase().includes('svg')) {
       console.warn(`[PackagingOcr] Skipping SVG image: ${redactImageUrl(url)}`);
       return {
         base64: null,
@@ -165,6 +181,14 @@ async function fetchRemoteImageOutcome(url: string, fetchFn: NetworkFetch = fetc
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
+
+    if (looksLikeTextualMarkup(buffer)) {
+      console.warn(`[PackagingOcr] Rejecting non-raster image payload (HTML/SVG markup detected): ${redactImageUrl(url)}`);
+      return {
+        base64: null,
+        failure: { reasonCode: 'image_svg_unsupported', message: MARKUP_REJECTION_MESSAGE },
+      };
+    }
 
     // Skip tiny files (likely icons/spacers)
     if (buffer.length < 1024) {
@@ -221,6 +245,13 @@ async function loadImageWithReason(
         return null;
       }
       const buffer = fs.readFileSync(resolved);
+      if (looksLikeTextualMarkup(buffer)) {
+        console.warn(`[PackagingOcr] Local image is not a raster payload (HTML/SVG markup detected): ${resolved}`);
+        return {
+          base64: null,
+          failure: { reasonCode: 'image_svg_unsupported', message: MARKUP_REJECTION_MESSAGE },
+        };
+      }
       if (buffer.length >= 1024) {
         return { base64: buffer.toString('base64') };
       }

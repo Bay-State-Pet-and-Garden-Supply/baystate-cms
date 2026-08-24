@@ -213,6 +213,14 @@ describe('sniffImageMimeType (magic-header detection)', () => {
     expect(sniffImageMimeType(text)).toBe('image/jpeg');
   });
 
+  it('FIX-H: rejects junk "GIF8zz" prefixes — only exact GIF87a/GIF89a are image/gif', () => {
+    const junk = Buffer.concat([Buffer.from('GIF8zz', 'ascii'), Buffer.alloc(1100)]).toString('base64');
+    expect(sniffImageMimeType(junk)).toBe('image/jpeg');
+    // Both exact signatures still classify as image/gif.
+    const gif87a = Buffer.concat([Buffer.from('GIF87a', 'ascii'), Buffer.alloc(1100)]).toString('base64');
+    expect(sniffImageMimeType(gif87a)).toBe('image/gif');
+  });
+
   it('FIX-F: rejects a TRUNCATED PNG prefix instead of classifying partial bytes', () => {
     // Only the first 4 signature bytes — below the required 8-byte PNG
     // signature minimum ⇒ jpeg default, not image/png.
