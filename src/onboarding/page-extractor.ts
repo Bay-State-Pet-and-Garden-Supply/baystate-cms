@@ -19,6 +19,7 @@ import {
   cleanAndDeduplicateImages,
   collectImageSourcesFromElement,
 } from './image-utils';
+import { applyLadderEnrichment } from './extraction-ladder/enrich';
 
 interface RawExtraction {
   custom: Record<string, string | string[]> | null;
@@ -28,7 +29,6 @@ interface RawExtraction {
   htmlHeuristics: Record<string, string | string[]>;
   images: string[];
   networkProducts: Record<string, unknown>[];
-  productJSON?: Record<string, any> | null;
 }
 
 /**
@@ -137,7 +137,7 @@ function customSelectorsHadAnyValue(
 export async function extractViaHttpDetailed(
   url: string,
   profile?: ExtractorProfile | null,
-  expected?: { name?: string; brandHint?: string | null; price?: string | null },
+  expected?: { name?: string; brandHint?: string | null; price?: string | null; gtin?: string },
   fetchFn: NetworkFetch = fetch,
 ): Promise<HttpExtractionDetailed> {
   // P0-1 (round 2): the transport accepts an injected fetch so the Product
@@ -176,9 +176,6 @@ export async function extractViaHttpDetailed(
   // Layer 5: Image Gallery
   const images = extractImagesCheerio($, url);
 
-  // Layer 6: Shopify productJSON — deprecated, variant logic removed
-  const productJSON = null;
-
   const raw: RawExtraction = {
     custom,
     jsonLd,
@@ -187,10 +184,29 @@ export async function extractViaHttpDetailed(
     htmlHeuristics,
     images,
     networkProducts: [],
-    productJSON,
   };
 
   const merged = mergeExtractionLayers(raw, url, expected);
+
+  // ADR-0031: deterministic ladder enrichment (additive-only). Fills fields
+  // the layers above left empty from embedded platform/structured signals
+  // and attaches identityStatus/identityReasons. Failures inside the
+  // enrichment degrade to "no enrichment" by contract — but guard anyway so
+  // an unexpected throw can never fail extraction.
+  try {
+    await applyLadderEnrichment({
+      html,
+      url,
+      data: merged,
+      expected: expected
+        ? { name: expected.name, brandHint: expected.brandHint, price: expected.price, gtin: (expected as { gtin?: string }).gtin }
+        : undefined,
+      fetchFn,
+    });
+  } catch (enrichErr) {
+    console.warn('[PageExtractor] Ladder enrichment failed (non-blocking):', enrichErr instanceof Error ? enrichErr.message : enrichErr);
+  }
+
   enrichBrandUrlFromRaw(url, raw, merged.title, merged.brand);
 
   return {
@@ -209,7 +225,7 @@ export async function extractViaHttpDetailed(
 async function extractViaHttp(
   url: string,
   profile?: ExtractorProfile | null,
-  expected?: { name?: string; brandHint?: string | null; price?: string | null },
+  expected?: { name?: string; brandHint?: string | null; price?: string | null; gtin?: string },
 ): Promise<ExtractionData> {
   const detailed = await extractViaHttpDetailed(url, profile, expected);
   return detailed.data;
@@ -222,7 +238,7 @@ async function extractViaHttp(
  */
 export async function extractProductData(
   url: string,
-  expected?: { name: string; brandHint?: string | null; price?: string | null }
+  expected?: { name: string; brandHint?: string | null; price?: string | null; gtin?: string }
 ): Promise<ExtractionData> {
   let domain = '';
   try {
@@ -372,7 +388,6 @@ export async function extractProductData(
 
       // When profile exists, extract via profile selectors only (no fallback layers)
       let custom: Record<string, string | string[]> | null = null;
-      let productJSON: Record<string, any> | null = null;
       if (profile) {
         try {
           custom = await extractCustomSelectors(page, profile);
@@ -383,7 +398,7 @@ export async function extractProductData(
       } else {
         // No profile — try all extraction layers
         try { custom = profile ? await extractCustomSelectors(page, profile) : null; } catch {}
-        // productJSON extraction deprecated
+        // Legacy productJSON extraction removed — superseded by the ADR-0031 ladder enrichment.
       }
       rawExtraction = {
         custom,
@@ -393,7 +408,6 @@ export async function extractProductData(
         htmlHeuristics: {},
         images: [],
         networkProducts: [],
-        productJSON,
       };
       playwrightCustomHadAnyValue = customSelectorsHadAnyValue(custom);
 
@@ -1130,7 +1144,7 @@ async function extractImages(page: import('playwright').Page, baseUrl: string): 
 function mergeExtractionLayers(
   raw: RawExtraction,
   sourceUrl: string,
-  expected?: { name?: string; brandHint?: string | null; price?: string | null },
+  expected?: { name?: string; brandHint?: string | null; price?: string | null; gtin?: string },
 ): ExtractionData {
   const provenance: Record<string, string> = {};
   let confidenceScore = 0;
@@ -1147,19 +1161,9 @@ function mergeExtractionLayers(
     return null;
   }
 
-  // Parse variantId from sourceUrl
-  let variantId: string | null = null;
-  try {
-    const urlObj = new URL(sourceUrl);
-    variantId = urlObj.searchParams.get('variant');
-  } catch { /* ignore */ }
-
-  let matchedVariant: any = null;
-  if (variantId && raw.productJSON && Array.isArray(raw.productJSON.variants)) {
-    matchedVariant = raw.productJSON.variants.find(
-      (v: any) => v.id?.toString() === variantId || v.id === Number(variantId)
-    );
-  }
+  // Legacy Shopify variant matching removed — the deprecated in-page
+  // productJSON payload was always null, so this code was unreachable.
+  // Variant-aware extraction is owned by the ADR-0031 ladder enrichment.
 
   // Title
   let title = pick('title',
@@ -1170,15 +1174,6 @@ function mergeExtractionLayers(
     [raw.htmlHeuristics.title as string, 'html'],
     [raw.metaTags['page:title'], 'meta'],
   );
-
-  // If we matched a variant, let's enrich the title to include the variant options
-  if (matchedVariant && title) {
-    const variantTitle = matchedVariant.title || matchedVariant.name || '';
-    if (variantTitle && !title.toLowerCase().includes(variantTitle.toLowerCase())) {
-      title = `${title} - ${variantTitle}`;
-      provenance.title = 'shopify-variant-enrichment';
-    }
-  }
 
   if (title) { confidenceScore++; confidenceFactors++; } else { confidenceFactors++; }
 
@@ -1229,15 +1224,6 @@ function mergeExtractionLayers(
     }
   }
 
-  // If we matched a variant and it has a price, override to use it
-  if (matchedVariant && matchedVariant.price) {
-    const priceVal = typeof matchedVariant.price === 'number'
-      ? (matchedVariant.price / 100).toFixed(2)
-      : matchedVariant.price;
-    price = priceVal.toString();
-    provenance.price = 'shopify-variant-enrichment';
-  }
-
   if (price) { confidenceScore++; confidenceFactors++; } else { confidenceFactors++; }
 
   // Images
@@ -1250,61 +1236,7 @@ function mergeExtractionLayers(
   let primaryImage: string | null = null;
   let provenanceSrc = 'json-ld';
 
-  // 1. If we matched a variant, try to use the variant's featured image as primaryImage
-  if (matchedVariant) {
-    let variantImg = matchedVariant.featured_image?.src
-      || matchedVariant.featured_media?.preview_image?.src
-      || matchedVariant.thumbnail_image?.desktop
-      || matchedVariant.image?.src;
-
-    // Fallback: search allImages for filenames matching variant option values (like color names "Tie Dye")
-    if (!variantImg && Array.isArray(matchedVariant.options)) {
-      for (const opt of matchedVariant.options) {
-        if (!opt || typeof opt !== 'string') continue;
-        const normalizedOpt = opt.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (normalizedOpt.length < 3) continue; // skip short values like size indicators
-        
-        const match = allImages.find(img => {
-          try {
-            const filename = new URL(img).pathname.split('/').pop()?.toLowerCase() || '';
-            const normalizedFilename = filename.replace(/[^a-z0-9]/g, '');
-            return normalizedFilename.includes(normalizedOpt);
-          } catch {
-            return false;
-          }
-        });
-        
-        if (match) {
-          variantImg = match;
-          break;
-        }
-      }
-    }
-      
-    if (variantImg) {
-      let variantImageUrl: string = variantImg;
-      if (variantImageUrl.startsWith('//')) {
-        variantImageUrl = 'https:' + variantImageUrl;
-      }
-      // Force Shopify variant image to 1200px width (high res)
-      try {
-        const imgUrlObj = new URL(variantImageUrl);
-        if (imgUrlObj.hostname.includes('shopify.com') || imgUrlObj.pathname.includes('/cdn/shop/')) {
-          const vParam = imgUrlObj.searchParams.get('v');
-          imgUrlObj.search = '';
-          if (vParam) imgUrlObj.searchParams.set('v', vParam);
-          imgUrlObj.searchParams.set('width', '1200');
-          variantImageUrl = imgUrlObj.href;
-        }
-      } catch {
-        /* keep the original variant image URL */
-      }
-      primaryImage = variantImageUrl;
-      provenanceSrc = 'shopify-variant';
-    }
-  }
-
-  // 2. Fall back to custom selector or structured data
+  // 1. Fall back to custom selector or structured data
   if (!primaryImage) {
     if (customImages.length > 0) {
       primaryImage = customImages[0];
@@ -1326,19 +1258,17 @@ function mergeExtractionLayers(
     }
   }
 
-  // 3. Normalize primaryImage protocol/relative paths and width if Shopify CDN
+  // 2. Normalize primaryImage protocol/relative paths and width if Shopify CDN
   if (primaryImage) {
     try {
       const imgUrlObj = new URL(primaryImage, sourceUrl);
       primaryImage = imgUrlObj.href;
-      if (provenanceSrc !== 'shopify-variant') {
-        if (imgUrlObj.hostname.includes('shopify.com') || imgUrlObj.pathname.includes('/cdn/shop/')) {
-          const vParam = imgUrlObj.searchParams.get('v');
-          imgUrlObj.search = '';
-          if (vParam) imgUrlObj.searchParams.set('v', vParam);
-          imgUrlObj.searchParams.set('width', '1200');
-          primaryImage = imgUrlObj.href;
-        }
+      if (imgUrlObj.hostname.includes('shopify.com') || imgUrlObj.pathname.includes('/cdn/shop/')) {
+        const vParam = imgUrlObj.searchParams.get('v');
+        imgUrlObj.search = '';
+        if (vParam) imgUrlObj.searchParams.set('v', vParam);
+        imgUrlObj.searchParams.set('width', '1200');
+        primaryImage = imgUrlObj.href;
       }
     } catch {
       if (primaryImage.startsWith('//')) {
