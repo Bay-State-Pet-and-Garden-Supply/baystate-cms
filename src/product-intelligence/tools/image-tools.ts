@@ -15,7 +15,7 @@
  */
 import { Type } from 'typebox';
 import { createRequire } from 'node:module';
-import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
+import { DeterministicNetworkGate, NetworkGateDeniedError, type ImageFetchGate } from '../../onboarding/image-verification/network-gate';
 import { verifyImageCandidate } from '../assets/verification';
 import { discoverCandidates } from '../assets/discovery';
 import { refreshResolvedAuthoritiesForRun } from './verification-tools';
@@ -70,7 +70,15 @@ export const verifyImageCandidateTool: PiToolAdapter = {
   }),
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
-    const gateway = ctx.gateway ?? defaultPolicyGateway;
+    // ADR-0030 Phase 1: the verification pipeline fetches through a gate.
+    // PI runs keep their PolicyGateway enforcement via a structural adapter;
+    // without an injected gateway the pure deterministic gate applies.
+    const gate: ImageFetchGate = ctx.gateway
+      ? { fetch: (url, init, options) => ctx.gateway!.gatewayFetch(ctx, url, init ?? {}, {
+          allowedContentTypes: options?.allowedContentTypes,
+          maxResponseBytes: options?.maxResponseBytes,
+        }) }
+      : new DeterministicNetworkGate();
 
     // Server-resolved durable evidence (lazy import keeps this module
     // importable in vitest — no bun:sqlite at module scope).
@@ -162,9 +170,7 @@ export const verifyImageCandidateTool: PiToolAdapter = {
           observed,
         },
         {
-          runId: ctx.runId,
-          policy: ctx.policy,
-          gateway,
+          gate,
           signal: ctx.signal,
           evidenceResolver,
           // Round-4: source kind derives from the durable source row for the
@@ -213,8 +219,8 @@ export const verifyImageCandidateTool: PiToolAdapter = {
         },
       ]);
     } catch (error) {
-      if (error instanceof PolicyDeniedError) {
-        return policyDenied(`network denied: ${error.decision.reasonCode}${error.decision.detail ? ` (${error.decision.detail})` : ''}`);
+      if (error instanceof NetworkGateDeniedError) {
+        return policyDenied(`network denied: ${error.code}${error.detail ? ` (${error.detail})` : ''}`);
       }
       return errorResult('image_verification_failed', error instanceof Error ? error.message.slice(0, 500) : String(error));
     }

@@ -29,6 +29,7 @@ import type {
 import { validateTerminalSubmission } from './workflow/bundle-validator';
 import { runExtractionLadder, exactGtinMatch } from './extraction/ladder';
 import { defaultLadderOptions } from './extraction/wiring';
+import type { ImageFetchGate } from '../onboarding/image-verification/network-gate';
 import { defaultPolicyGateway } from './policy';
 import { sha256Hex } from '../shared/stable-id';
 import type { ExecutionEventSink } from './executor';
@@ -237,20 +238,26 @@ export async function runDeterministicPreflight(
         try {
           const verifier = lazyRequire('./assets/verification') as {
             verifyImageCandidate?: (
-              target: { runId: string; candidateId: string; imageUrl: string; sourcePageUrl: string; sourceArtifactId: string },
-              checkCtx: { runId: string; policy: unknown; gateway: unknown },
+              target: { candidateId: string; imageUrl: string; sourcePageUrl: string; sourceArtifactId: string },
+              checkCtx: { gate: unknown },
             ) => Promise<{ asset: { id: string } }>;
           };
           if (verifier.verifyImageCandidate) {
             const verified = await verifier.verifyImageCandidate(
               {
-                runId: ctx.runId,
                 candidateId,
                 imageUrl: img.url,
                 sourcePageUrl: res.finalUrl,
                 sourceArtifactId: artifactId,
               },
-              { runId: ctx.runId, policy: ctx.policy, gateway: defaultPolicyGateway },
+              { gate: {
+                fetch: (url, init, options) => defaultPolicyGateway.gatewayFetch(
+                  { runId: ctx.runId, policy: ctx.policy },
+                  url,
+                  init ?? {},
+                  { allowedContentTypes: options?.allowedContentTypes, maxResponseBytes: options?.maxResponseBytes },
+                ),
+              } as ImageFetchGate },
             );
             verifiedAssetId = verified?.asset?.id ?? '';
           }

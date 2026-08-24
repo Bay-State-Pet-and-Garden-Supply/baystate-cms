@@ -1,18 +1,11 @@
 /**
- * Image evidence pipeline (PI-6).
- *
- * Deterministic discovery, verification, rights, and duplicate detection for
- * product image candidates. The pipeline consumes structured artifacts
- * (#29-style captures, JSON-LD, platform variant mappings), quarantines
- * fetched assets behind the policy gateway, records content + perceptual
- * hashes, compares visible packaging evidence, resolves rights from declared
- * sources, and computes the fail-closed commerce-approval flag.
- *
- * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/23
+ * ADR-0030 Phase 1 relocation shim: the image evidence pipeline moved to
+ * src/onboarding/image-verification/. Deleted together with the PI program
+ * in Phase 3.
  */
-export * from './schema';
-export * from './image-hash';
-export * from './rights';
-export * from './contract';
-export * from './verification';
-export * from './discovery';
+export * from '../../onboarding/image-verification/schema';
+export * from '../../onboarding/image-verification/image-hash';
+export * from '../../onboarding/image-verification/rights';
+export * from '../../onboarding/image-verification/contract';
+export * from '../../onboarding/image-verification/verification';
+export * from '../../onboarding/image-verification/discovery';
