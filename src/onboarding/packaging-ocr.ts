@@ -51,13 +51,28 @@ import { sha256Hex } from '../shared/stable-id';
 /**
  * Comprehensive VLM prompt for packaging image analysis.
  * Asks for structured JSON with per-field confidence.
+ *
+ * Prompt version history:
+ * - v1 (original): bare field list; VLMs used flavorVariety as a generic
+ *   variety/scent/line-name slot on non-food products (e.g. "Ammonia Locker"
+ *   for paper litter, "VEGGIE" for chew toys).
+ * - v2 (2026-08-24): explicit per-field semantics. flavorVariety is
+ *   EDIBLE-products-only; scents/odor-control claims/formula names belong in
+ *   "claims" (or null). productForm/lifeStage tightened likewise. Field set
+ *   unchanged (PackagingOcrDataSchema is frozen-shape).
  */
 export const PACKAGING_OCR_PROMPT = `Analyze this product packaging image for a retail catalog.
 
 Return ONLY valid JSON. Do not wrap in markdown. Do not guess. Use null or [] when not visible.
-If a field does not apply to this product type (e.g. flavor for a shovel, species for a hose), return null or [].
+If a field does not apply to this product type, return null or [] — an empty field is correct and preferred over a guess.
 Separate printed text from visual inference.
-"upc": transcribe the exact UPC/GTIN barcode digits printed on the package (EAN-13/UPC-A, 8-14 digits, digits only after stripping check-spacing). Use null when no barcode is visible or legible.
+
+Field definitions (apply strictly):
+"flavorVariety": the named flavor OR recipe ONLY for EDIBLE products (foods, treats, chews intended to be eaten). Examples: "Chicken Recipe", "Duck Stew", "Peanut Butter". For NON-edible products (litter, toys, grooming, tools), this MUST be null — scent notes, odor-control claims (e.g. "Ammonia Locker", "Odor-Eliminating Carbon", "Beef Scent") and formula names are NOT flavors; put marketing claim phrases like these into "claims" instead.
+"productForm": the physical form of the product itself (e.g. "dry kibble", "wet food", "plush toy", "clumping litter", "shampoo"). Not the product category, not marketing wording.
+"lifeStage": life-stage wording printed on the package only (e.g. "puppy", "adult", "senior", "kitten"). Null when absent.
+"upc": transcribe the exact UPC/GTIN barcode digits printed on the package (EAN-13/UPC-A, 8-14 digits, digits only after stripping check-spacing). Use null when no barcode is visible or legible. Transcribe ONLY what is printed — never infer from brand or size text.
+"brand": the brand name exactly as printed on the package.
 
 {
   "productName": string | null,
