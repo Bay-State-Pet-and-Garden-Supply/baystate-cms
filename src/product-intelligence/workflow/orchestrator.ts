@@ -483,7 +483,7 @@ export function resolveDefaultWorkflowPersistence(options?: { allowInMemoryFallb
       return new InMemoryWorkflowPersistenceRepository();
     }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const repo = require('../../db/repositories/specialist-workflow-repo');
+    const repo = require('./specialist-workflow-repo');
     if (typeof repo.specialistWorkflowPersistence === 'function') {
       return repo.specialistWorkflowPersistence();
     }

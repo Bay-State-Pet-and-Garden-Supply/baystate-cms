@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { SqliteSpecialistWorkflowRepository } from '../../db/repositories/specialist-workflow-repo';
+import { SqliteSpecialistWorkflowRepository } from '../../product-intelligence/workflow/specialist-workflow-repo';
 import type { SpecialistWorkflowRecord } from '../../product-intelligence/workflow/orchestrator';
 
 const dbPath = 'src/tests/unit/specialist-workflow-test.db';

@@ -37,8 +37,8 @@ import { overrideSourcingFlags, resetSourcingFlagsOverride } from '../../onboard
 import {
   importRunToOnboarding,
   UnresolvedEvidenceError,
-  verifyImportedResultGate,
 } from '../../product-intelligence/onboarding-import';
+import { verifyImportedResultGate } from '../../onboarding/imported-result-gate';
 import { validSubmission } from './product-intelligence/test-helpers';
 import app from '../../server/app';
 

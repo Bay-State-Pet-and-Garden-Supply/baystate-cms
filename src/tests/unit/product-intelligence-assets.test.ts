@@ -21,8 +21,7 @@ import { dhashFromRaw, perceptualHammingDistance } from '../../product-intellige
 import { parseJsonLdImages, parseShopifyVariantImages, parseWooCommerceVariantImages, parseNetworkCaptures, discoverCandidates } from '../../product-intelligence/assets/discovery';
 import { resolveRights, computeCommerceApproved } from '../../product-intelligence/assets/rights';
 import { classifyAssetIdentity, findDuplicateAssets, parseNetContent, verifyImageCandidate } from '../../product-intelligence/assets/verification';
-import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
-import { buildDefaultPiPolicy } from '../../product-intelligence/run-service';
+import { DeterministicNetworkGate } from '../../onboarding/image-verification/network-gate';
 
 const wsId = 'pi-assets-test-workspace';
 const GTIN = '036000291452';
@@ -457,17 +456,15 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
   // -------------------------------------------------------------------------
 
   describe('verifyImageCandidate', () => {
-    function gatewayReturning(buffer: Buffer): PolicyGateway {
-      return new PolicyGateway({
+    function gateReturning(buffer: Buffer): DeterministicNetworkGate {
+      return new DeterministicNetworkGate({
         resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
         fetchFn: async () => new Response(new Uint8Array(buffer), { status: 200, headers: { 'content-type': 'image/png' } }),
       });
     }
 
-    const deps = (gateway: PolicyGateway) => ({
-      runId: 'run-assets-1',
-      policy: buildDefaultPiPolicy(),
-      gateway,
+    const deps = (gate: DeterministicNetworkGate) => ({
+      gate,
     });
 
     it('approves a verified supplier asset with evidence-resolved facts and a reuse grant', async () => {
@@ -490,7 +487,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-1', 'ev-name-1', 'ev-net-1'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           // Server-resolved durable evidence rows (the only authority).
           evidenceResolver: (ids) =>
             ids.map((id) => {
@@ -530,7 +527,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           observed: { productName: 'Stella Chicken Broth 16 oz', gtin: GTIN },
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: () => [], // no durable evidence rows resolve
           reuseGrantResolver: () => null,
         },
@@ -560,7 +557,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           assetGtinLinkages: [{ gtin: GTIN, assetId: 'asset-mfr-1', originalContentHash: pngHash }],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
           // Round-4: durable source kind (origin proves nothing by itself).
@@ -584,7 +581,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-ocr'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
           reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-hash-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
@@ -613,7 +610,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-nohash', 'ev-name-nohash'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           // Hash-bound name fact (informative), NULL-hash GTIN fact (NOT
           // authoritative for this image).
           evidenceResolver: (ids) =>
@@ -644,7 +641,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-dec'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'decoder', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
           reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-dec-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
@@ -666,7 +663,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-ocr'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: wrongHash })),
           reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-hash-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
@@ -692,7 +689,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-1', 'ev-name-wrong', 'ev-net-wrong'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => {
               if (id === 'ev-gtin-1') return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
@@ -717,7 +714,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-1'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
           reuseGrantResolver: () => null,
@@ -730,7 +727,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
     it('rejects corrupt content with qualityStatus invalid', async () => {
       const record = await verifyImageCandidate(
         { url: 'https://cdn.example.com/corrupt.png', declaredSourceType: 'supplier' },
-        deps(gatewayReturning(Buffer.from('this is definitely not an image'))),
+        deps(gateReturning(Buffer.from('this is definitely not an image'))),
       );
       expect(record.qualityStatus).toBe('invalid');
       expect(record.commerceApproved).toBe(false);
@@ -742,7 +739,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       const record = await verifyImageCandidate(
         { url: 'https://cdn.example.com/tiny.png', declaredSourceType: 'supplier', evidenceIds: ['ev-gtin-1'], expectedGtin: GTIN },
         {
-          ...deps(gatewayReturning(tiny)),
+          ...deps(gateReturning(tiny)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
           reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-tiny-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
@@ -764,7 +761,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-y-bytebound', 'ev-x-generic'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => {
               if (id === 'ev-y-bytebound') {
@@ -799,7 +796,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-g1', 'ev-g2'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id, index) => ({
               id,
@@ -835,7 +832,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-cand'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
           // The durable resolver consults ONLY the candidate record.
@@ -865,7 +862,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-nocand'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
           sourceTypeResolver: (_url, provenance) => (provenance.candidateId ? 'supplier' : null),
@@ -888,7 +885,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-1', 'ev-unqualified-brand'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => {
               if (id === 'ev-gtin-1') {
@@ -915,7 +912,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-entity-1', 'ev-brand-entity-1'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => {
               if (id === 'ev-gtin-entity-1') {
@@ -940,7 +937,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           evidenceIds: ['ev-gtin-ocr', 'ev-brand-ocr'],
         },
         {
-          ...deps(gatewayReturning(solidPng)),
+          ...deps(gateReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => {
               if (id === 'ev-gtin-ocr') {

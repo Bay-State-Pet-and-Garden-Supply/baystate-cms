@@ -76,7 +76,7 @@ import { importRunToOnboarding } from '../../product-intelligence/onboarding-imp
 import { importSpecialistWorkflowToOnboarding } from '../../product-intelligence/specialist-workflow-import';
 import type { SpecialistWorkflowResult } from '../../product-intelligence/workflow/orchestrator';
 import { routeSpecialistRetry, retrySpecialistWorkflow, type SpecialistRetryTarget } from '../../product-intelligence/workflow/orchestrator';
-import { specialistWorkflowPersistence } from '../../db/repositories/specialist-workflow-repo';
+import { specialistWorkflowPersistence } from '../../product-intelligence/workflow/specialist-workflow-repo';
 import { assertRunApprovedForImport } from '../../product-intelligence/review-gate';
 import {
   createReviewDecision,
