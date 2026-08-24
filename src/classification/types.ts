@@ -14,6 +14,10 @@ export type ClassificationStageName =
   | 'primary_product_type_proposal'
   | 'attribute_applicability'
   | 'product_attribute_proposals'
+  // P3 value-production ladder (plan B.P3.3): flag-gated residual-gap stage.
+  // Composed ONLY while BAYSTATE_CMS_VALUE_GAP_LLM is on; flag-OFF pipelines
+  // never carry the name, so legacy runs stay byte-identical.
+  | 'value_gap_abstain'
   | 'category_page_proposals'
   | 'product_draft_projection';
 

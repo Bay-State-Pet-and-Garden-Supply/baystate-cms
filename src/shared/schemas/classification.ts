@@ -338,6 +338,10 @@ export const ClassificationStageNameValues = [
   'primary_product_type_proposal',
   'attribute_applicability',
   'product_attribute_proposals',
+  // P3 (value-production ladder): flag-gated residual-gap resolution stage.
+  // Additive only — previously valid configs remain valid; the new value is
+  // accepted solely so modelPolicy.stageOverrides can target the stage.
+  'value_gap_abstain',
   'category_page_proposals',
   'product_draft_projection',
 ] as const;

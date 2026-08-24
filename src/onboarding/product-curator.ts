@@ -47,6 +47,8 @@ import {
   categoryPageProposalsStage,
   productDraftProjectionStage,
 } from '../classification';
+import { valueGapAbstainStage } from '../classification/stages/value-gap-abstain';
+import { getUniversalTierFlags } from '../classification/flags';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { redactTransportText, type ModelPolicyView } from '../classification/model-policy-gateway';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
@@ -148,6 +150,13 @@ export function composeCurationPipelineStages(): StageDefinition[] {
     primaryProductTypeStage,
     attributeApplicabilityStage,
     productAttributeProposalsStage,
+    // P3 value-production ladder (plan B.P3.3): the flag-gated residual-gap
+    // stage joins ONLY while BAYSTATE_CMS_VALUE_GAP_LLM is on. Flag OFF
+    // (default) composes exactly today's list byte-identically. It runs after
+    // `product_attribute_proposals` (reads its output) and before page
+    // assignment; it never touches promotion gates or stage ordering for the
+    // legacy seven stages.
+    ...(getUniversalTierFlags().valueGapLlmEnabled ? [valueGapAbstainStage] : []),
     categoryPageProposalsStage,
     productDraftProjectionStage,
   ];

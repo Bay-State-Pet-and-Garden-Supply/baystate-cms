@@ -65,7 +65,7 @@ A Product Attribute without a live Catalog Field target.
 _Avoid_: Planned field, final assignment
 
 **Universal Product Attribute**:
-A Product Attribute that is relevant regardless of Product Type.
+A Product Attribute that is universally PROPOSABLE from evidence, with requiredness and applicability still enforced by the Attribute Profile.
 _Avoid_: Global field, common metadata
 
 **Product Claim**:
@@ -424,7 +424,7 @@ _Avoid_: Hidden ordering, implicit prerequisite
 
 - A **Product Type** defines which **Product Attributes** are relevant for a product.
 - A **Product SKU** may have one **Primary Product Type** or an **Unknown Primary Product Type** during review.
-- A **Primary Product Type** gates Product Attribute classification except for **Universal Product Attributes**.
+- A **Primary Product Type** gates Product Attribute classification except for **Universal Product Attributes**, which are universally PROPOSABLE from evidence while the **Attribute Profile** continues to enforce requiredness and applicability.
 - An **Unknown Primary Product Type** pauses type-gated Product Attribute proposals and Category Page proposals but does not block product draft creation.
 - A **Product Type** remains local CMS classification unless represented by a mapped **Product Attribute**.
 - Changing a **Product Type** may make type-specific **Classification Proposals** stale.

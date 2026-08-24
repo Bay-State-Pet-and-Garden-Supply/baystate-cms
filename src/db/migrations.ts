@@ -1235,6 +1235,59 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint for packaging_ocr:', e);
   }
 
+  // ── Migration to expand classification_stage_results CHECK for value_gap_abstain ──
+  //
+  // P3 value-production ladder (plan B.P3.3): the flag-gated
+  // `value_gap_abstain` stage persists its result through the same
+  // `classification_stage_results` table. Existing databases carry a CHECK
+  // constraint without the name; rebuild the table with `value_gap_abstain`
+  // added. Purely additive (constraint widening only) and idempotent —
+  // flag-OFF behavior is unchanged because nothing writes the new value until
+  // BAYSTATE_CMS_VALUE_GAP_LLM is enabled. Mirrors the packaging_ocr rebuild
+  // precedent exactly (orphan cleanup, transactional swap, FK restore).
+  try {
+    const tableInfoGap = db.query('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?').get('table', 'classification_stage_results') as { sql: string } | undefined;
+    if (tableInfoGap && tableInfoGap.sql && !tableInfoGap.sql.includes("'value_gap_abstain'")) {
+      console.log('[Migrations] Expanding classification_stage_results CHECK constraint for value_gap_abstain...');
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          // Retry safety: drop any _new remnant from an earlier failed swap.
+          db.exec('DROP TABLE IF EXISTS classification_stage_results_new');
+          const orphanedStageResults = db.query(
+            'SELECT COUNT(*) as cnt FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)'
+          ).get() as { cnt: number };
+          if (orphanedStageResults.cnt > 0) {
+            db.run('DELETE FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)');
+            console.log(`[Migrations] Cleaned up ${orphanedStageResults.cnt} orphaned classification_stage_results row(s).`);
+          }
+          db.exec(`
+            CREATE TABLE classification_stage_results_new (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+              stage_name TEXT NOT NULL CHECK (stage_name IN ('packaging_ocr', 'evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'value_gap_abstain', 'category_page_proposals', 'product_draft_projection')),
+              status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
+              output_json TEXT,
+              error_message TEXT,
+              started_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+          `);
+          db.exec('INSERT INTO classification_stage_results_new SELECT * FROM classification_stage_results;');
+          db.exec('DROP TABLE classification_stage_results;');
+          db.exec('ALTER TABLE classification_stage_results_new RENAME TO classification_stage_results;');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_classification_stage_results_run ON classification_stage_results(run_id);');
+        })();
+      } finally {
+        // Always restore foreign key enforcement, even if the rebuild fails.
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+      console.log('[Migrations] classification_stage_results CHECK constraint expanded for value_gap_abstain successfully.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint for value_gap_abstain:', e);
+  }
+
   // Run stage pipeline migration if not already applied
   const stagePipelineVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('stage_pipeline_schema_version') as
     | { value: string }
