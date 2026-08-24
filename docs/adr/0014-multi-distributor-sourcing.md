@@ -1,5 +1,7 @@
 # Adopt a flag-gated Multi-Distributor Sourcing engine with immutable evidence generations
 
+> **Path update (ADR-0030):** references to "PI-6" below now resolve to `src/onboarding/image-verification/` (the relocated rights-and-identity verification pipeline). The verification contract itself is unchanged.
+
 The Sourcing stage exists in the item-centric onboarding pipeline (Sourcing → Discovery → Extraction → Curation → Review → Promotion) but its distributor-evidence engine was never shipped: the evidence-attempt writer was removed in a dead-code sweep (`7e11c47`), no production code ever wrote `onboarding_evidence_attempts`, and the capability was gated default-OFF by the Sourcing safety patch (`BAYSTATE_CMS_SOURCING_ENABLED`). This ADR ratifies the authority, provider, generation, routing, and rollout contracts for rebuilding Sourcing as a real engine — reusing the recovered multi-distributor "V2" work (preserved in `stash@{1}`/`dc01ea6`) adapted to the current six-stage, capability-gated architecture.
 
 **Status**: implemented (ADR ratified as the prerequisite; implementation completed per `docs/plans/sourcing-v2-recovery-plan.md` — schema/repositories (M2), provider-neutral engine + Phillips/BCI connectors (M3), reconciler + flag-gated worker leg (M4), conflict API + Settings surface (M5), capability-gated drawer (M6), end-to-end acceptance suite (M7). The capability remains DEFAULT OFF; the staged enablement sequence is documented in `docs/runbooks/sourcing-engine-rollout.md`.)

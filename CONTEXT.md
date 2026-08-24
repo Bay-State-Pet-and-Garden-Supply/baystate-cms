@@ -989,3 +989,7 @@ from a product's primary package image to ground curation titles and evidence.
   Model flips require the pre-registered gate in
   `docs/runbooks/packaging-ocr-model-rollout.md`; flip = one-constant commit.
 - **Plan:** `docs/plans/packaging-ocr-overhaul-plan.md`.
+
+## Naming footnote: `product_intelligence_assets` (ADR 0030)
+
+The `product_intelligence_assets` table and `pi_reuse_policies` table keep their historical names even though the Agent Lab program was decommissioned: both are live-written onboarding infrastructure (distributor imagery verification + image reuse grants) whose homes moved to `src/onboarding/image-verification/`, `src/db/repositories/onboarding-pi-asset-repo.ts`, and `src/db/repositories/image-reuse-policy-repo.ts`. The names are retained for row-history continuity, not because an agent program exists.
