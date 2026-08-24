@@ -15,11 +15,10 @@
  *   free-text targets producing the same text) collapse into one row.
  * - Confidence renders as a qualitative chip + percent.
  */
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import type { ClassificationProposal } from '../../../../shared/schemas/classification';
 import type { CurationData } from '../../../../shared/schemas/onboarding';
-import { listPages, listVerifiedPageOptionSummaries } from '../../../api';
 
 /** e09 round-3 FIX 1 (adjudication #10): correction payload written alongside
  *  suggestedPages when the added page resolves to a VERIFIED Page ID. */
@@ -33,7 +32,6 @@ export interface ReviewClassificationPanelProps {
   onDecision: (proposal: ClassificationProposal, decision: 'accepted' | 'rejected') => Promise<void>;
   /** Item id currently performing a decision write (disables row buttons). */
   busyDecisionId: string | null;
-  onUpdatePages?: (suggestedPages: string[], correction?: CategoryPageCorrection) => Promise<void>;
 }
 
 export const PROPOSAL_TYPE_LABELS: Record<string, string> = {
@@ -144,38 +142,8 @@ export function ReviewClassificationPanel({
   detail,
   onDecision,
   busyDecisionId,
-  onUpdatePages,
 }: ReviewClassificationPanelProps) {
   const [decisionError, setDecisionError] = useState<string | null>(null);
-  const [availablePages, setAvailablePages] = useState<string[]>([]);
-  // e09 round-3 FIX 1: verified options + active import hash for corrections.
-  const [verifiedPages, setVerifiedPages] = useState<Array<{ id: string; name: string }>>([]);
-  const [activeImportHash, setActiveImportHash] = useState<string | null>(null);
-  const [isAddingPage, setIsAddingPage] = useState(false);
-  const [pageSearch, setPageSearch] = useState('');
-  const [savingPages, setSavingPages] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-    listPages()
-      .then(res => {
-        if (mounted && res?.pages) {
-          const names = [...new Set(res.pages.map(p => p.name).filter(Boolean))].sort();
-          setAvailablePages(names);
-        }
-      })
-      .catch(() => {});
-    listVerifiedPageOptionSummaries()
-      .then(res => {
-        if (!mounted) return;
-        setVerifiedPages((res?.pages ?? []).map(p => ({ id: p.id, name: p.name })));
-        setActiveImportHash(res?.activeImportHash ?? null);
-      })
-      .catch(() => {});
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   const curation = detail?.item.curationData as CurationData | null;
   const proposals = curation?.classificationProposals ?? [];
@@ -194,39 +162,6 @@ export function ReviewClassificationPanel({
       await onDecision(proposal, decision);
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleRemovePage = async (pageToRemove: string) => {
-    if (!onUpdatePages || savingPages) return;
-    setSavingPages(true);
-    try {
-      const next = suggestedPages.filter(p => p !== pageToRemove);
-      await onUpdatePages(next);
-    } finally {
-      setSavingPages(false);
-    }
-  };
-
-  const handleAddPage = async (pageToAdd: string) => {
-    if (!onUpdatePages || savingPages || suggestedPages.includes(pageToAdd)) return;
-    setSavingPages(true);
-    try {
-      const next = [...suggestedPages, pageToAdd];
-      // e09 round-3 FIX 1: when the added page resolves to a verified identity,
-      // stamp the correction record so an abstained durable decision can be
-      // resolved by this manual selection (adjudication #10). Non-verified
-      // additions keep today's name-only behavior (never acceptance authority).
-      const verified = verifiedPages.find(p => p.name === pageToAdd);
-      const correction: CategoryPageCorrection | undefined =
-        verified && activeImportHash
-          ? { pageId: verified.id, activePageImportHash: activeImportHash }
-          : undefined;
-      await onUpdatePages(next, correction);
-      setIsAddingPage(false);
-      setPageSearch('');
-    } finally {
-      setSavingPages(false);
     }
   };
 
@@ -259,18 +194,17 @@ export function ReviewClassificationPanel({
   }, []);
   const dedupeCount = reviewable.length - dedupedReviewable.length;
 
-  const filteredPageOptions = availablePages.filter(
-    p => !suggestedPages.includes(p) && p.toLowerCase().includes(pageSearch.toLowerCase().trim()),
-  );
-
   return (
     <section
       className="rv-panel"
-      aria-label="Classification"
+      aria-label="Additional Fields"
       id="rv-classification-panel"
       tabIndex={-1}
     >
-      <header className="rv-panel-head">Classification</header>
+      <header className="rv-panel-head">Additional Fields</header>
+      <div className="rv-field-value" style={{ fontSize: '0.75rem', color: 'var(--text-muted, #64748b)', marginTop: '-0.25rem' }}>
+        Product type and additional Product Fields (ProductField 1+) — assign via the proposals below.
+      </div>
       <div className="rv-panel-body">
         {withoutResults && (
           <div className="rv-empty">
@@ -289,110 +223,6 @@ export function ReviewClassificationPanel({
             <ReviewProposalRow proposal={primary} onDecision={handleDecision} busy={busyDecisionId} />
           </div>
         )}
-
-        {/* Assigned or Suggested Category Pages with Interactive Editing */}
-        <div className="rv-field" style={{ marginTop: '0.875rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div className="rv-field-label">Category Pages</div>
-            {onUpdatePages && (
-              <button
-                type="button"
-                className="rv-btn rv-btn-secondary"
-                style={{ fontSize: '0.75rem', padding: '0.125rem 0.5rem', height: 'auto' }}
-                onClick={() => setIsAddingPage(prev => !prev)}
-                disabled={savingPages}
-              >
-                {isAddingPage ? 'Done' : '+ Add Page'}
-              </button>
-            )}
-          </div>
-          {suggestedPages.length > 0 ? (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.375rem', marginTop: '0.25rem' }}>
-              {suggestedPages.map(page => (
-                <span
-                  key={page}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    padding: '0.25rem 0.625rem',
-                    borderRadius: '9999px',
-                    fontSize: '0.8125rem',
-                    fontWeight: 500,
-                    background: '#eff6ff',
-                    color: '#1d4ed8',
-                    border: '1px solid #bfdbfe',
-                  }}
-                >
-                  📁 {page}
-                  {onUpdatePages && (
-                    <button
-                      type="button"
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: '#1d4ed8',
-                        cursor: 'pointer',
-                        fontWeight: 'bold',
-                        marginLeft: '0.375rem',
-                        padding: 0,
-                        fontSize: '0.875rem',
-                        lineHeight: 1,
-                      }}
-                      title={`Remove ${page}`}
-                      disabled={savingPages}
-                      onClick={() => void handleRemovePage(page)}
-                    >
-                      ×
-                    </button>
-                  )}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <div className="rv-field-value" style={{ color: 'var(--text-muted, #64748b)', fontStyle: 'italic' }}>
-              No category pages assigned yet.
-            </div>
-          )}
-
-          {isAddingPage && (
-            <div style={{ marginTop: '0.5rem', background: '#f8fafc', padding: '0.5rem', borderRadius: '4px', border: '1px solid #e2e8f0' }}>
-              <input
-                type="text"
-                className="rv-input"
-                style={{ fontSize: '0.8125rem', width: '100%', marginBottom: '0.375rem' }}
-                placeholder="Search category pages to add..."
-                value={pageSearch}
-                onChange={e => setPageSearch(e.target.value)}
-                autoFocus
-              />
-              <div style={{ maxHeight: '140px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                {filteredPageOptions.slice(0, 20).map(page => (
-                  <button
-                    key={page}
-                    type="button"
-                    style={{
-                      textAlign: 'left',
-                      padding: '0.25rem 0.5rem',
-                      background: '#fff',
-                      border: '1px solid #cbd5e1',
-                      borderRadius: '3px',
-                      cursor: 'pointer',
-                      fontSize: '0.8125rem',
-                    }}
-                    onClick={() => void handleAddPage(page)}
-                  >
-                    + {page}
-                  </button>
-                ))}
-                {filteredPageOptions.length === 0 && (
-                  <div style={{ fontSize: '0.75rem', color: '#64748b', padding: '0.25rem' }}>
-                    {pageSearch ? 'No matching pages found.' : 'All store pages already added.'}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
 
         {dedupedReviewable.length > 0 && (
           <div className="rv-field">

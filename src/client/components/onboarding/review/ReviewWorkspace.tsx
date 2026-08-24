@@ -63,6 +63,7 @@ import {
 } from './review-readiness';
 import { ReviewQueue } from './ReviewQueue';
 import { ReviewIdentityPanel } from './ReviewIdentityPanel';
+import { ReviewPagesPanel } from './ReviewPagesPanel';
 import { ReviewListingPanel } from './ReviewListingPanel';
 import { ReviewClassificationPanel } from './ReviewClassificationPanel';
 import { ReviewWarningsPanel } from './ReviewWarningsPanel';
@@ -1094,11 +1095,14 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
                   v2 && mergedReadiness ? fieldBlockerCodes(mergedReadiness.blockers) : undefined
                 }
               />
+              <ReviewPagesPanel
+                detail={currentInspector.detail}
+                onUpdatePages={handleUpdatePages}
+              />
               <ReviewClassificationPanel
                 detail={currentInspector.detail}
                 onDecision={handleDecision}
                 busyDecisionId={busyDecisionId}
-                onUpdatePages={handleUpdatePages}
               />
               <ReviewWarningsPanel detail={currentInspector.detail} />
               {v2 && (

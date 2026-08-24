@@ -562,7 +562,7 @@ describe('gate text + jump targets // e10s03', () => {
     expect(jumpTargetFor('missing_price')).toBe('rv-edit-price');
     expect(jumpTargetFor('missing_brand')).toBe('rv-edit-brand');
     expect(jumpTargetFor('missing_primary_image')).toBe('rv-listing-media');
-    expect(jumpTargetFor('missing_pages')).toBe('rv-classification-panel');
+    expect(jumpTargetFor('missing_pages')).toBe('rv-pages-panel');
     expect(jumpTargetFor('unknown_code')).toBeNull();
   });
 });
