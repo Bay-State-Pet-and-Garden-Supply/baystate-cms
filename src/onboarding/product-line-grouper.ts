@@ -60,7 +60,21 @@ const ATTACHED_COLOR = /(yellow|lavender|orange|green|blue|red|pink|purple|black
 const STANDALONE_COLORS = /\b(yellow|lavender|orange|green|blue|red|pink|purple|black|white|brown|tan)\b/gi;
 
 /** Flavor/variant words to remove from name stem */
-const FLAVOR_WORDS = /\b(chicken|chkn|ckn|beef|salmon|slmn|lamb|turkey|trky|duck|fish|tuna|shrimp|pork|venison|rabbit|bison|whitefish|ocean\s*fish|mixed|variety|assortment|medley|combo|blend|recipe|formula|adult|puppy|kitten|senior|all[\s-]?life[\s-]?stage)\b/gi;
+const FLAVOR_WORDS = /\b(chicken|chkn|ckn|beef|salmon|slmn|lamb|turkey|trky|duck|fish|tuna|shrimp|pork|venison|veggie|rabbit|bison|whitefish|ocean\s*fish|mixed|variety|assortment|medley|combo|blend|recipe|formula|adult|puppy|kitten|senior|all[\s-]?life[\s-]?stage)\b/gi;
+
+/**
+ * Product-line modifiers that distinguish sub-lines within a brand
+ * (e.g., Soft vs Hard BetterBone) but should NOT create separate
+ * family groups. Stripped AFTER flavor words so the stem captures only
+ * the brand + base product identity.
+ *
+ * Safe: \b ensures soft doesnt match inside "softball"; "hard"
+ * doesnt match inside orchard.
+ */
+const PRODUCT_LINE_MODIFIERS = /\b(soft|hard|classic|hypo|hypoallergenic)\b/gi;
+
+/** Size designator pattern: SZ 4, SZ 5, etc. */
+const SIZE_DESIGNATOR = /\bsz\s*\d+\b/gi;
 
 /** Common suffixes to strip from name stem */
 const NAME_SUFFIXES = /\b(for\s+(dogs|cats|pets?|adults?|seniors?|puppies?|kittens?))\b/gi;
@@ -147,6 +161,23 @@ export function knownBrandsForBatch(batchItems: OnboardingItem[]): string[] {
   return [...new Set([...fromBatch, ...DEFAULT_KNOWN_BRANDS])];
 }
 
+/**
+ * Pure family grouping identity for deterministic candidate families.
+ * Returns the normalized display brand, compact brand key, normalized name
+ * stem, and canonical grouping key. Consumes an item plus the batch’s
+ * precomputed known-brand list — no DB access, pure and testable.
+ */
+export function familyGroupingIdentityFor(
+  item: Pick<OnboardingItem, 'brandHint' | 'name'>,
+  knownBrands: string[],
+): { normalizedBrand: string; compactBrandKey: string; stem: string; key: string } {
+  const normalizedBrand = normalizeBrand(effectiveBrandFor(item, knownBrands));
+  const compactKey = normalizedBrand.replace(/\s+/g, '') || 'no-brand';
+  const stem = extractNameStem(item.name || '');
+  const key = `${compactKey}::${stem}`;
+  return { normalizedBrand, compactBrandKey: compactKey, stem, key };
+}
+
 // ─── Normalization Helpers ─────────────────────────────────────────────────────
 
 /**
@@ -183,6 +214,8 @@ export function extractNameStem(name: string | null | undefined): string {
     .replace(SIZE_ADJECTIVES, '')
     .replace(/[a-z]+/g, expandAbbreviations)
     .replace(FLAVOR_WORDS, '')
+    .replace(PRODUCT_LINE_MODIFIERS, '')
+    .replace(SIZE_DESIGNATOR, '')
     .replace(NAME_SUFFIXES, '')
     .replace(/[^a-z0-9\s-]/g, '')
     .replace(/\s+/g, ' ')
@@ -208,11 +241,9 @@ export function determineProductGroup(
   if (!item.name && !item.brandHint) return null;
 
   const knownBrands = knownBrandsForBatch(batchItems);
-  // Epic #46 Package A: brandHint OR name-embedded known-brand prefix; the
-  // comparison uses the COMPACT key so "BetterBone" and "Better Bone" are
-  // the same family.
-  const itemBrand = compactBrandKey(effectiveBrandFor(item, knownBrands));
-  const itemStem = extractNameStem(item.name || '');
+  const identity = familyGroupingIdentityFor(item, knownBrands);
+  const itemBrand = identity.compactBrandKey;
+  const itemStem = identity.stem;
 
   if (!itemStem) return null;
 
@@ -221,15 +252,9 @@ export function determineProductGroup(
     if (sibling.id === item.id) return false;
     if (!sibling.name) return false;
 
-    const siblingBrand = compactBrandKey(effectiveBrandFor(sibling, knownBrands));
-    const siblingStem = extractNameStem(sibling.name);
-
-    // Must share same brand (or both have no brand)
-    if (itemBrand !== siblingBrand) return false;
-
-    // Must share same name stem
-    if (!siblingStem || siblingStem !== itemStem) return false;
-
+    const siblingIdentity = familyGroupingIdentityFor(sibling, knownBrands);
+    if (itemBrand !== siblingIdentity.compactBrandKey) return false;
+    if (!siblingIdentity.stem || siblingIdentity.stem !== itemStem) return false;
     return true;
   });
 

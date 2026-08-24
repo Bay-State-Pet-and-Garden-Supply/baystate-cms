@@ -35,6 +35,13 @@ export default defineConfig({
       'src/tests/integration/phase3-sync-drift.test.ts',
       'src/tests/unit/onboarding-repos.test.ts',
       'src/tests/unit/onboarding-approval-gates.test.ts',
+      // e10s01 review-completeness gate — bun:sqlite/bun:test, run under bun test (test:db)
+      'src/tests/unit/review-completeness-gate.test.ts',
+      // P2 mapping audit — imports repository modules that load bun:sqlite; run under bun test (test:db)
+      'src/tests/unit/mapping-audit.test.ts',
+      // e10s04 media route/resolution — bun:sqlite/bun:test, run under bun test (test:db)
+      'src/tests/unit/review-media-route.test.ts',
+      'src/tests/unit/review-media-resolution.test.ts',
       'src/tests/unit/durable-approval-promote.test.ts',
       'src/tests/unit/draft-promoter.test.ts',
       'src/tests/unit/onboarding-duplicate-skip.test.ts',
@@ -54,17 +61,28 @@ export default defineConfig({
       'src/tests/unit/sitemap-cache-repo.test.ts',
       'src/tests/unit/sitemap-fetcher.test.ts',
       'src/tests/unit/sitemap-matcher.test.ts',
+      'src/tests/unit/sitemap-sync-service.test.ts',
       'src/tests/unit/profile-generation-revision-repo.test.ts',
       'src/tests/unit/profile-generation-field-decision-repo.test.ts',
       'src/tests/unit/llm-task-config-repo.test.ts',
       'src/tests/unit/llm-client-task-routing.test.ts',
       // bun:sqlite suites missing from the excludes at 0e9a242 (vitest
       // cannot collect them); registered in package.json test:db
+      'src/tests/unit/packaging-ocr-stage.test.ts',
+      'src/tests/unit/packaging-ocr-shadow.test.ts',
+      'src/tests/unit/packaging-ocr-consumer-wiring.test.ts',
       'src/tests/unit/provider-connection-routing.test.ts',
       'src/tests/unit/vlm-client.test.ts',
       'src/tests/unit/profile-governance-service.test.ts',
       'src/tests/unit/domain-diagnostics-service.test.ts',
       'src/tests/unit/packaging-ocr.test.ts',
+      // P1-T1 structured OCR attempt results — transitively imports bun:sqlite
+      // repositories (run under bun test via test:db)
+      'src/tests/unit/packaging-ocr-attempt.test.ts',
+      // P3-T1/T2 packaging-OCR eval harness + repetition mitigation — bun:sqlite
+      // transitive imports (run under bun test via test:db)
+      'src/tests/unit/ocr-eval-harness.test.ts',
+      'src/tests/unit/packaging-ocr-repetition.test.ts',
       // New Phase 1-8 DB-backed tests
       'src/tests/unit/brand-integration.test.ts',
       'src/tests/unit/detail-enrichment-integration.test.ts',
@@ -84,34 +102,6 @@ export default defineConfig({
       'src/tests/unit/catalog-classification-db.test.ts',
       'src/tests/unit/decision-revision-migration.test.ts',
       'src/tests/unit/onboarding-decision-routes.test.ts',
-      'src/tests/unit/product-intelligence-repo.test.ts',
-      'src/tests/unit/product-intelligence-run-service.test.ts',
-      'src/tests/unit/product-intelligence-sse.test.ts',
-      'src/tests/unit/product-intelligence-tool-contracts.test.ts',
-      'src/tests/unit/product-intelligence-tools.test.ts',
-      'src/tests/unit/product-intelligence-workflow.test.ts',
-      'src/tests/unit/product-intelligence-policy.test.ts',
-      'src/tests/unit/product-intelligence-assets.test.ts',
-      'src/tests/unit/product-intelligence-image-tools.test.ts',
-      'src/tests/unit/product-intelligence-import.test.ts',
-      'src/tests/unit/pi-golden-dataset.test.ts',
-      'src/tests/unit/pi-evaluation-runner.test.ts',
-      'src/tests/unit/pi-extraction-benchmark.test.ts',
-      'src/tests/unit/pi-rollout.test.ts',
-      'src/tests/unit/pi-shadow-immutability.test.ts',
-      'src/tests/unit/pi-budgets.test.ts',
-      'src/tests/unit/pi-retention.test.ts',
-      'src/tests/unit/pi-replay.test.ts',
-      'src/tests/unit/pi-search-benchmark.test.ts',
-      'src/tests/unit/pi-evidence-persistence.test.ts',
-      'src/tests/unit/pi-authority-lifecycle.test.ts',
-      'src/tests/unit/pi-supplier-boundary.test.ts',
-      'src/tests/unit/pi-approved-policies.test.ts',
-      'src/tests/unit/pi-network-boundary.test.ts',
-      'src/tests/unit/pi-review-decisions.test.ts',
-      'src/tests/unit/pi-reuse-policies.test.ts',
-      'src/tests/unit/pi-deterministic-preflight.test.ts',
-      'src/tests/unit/pi-governed-proposal-trigger.test.ts',
       'src/tests/unit/classification-integrity-audit.test.ts',
       'src/tests/unit/sqlite-backup-verifier.test.ts',
       'src/tests/unit/classification-integrity-cli.test.ts',
@@ -144,6 +134,9 @@ export default defineConfig({
       'src/tests/unit/sourcing-safety-routes.test.ts',
       'src/tests/unit/fetch-html-ssrf.test.ts',
       'src/tests/unit/distributor-v2.test.ts',
+      // DB-backed (bun:sqlite) — run under `bun test` via test:db
+      'src/tests/unit/distributor-image-verification.test.ts',
+      'src/tests/unit/pi-reuse-policies.test.ts',
       'src/tests/unit/acceptance-migration.test.ts',
       'src/tests/unit/conflict-resolution.test.ts',
       'src/tests/unit/sourcing-engine.test.ts',
@@ -155,8 +148,6 @@ export default defineConfig({
       // bun:test imports — vitest cannot collect them; run under test:db)
       'src/tests/unit/store-manager-execution-boundary.test.ts',
       'src/tests/unit/store-manager-operations-migration.test.ts',
-      'src/tests/unit/agent-version-repo.test.ts',
-      'src/tests/unit/evaluation-orchestrator.test.ts',
       'src/tests/unit/distributor-scrapers-acceptance.test.ts',
       // Operations-console epic DB suites (Issues 3-9): bun:sqlite/bun:test
       // imports — excluded here, registered in package.json test:db.
@@ -184,6 +175,7 @@ export default defineConfig({
       'src/tests/unit/store-manager-scheduler.test.ts',
       'src/tests/unit/store-manager-scope.test.ts',
       'src/tests/unit/store-manager-trigger-repo.test.ts',
+      'src/tests/unit/cancel-overdue-benchmark.test.ts',
       'src/tests/unit/sourcing-default-on-e2e.test.ts',
       'src/tests/unit/sourcing-observe-mode.test.ts',
       'src/tests/unit/distributor-record-materializer.test.ts',
@@ -231,6 +223,11 @@ export default defineConfig({
       'src/tests/unit/pr6-acceptance.test.ts',
       // PR4 C3 pure resolver (bun:test imports — vitest cannot collect it)
       'src/tests/unit/cohort-product-type-resolver.test.ts',
+      // P4 taxonomy release wiring (bun:test imports + bun:sqlite transitive —
+      // run under bun test via test:db)
+      'src/tests/unit/release-compiler.test.ts',
+      'src/tests/unit/release-routes.test.ts',
+      'src/tests/unit/release-shadow.test.ts',
       // PR5 effective-curation-type suites (bun:test imports — vitest cannot collect them)
       'src/tests/unit/effective-curation-type.test.ts',
       'src/tests/unit/effective-curation-stages.test.ts',
@@ -267,11 +264,6 @@ export default defineConfig({
       'src/tests/unit/onboarding-review-state.test.ts',
       'src/tests/unit/onboarding-telemetry.test.ts',
       // Product intelligence seed persistence (bun:test / bun:sqlite — run under bun test via test:db)
-      'src/tests/unit/product-intelligence/product-seed-persistence.test.ts',
-      // e03s01 DB-backed shadow + additive (bun:sqlite — run under bun test via test:db)
-      'src/tests/unit/e03s01-shadow.test.ts',
-      'src/tests/unit/e03s01-additive.test.ts',
-      'src/tests/unit/e03s01-retry.test.ts',
       // Epic #61 sitemap & brand URL index DB-backed suites
       'src/tests/unit/brand-url-index-repo.test.ts',
       'src/tests/unit/local-brand-url-finder.test.ts',
@@ -284,14 +276,12 @@ export default defineConfig({
       'src/tests/unit/source-discovery-sitemap-priority.test.ts',
       // Page extractor / specialist workflow DB suites
       'src/tests/unit/page-extractor-images.test.ts',
+      'src/tests/unit/page-extractor-ladder-wiring.test.ts',
       'src/tests/unit/page-extractor-profile-generation.test.ts',
       'src/tests/unit/page-extractor-variant-inference.test.ts',
       'src/tests/unit/brand-hub-routes.test.ts',
       'src/tests/unit/sourcing-engine-dual-connector.test.ts',
       'src/tests/unit/profile-engineer-workflow-repo.test.ts',
-      'src/tests/unit/specialist-workflow-import.test.ts',
-      'src/tests/unit/specialist-workflow-repo.test.ts',
-      'src/tests/unit/product-intelligence/orchestrator.test.ts',
     ],
   },
 });

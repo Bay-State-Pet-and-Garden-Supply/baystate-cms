@@ -1171,6 +1171,123 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint:', e);
   }
 
+  // ── Migration to expand classification_stage_results CHECK for packaging_ocr ──
+  //
+  // Packaging-OCR overhaul plan P2-T6: the flag-gated `packaging_ocr`
+  // classification stage persists its (succeeded/abstained/failed) result
+  // through the same `classification_stage_results` table as every other
+  // pipeline stage. Existing databases carry a CHECK constraint frozen to the
+  // legacy seven stage names; rebuild the table with `packaging_ocr` added.
+  // Purely additive (constraint widening only) and idempotent — flag-OFF
+  // behavior is unchanged because nothing writes the new value until the
+  // master flag is enabled.
+  //
+  // Hardening (post-review fixup): mirrors the catalog-classification rebuild
+  // precedent above — orphaned rows (run_id not in classification_runs, left
+  // by prior operations that ran with foreign_keys=OFF) are deleted BEFORE
+  // the copy so the FK-enforcing rebuild can never fail mid-swap and leave a
+  // `classification_stage_results_new` remnant blocking retry; the whole
+  // rebuild is transactional; foreign_keys is disabled around it and always
+  // restored in `finally`. A partial failure therefore rolls back cleanly and
+  // the migration re-runs on the next start.
+  try {
+    const tableInfoOcr = db.query('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?').get('table', 'classification_stage_results') as { sql: string } | undefined;
+    if (tableInfoOcr && tableInfoOcr.sql && !tableInfoOcr.sql.includes("'packaging_ocr'")) {
+      console.log('[Migrations] Expanding classification_stage_results CHECK constraint for packaging_ocr...');
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          // Retry safety: drop any _new remnant from an earlier failed swap.
+          db.exec('DROP TABLE IF EXISTS classification_stage_results_new');
+          // Orphaned rows first (dead data from prior foreign_keys=OFF ops):
+          // copying them into the rebuilt table would violate its restored FK.
+          const orphanedStageResults = db.query(
+            'SELECT COUNT(*) as cnt FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)'
+          ).get() as { cnt: number };
+          if (orphanedStageResults.cnt > 0) {
+            db.run('DELETE FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)');
+            console.log(`[Migrations] Cleaned up ${orphanedStageResults.cnt} orphaned classification_stage_results row(s).`);
+          }
+          db.exec(`
+            CREATE TABLE classification_stage_results_new (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+              stage_name TEXT NOT NULL CHECK (stage_name IN ('packaging_ocr', 'evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
+              status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
+              output_json TEXT,
+              error_message TEXT,
+              started_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+          `);
+          db.exec('INSERT INTO classification_stage_results_new SELECT * FROM classification_stage_results;');
+          db.exec('DROP TABLE classification_stage_results;');
+          db.exec('ALTER TABLE classification_stage_results_new RENAME TO classification_stage_results;');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_classification_stage_results_run ON classification_stage_results(run_id);');
+        })();
+      } finally {
+        // Always restore foreign key enforcement, even if the rebuild fails.
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+      console.log('[Migrations] classification_stage_results CHECK constraint expanded for packaging_ocr successfully.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint for packaging_ocr:', e);
+  }
+
+  // ── Migration to expand classification_stage_results CHECK for value_gap_abstain ──
+  //
+  // P3 value-production ladder (plan B.P3.3): the flag-gated
+  // `value_gap_abstain` stage persists its result through the same
+  // `classification_stage_results` table. Existing databases carry a CHECK
+  // constraint without the name; rebuild the table with `value_gap_abstain`
+  // added. Purely additive (constraint widening only) and idempotent —
+  // flag-OFF behavior is unchanged because nothing writes the new value until
+  // BAYSTATE_CMS_VALUE_GAP_LLM is enabled. Mirrors the packaging_ocr rebuild
+  // precedent exactly (orphan cleanup, transactional swap, FK restore).
+  try {
+    const tableInfoGap = db.query('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?').get('table', 'classification_stage_results') as { sql: string } | undefined;
+    if (tableInfoGap && tableInfoGap.sql && !tableInfoGap.sql.includes("'value_gap_abstain'")) {
+      console.log('[Migrations] Expanding classification_stage_results CHECK constraint for value_gap_abstain...');
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          // Retry safety: drop any _new remnant from an earlier failed swap.
+          db.exec('DROP TABLE IF EXISTS classification_stage_results_new');
+          const orphanedStageResults = db.query(
+            'SELECT COUNT(*) as cnt FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)'
+          ).get() as { cnt: number };
+          if (orphanedStageResults.cnt > 0) {
+            db.run('DELETE FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)');
+            console.log(`[Migrations] Cleaned up ${orphanedStageResults.cnt} orphaned classification_stage_results row(s).`);
+          }
+          db.exec(`
+            CREATE TABLE classification_stage_results_new (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+              stage_name TEXT NOT NULL CHECK (stage_name IN ('packaging_ocr', 'evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'value_gap_abstain', 'category_page_proposals', 'product_draft_projection')),
+              status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
+              output_json TEXT,
+              error_message TEXT,
+              started_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+          `);
+          db.exec('INSERT INTO classification_stage_results_new SELECT * FROM classification_stage_results;');
+          db.exec('DROP TABLE classification_stage_results;');
+          db.exec('ALTER TABLE classification_stage_results_new RENAME TO classification_stage_results;');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_classification_stage_results_run ON classification_stage_results(run_id);');
+        })();
+      } finally {
+        // Always restore foreign key enforcement, even if the rebuild fails.
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+      console.log('[Migrations] classification_stage_results CHECK constraint expanded for value_gap_abstain successfully.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint for value_gap_abstain:', e);
+  }
+
   // Run stage pipeline migration if not already applied
   const stagePipelineVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('stage_pipeline_schema_version') as
     | { value: string }
@@ -3362,14 +3479,19 @@ export function runMigrations(): void {
   //   FK cannot express "artifact must belong to this candidate's run").
   // - product_intelligence_assets gains candidate_id (exact FK to the
   //   pi_image_candidates row the asset was verified from), same-run enforced.
+  // ADR-0030 Phase 4: the PI-only tables are dropped on decommissioned
+  // databases. Each probe below must therefore also require its target table
+  // to exist before attempting DDL against it.
+  const piTableExists = (name: string): boolean =>
+    !!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
   const artifactColumns = db.query("SELECT name FROM pragma_table_info('pi_page_artifacts') WHERE name = 'artifact_type'").get();
-  if (!artifactColumns) {
+  if (!artifactColumns && piTableExists('pi_page_artifacts')) {
     db.exec("ALTER TABLE pi_page_artifacts ADD COLUMN artifact_type TEXT NOT NULL DEFAULT 'page_html';");
   }
   const candidateRunTrigger = db
     .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_pi_candidate_attestation_same_run'")
     .get();
-  if (!candidateRunTrigger) {
+  if (!candidateRunTrigger && piTableExists('pi_image_candidates') && piTableExists('pi_page_artifacts')) {
     db.exec(`
       CREATE TRIGGER trg_pi_candidate_attestation_same_run
       BEFORE INSERT ON pi_image_candidates
@@ -3392,7 +3514,7 @@ export function runMigrations(): void {
   const assetCandidateTrigger = db
     .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_pi_asset_candidate_same_run'")
     .get();
-  if (!assetCandidateTrigger) {
+  if (!assetCandidateTrigger && piTableExists('product_intelligence_assets') && piTableExists('pi_image_candidates')) {
     db.exec(`
       CREATE TRIGGER trg_pi_asset_candidate_same_run
       BEFORE INSERT ON product_intelligence_assets
@@ -4932,6 +5054,278 @@ export function runMigrations(): void {
       db.exec("UPDATE app_meta SET value = '1' WHERE key = 'batch_preflight_schema_version'");
     })();
     console.log('[Migrations] Batch preflight and controlled release migration complete.');
+  }
+
+  // ── Sourcing Decision V2 Schema Repair Migration ───────────────────────────
+  const sourcingDecisionRepairVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('sourcing_decision_repair_version') as { value: string } | undefined;
+  if (!sourcingDecisionRepairVersion) {
+    db.transaction(() => {
+      const items = db
+        .query('SELECT id, sourcing_decision_json FROM onboarding_items WHERE sourcing_decision_json IS NOT NULL')
+        .all() as Array<{ id: string; sourcing_decision_json: string }>;
+      const updateStmt = db.prepare('UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?');
+
+      for (const item of items) {
+        try {
+          const parsed = JSON.parse(item.sourcing_decision_json) as Record<string, unknown>;
+          if (parsed && typeof parsed === 'object' && (parsed.schemaVersion === 2 || ('route' in parsed && typeof parsed.route === 'string'))) {
+            const route = parsed.route as string;
+            const origin = typeof parsed.origin === 'string' ? parsed.origin : 'automatic_policy';
+            const decidedAt = typeof parsed.decidedAt === 'string' ? parsed.decidedAt : new Date().toISOString();
+            const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
+            const conflicts = Array.isArray(parsed.conflicts) ? parsed.conflicts : [];
+
+            let changed = false;
+            let updatedDecision: Record<string, unknown> | null = null;
+
+            if (route === 'evidence_to_discovery') {
+              const acceptedAttemptIds = Array.isArray(parsed.acceptedEvidenceAttemptIds) ? parsed.acceptedEvidenceAttemptIds : [];
+              const providerIds = Array.isArray(parsed.providerIds) ? parsed.providerIds : [];
+              const genId = typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : null;
+
+              if (acceptedAttemptIds.length === 0 || providerIds.length === 0 || !genId) {
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'fallback_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: [],
+                  providerIds: [],
+                  sourcingGenerationId: genId ?? undefined,
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              } else if (!parsed.sourceType || !parsed.target) {
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'evidence_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: acceptedAttemptIds,
+                  providerIds,
+                  sourcingGenerationId: genId,
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              }
+            } else if (route === 'fallback_to_discovery') {
+              if (!parsed.sourceType || !parsed.target) {
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'fallback_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: [],
+                  providerIds: Array.isArray(parsed.providerIds) ? parsed.providerIds : [],
+                  sourcingGenerationId: typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : undefined,
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              }
+            } else if (route === 'degraded_fallback_to_discovery') {
+              if (!parsed.sourceType || !parsed.target || !parsed.sourcingGenerationId) {
+                const providerIds = Array.isArray(parsed.providerIds) && parsed.providerIds.length > 0 ? parsed.providerIds : ['unknown'];
+                updatedDecision = {
+                  schemaVersion: 2,
+                  route: 'degraded_fallback_to_discovery',
+                  origin,
+                  acceptedEvidenceAttemptIds: [],
+                  providerIds,
+                  sourcingGenerationId: typeof parsed.sourcingGenerationId === 'string' ? parsed.sourcingGenerationId : 'legacy',
+                  sourceType: 'official_page',
+                  target: 'discovery',
+                  conflicts,
+                  warnings,
+                  decidedAt,
+                };
+                changed = true;
+              }
+            }
+
+            if (changed && updatedDecision) {
+              updateStmt.run(JSON.stringify(updatedDecision), item.id);
+            }
+          }
+        } catch {
+          // ignore corrupted unparseable JSON
+        }
+      }
+
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('sourcing_decision_repair_version', '1')");
+      db.exec("UPDATE app_meta SET value = '1' WHERE key = 'sourcing_decision_repair_version'");
+    })();
+    console.log('[Migrations] Sourcing decision repair migration complete.');
+  }
+
+  // ── Packaging-OCR shadow comparisons (packaging-ocr overhaul plan P2-T4) ────
+  //
+  // Additive dual-run diagnostics table: one row per (item, run) where the new
+  // `packaging_ocr` classification stage executed alongside the legacy inline
+  // OCR path. Purely observational — no authority decision reads these rows.
+  // Idempotent via CREATE TABLE/INDEX IF NOT EXISTS (fresh installs and every
+  // existing database get the table on the next migration pass).
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS packaging_ocr_shadow_comparisons (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+        batch_id TEXT,
+        run_id TEXT,
+        legacy_status TEXT,
+        legacy_reason TEXT,
+        stage_status TEXT NOT NULL,
+        stage_reason TEXT,
+        field_agreement_json TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_packaging_ocr_shadow_item ON packaging_ocr_shadow_comparisons(item_id);',
+    );
+  } catch (e) {
+    console.error('Failed to create packaging_ocr_shadow_comparisons table:', e);
+  }
+
+  // ── ADR-0030 Phase 4: Agent Lab data retirement ────────────────────────
+  // Drops every PI-only table after the Agent Lab runtime deletion (Phase 3).
+  // KEPT: product_intelligence_assets (live-written by onboarding distributor
+  // imagery), pi_reuse_policies (live reuse grants), benchmark_* (shared with
+  // the classification program, ADR #14). Historical JSON dumps live in the
+  // gitignored archive/pi-decommission-20260824/ directory.
+  try {
+    const decommissionVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('decommission_pi_schema_version') as { value: string } | undefined;
+    if (!decommissionVersion) {
+      console.log('[Migrations] Running ADR-0030 Phase 4 PI data retirement migration...');
+      db.transaction(() => {
+        const countAssets = () =>
+          (db.query('SELECT COUNT(*) AS n FROM product_intelligence_assets').get() as { n: number }).n;
+        const before = countAssets();
+
+        // Step 1: rebuild product_intelligence_assets WITHOUT the run_id FK
+        // (ON DELETE CASCADE toward product_intelligence_runs would otherwise
+        // wipe every asset row when runs is dropped) and WITHOUT the
+        // source_id FK (sources is dropped too). The onboarding_item_id FK is
+        // preserved. Column set mirrors the live table exactly.
+        db.exec('DROP TRIGGER IF EXISTS trg_pi_asset_candidate_same_run;');
+        db.exec(`
+          CREATE TABLE product_intelligence_assets_new (
+            id TEXT PRIMARY KEY,
+            run_id TEXT,
+            source_id TEXT,
+            source_url TEXT NOT NULL,
+            source_page_url TEXT,
+            source_type TEXT NOT NULL,
+            source_path TEXT,
+            source_artifact_id TEXT,
+            extraction_method TEXT NOT NULL CHECK (extraction_method IN ('json_ld', 'platform_api', 'network_response', 'profile_selector', 'media_api', 'manual', 'image_ocr', 'decoder')),
+            retrieved_at TEXT NOT NULL,
+            original_content_hash TEXT NOT NULL,
+            perceptual_hash TEXT,
+            variant_reference TEXT,
+            rights_status TEXT NOT NULL CHECK (rights_status IN ('approved', 'restricted', 'unknown')),
+            rights_basis TEXT,
+            rights_evidence_ref TEXT,
+            observed_brand TEXT,
+            observed_product_name TEXT,
+            observed_variant TEXT,
+            observed_net_content_json TEXT,
+            observed_pack_count INTEGER,
+            observed_gtin TEXT,
+            exact_product_match INTEGER NOT NULL DEFAULT 0,
+            exact_variant_match INTEGER,
+            quality_status TEXT NOT NULL CHECK (quality_status IN ('usable', 'low_quality', 'invalid')),
+            commerce_approved INTEGER NOT NULL DEFAULT 0,
+            conflicts_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            verified_against_json TEXT,
+            verified_against_hash TEXT,
+            declared_source_type TEXT,
+            candidate_id TEXT,
+            brand_evidence_id TEXT,
+            brand_evidence_hash TEXT,
+            origin TEXT NOT NULL DEFAULT 'pi_run',
+            onboarding_item_id TEXT REFERENCES onboarding_items(id) ON DELETE CASCADE
+          );`);
+        db.exec(`
+          INSERT INTO product_intelligence_assets_new SELECT * FROM product_intelligence_assets;`);
+        db.exec('DROP TABLE product_intelligence_assets;');
+        db.exec('ALTER TABLE product_intelligence_assets_new RENAME TO product_intelligence_assets;');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_pi_assets_onboarding_item ON product_intelligence_assets(onboarding_item_id);');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pi_assets_onboarding_url
+            ON product_intelligence_assets(onboarding_item_id, source_url)
+            WHERE origin = 'onboarding_distributor' AND onboarding_item_id IS NOT NULL;`);
+        const after = countAssets();
+        if (after !== before) {
+          throw new Error(`product_intelligence_assets row-count mismatch after rebuild: before=${before} after=${after}`);
+        }
+        console.log(`[Migrations] product_intelligence_assets rebuilt without PI FKs (${after} rows preserved).`);
+
+        // Step 2: drop the PI-only family, children before parents. With
+        // foreign_keys disabled during the transaction this order is a
+        // formality, but it keeps manual/foreign_keys-ON recoveries sane.
+        const piDropOrder = [
+          'product_intelligence_imports',
+          'agent_evaluation_cases',
+          'agent_evaluation_snapshots',
+          'agent_teaching_events',
+          'agent_corrections',
+          'agent_version_states',
+          'agent_version_snapshots',
+          'pi_image_candidates',
+          'pi_source_authorities',
+          'pi_page_artifacts',
+          'product_intelligence_tool_calls',
+          'product_intelligence_steps',
+          'product_intelligence_events',
+          'product_intelligence_policy_decisions',
+          'product_intelligence_comparisons',
+          'product_intelligence_conflicts',
+          'product_intelligence_evidence',
+          'product_intelligence_results',
+          'pi_review_decisions',
+          'product_intelligence_sources',
+          'pi_approved_policies',
+          'pi_budget_policies',
+          'pi_retention_policies',
+          'pi_evaluation_runs',
+          'product_intelligence_runs',
+        ];
+        for (const t of piDropOrder) {
+          db.exec(`DROP TABLE IF EXISTS ${t};`);
+        }
+
+        // Step 3: app_meta bookkeeping. NOTE: we deliberately KEEP the
+        // historical *_schema_version guard keys (product_intelligence_*,
+        // pi_*): the migration blocks they guard still exist above in this
+        // file, and deleting their keys would cause those blocks to RE-RUN on
+        // the next startup against the now-dropped tables and crash. They are
+        // inert markers for already-applied code paths.
+        db.exec("INSERT INTO app_meta (key, value) VALUES ('decommission_pi_schema_version', '1');");
+      })();
+
+      const violations = db.query("PRAGMA foreign_key_check('product_intelligence_assets')").all();
+      if (violations.length > 0) {
+        console.warn(`[Migrations] ${violations.length} FK violations in kept product_intelligence_assets post-retirement:`, violations.slice(0, 5));
+      }
+      console.log('[Migrations] ADR-0030 Phase 4 PI data retirement complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] ADR-0030 Phase 4 PI data retirement failed:', e);
+    throw e;
   }
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as

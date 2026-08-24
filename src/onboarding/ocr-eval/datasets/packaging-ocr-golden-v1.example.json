@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "name": "packaging-ocr-golden-v1",
+  "entries": [
+    {
+      "id": "example-dog-treats-a",
+      "imageRef": "images/dog-treats-a.jpg",
+      "expected": {
+        "productName": "Wormeze Liquid Dog Treats",
+        "brand": "Wormeze",
+        "species": ["dog"],
+        "upc": "012345678905",
+        "flavorVariety": "Peanut Butter",
+        "color": null,
+        "material": null,
+        "size": "8 oz",
+        "weight": null,
+        "count": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "productForm": "liquid",
+        "healthConcernFunction": [],
+        "dietaryLabels": ["grain-free"],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "example row — replace with real curated entries"
+    },
+    {
+      "id": "example-garden-hose-b",
+      "imageRef": "images/garden-hose-b.jpg",
+      "expected": {
+        "productName": null,
+        "brand": null,
+        "species": [],
+        "upc": null,
+        "flavorVariety": null,
+        "color": "green",
+        "material": "rubber",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "productForm": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "example row — UPC-null rows exercise hallucination-rate accounting"
+    }
+  ]
+}

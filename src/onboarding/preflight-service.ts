@@ -154,15 +154,13 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
 
   const knownBrandNames = Array.from(knownBrandMap.values()).sort((a, b) => a.localeCompare(b));
   
-  const brandToDomainMap = new Map<string, string[]>();
+  const brandsWithDomain = new Set<string>();
   const brandToPatternMap = new Map<string, string>();
   for (const site of allBrandSites) {
     const key = site.brandName.toLowerCase().trim();
-    const existing = brandToDomainMap.get(key) ?? [];
-    if (!existing.includes(site.domain)) {
-      existing.push(site.domain);
+    if (site.domain) {
+      brandsWithDomain.add(key);
     }
-    brandToDomainMap.set(key, existing);
     if (site.urlPattern && !brandToPatternMap.has(key)) {
       brandToPatternMap.set(key, site.urlPattern);
     }
@@ -225,8 +223,7 @@ export function analyzeBatchPreflight(workspaceId: string, batchId: string): Bat
       const normBrand = rawBrand!.toLowerCase();
 
       // Check official domain
-      const domains = brandToDomainMap.get(normBrand);
-      if (domains && domains.length > 0) {
+      if (brandsWithDomain.has(normBrand)) {
         domainMappedCount++;
       } else {
         const canonicalBrand = knownBrandMap.get(normBrand) || rawBrand!;

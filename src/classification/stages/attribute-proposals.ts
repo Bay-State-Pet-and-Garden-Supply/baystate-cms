@@ -34,6 +34,7 @@ import { loadClassificationConfig } from '../config-loader';
 import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { processProductFieldTarget } from '../curation-target-processor';
 import { getEffectiveCurationProductType, resolveEffectiveTypeProfile } from '../effective-curation-type';
+import { getUniversalTierFlags } from '../flags';
 import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
 import { evaluateAttributeApplicability } from './attribute-applicability';
 
@@ -106,6 +107,9 @@ export const productAttributeProposalsStage: StageDefinition = {
         acceptedTypeId: effectiveTypeId,
         typeTargetEnabled,
         reviewedFacts: context.snapshot?.reviewedFacts ?? [],
+        // P3 widened universal tier (plan B.P3.1): flag OFF (default) passes
+        // false — byte-identical legacy gating.
+        widenedUniversal: getUniversalTierFlags().universalTierWideningEnabled,
       });
       if (evaluation.state !== 'applicable') continue;
 

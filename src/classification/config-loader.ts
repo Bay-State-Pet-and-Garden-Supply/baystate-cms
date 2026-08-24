@@ -33,6 +33,17 @@ import {
   type ClassificationConfigValidationOptions,
 } from './config-validation';
 import { assertTaxonomyMutable } from './taxonomy-freeze';
+import { readWorkspaceState, DEFAULT_TAXONOMY_REVISION } from './workspace-state';
+import {
+  V4_TAXONOMY_REVISION,
+  compileTaxonomyReleaseV4,
+} from './release-compiler';
+import { loadTaxonomyReleaseV4 } from './release-validation';
+import {
+  buildV4ShadowDiffSummary,
+  isTaxonomyV4ShadowEnabled,
+  recordV4ShadowObservation,
+} from './release-shadow';
 
 const CLASSIFICATION_DIR = 'classification';
 
@@ -596,6 +607,77 @@ export function loadClassificationConfig(workspacePath: string): ClassificationC
 // ─── Runtime config authority (Milestone 7) ───────────────────────────────────
 
 /**
+ * P4 (plan B.P4.1): read the workspace's active-taxonomy pin. Returns null
+ * when no state.json exists. A malformed state file fails closed (the pin is
+ * the ONLY sanctioned release reference, so a corrupt one must never be
+ * silently ignored in favor of a stale workspace bundle).
+ */
+function readActiveRevisionPin(workspacePath: string): string | null {
+  return readWorkspaceState(workspacePath)?.activeTaxonomyRevision ?? null;
+}
+
+/**
+ * P4 (plan B.P4.1): compile the pinned bay-state-v4 release into the runtime
+ * authority shape. Fail closed on ANY release validation failure.
+ *
+ * Store-local vocabulary overlay: immutable releases deliberately exclude the
+ * reviewed brand list (brands are workspace/store-local, not taxonomy). The
+ * workspace's legacy bundle brands — if present — are overlaid AFTER hashing
+ * so `bundleHash` stays pure-taxonomy while snapshot brand evidence keeps v3
+ * parity. Everything else comes exclusively from the release.
+ */
+function loadV4PinnedAuthority(workspacePath: string, pinnedRevision: string): RuntimeConfigAuthority {
+  const bundle = loadTaxonomyReleaseV4('bay-state-v4'); // resolves inside src/classification/releases
+  const compiled = compileTaxonomyReleaseV4(bundle);
+  if (compiled.taxonomyRevision !== pinnedRevision) {
+    throw new ClassificationConfigLoadError(
+      'unsupported_version',
+      `Workspace pins "${pinnedRevision}" but the compiled release is "${compiled.taxonomyRevision}".`,
+      path.join(classificationDir(workspacePath), 'state.json'),
+    );
+  }
+  let brands = compiled.brands;
+  try {
+    const legacy = loadLegacyV1ConfigForMigration(workspacePath);
+    if (Array.isArray(legacy.brands) && legacy.brands.length > 0) {
+      brands = legacy.brands as typeof compiled.brands;
+    }
+  } catch {
+    // No legacy workspace bundle: keep the empty release brand list.
+  }
+  return { kind: 'v2', bundle: Object.freeze({ ...compiled, brands }) };
+}
+
+/**
+ * P4 (plan B.P4.4): when the shadow flag is on and the pin is NOT bay-state-v4,
+ * observe the config-level V4 delta WITHOUT changing the returned authority.
+ * Observer failures never propagate.
+ */
+function observeV4ShadowIfEnabled(
+  workspacePath: string,
+  pinnedRevision: string | null,
+  authority: RuntimeConfigAuthority,
+): void {
+  if (!isTaxonomyV4ShadowEnabled() || pinnedRevision === V4_TAXONOMY_REVISION) return;
+  try {
+    const fields = authority.kind === 'v2' ? authority.bundle : authority.config;
+    const active = {
+      productTypeIds: fields.productTypes.map(type => type.id),
+      attributeIds: fields.attributes.map(attribute => attribute.id),
+      mappings: fields.attributeMappings.map(mapping => ({
+        attributeId: mapping.attributeId,
+        catalogField: mapping.catalogField,
+      })),
+    };
+    const v4Bundle = loadTaxonomyReleaseV4(V4_TAXONOMY_REVISION);
+    const summary = buildV4ShadowDiffSummary(active, v4Bundle, pinnedRevision, new Date().toISOString());
+    recordV4ShadowObservation(workspacePath, summary);
+  } catch (error) {
+    console.warn('[ConfigLoader] v4 shadow observation skipped:', error instanceof Error ? error.message : error);
+  }
+}
+
+/**
  * The authoritative runtime configuration: strict v1 transitional bundles are
  * consumed as-is; the ACTIVE v2 bundle is consumed through the verified active
  * loader. V2 is the authority whenever an active v2 activation exists.
@@ -609,8 +691,38 @@ export type RuntimeConfigAuthority =
  * verified activation context (catalog fields + catalog-evidence verifier);
  * without one it fails closed. V1 remains the transitional fallback when no
  * v2 activation exists.
+ *
+ * P4 pin-aware selection (plan B.P4.1):
+ * - pin = `bay-state-v4` → the validated release is compiled into the runtime
+ *   authority (release-compiler); the activation context is not required for
+ *   this path because the release itself is the fail-closed gate.
+ * - pin absent or `bay-state-v3` → byte-identical HEAD behavior (workspace
+ *   bundle / default migration path; golden-pinned by tests).
+ * - any other pin value → fail closed (`unknown_taxonomy_revision`).
  */
 export function loadRuntimeConfigAuthority(
+  workspacePath: string,
+  activationContext?: VerifiedActivationContext,
+): RuntimeConfigAuthority {
+  const pinnedRevision = readActiveRevisionPin(workspacePath);
+  if (pinnedRevision !== null && pinnedRevision !== DEFAULT_TAXONOMY_REVISION && pinnedRevision !== V4_TAXONOMY_REVISION) {
+    throw new ClassificationConfigLoadError(
+      'unsupported_version',
+      `Workspace classification state pins unknown taxonomy revision "${pinnedRevision}". Supported: ${DEFAULT_TAXONOMY_REVISION}, ${V4_TAXONOMY_REVISION} (or no pin).`,
+      path.join(classificationDir(workspacePath), 'state.json'),
+    );
+  }
+  if (pinnedRevision === V4_TAXONOMY_REVISION) {
+    const authority = loadV4PinnedAuthority(workspacePath, pinnedRevision);
+    return authority;
+  }
+  const authority = loadLegacyRuntimeAuthority(workspacePath, activationContext);
+  observeV4ShadowIfEnabled(workspacePath, pinnedRevision, authority);
+  return authority;
+}
+
+/** Byte-identical HEAD behavior: v1 transitional bundle or verified-active v2. */
+function loadLegacyRuntimeAuthority(
   workspacePath: string,
   activationContext?: VerifiedActivationContext,
 ): RuntimeConfigAuthority {

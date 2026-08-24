@@ -21,7 +21,7 @@ import { lookup } from 'node:dns/promises';
 import { chromium } from 'playwright';
 import { SnapshotRequestSchema, SnapshotResponseSchema } from '../../shared/schemas/extraction-worker';
 import type { SnapshotResponse, InteractionAction } from '../../shared/schemas/extraction-worker';
-import type { NetworkCaptureArtifact } from '../../product-intelligence/assets/schema';
+import type { NetworkCaptureArtifact } from '../../shared/schemas/extraction-worker';
 import { sha256Hex } from '../../shared/stable-id';
 import { resolveArtifactDir, writeArtifact, generateJobId, extractDomainFromUrl } from '../artifacts';
 

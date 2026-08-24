@@ -166,12 +166,12 @@ let blockSingletonTransport = false;
 let releaseBlockedTransport: (() => void) | null = null;
 let blockedTransportCallId: string | null = null;
 
-const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme'];
+const PAGE_NAMES = ['Dog Food Dry', 'Dog Food Canned', 'Brand - Acme'];
 
 /** PR7 review R1 (T3): FROZEN expected legacy page results — the COMPLETE
  *  {pageName, confidence} proposal set per SKU the legacy path must produce
  *  byte-identically (flag OFF and shadow). The canned responses assign Dog
- *  Food Dry / Dog Treats from the frozen page list (position-independent, see
+ *  Food Dry / Dog Food Canned from the frozen page list (position-independent, see
  *  `cannedGroupResponse`) and the deterministic normalizer adds the exact
  *  'Brand - Acme' page in multiple mode (0.85 canned + 0.95 brand shortcut).
  *  Entries are sorted by pageName for order-independent set equality. */
@@ -182,7 +182,7 @@ const LEGACY_PAGE_RESULTS_BASELINE: Record<string, Array<{ pageName: string; con
   ],
   '100000000002': [
     { pageName: 'Brand - Acme', confidence: 0.95 },
-    { pageName: 'Dog Treats', confidence: 0.85 },
+    { pageName: 'Dog Food Canned', confidence: 0.85 },
   ],
   // The legacy SINGLETON path resolves its brand from the restricted page
   // evidence packet (no brand record in this harness) — the normalizer never
@@ -204,7 +204,7 @@ function findPage(pages: Array<{ id: string; name: string }>, name: string) {
 
 /** The group response: every SKU in the prompt assigned to a FROZEN page.
  *  Siblings differ by design (rule 7): the SKU VALUE decides the page —
- *  '100000000001' → Dog Food Dry, '100000000002' → Dog Treats — so member /
+ *  '100000000001' → Dog Food Dry, '100000000002' → Dog Food Canned — so member /
  *  prompt ORDER can never flip the result (the T3 frozen legacy baseline is
  *  position-independent). */
 function cannedGroupResponse(prompt: string): string {
@@ -610,11 +610,11 @@ const TWO_MEMBER_EXTRACTIONS = {
 };
 
 /** Activate ONE verified Page import with the fixture pages (Dog Food Dry,
- *  Dog Treats, Brand - Acme). Returns the generated page_index ids. */
+ *  Dog Food Canned, Brand - Acme). Returns the generated page_index ids. */
 function activateVerifiedPages(wsId: string): Map<string, string> {
   const pages = [
     { key: 'dog-food-dry', name: 'Dog Food Dry' },
-    { key: 'dog-treats', name: 'Dog Treats' },
+    { key: 'dog-food-canned', name: 'Dog Food Canned' },
     { key: 'brand-acme', name: 'Brand - Acme' },
   ];
   activatePageImportFromRecords({
@@ -1237,7 +1237,7 @@ describe('PR7 acceptance — durable parent page coordination, replay-safe after
     expect(pagesOne.length).toBeGreaterThan(0);
     expect(pagesTwo.length).toBeGreaterThan(0);
     // Rule 7: siblings may legitimately differ — the canned response assigned
-    // one to Dog Food Dry and the other to Dog Treats from ONE group call.
+    // one to Dog Food Dry and the other to Dog Food Canned from ONE group call.
     const pagesByName = new Map<string, string[]>();
     for (const row of getCohortPageOutputsByRun(finalized.id)) {
       const names = (JSON.parse(row.outputValueJson).pages as Array<{ pageName: string }>).map(p => p.pageName);
@@ -1246,7 +1246,7 @@ describe('PR7 acceptance — durable parent page coordination, replay-safe after
     const namesOne = pagesByName.get(items[0].upc)!;
     const namesTwo = pagesByName.get(items[1].upc)!;
     expect(namesOne.some(name => name === 'Dog Food Dry')).toBe(true);
-    expect(namesTwo.some(name => name === 'Dog Treats')).toBe(true);
+    expect(namesTwo.some(name => name === 'Dog Food Canned')).toBe(true);
     expect(pagesOne[0].targetId).not.toBe(pagesTwo[0].targetId);
   });
 

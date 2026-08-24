@@ -136,6 +136,8 @@ export interface ChatMessage {
 
 export interface ChatCompletionOptions {
   temperature?: number;
+  /** OpenAI-compatible frequency_penalty (e.g. packaging-OCR repetition retry). */
+  frequencyPenalty?: number;
   maxTokens?: number;
   responseFormat?: { type: 'text' | 'json_object' | 'json_schema'; json_schema?: any };
   tools?: any[];
@@ -186,6 +188,7 @@ export async function executeOpenAiChat(
   };
 
   if (options.temperature !== undefined) bodyPayload.temperature = options.temperature;
+  if (options.frequencyPenalty !== undefined) bodyPayload.frequency_penalty = options.frequencyPenalty;
   if (options.maxTokens !== undefined) bodyPayload.max_tokens = options.maxTokens;
   if (options.reasoningEffort !== undefined) bodyPayload.reasoning_effort = options.reasoningEffort;
   if (options.responseFormat) bodyPayload.response_format = options.responseFormat;

@@ -1,5 +1,7 @@
 # PI Live-Smoke Findings (store products)
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 Findings from the live smoke against real store catalog products
 (`Feline Wormeze Liquid 4oz` → completed/submitted, `Cadet Peanut Rawhide
 Sticks 100 CT` → deadline-exceeded), with the fix each produced.

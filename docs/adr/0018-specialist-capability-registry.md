@@ -1,5 +1,7 @@
 # ADR 0018 — Specialist Capability Registry and Typed Workflow Artifacts
 
+> **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**
+
 - **Status:** Accepted
 - **Relates to:** ADR 0010 (Product Intelligence execution boundary), ADR 0004 (composable classification stages), epic #47 (specialist capabilities), ADR 0005/0012/0017 (deterministic authority patterns)
 - **Implementation surface:** `src/product-intelligence/specialists/` (`contracts.ts`, `artifacts.ts`, `registry.ts`, `policies.ts`), `src/tests/unit/product-intelligence/specialist-registry.test.ts`

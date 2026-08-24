@@ -1,5 +1,7 @@
 # ADR 0029: Evals, v1/v2 Shadow, Rollout Gates and Legacy Migration (#60)
 
+**Status update (2026-08): SUPERSEDED operationally by ADR-0030 (Agent Lab decommission); paths below are deleted/historical.**
+
 - Status: Accepted
 - Date: 2026-08-20
 - Issue: #60 (epic #47, tail of #48–#59)

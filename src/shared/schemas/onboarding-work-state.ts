@@ -154,6 +154,14 @@ export const OnboardingWorkStateSchema = z.object({
   sourceType: SourceTypeEnum.nullable().default(null),
   /** Normalized source host (official page only; null for distributor records). */
   domain: z.string().nullable().default(null),
+  /** Curated title for immediate zero-latency review rendering. */
+  curatedTitle: z.string().nullish().default(null),
+  /** Primary image URL for immediate zero-latency review rendering. */
+  imageUrl: z.string().nullish().default(null),
+  /** Curated or extracted description for immediate zero-latency review rendering. */
+  description: z.string().nullish().default(null),
+  /** Weight in lbs / size for immediate zero-latency review rendering. */
+  weight: z.string().nullish().default(null),
 });
 
 export type OnboardingWorkState = z.infer<typeof OnboardingWorkStateSchema>;

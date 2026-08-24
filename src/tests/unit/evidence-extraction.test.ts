@@ -153,6 +153,56 @@ describe('Evidence Extraction — distributor_record source (Amendment A)', () =
     } as any);
   });
 
+  /** Official-page member projection (P1-T3 defense-in-depth fixture). */
+  function makeOfficialMember(primaryImage: string | null): Record<string, any> {
+    return {
+      onboardingItemId: 'item-stale-ocr-1',
+      ordinal: 0,
+      productSku: '100000000009',
+      extractionComplete: true,
+      sourceUrl: 'https://brand.example.com/product',
+      extractionSourceUrl: 'https://brand.example.com/product',
+      sourcingDecision: null,
+      itemSourceType: 'official_page',
+      extractionSourceType: 'official_page',
+      extractionMethod: 'test',
+      sourcingGenerationId: null,
+      acceptedEvidenceAttemptIds: [],
+      acceptedProviderIds: [],
+      distributorEvidenceHash: null,
+      spreadsheetIdentity: {
+        name: 'Official Dog Food Chicken 5 lb',
+        expectedName: null,
+        brandHint: 'Acme',
+        departmentHint: null,
+        price: null,
+        quantity: null,
+        rowNumber: 1,
+        upc: '100000000009',
+      },
+      extraction: {
+        title: 'Official Web Title',
+        description: 'Web description',
+        brand: 'Acme',
+        weight: '5 lb',
+        bulletPoints: ['Bullet one'],
+        searchKeywords: 'kibble dog',
+        primaryImage,
+        additionalImages: [],
+        customFields: {},
+        fieldProvenance: {},
+        packagingTitle: 'Stale Authority Name',
+        distributorSku: null,
+        manufacturerPartNumber: null,
+        variantAttributes: {},
+        ocr: { outcome: null, packagingOcrData: null, ocrInputHash: 'b'.repeat(64), ocrExecutionDigest: null },
+        piEvidence: [],
+        piImportComplete: true,
+      },
+      evidenceHash: 'd'.repeat(64),
+    };
+  }
+
   function makeDistributorMember(): Record<string, any> {
     return {
       onboardingItemId: 'item-dist-1',
@@ -425,5 +475,71 @@ describe('Evidence Extraction — distributor_record source (Amendment A)', () =
     expect(evidence.some(e => e.source === 'official_product_page')).toBe(false);
     expect(evidence.some(e => e.sourceField === 'price')).toBe(false);
     expect(evidence.some(e => e.sourceField === 'primaryImage')).toBe(false);
+  });
+
+  it('P1-T3 defense in depth: stale-marked OCR that was NOT re-run still abstains from materialization (digest gate unchanged)', async () => {
+    const { evidenceExtractionStage } = await import('../../classification/stages/evidence-extraction');
+    const { hashCanonicalJson } = await import('../../shared/stable-id');
+
+    // Official-page member whose stored OCR carries the P1-T3 digest-staleness
+    // invalidation marker (status 'failed', plan_incompatible, stale: true)
+    // with the PRIOR packagingOcrData preserved intact — exactly what a
+    // beyond-cap member looks like after freeze. The input hash MATCHES (only
+    // the execution authority went stale), so the ONLY thing refusing the OCR
+    // must be the unchanged digest gate + the marker.
+    const primaryImage = 'https://brand.example.com/img.png';
+    const member = makeOfficialMember(primaryImage);
+    member.extraction.ocr = {
+      outcome: {
+        status: 'failed',
+        localStatus: 'failed',
+        model: 'old-vlm',
+        imageCount: 1,
+        localFailureReason: 'plan_incompatible',
+        stale: true,
+      },
+      packagingOcrData: {
+        productName: 'Stale Authority Name',
+        brand: 'Acme',
+        species: ['dog'],
+        flavorVariety: 'Chicken',
+        weight: '5 lb',
+        confidenceByField: { productName: 0.95 },
+        metadata: {
+          imageSourceUrl: primaryImage,
+          model: 'old-vlm',
+          extractedAt: new Date().toISOString(),
+          modelCallIds: ['stale-call-1'],
+        },
+      },
+      ocrInputHash: hashCanonicalJson({
+        sourceUrl: member.sourceUrl,
+        extractionSourceUrl: member.extractionSourceUrl,
+        primaryImage,
+        additionalImages: [],
+      }),
+      ocrExecutionDigest: 'f'.repeat(64),
+    };
+
+    const result = await evidenceExtractionStage.execute(
+      { sku: '100000000009', onboardingItemId: 'item-stale-ocr-1', evidence: [], acceptedProposals: [], allProposals: [] },
+      {
+        workspacePath,
+        workspaceId,
+        runId: 'run-stale-ocr-1',
+        configSnapshotRef: { id: 'cfg', hash: 'h'.repeat(64), sourceCommit: null, createdAt: new Date().toISOString() },
+        snapshot: undefined,
+        cohortFrozenEvidence: member as never,
+      } as never,
+    );
+
+    // Textual evidence still flows; the STALE OCR is never materialized.
+    expect(result.status).toBe('succeeded');
+    const out = (result as { status: 'succeeded'; output: { evidence: Array<Record<string, any>>; metadata?: Record<string, any> } }).output;
+    expect(out.evidence.some(e => e.metadata?.provenance === 'packaging_ocr')).toBe(false);
+    expect(out.evidence.some(e => String(e.value) === 'Stale Authority Name')).toBe(false);
+    // Metadata-only surfacing of the marker (no gate-semantics change).
+    expect(out.metadata?.ocrStale).toBe(true);
+    expect((out.metadata?.ocrOutcome as Record<string, any>)?.stale).toBe(true);
   });
 });

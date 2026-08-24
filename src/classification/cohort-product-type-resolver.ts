@@ -37,7 +37,6 @@ import type {
   ClassificationEvidence,
   BrandConfig,
 } from '../shared/schemas/classification';
-import type { PackagingOcrData } from '../shared/schemas/onboarding';
 import type {
   ExecutionEvidenceProjectionMemberV1,
   ExecutionEvidenceProjectionMemberV2,
@@ -48,6 +47,7 @@ import { matchKeywordOptions } from './curation-target-matcher';
 import { buildEvidenceTargetPacket } from './evidence-targeting';
 import { resolveTargetsFromSnapshot, type ResolvedTargetOption } from './curation-target-resolver';
 import { resolveBrand } from './brand-resolution';
+import { packagingOcrDataToEvidence } from './ocr-evidence';
 import { getReviewedTypeFromSnapshot } from './effective-curation-type';
 
 const now = () => new Date().toISOString();
@@ -109,8 +109,8 @@ export interface DeterministicTypeMatchResult {
  *   (name, brand, weight, description, bullet_point, search_keywords [low],
  *   custom fields);
  * - frozen packaging OCR -> `visual_product_evidence` records (the frozen
- *   stage's `packagingOcrDataToEvidence` conversion, mirrored here so this
- *   pure module never loads the DB/model-coupled extractor module).
+ *   stage's conversion, via the shared PURE converter in
+ *   `./ocr-evidence` — P2-T1 removed this module's mirrored copy).
  *
  * The OCR is materialized ONLY when the projection's own input-hash binding
  * still matches (recomputed purely from frozen fields) AND the projection
@@ -314,134 +314,12 @@ export function evidenceFromProjection(
       : frozenOcr.ocrExecutionDigest !== null;
   if (frozenOcr.packagingOcrData && ocrInputHashMatches && executionDigestBound) {
     const modelCallIds = frozenOcr.packagingOcrData.metadata?.modelCallIds;
-    evidence.push(...mirrorPackagingOcrDataToEvidence(frozenOcr.packagingOcrData, {
+    evidence.push(...packagingOcrDataToEvidence(frozenOcr.packagingOcrData, {
       runId,
       sku,
       model: frozenOcr.outcome?.model ?? 'unknown',
       ...(Array.isArray(modelCallIds) && modelCallIds.length > 0 ? { modelCallIds } : {}),
     }));
-  }
-
-  return evidence;
-}
-
-/**
- * Mirror of the shared `packagingOcrDataToEvidence`
- * (`src/classification/product-evidence-extractor.ts:105-353`). The shared
- * helper lives in a module that imports DB/model layers; this pure module
- * reproduces the EXACT field mapping (fields, reliability thresholds, source
- * fields, metadata, model-call propagation) without importing it.
- */
-function mirrorPackagingOcrDataToEvidence(
-  ocrData: PackagingOcrData,
-  params: { runId: string; sku: string; model: string; modelCallIds?: string[] },
-): ClassificationEvidence[] {
-  const evidence: ClassificationEvidence[] = [];
-  const { runId, sku, model } = params;
-  const reliability = (field: string, fallback: string): string => {
-    const confidence = ocrData.confidenceByField?.[field];
-    if (confidence == null) return fallback;
-    if (confidence >= 0.7) return 'high';
-    if (confidence >= 0.4) return 'medium';
-    return 'low';
-  };
-
-  const base = {
-    runId,
-    stageName: 'evidence_extraction' as const,
-    productSku: sku,
-    source: 'visual_product_evidence' as const,
-    sourceUrl: null as string | null,
-    capturedAt: now(),
-  };
-
-  const push = (entry: Omit<ClassificationEvidence, 'id' | 'runId' | 'stageName' | 'productSku' | 'capturedAt' | 'source' | 'sourceUrl'>): void => {
-    evidence.push({
-      ...base,
-      ...entry,
-      id: randomUUID(),
-    } as ClassificationEvidence);
-  };
-
-  if (ocrData.productName) {
-    push({ attributeId: null, reliability: reliability('productName', 'high') as ClassificationEvidence['reliability'], sourceField: 'name', snippet: ocrData.productName.slice(0, 300), value: ocrData.productName, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.productName ?? null } });
-  }
-  if (ocrData.brand) {
-    push({ attributeId: null, reliability: reliability('brand', 'high') as ClassificationEvidence['reliability'], sourceField: 'brand', snippet: ocrData.brand.slice(0, 300), value: ocrData.brand, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.brand ?? null } });
-  }
-  if (ocrData.species?.length) {
-    for (const val of ocrData.species) {
-      push({ attributeId: null, reliability: reliability('species', 'medium') as ClassificationEvidence['reliability'], sourceField: 'species', snippet: val.slice(0, 300), value: val, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.species ?? null } });
-    }
-  }
-  if (ocrData.flavorVariety) {
-    push({ attributeId: 'flavor', reliability: reliability('flavorVariety', 'medium') as ClassificationEvidence['reliability'], sourceField: 'flavor', snippet: ocrData.flavorVariety.slice(0, 300), value: ocrData.flavorVariety, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.flavorVariety ?? null } });
-  }
-  if (ocrData.color) {
-    push({ attributeId: 'color', reliability: reliability('color', 'medium') as ClassificationEvidence['reliability'], sourceField: 'color', snippet: ocrData.color.slice(0, 300), value: ocrData.color, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.color ?? null } });
-  }
-  if (ocrData.material) {
-    push({ attributeId: 'material', reliability: reliability('material', 'medium') as ClassificationEvidence['reliability'], sourceField: 'material', snippet: ocrData.material.slice(0, 300), value: ocrData.material, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.material ?? null } });
-  }
-  if (ocrData.size) {
-    push({ attributeId: 'size', reliability: reliability('size', 'medium') as ClassificationEvidence['reliability'], sourceField: 'size', snippet: ocrData.size.slice(0, 300), value: ocrData.size, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.size ?? null } });
-  }
-  if (ocrData.weight) {
-    push({ attributeId: null, reliability: reliability('weight', 'medium') as ClassificationEvidence['reliability'], sourceField: 'weight', snippet: ocrData.weight.slice(0, 300), value: ocrData.weight, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.weight ?? null } });
-  }
-  if (ocrData.count) {
-    push({ attributeId: null, reliability: reliability('count', 'medium') as ClassificationEvidence['reliability'], sourceField: 'count', snippet: ocrData.count.slice(0, 300), value: ocrData.count, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.count ?? null } });
-  }
-  if (ocrData.lifeStage) {
-    push({ attributeId: 'lifeStage', reliability: reliability('lifeStage', 'medium') as ClassificationEvidence['reliability'], sourceField: 'lifeStage', snippet: ocrData.lifeStage.slice(0, 300), value: ocrData.lifeStage, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.lifeStage ?? null } });
-  }
-  if (ocrData.breedSize) {
-    push({ attributeId: 'breedSize', reliability: reliability('breedSize', 'medium') as ClassificationEvidence['reliability'], sourceField: 'breedSize', snippet: ocrData.breedSize.slice(0, 300), value: ocrData.breedSize, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.breedSize ?? null } });
-  }
-  if (ocrData.productForm) {
-    push({ attributeId: 'productForm', reliability: reliability('productForm', 'medium') as ClassificationEvidence['reliability'], sourceField: 'productForm', snippet: ocrData.productForm.slice(0, 300), value: ocrData.productForm, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.productForm ?? null } });
-  }
-  if (ocrData.healthConcernFunction?.length) {
-    for (const val of ocrData.healthConcernFunction) {
-      push({ attributeId: 'healthConcern', reliability: reliability('healthConcernFunction', 'medium') as ClassificationEvidence['reliability'], sourceField: 'healthConcern', snippet: val.slice(0, 300), value: val, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.healthConcernFunction ?? null } });
-    }
-  }
-  if (ocrData.dietaryLabels?.length) {
-    for (const val of ocrData.dietaryLabels) {
-      push({ attributeId: null, reliability: reliability('dietaryLabels', 'medium') as ClassificationEvidence['reliability'], sourceField: 'dietaryLabel', snippet: val.slice(0, 300), value: val, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.dietaryLabels ?? null } });
-    }
-  }
-  if (ocrData.ingredientKeywords?.length) {
-    for (const val of ocrData.ingredientKeywords) {
-      push({ attributeId: null, reliability: reliability('ingredientKeywords', 'low') as ClassificationEvidence['reliability'], sourceField: 'ingredientKeyword', snippet: val.slice(0, 300), value: val, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.ingredientKeywords ?? null } });
-    }
-  }
-  if (ocrData.visibleTextLines?.length) {
-    const lines = ocrData.visibleTextLines.slice(0, 3);
-    for (const val of lines) {
-      if (!val?.trim()) continue;
-      push({ attributeId: null, reliability: reliability('visibleTextLines', 'low') as ClassificationEvidence['reliability'], sourceField: 'visible_text', snippet: val.slice(0, 300), value: val, metadata: { provenance: 'packaging_ocr', model, visibleText: true, confidence: ocrData.confidenceByField?.visibleTextLines ?? null } });
-    }
-  }
-  if (ocrData.ingredients?.length) {
-    for (const val of ocrData.ingredients) {
-      if (!val?.trim()) continue;
-      push({ attributeId: null, reliability: reliability('ingredients', 'medium') as ClassificationEvidence['reliability'], sourceField: 'ingredient', snippet: val.slice(0, 300), value: val, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.ingredients ?? null } });
-    }
-  }
-  if (ocrData.claims?.length) {
-    for (const val of ocrData.claims) {
-      if (!val?.trim()) continue;
-      push({ attributeId: null, reliability: reliability('claims', 'medium') as ClassificationEvidence['reliability'], sourceField: 'claim', snippet: val.slice(0, 300), value: val, metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.claims ?? null } });
-    }
-  }
-
-  // Propagate the durable model-call IDs that produced this OCR evidence
-  // (mirror of the shared helper; issue #17 E).
-  if (params.modelCallIds?.length) {
-    for (const record of evidence) {
-      record.metadata = { ...(record.metadata ?? {}), modelCallIds: params.modelCallIds };
-    }
   }
 
   return evidence;
