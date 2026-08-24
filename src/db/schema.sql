@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS product_index (
   updated_at TEXT NOT NULL
 );
 
+-- ── ARCHIVED (Gen1, P5 retirement 2026-08-24) ──────────────────────────────
+-- `product_types` + `product_type_fields` are the pre-classification legacy
+-- field-map tables (superseded by the immutable taxonomy releases under
+-- src/classification/releases/). RETAINED READ-ONLY for history and as the
+-- sole source of the candidate-only legacy migration bridge
+-- (src/classification/legacy-migration.ts -> POST /api/classification/migrate-legacy).
+-- No production code reads or writes them outside that bridge; no routes serve
+-- them; destructive DROP is intentionally deferred pending owner decision.
 CREATE TABLE IF NOT EXISTS product_types (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspace(id),
@@ -63,6 +71,7 @@ CREATE TABLE IF NOT EXISTS product_types (
   updated_at TEXT NOT NULL
 );
 
+-- See archive banner above `product_types` — same Gen1 status.
 CREATE TABLE IF NOT EXISTS product_type_fields (
   id TEXT PRIMARY KEY,
   product_type_id TEXT NOT NULL REFERENCES product_types(id),
