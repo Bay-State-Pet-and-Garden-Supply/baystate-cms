@@ -433,6 +433,49 @@ describe('loadImageWithReason workspace containment', () => {
     }
   });
 
+  it('rejects an ABSOLUTE imageLocalPath even when it points INSIDE the workspace (FIX-A round 2)', async () => {
+    seedLegacyVlm();
+    // The file exists and is readable INSIDE tmpDir — but absolute candidates
+    // are rejected outright, so no transport may run.
+    const result = await runPackagingOcrAttempt(makeParams({
+      imageUrl: 'definitely-missing-inside-workspace.bin',
+      imageLocalPath: seedLocalImage(),
+      modelFetchFn: contentTransport('{"productName":"MUST NOT RUN"}').fn,
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasonCode).toBe('no_image');
+  });
+
+  it('rejects a workspace symlink that resolves OUTSIDE the workspace (FIX-A round 2)', async () => {
+    seedLegacyVlm();
+    // Real payload lives OUTSIDE tmpDir; a symlink INSIDE tmpDir points at it.
+    const outsidePath = path.join(path.dirname(tmpDir), `outside-${path.basename(tmpDir)}.bin`);
+    fs.writeFileSync(outsidePath, Buffer.alloc(2048, 0x64));
+    const linkPath = path.join(tmpDir, 'escape-link.bin');
+    try {
+      fs.symlinkSync(outsidePath, linkPath);
+      const result = await runPackagingOcrAttempt(makeParams({
+        imageUrl: 'definitely-missing-inside-workspace.bin',
+        imageLocalPath: 'escape-link.bin',
+        modelFetchFn: contentTransport('{"productName":"MUST NOT RUN"}').fn,
+      }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reasonCode).toBe('no_image');
+    } finally {
+      fs.rmSync(linkPath, { force: true });
+      fs.rmSync(outsidePath, { force: true });
+    }
+  });
+
+  it('still loads a legitimate RELATIVE candidate inside the workspace (FIX-A round 2)', async () => {
+    seedLegacyVlm();
+    const transport = contentTransport('{"productName":"Relative Still OK"}');
+    const result = await runPackagingOcrAttempt(makeParams({ modelFetchFn: transport.fn }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data.productName).toBe('Relative Still OK');
+    expect(transport.calls()).toBe(1);
+  });
+
   it('rejects a ../ traversal imageLocalPath that escapes the workspace', async () => {
     seedLegacyVlm();
     const result = await runPackagingOcrAttempt(makeParams({

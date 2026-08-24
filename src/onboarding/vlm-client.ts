@@ -107,16 +107,34 @@ export function getVlmConfig(): VlmConfig | null {
 
 /**
  * Sniff the image MIME type from the decoded base64 payload's magic header:
- * JPEG (FF D8 FF), PNG (89 50 4E 47), GIF (47 49 46 38), WebP (RIFF…WEBP).
- * Anything else (including undecodable payloads) defaults to `image/jpeg` —
- * the historical hardcoded value — so legacy callers stay byte-compatible.
+ * JPEG (FF D8 FF), GIF87a/GIF89a, PNG full 8-byte signature, WebP
+ * (RIFF…WEBP). FIX-F review round 2: the payload is validated as CANONICAL
+ * base64 (alphabet + padding structure) BEFORE decoding, and every signature
+ * must be COMPLETE at a sensible minimum byte count — truncated or junk-
+ * prefixed payloads fall through to the `image/jpeg` default (the historical
+ * hardcoded value) instead of being classified from partial bytes.
  * Pure function; exported for unit tests.
  */
 export function sniffImageMimeType(base64: string): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
-  const buf = Buffer.from(String(base64 ?? ''), 'base64');
+  const raw = String(base64 ?? '');
+  // Canonical-base64 gate: only the standard alphabet, `=` padding only at
+  // the end, and a length multiple of 4 decode unambiguously. Buffer.from is
+  // lenient and would silently accept junk-prefixed input.
+  if (raw.length === 0 || raw.length % 4 !== 0) return 'image/jpeg';
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw)) return 'image/jpeg';
+  const buf = Buffer.from(raw, 'base64');
+  // Round-trip check: canonical base64 must re-encode to itself (catches
+  // trailing-bit misuse of the two `=` slots).
+  if (buf.toString('base64') !== raw) return 'image/jpeg';
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
-  if (buf.length >= 4 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif';
+  if (
+    buf.length >= 8 &&
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+  if (buf.length >= 6 && buf.toString('latin1', 0, 6).startsWith('GIF8')) return 'image/gif';
   if (
     buf.length >= 12 &&
     buf.toString('latin1', 0, 4) === 'RIFF' &&

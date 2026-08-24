@@ -168,6 +168,30 @@ describe('evaluateCandidatesAgainstGolden', () => {
     expect(transport.calls).toHaveLength(0);
   });
 
+  it('FIX-E round 2: rejection message never carries userinfo or query payload', async () => {
+    const transport = makeTransport(() => GOOD_JSON);
+    const raw = datasetJson([{ id: 'a', upc: '036000291452' }]);
+    const secretUrl = 'http://user:topsecret@evil.example.com:11434/path?token=abc123';
+    let message = '';
+    try {
+      await evaluateCandidatesAgainstGolden(loadGoldenDatasetFromJson(raw), {
+        candidates: [{ baseUrl: secretUrl, model: CANDIDATE_MODEL }],
+        fetchFn: transport.fn,
+      });
+      throw new Error('expected a non-loopback rejection');
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+      expect(message).toMatch(/non-loopback/);
+    }
+    // Bounded redaction: scheme://host[:port] only.
+    expect(message).toContain('http://evil.example.com:11434');
+    expect(message).not.toContain('user:topsecret');
+    expect(message).not.toContain('token=abc123');
+    expect(message).not.toContain('/path');
+    // And no transport ever ran.
+    expect(transport.calls).toHaveLength(0);
+  });
+
   it('rejects duplicate candidate labels before any model call', async () => {
     const transport = makeTransport(() => GOOD_JSON);
     const raw = datasetJson([{ id: 'a', upc: '036000291452' }]);

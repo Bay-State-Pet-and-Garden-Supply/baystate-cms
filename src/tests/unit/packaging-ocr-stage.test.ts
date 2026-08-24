@@ -102,11 +102,12 @@ function seedWorkspace(): void {
   });
 }
 
-/** >1KiB local image so loadImageWithReason resolves it from disk (no network). */
+/** >1KiB local image so loadImageWithReason resolves it from disk (no network).
+ *  Returns a WORKSPACE-RELATIVE path — production extraction data never
+ *  stores absolute filesystem paths (FIX-A round 2 rejects them outright). */
 function seedLocalImage(): string {
-  const imgPath = path.join(workspacePath, 'img-primary.bin');
-  fs.writeFileSync(imgPath, Buffer.alloc(2048, 0x64));
-  return imgPath;
+  fs.writeFileSync(path.join(workspacePath, 'img-primary.bin'), Buffer.alloc(2048, 0x64));
+  return 'img-primary.bin';
 }
 
 interface ItemSpec {
@@ -403,6 +404,9 @@ describe('packaging_ocr stage — frozen-route authority (FIX-1)', () => {
       expect(outcome.localStatus).toBe('disabled');
       expect(outcome.cloudStatus).toBe('disabled');
       expect(outcome.status).toBe('disabled');
+      // FIX-B round 2: the late-inserted mutable model ('late-model') must
+      // NEVER leak into a snapshot-bound outcome — no frozen route ⇒ null.
+      expect(outcome.model).toBeNull();
     }
     // Zero transports: no model-call rows at all.
     const calls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
@@ -432,6 +436,82 @@ describe('packaging_ocr stage — frozen-route authority (FIX-1)', () => {
       "SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE status = 'policy_denied'",
     ).get() as { cnt: number };
     expect(denied.cnt).toBeGreaterThan(0);
+  });
+});
+
+// ─── content-rule + image-set coverage (FIX-G round 2) ─────────────────────
+
+describe('packaging_ocr stage — extended hasOcrContent + additionalImages-only (FIX-G)', () => {
+  it('succeeds for an item with primaryImage:null but a usable additionalImage', async () => {
+    const { server, port } = await startOllamaServer(STAGE_OCR_JSON);
+    try {
+      seedWorkspace();
+      const img = seedLocalImage();
+      const snapshot = makeSnapshot(`http://127.0.0.1:${port}`);
+      // No primaryImage — before this fix the stage short-circuited to
+      // coded no_image and never touched additionalImages.
+      const item = seedItem({ ext: { title: 'Web Title', primaryImage: null, additionalImages: [img] } });
+      overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: false });
+
+      const result = await packagingOcrStage.execute(makeInput(item.id), makeContext({}, snapshot));
+
+      expect(result.status).toBe('succeeded');
+      if (result.status !== 'succeeded') return;
+      expect((result.output.metadata as any).packagingOcrData).toBeDefined();
+      const outcome = (result.output.metadata as any).ocrOutcome;
+      expect(outcome.status).toBe('succeeded');
+      expect(outcome.imageCount).toBe(1);
+      const stored = JSON.parse(readExtRaw(item.id)!) as Record<string, any>;
+      expect(stored.packagingOcrData.productName).toBe('Stage Kibble');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('keeps a UPC-only OCR success instead of discarding it', async () => {
+    const { server, port } = await startOllamaServer({ upc: '036000291452' });
+    try {
+      seedWorkspace();
+      const img = seedLocalImage();
+      const snapshot = makeSnapshot(`http://127.0.0.1:${port}`);
+      const item = seedItem({ ext: { title: 'Web Title', primaryImage: img } });
+      overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: false });
+
+      const result = await packagingOcrStage.execute(makeInput(item.id), makeContext({}, snapshot));
+
+      expect(result.status).toBe('succeeded');
+      if (result.status !== 'succeeded') return;
+      const meta = result.output.metadata as Record<string, any>;
+      // A valid barcode-only transcription is real content under the
+      // extended hasOcrContent rule — persisted, not dropped.
+      expect((meta.packagingOcrData as any).upc).toBe('036000291452');
+      expect((meta.ocrOutcome as any).status).toBe('succeeded');
+      const stored = JSON.parse(readExtRaw(item.id)!) as Record<string, any>;
+      expect(stored.packagingOcrData.upc).toBe('036000291452');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('keeps an ingredients-only OCR success instead of discarding it', async () => {
+    const { server, port } = await startOllamaServer({ ingredients: ['chicken', 'rice'] });
+    try {
+      seedWorkspace();
+      const img = seedLocalImage();
+      const snapshot = makeSnapshot(`http://127.0.0.1:${port}`);
+      const item = seedItem({ ext: { title: 'Web Title', primaryImage: img } });
+      overrideOcrStageFlags({ packagingOcrStageEnabled: true, packagingOcrStageShadowOnly: false });
+
+      const result = await packagingOcrStage.execute(makeInput(item.id), makeContext({}, snapshot));
+
+      expect(result.status).toBe('succeeded');
+      if (result.status !== 'succeeded') return;
+      const meta = result.output.metadata as Record<string, any>;
+      expect((meta.packagingOcrData as any).ingredients).toEqual(['chicken', 'rice']);
+      expect((meta.ocrOutcome as any).status).toBe('succeeded');
+    } finally {
+      server.close();
+    }
   });
 });
 

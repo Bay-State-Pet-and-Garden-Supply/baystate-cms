@@ -100,9 +100,10 @@ function seedWorkspace(): void {
 }
 
 function seedLocalImage(): string {
-  const imgPath = path.join(workspacePath, 'img-primary.bin');
-  fs.writeFileSync(imgPath, Buffer.alloc(2048, 0x64));
-  return imgPath;
+  fs.writeFileSync(path.join(workspacePath, 'img-primary.bin'), Buffer.alloc(2048, 0x64));
+  // Workspace-relative — production extraction data never stores absolute
+  // filesystem paths (FIX-A round 2 rejects them outright).
+  return 'img-primary.bin';
 }
 
 function seedItem(ext: Record<string, unknown>) {

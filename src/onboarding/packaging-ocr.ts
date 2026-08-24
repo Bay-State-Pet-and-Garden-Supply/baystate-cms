@@ -199,20 +199,36 @@ async function loadImageWithReason(
   imageLocalPath?: string | null,
   fetchFn: NetworkFetch = fetch,
 ): Promise<ImageLoadOutcome> {
-  const readLocalFile = async (resolved: string): Promise<ImageLoadOutcome | null> => {
+  const readLocalFile = async (resolved: string, workspaceRoot: string): Promise<ImageLoadOutcome | null> => {
     try {
       const fs = await import('fs');
-      if (fs.existsSync(resolved)) {
-        const buffer = fs.readFileSync(resolved);
-        if (buffer.length >= 1024) {
-          return { base64: buffer.toString('base64') };
-        }
-        console.warn(`[PackagingOcr] Local image too small (${buffer.length}b): ${resolved}`);
-        return {
-          base64: null,
-          failure: { reasonCode: 'image_too_small', message: `Local image too small (${buffer.length} bytes) to run OCR.` },
-        };
+      if (!fs.existsSync(resolved)) return null;
+      // FIX-A round 2: filesystem-REAL containment. The lexical prefix check in
+      // resolveWorkspaceContainedPath cannot see symlinks, so re-resolve BOTH
+      // the candidate and the workspace root to their true paths and require
+      // the candidate to live under the real root — an interior symlink
+      // pointing outside the workspace is rejected here.
+      let candidateReal: string;
+      let workspaceReal: string;
+      try {
+        candidateReal = fs.realpathSync(resolved);
+        workspaceReal = fs.realpathSync(workspaceRoot);
+      } catch {
+        return null; // unresolvable path ⇒ treat as missing
       }
+      if (candidateReal !== workspaceReal && !candidateReal.startsWith(workspaceReal + nodePath.sep)) {
+        console.warn(`[PackagingOcr] Local image path escapes the workspace after symlink resolution; refusing.`);
+        return null;
+      }
+      const buffer = fs.readFileSync(resolved);
+      if (buffer.length >= 1024) {
+        return { base64: buffer.toString('base64') };
+      }
+      console.warn(`[PackagingOcr] Local image too small (${buffer.length}b): ${resolved}`);
+      return {
+        base64: null,
+        failure: { reasonCode: 'image_too_small', message: `Local image too small (${buffer.length} bytes) to run OCR.` },
+      };
     } catch {
       // Fall through to next strategy
     }
@@ -227,7 +243,7 @@ async function loadImageWithReason(
   if (imageLocalPath && workspacePath) {
     const resolved = resolveWorkspaceContainedPath(workspacePath, imageLocalPath);
     if (resolved) {
-      const local = await readLocalFile(resolved);
+      const local = await readLocalFile(resolved, workspacePath);
       if (local) return local;
     }
   }
@@ -236,7 +252,7 @@ async function loadImageWithReason(
   if (!isRemoteUrl(imageUrl) && workspacePath) {
     const resolved = resolveWorkspaceContainedPath(workspacePath, imageUrl);
     if (resolved) {
-      const local = await readLocalFile(resolved);
+      const local = await readLocalFile(resolved, workspacePath);
       if (local) return local;
     }
   }
@@ -342,8 +358,13 @@ export function coercePackagingOcrData(
 ): PackagingOcrData | null {
   // Normalize scalar values that should be arrays
   const normalizeArray = (val: unknown): string[] => {
-    if (Array.isArray(val)) return val.map(String).map(s => s.trim()).filter(Boolean);
-    if (typeof val === 'string' && val.trim()) return [val.trim()];
+    // FIX-D review round 2: placeholder entries ("NULL", "NONE", "NA", …)
+    // are VLM non-answers — dropped from arrays exactly like normalizeString
+    // drops them from scalars, so a placeholder-only array can never count
+    // as OCR content downstream.
+    const isPlaceholder = (s: string): boolean => /^(null|none|n\/a|na|unknown|n\.a\.)$/i.test(s.trim());
+    if (Array.isArray(val)) return val.map(String).map(s => s.trim()).filter(Boolean).filter(s => !isPlaceholder(s));
+    if (typeof val === 'string' && val.trim() && !isPlaceholder(val)) return [val.trim()];
     return [];
   };
 
@@ -1032,7 +1053,10 @@ export function mergeOcrResults(results: PackagingOcrData[]): PackagingOcrData {
   // pick the value from the result with the highest confidence.
   // Falls back to first-non-null when no confidence data exists.
   const scalarFields: Array<keyof PackagingOcrData> = [
-    'productName', 'brand', 'flavorVariety', 'color', 'material',
+    // FIX-C review round 2: `upc` participates like every other scalar —
+    // without it, two UPC-only image results merged to an all-null object
+    // and callers discarded a successful barcode transcription.
+    'productName', 'brand', 'upc', 'flavorVariety', 'color', 'material',
     'size', 'weight', 'count', 'lifeStage', 'breedSize', 'productForm',
   ];
   for (const field of scalarFields) {
@@ -1120,26 +1144,27 @@ export function mergeOcrResults(results: PackagingOcrData[]): PackagingOcrData {
 /**
  * Resolve a candidate local image path STRICTLY inside the workspace.
  *
- * Containment rules (security fix):
+ * Containment rules (FIX-A review round 2):
+ * - ABSOLUTE candidates are rejected OUTRIGHT (POSIX leading `/` and Windows
+ *   drive prefixes): production writers only ever store URLs or relative
+ *   paths, so an absolute candidate is never legitimate and must never be
+ *   resolved-and-accepted.
  * - Relative candidates are joined onto the resolved workspace root and
  *   normalized; any result escaping the root (`..` traversal) returns null.
- * - Absolute candidates are honored ONLY when they already resolve INSIDE
- *   the workspace root (legacy extraction rows legitimately store absolute
- *   paths for downloaded workspace images); an absolute path pointing
- *   anywhere else returns null. This is the conservative subset of "reject
- *   absolute outright": full rejection would break every legitimate stored
- *   absolute workspace image, and containment is the invariant that matters.
+ * - Symlink escape is handled by the CALLER's realpath re-check
+ *   (readLocalFile), which resolves both the candidate and the workspace
+ *   root to their filesystem-real paths before reading.
  *
- * Returns the contained absolute path, or null when the candidate is
- * empty/escaping (callers treat null as "candidate missing" and continue to
- * the next load strategy).
+ * Returns the lexically-contained absolute path, or null when the candidate
+ * is empty/absolute/escaping (callers treat null as "candidate missing" and
+ * continue to the next load strategy).
  */
 function resolveWorkspaceContainedPath(workspacePath: string, candidate: string): string | null {
   const trimmed = typeof candidate === 'string' ? candidate.trim() : '';
   if (!trimmed) return null;
+  if (nodePath.isAbsolute(trimmed) || /^[a-zA-Z]:[\\/]/.test(trimmed)) return null;
   const base = nodePath.resolve(workspacePath);
-  const isAbsolute = nodePath.isAbsolute(trimmed) || /^[a-zA-Z]:[\\/]/.test(trimmed);
-  const resolved = isAbsolute ? nodePath.resolve(trimmed) : nodePath.resolve(base, trimmed);
+  const resolved = nodePath.resolve(base, trimmed);
   if (resolved !== base && !resolved.startsWith(base + nodePath.sep)) return null;
   return resolved;
 }

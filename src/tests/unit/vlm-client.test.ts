@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeAll, afterAll, describe, expect, it } from 'bun:test';
-import { callVlm, getVlmConfig, parseOcrTimeoutMs, DEFAULT_OCR_TIMEOUT_MS, sniffImageMimeType } from '../../onboarding/vlm-client';
+import { callVlm, callVlmWithDispatcher, getVlmConfig, parseOcrTimeoutMs, DEFAULT_OCR_TIMEOUT_MS, sniffImageMimeType } from '../../onboarding/vlm-client';
 import { initDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { upsertApiKey } from '../../db/repositories/api-key-repo';
@@ -113,14 +113,90 @@ describe('VLM client — AI Compute route inheritance (getVlmConfig)', () => {
     expect(cfg?.baseUrl).toBe('http://localhost:11434');
     expect(cfg?.model).toBe('qwen2.5vl:latest');
   });
+
+  it('FIX-G round 2: sends the SNIFFED PNG MIME through the dispatcher request body', async () => {
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(1100),
+    ]).toString('base64');
+
+    // Live local stand-in for the openai-compatible endpoint; captures the
+    // request body so the data-URI media type is observable end-to-end.
+    const bodies: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch: async (req) => {
+        bodies.push(await req.text());
+        return Response.json({ choices: [{ message: { content: 'ok' } }] });
+      },
+    });
+    const port = server.port;
+    try {
+      upsertProviderConnection({
+        id: 'mime-dispatch',
+        label: 'MIME Dispatch Endpoint',
+        transport: 'openai-compatible',
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        trustZone: 'trusted_lan',
+        approvedHost: '127.0.0.1',
+        approvedPort: port,
+        enabled: true,
+      });
+      saveAiRoutingDefaults({
+        catalogTarget: { connectionId: 'mime-dispatch', modelId: 'vlm-mime' },
+        catalogFallback: null,
+        textDataSharing: 'trusted_lan_allowed',
+        imageDataSharing: 'trusted_lan_allowed',
+      });
+
+      const result = await callVlmWithDispatcher('read this label', png);
+      expect(result.content).toBe('ok');
+      expect(bodies.length).toBeGreaterThan(0);
+      // Reverting the sniff call site in callVlmWithDispatcher (back to a
+      // hardcoded image/jpeg) makes this assertion fail.
+      expect(bodies.some(b => b.includes(`data:image/png;base64,${png}`))).toBe(true);
+      expect(bodies.some(b => b.includes('data:image/jpeg'))).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
 });
 
 // ─── image MIME sniffing (FIX-10) ─────────────────────────────────────────────
 
+describe('callVlm openai-compatible MIME transport body (FIX-G round 2)', () => {
+  it('sends the sniffed PNG media type in the data URI', async () => {
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(1100),
+    ]).toString('base64');
+    let body = '';
+    const captureFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      body = String(init?.body ?? '');
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    await callVlm(
+      'read this label',
+      png,
+      { baseUrl: 'http://127.0.0.1:1/v1', model: 'm', enabled: true, transport: 'openai-compatible' },
+      captureFetch,
+    );
+    // Reverting the sniff call site in callVlm (back to hardcoded jpeg)
+    // makes this assertion fail.
+    expect(body).toContain(`data:image/png;base64,${png}`);
+    expect(body).not.toContain('data:image/jpeg');
+  });
+});
+
 describe('sniffImageMimeType (magic-header detection)', () => {
   it('detects JPEG, PNG, GIF, and WebP headers from decoded base64 bytes', () => {
     const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(1100)]).toString('base64');
-    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]), Buffer.alloc(1100)]).toString('base64');
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(1100)]).toString('base64');
     const gif = Buffer.concat([Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), Buffer.alloc(1100)]).toString('base64');
     const webp = Buffer.concat([Buffer.from([0x52, 0x49, 0x46, 0x46]), Buffer.alloc(4), Buffer.from('WEBP', 'ascii'), Buffer.alloc(1100)]).toString('base64');
     expect(sniffImageMimeType(jpeg)).toBe('image/jpeg');
@@ -135,6 +211,32 @@ describe('sniffImageMimeType (magic-header detection)', () => {
     expect(sniffImageMimeType('')).toBe('image/jpeg');
     const text = Buffer.from('plain text payload', 'utf8').toString('base64');
     expect(sniffImageMimeType(text)).toBe('image/jpeg');
+  });
+
+  it('FIX-F: rejects a TRUNCATED PNG prefix instead of classifying partial bytes', () => {
+    // Only the first 4 signature bytes — below the required 8-byte PNG
+    // signature minimum ⇒ jpeg default, not image/png.
+    const truncatedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64');
+    expect(sniffImageMimeType(truncatedPng)).toBe('image/jpeg');
+  });
+
+  it('FIX-F: rejects non-canonical base64 even with a valid magic prefix', () => {
+    // Valid PNG header bytes, then an ILLEGAL character ('*') injected —
+    // the canonical-alphabet gate must fire before any decoding.
+    const good = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    ]).toString('base64');
+    const poisoned = good.slice(0, -2) + '**';
+    expect(poisoned).not.toBe(good);
+    expect(sniffImageMimeType(poisoned)).toBe('image/jpeg');
+  });
+
+  it('FIX-F: rejects length-not-multiple-of-4 and whitespace-laced input', () => {
+    expect(sniffImageMimeType('abc')).toBe('image/jpeg'); // 3 chars ⇒ %4 !== 0
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(1100)]).toString('base64');
+    // Newlines are common in transported base64 but NOT canonical here.
+    const wrapped = png.slice(0, 40) + '\n' + png.slice(40);
+    expect(sniffImageMimeType(wrapped)).toBe('image/jpeg');
   });
 });
 

@@ -232,6 +232,26 @@ describe('fieldMatches normalization rules', () => {
     // Labeled fields still score normally.
     expect(fieldMatches('productName', pred({ productName: 'wormeze liquid' }), partialLabel)).toBe(true);
   });
+
+  it('FIX-G round 2: an omitted label field aggregates to comparable === 0 (never scored)', () => {
+    // Label covers ONLY productName; every other OCR field is omitted.
+    const entries = [{ id: 'e1', expected: { productName: 'Wormeze Liquid' } as unknown as GoldenOcrExpected }];
+    const outcomes = [
+      outcome(true, pred({ productName: 'Wormeze Liquid', brand: 'Acme', weight: '5 lb' })),
+    ];
+    const report = aggregateCandidateReport('candidate', outcomes, {
+      baselineModel: 'baseline',
+      datasetEntries: entries,
+    });
+    // Labeled field scores; omitted fields have ZERO comparable samples —
+    // they must never enter match rates or the hallucination denominator.
+    expect(report.fieldMatch.productName.comparable).toBe(1);
+    expect(report.fieldMatch.brand.comparable).toBe(0);
+    expect(report.fieldMatch.weight.comparable).toBe(0);
+    expect(report.fieldMatch.material.comparable).toBe(0);
+    expect(report.fieldMatch.claims.comparable).toBe(0);
+    expect(report.fieldMatch.brand.rate).toBeNull();
+  });
 });
 
 // ─── aggregation + gate ───────────────────────────────────────────────────────

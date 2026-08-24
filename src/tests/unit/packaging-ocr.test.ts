@@ -237,14 +237,19 @@ describe('coercePackagingOcrData', () => {
     expect(result!.count).toBe('12');
   });
 
-  it('leaves array placeholder handling unchanged (scalars only)', () => {
+  it('drops placeholder entries from arrays too (FIX-D round 2)', () => {
     const result = coercePackagingOcrData({
       productName: 'Test',
       visibleTextLines: ['NA', 'REAL LINE'],
+      claims: ['NULL', 'none', 'Unknown', 'REAL CLAIM'],
+      ingredients: ['N/A', 'chicken'],
     });
     expect(result).not.toBeNull();
-    // Arrays keep their own trimming/filtering semantics.
-    expect(result!.visibleTextLines).toEqual(['NA', 'REAL LINE']);
+    // Placeholder entries are VLM non-answers — dropped like scalar
+    // placeholders; a placeholder-only array normalizes to empty.
+    expect(result!.visibleTextLines).toEqual(['REAL LINE']);
+    expect(result!.claims).toEqual(['REAL CLAIM']);
+    expect(result!.ingredients).toEqual(['chicken']);
   });
 
   it('returns null for invalid input that fails schema validation', () => {
@@ -293,5 +298,40 @@ describe('mergeOcrResults', () => {
     expect((merged as { contentHash?: string | null }).contentHash).toBe('a'.repeat(64));
     expect(merged.productName).toBe('Primary Name');
     expect(merged.species).toEqual(['cat']);
+  });
+
+  it('merges two UPC-only results without discarding the barcode (FIX-C round 2)', () => {
+    const base = {
+      productName: null,
+      brand: null,
+      species: [],
+      upc: null,
+      flavorVariety: null,
+      color: null,
+      material: null,
+      size: null,
+      weight: null,
+      count: null,
+      lifeStage: null,
+      breedSize: null,
+      productForm: null,
+      healthConcernFunction: [],
+      dietaryLabels: [],
+      ingredients: [],
+      ingredientKeywords: [],
+      claims: [],
+      visibleTextLines: [],
+      confidenceByField: {},
+      metadata: null,
+      contentHash: null,
+    };
+    const first = { ...base, upc: '035585507101' } as PackagingOcrData & { contentHash: string | null };
+    const second = { ...base, upc: null } as PackagingOcrData & { contentHash: string | null };
+
+    const merged = mergeOcrResults([first, second]);
+    // Before FIX-C `upc` was missing from the scalar merge list, so the merge
+    // produced an all-null result and callers discarded the transcription.
+    expect(merged.upc).toBe('035585507101');
+    expect(merged.productName).toBeNull();
   });
 });

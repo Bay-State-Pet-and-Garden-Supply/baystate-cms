@@ -107,6 +107,21 @@ function resolveEntryImageBytes(entry: GoldenOcrEntry, datasetDir?: string): Buf
 }
 
 /**
+ * FIX-E review round 2: bounded redaction for a REJECTED eval candidate URL.
+ * Keeps scheme://host[:port]; strips path, userinfo, and query/search so a
+ * credential- or token-bearing URL can never land in an error message or log.
+ * Unparseable input degrades to a fixed note (no raw echo).
+ */
+function redactCandidateBaseUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host} (path/userinfo/query redacted)`;
+  } catch {
+    return '(unparseable baseUrl)';
+  }
+}
+
+/**
  * Evaluate all candidates sequentially against the frozen dataset.
  *
  * Accepts either a pre-loaded dataset object or raw JSON text (which is
@@ -141,10 +156,12 @@ export async function evaluateCandidatesAgainstGolden(
   // Post-review security fixup (eval loopback-only): every candidate baseUrl
   // must resolve to THIS machine BEFORE any golden image is staged or any
   // transport call is made. The harness contract is strictly local-only.
+  // FIX-E review round 2: the rejection message carries a BOUNDED redaction
+  // (scheme://host[:port] only) — never userinfo or query strings.
   for (const candidate of options.candidates) {
     if (!isLoopbackBaseUrl(candidate.baseUrl)) {
       throw new Error(
-        `OCR eval candidate "${candidate.label ?? candidate.model}" has a non-loopback baseUrl (${candidate.baseUrl}); the evaluation harness may only target loopback endpoints.`,
+        `OCR eval candidate "${candidate.label ?? candidate.model}" has a non-loopback baseUrl (${redactCandidateBaseUrl(candidate.baseUrl)}); the evaluation harness may only target loopback endpoints.`,
       );
     }
   }

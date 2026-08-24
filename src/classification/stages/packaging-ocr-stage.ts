@@ -413,7 +413,12 @@ export const packagingOcrStage: StageDefinition = {
       return succeededEmpty({ ocrOutcome, shadowOnly: flags.packagingOcrStageShadowOnly });
     }
 
-    const vlmConfig = getVlmConfig();
+    // FIX-B review round 2: mutable settings are read ONLY for legacy
+    // (snapshot-less) callers. A run-bound leg's availability comes from the
+    // FROZEN plan entry alone, and the reported model never falls back to
+    // the mutable setting — a snapshot-bound disabled outcome must not leak
+    // whatever `ollama_vlm` happens to hold mid-run.
+    const vlmConfig = context.snapshot ? null : getVlmConfig();
     // Frozen-route authority: when a run snapshot is bound, local-VLM
     // availability derives from the FROZEN plan entry only — mutable
     // `ollama_vlm` settings never enable or disable a run-bound OCR leg.
@@ -564,7 +569,10 @@ export const packagingOcrStage: StageDefinition = {
       status: overallStatus,
       localStatus,
       cloudStatus,
-      model: packagingOcrData?.metadata?.model ?? frozenPlanEntry?.localVlmModel ?? vlmConfig?.model ?? null,
+      // FIX-B review round 2: snapshot-bound runs report the model from OCR
+      // metadata or the frozen plan entry ONLY — never the mutable setting.
+      model: packagingOcrData?.metadata?.model
+        ?? (context.snapshot ? (frozenPlanEntry?.localVlmModel ?? null) : (vlmConfig?.model ?? null)),
       imageCount: imageUrls.length,
       ...(localFailureReason ? { localFailureReason } : {}),
       ...(localAttempts > 0 ? { attempts: localAttempts } : {}),
