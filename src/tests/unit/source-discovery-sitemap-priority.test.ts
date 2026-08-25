@@ -53,7 +53,7 @@ describe('Source Discovery - Local Brand URL Index Priority', () => {
       return new Response('Not Found', { status: 404 });
     };
 
-    // 3. Execute discoverSources without Serper API key configured
+    // 3. Execute discoverSources with no external search dependency
     const result = await discoverSources(
       '038100130839',
       'Purina Pro Plan Puppy Chicken & Rice',
@@ -72,7 +72,7 @@ describe('Source Discovery - Local Brand URL Index Priority', () => {
     expect(economics.localHitCount).toBe(1);
   });
 
-  it('should satisfy discovery locally using enriched metadata without calling Serper', async () => {
+  it('should satisfy discovery locally using enriched metadata without any external search API', async () => {
     upsertBrandSite('KONG', 'kongcompany.com');
 
     reconcileSitemapUrls(

@@ -97,18 +97,25 @@ function fixtureWorker(workspaceId: string, workspacePath: string): OnboardingWo
  * legitimately continues an item that just advanced (sourcing → discovery):
  * the discovery stage claims it and runs the discovery leg. Discovery runs
  * entirely against local brand-domain indexes, so offline it completes
- * deterministically (needs_input_no_candidates) without any external search
- * key. Poll + drain cycles settle every promise so the terminal state is a
+ * deterministically (needs_input_no_candidates / needs_input_setup) without
+ * any external search key.
+ * Poll + drain cycles settle every promise so the terminal state is a
  * settled discovery/completed (the in_progress window is transient).
  * (requeueStaleInProgressItems runs at worker start(), not per poll — this
  * suite never relies on it.)
  */
-async function settle(worker: OnboardingWorker): Promise<void> {
-  // EXACTLY ONE poll + drain: after one cycle the sourcing outcome is
-  // terminal and the same-poll discovery continuation has settled the item
-  // at its deterministic discovery outcome.
-  await worker.poll();
-  await worker.drain();
+async function settle(worker: OnboardingWorker, cycles = 1): Promise<void> {
+  // Bounded poll + drain cycles. One cycle mirrors the legacy single-pass
+  // contract. A second cycle is needed only when cycle 1 ends with the item
+  // queued at discovery/pending (the same-poll discovery continuation is
+  // skipped by the running guard): the next claim settles it at its
+  // deterministic offline outcome (needs_input_no_candidates /
+  // needs_input_setup). No retry escalation is possible because offline
+  // discovery never throws.
+  for (let cycle = 0; cycle < cycles; cycle++) {
+    await worker.poll();
+    await worker.drain();
+  }
 }
 
 // ─── Suite ─────────────────────────────────────────────────────────────────────
@@ -226,7 +233,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
   test('2. flag ON: new import enters Sourcing; zero enabled connections passes to Discovery with an audited decision', async () => {
     const { item } = makeItem('012345678902', 'Zero Conn');
 
-    await settle(new OnboardingWorker(workspaceId, tempDir));
+    await settle(new OnboardingWorker(workspaceId, tempDir), 2);
 
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
@@ -261,7 +268,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     seedFound(item.id, item.upc, gen.id, 'phillips', { upc: item.upc, attributes: { size: '10 lb' } });
     seedFound(item.id, item.upc, gen.id, 'bci', { upc: item.upc, attributes: { size: '20 lb' } });
 
-    await settle(new OnboardingWorker(workspaceId, tempDir));
+    await settle(new OnboardingWorker(workspaceId, tempDir), 2);
 
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
@@ -324,7 +331,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     seedFound(item.id, item.upc, current.id, 'phillips', { upc: item.upc, attributes: { size: '10 lb' } });
     seedFound(item.id, item.upc, current.id, 'bci', { upc: item.upc, attributes: { size: '10 lb' } });
 
-    await settle(new OnboardingWorker(workspaceId, tempDir));
+    await settle(new OnboardingWorker(workspaceId, tempDir), 2);
 
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');

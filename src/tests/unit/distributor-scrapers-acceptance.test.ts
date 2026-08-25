@@ -559,8 +559,13 @@ describe('Distributor Scrapers offline acceptance (M7, Amendment B)', () => {
     expect(identity.description).toBeTruthy(); // v2 merchandising observable in shadow mode
 
     const after = findItemById(item.id);
+    // Observe mode itself performs zero transitions — the item then flows
+    // through discovery, which deterministically parks it as needs-review
+    // (no brand hint → no mapped domain → no candidates) instead of failing
+    // offline like the old Serper-key path did.
     expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expect(after?.stageStatus).toBe('completed');
+    expect(after?.errorMessage ?? '').toContain('No matching product pages found');
     expect(after?.sourcingDecision).toBeNull();
     const acceptanceRows = getDb().query('SELECT COUNT(*) AS c FROM onboarding_item_evidence_acceptances WHERE item_id = ?').get(item.id) as { c: number };
     expect(acceptanceRows.c).toBe(0);

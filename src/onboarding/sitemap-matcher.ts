@@ -25,9 +25,8 @@
  *   - Fallback   → 0.7 + 0.25 * tokenOverlapRatio  (matchType: 'token_overlap')
  *
  * `sourceMethod` is `'sitemap_upc'` for the UPC pass and `'sitemap_name'`
- * for the filtered/token/LLM passes. This mirrors the `serper_upc` vs
- * `serper_name` naming used in `source-discovery.ts` so downstream
- * consumers can distinguish how a candidate was discovered.
+ * for the filtered/token/LLM passes, so downstream consumers can
+ * distinguish how a candidate was discovered.
  */
 
 import { callLlmForTask, getLlmConfigForTask } from './llm-client';
@@ -84,8 +83,8 @@ const GENERIC_PRODUCT_PATH_RE =
  *
  * @param sitemapUrls       Full list of URLs pulled from the domain's sitemap.
  * @param itemName          The raw catalog name from the spreadsheet row.
- * @param consolidatedName  The LLM/LCS-consolidated name from Serper Pass 1
- *                          (may be null when consolidation was unavailable).
+ * @param consolidatedName  Optional previously consolidated clean name hint
+ *                          (may be null when no hint is available).
  * @param upc               The product UPC/barcode.
  * @param domain            The brand/retailer domain (for diagnostics).
  * @param productUrlPattern Optional regex string from the extractor profile.

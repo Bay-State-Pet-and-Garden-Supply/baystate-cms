@@ -14,8 +14,10 @@
  *   re-queues discovery;
  * - both reject non-Discovery items and fail closed cross-workspace (404).
  *
- * Offline-only: no Serper key exists in the test DB, so the background
- * worker's discovery attempt fails fast and deterministically — the re-queue
+ * Offline-only: discovery runs entirely against local brand-domain indexes
+ * and sitemaps — no search API key exists in the test DB. The background
+ * worker's discovery attempt therefore settles deterministically (setup
+ * hold or zero-candidate completion) without external calls, and the re-queue
  * contract asserted here (stage stays discovery, flat status 'imported',
  * stage_status pending-or-claimed) is written synchronously by the routes.
  */

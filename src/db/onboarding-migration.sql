@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS onboarding_sources (
   domain TEXT,
   confidence REAL NOT NULL DEFAULT 0.0,
   is_selected INTEGER NOT NULL DEFAULT 0,
-  source_method TEXT NOT NULL DEFAULT 'serper',
+  source_method TEXT NOT NULL DEFAULT 'unknown',
   metadata_json TEXT,
   created_at TEXT NOT NULL
 );

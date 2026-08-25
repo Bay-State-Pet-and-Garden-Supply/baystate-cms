@@ -329,7 +329,10 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
     const { item } = makeItem('012345678901', 'Malformed Item', 'discovery');
     await settle(fixtureWorker(workspaceId, tempDir));
     expect(findItemById(item.id)?.stage).toBe('discovery');
-    expect(findItemById(item.id)?.stageStatus).toBe('pending');
+    // SERP retirement: offline discovery is deterministic — zero candidates
+    // settles the row at discovery/completed with a needsManualReview flag
+    // instead of the legacy failed-attempt → pending path.
+    expect(findItemById(item.id)?.stageStatus).toBe('completed');
   });
 
   // 4. Observe mutation isolation (found/conflict/error/timeout/repeat polling).

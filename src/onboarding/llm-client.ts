@@ -1266,7 +1266,7 @@ export async function callLlm(
 }
 
 /**
- * Consolidate a canonical product name from Serper search titles and snippets.
+ * Consolidate a canonical product name from search result titles and snippets.
  * Falls back to the LCS algorithm if the LLM is not configured or fails.
  *
  * Uses the `product_name_consolidation` task config when present;

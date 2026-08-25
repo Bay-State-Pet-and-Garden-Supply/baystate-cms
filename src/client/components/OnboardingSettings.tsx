@@ -1,13 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
-  getApiKeys,
-  updateApiKey,
-  deleteApiKey,
   getCurationTargets,
   getClassificationReadiness,
   getOnboardingCapabilities,
 
-  type ApiKeyDisplay,
   type CurationTargetsResponse,
 } from '../onboarding-api';
 import { downloadPagesImport, activatePagesImport } from '../api';
@@ -35,7 +31,6 @@ interface OnboardingSettingsProps {
 }
 
 export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsProps) {
-  const [keys, setKeys] = useState<ApiKeyDisplay[]>([]);
   const [_loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 

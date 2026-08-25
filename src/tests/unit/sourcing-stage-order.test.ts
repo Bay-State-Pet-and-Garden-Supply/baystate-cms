@@ -135,13 +135,16 @@ describe('Sourcing Stage Order & Capability-Gated Entry (Issue #44)', () => {
     const worker = new OnboardingWorker(workspaceId, tempDir);
     await worker.poll();
 
-    // The Discovery leg CLAIMS pending discovery rows — the worker engaged
-    // with the item (retry bookkeeping incremented), unlike Sourcing rows
-    // which are never claimed. The failed attempt (no Serper key in tests)
-    // returns the item to pending — a supported review state, not stranding.
+    // The Discovery leg CLAIMS pending discovery rows and settles them
+    // deterministically offline: with a brand hint but no mapped domain the
+    // preflight halts at needs_input_setup, which parks the item as
+    // discovery/completed with a needsManualReview flag — a supported
+    // review state, not stranding. No retry bookkeeping occurs because
+    // offline discovery never throws.
     const itemAfterPoll = findItemById(items[0].id);
     expect(itemAfterPoll?.stage).toBe('discovery');
-    expect(itemAfterPoll?.retryCount).toBeGreaterThan(0);
+    expect(itemAfterPoll?.stageStatus).toBe('completed');
+    expect(itemAfterPoll?.retryCount).toBe(0);
   });
 
   it('advances every completed Sourcing item to Discovery only (legacy bundle decisions ignored)', () => {

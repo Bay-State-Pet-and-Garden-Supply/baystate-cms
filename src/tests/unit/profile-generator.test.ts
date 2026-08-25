@@ -609,8 +609,8 @@ describe('shouldAttemptProfileGeneration', () => {
     // The "price-only missing" case: when both description AND brand are
     // present, the trigger should NOT fire. To model price-only missing,
     // set description and brand present, and the trigger must still
-    // return false because the only thing missing is something the
-    // existing pipeline (supplementPrice) handles. Since the trigger
+    // return false because the only thing missing is something outside
+    // this trigger's scope (profile generation never fills price). Since the trigger
     // checks description+brand missing, it requires AT LEAST one of
     // them to be missing. With both present, no improvement target.
     const priceOnlyInput: ProfileGenerationTriggerInput = {

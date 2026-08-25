@@ -77,7 +77,7 @@ describe('Benchmark Lifecycle & Task Evaluators (PR 4)', () => {
 
   describe('Benchmark Runner & Qualification Engine', () => {
     test('computes eval run result with latency percentiles and failure categories', () => {
-      const run = computeEvalRunResult('gemma4:12b-mlx', 'brand_inference', [
+      const run = computeEvalRunResult('gemma4:12b-mlx', 'product_name_consolidation', [
         { caseId: '1', success: true, validJson: true, latencyMs: 150, promptTokens: 100, completionTokens: 20 },
         { caseId: '2', success: true, validJson: true, latencyMs: 250, promptTokens: 100, completionTokens: 20 },
         { caseId: '3', success: false, validJson: false, latencyMs: 350, promptTokens: 100, completionTokens: 20, failureCategory: 'invalid_json' },
@@ -91,7 +91,7 @@ describe('Benchmark Lifecycle & Task Evaluators (PR 4)', () => {
     });
 
     test('compares candidate run against cloud baseline according to qualification gates', () => {
-      const candidateRun = computeEvalRunResult('gemma4:12b-mlx', 'brand_inference', Array(100).fill(null).map((_, i) => ({
+      const candidateRun = computeEvalRunResult('gemma4:12b-mlx', 'product_name_consolidation', Array(100).fill(null).map((_, i) => ({
         caseId: `c_${i}`,
         success: true,
         validJson: true,
@@ -100,7 +100,7 @@ describe('Benchmark Lifecycle & Task Evaluators (PR 4)', () => {
         completionTokens: 20,
       })));
 
-      const baselineRun = computeEvalRunResult('deepseek-v4-flash', 'brand_inference', Array(100).fill(null).map((_, i) => ({
+      const baselineRun = computeEvalRunResult('deepseek-v4-flash', 'product_name_consolidation', Array(100).fill(null).map((_, i) => ({
         caseId: `c_${i}`,
         success: true,
         validJson: true,
@@ -119,12 +119,12 @@ describe('Benchmark Lifecycle & Task Evaluators (PR 4)', () => {
     });
 
     test('disqualifies candidate model when JSON validity is below 99%', () => {
-      const candidateRun = computeEvalRunResult('flaky-model', 'brand_inference', [
+      const candidateRun = computeEvalRunResult('flaky-model', 'product_name_consolidation', [
         { caseId: '1', success: true, validJson: true, latencyMs: 100, promptTokens: 50, completionTokens: 10 },
         { caseId: '2', success: false, validJson: false, latencyMs: 100, promptTokens: 50, completionTokens: 10, failureCategory: 'invalid_json' },
       ]);
 
-      const baselineRun = computeEvalRunResult('deepseek-v4-flash', 'brand_inference', [
+      const baselineRun = computeEvalRunResult('deepseek-v4-flash', 'product_name_consolidation', [
         { caseId: '1', success: true, validJson: true, latencyMs: 200, promptTokens: 50, completionTokens: 10 },
         { caseId: '2', success: true, validJson: true, latencyMs: 200, promptTokens: 50, completionTokens: 10 },
       ]);

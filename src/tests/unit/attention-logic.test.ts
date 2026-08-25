@@ -228,8 +228,9 @@ describe('candidate presentation', () => {
 
   it('labels source methods', () => {
     expect(candidateMethodLabel('shopify_variant')).toBe('Variant match');
-    expect(candidateMethodLabel('serper_name')).toBe('Name search');
-    expect(candidateMethodLabel('serper_upc')).toBe('UPC search');
+    // SERP retirement: legacy serper_* methods collapse to one honest label.
+    expect(candidateMethodLabel('serper_name')).toBe('Legacy web search');
+    expect(candidateMethodLabel('serper_upc')).toBe('Legacy web search');
     expect(candidateMethodLabel('sitemap')).toBe('Sitemap match');
     expect(candidateMethodLabel('manual')).toBe('Manually added');
     expect(candidateMethodLabel(null)).toBe('Search result');
@@ -249,7 +250,7 @@ describe('candidate presentation', () => {
       reviewStatus: 'pending',
       createdAt: '2026-01-01T00:00:00.000Z',
     });
-    expect(why).toContain('Found via UPC search');
+    expect(why).toContain('Found via Legacy web search');
     expect(why).toContain('90% confidence');
 
     const withRecommendation = candidateWhy({

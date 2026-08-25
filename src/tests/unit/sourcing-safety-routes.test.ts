@@ -65,6 +65,19 @@ function importPayload(rows: Array<Record<string, string>>) {
   };
 }
 
+/**
+ * SERP retirement: the re-queue routes fire a detached (non-awaited)
+ * worker poll. Offline discovery is deterministic and never throws, so by
+ * assertion time the moved row is either still queued at discovery/pending
+ * (poll not finished) or already settled at discovery/completed with a
+ * needsManualReview flag (zero candidates / no domain mapped). Neither
+ * state strands the item — that invariant is what these suites assert.
+ */
+function expectDiscoveryRequeueState(item: { stage?: string | null; stageStatus?: string | null } | undefined): void {
+  expect(item?.stage).toBe('discovery');
+  expect(['pending', 'completed']).toContain(item?.stageStatus);
+}
+
 describe('Sourcing stage safety routes (engine disabled)', () => {
   beforeAll(() => {
     try { resetDb(); } catch { /* ok */ }
@@ -203,8 +216,7 @@ describe('Sourcing stage safety routes (engine disabled)', () => {
       // Observe mode never claims Sourcing; an in-place reset would strand the
       // row at sourcing/pending. The audited fallback moves it to Discovery.
       const after = findItemById(item.id);
-      expect(after?.stage).toBe('discovery');
-      expect(after?.stageStatus).toBe('pending');
+      expectDiscoveryRequeueState(after);
       expect(after?.sourcingDecision?.route).toBe('fallback_to_discovery');
     } finally {
       resetSourcingFlagsOverride();
@@ -226,8 +238,7 @@ describe('Sourcing stage safety routes (engine disabled)', () => {
       expect(res.status).toBe(200);
 
       const after = findItemById(item.id);
-      expect(after?.stage).toBe('discovery');
-      expect(after?.stageStatus).toBe('pending');
+      expectDiscoveryRequeueState(after);
       expect(after?.sourcingDecision?.route).toBe('fallback_to_discovery');
     } finally {
       resetSourcingFlagsOverride();
@@ -264,16 +275,16 @@ describe('Sourcing stage safety routes (engine disabled)', () => {
 
     for (const id of [items[0].id, items[1].id]) {
       const item = findItemById(id);
-      expect(item?.stage).toBe('discovery');
-      expect(item?.stageStatus).toBe('pending');
+      expectDiscoveryRequeueState(item);
       expect(item?.sourcingDecision?.route).toBe('fallback_to_discovery');
       expect(item?.sourcingDecision?.origin).toBe('operator_override');
       expect(item?.sourcingDecision?.acceptedEvidenceAttemptIds).toEqual([]);
-      expect(item?.errorMessage).toBeNull();
-      // retry_count was reset to 0 by the transition; the worker then engages
-      // immediately (its poll runs inside the endpoint) and may already have
-      // bumped it via the failed Discovery attempt — the retry-reset contract
-      // itself is asserted at the repository level without a worker.
+      // Pre-poll the transition leaves no error; post-poll the deterministic
+      // zero-candidate completion records its review note here.
+      expect([null, 'No matching product pages found']).toContain(item?.errorMessage);
+      // retry_count was reset to 0 by the transition; offline discovery is
+      // deterministic (never throws), so the detached endpoint poll settles
+      // the row without any retry bookkeeping.
     }
     const completed = findItemById(items[2].id);
     expect(completed?.stage).toBe('sourcing');
@@ -317,8 +328,7 @@ describe('Sourcing stage safety routes (engine disabled)', () => {
     expect(body.moved).toEqual([item.id]);
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expectDiscoveryRequeueState(after);
     expect(after?.sourcingDecision?.route).toBe('fallback_to_discovery');
   });
 
@@ -332,8 +342,7 @@ describe('Sourcing stage safety routes (engine disabled)', () => {
     expect(res.status).toBe(200);
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expectDiscoveryRequeueState(after);
     expect(after?.sourcingDecision?.route).toBe('fallback_to_discovery');
   });
 
@@ -422,8 +431,7 @@ describe('Sourcing stage safety routes (engine disabled)', () => {
     expect(body.advanced).toBe(1);
 
     const after = findItemById(item.id);
-    expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expectDiscoveryRequeueState(after);
   });
 });
 

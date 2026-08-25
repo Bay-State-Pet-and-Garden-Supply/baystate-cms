@@ -1203,14 +1203,6 @@ export function updateItemCurationData(id: string, curationDataJson: string): vo
   ).run(curationDataJson, now, id);
 }
 
-export function updateItemExpectedName(id: string, expectedName: string | null): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-  db.query(
-    'UPDATE onboarding_items SET expected_name = ?, updated_at = ? WHERE id = ?',
-  ).run(expectedName, now, id);
-}
-
 export function updateItemBrandHint(id: string, brandHint: string | null): void {
   const db = getDb();
   const now = new Date().toISOString();
