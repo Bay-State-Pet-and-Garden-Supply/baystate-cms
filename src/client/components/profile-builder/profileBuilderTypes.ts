@@ -154,6 +154,7 @@ export interface ProfileBuilderState {
   snapshot: SnapshotResponse | null;
   pageHtml: string | null;
   samples: ValidationSample[];
+  sampleCaptures?: Record<string, { html: string; dom: string }>;
   validation: ValidateResponse | null;
   extractionPreview: ExtractorTestResult | null;
   generation: SelectorGenerationState;
@@ -185,6 +186,7 @@ export interface ProfileBuilderProps {
   initialDomain?: string;
   initialProductUrl?: string;
   initialCapture?: CaptureArtifactLite | null;
+  validationSamples?: string[];
   mode?: 'inline' | 'modal';
   onSaved?: (profile: ExtractorProfile) => void;
   onCancel?: () => void;

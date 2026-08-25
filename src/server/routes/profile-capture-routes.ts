@@ -16,9 +16,12 @@ profileCaptureRoutes.post('/capture', async (c) => {
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
   try {
     const result = await captureProfilePage(parsed.data);
-    // do not return raw base64 in API — return ref; persist server-side already done
-    const { screenshotBase64: _omit, ...rest } = result as any;
-    return c.json({ ok: true, ...rest, screenshotRef: (result as any).screenshotRef ?? null });
+    return c.json({
+      ok: true,
+      ...result,
+      screenshotBase64: result.screenshotBase64 ?? '',
+      screenshotRef: (result as any).screenshotRef ?? null,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return c.json({ ok: false, error: msg }, 500);

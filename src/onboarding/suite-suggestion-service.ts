@@ -20,6 +20,18 @@ function isSpamDuplicate(urls: Array<{ url: string }>): Set<string> {
   return new Set();
 }
 
+function isNonProductPath(url: string): boolean {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    if (p === '/' || p === '') return true;
+    if (/\.(md|txt|xml|json|pdf|png|jpg|jpeg|webp|svg|ico|css|js)$/i.test(p)) return true;
+    if (/^\/(agents\.md|robots\.txt|sitemap.*|cart|checkout|account|login|register|privacy|terms|contact|about)(\/|$)/i.test(p)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function getSuiteSuggestion(
   domain: string,
   opts?: { htmlLengths?: Map<string, number> },
@@ -43,6 +55,13 @@ export function getSuiteSuggestion(
   if (failedUrls.size > 0) {
     filtered = filtered.filter(u => !failedUrls.has(u));
     filteredReasons['failed_extraction'] = failedUrls.size;
+  }
+
+  // Non-product URL filter: drop /, /agents.md, /cart, static files, etc.
+  const nonProductUrls = filtered.filter(u => isNonProductPath(u));
+  if (nonProductUrls.length > 0) {
+    filtered = filtered.filter(u => !isNonProductPath(u));
+    filteredReasons['non_product_path'] = nonProductUrls.length;
   }
 
   // Identical-length spam dedupe (acmepet: same len 75799)
@@ -87,6 +106,20 @@ export function getSuiteSuggestion(
       if (variantExtra) suggested.push(variantExtra);
     }
   }
+
+  // If we have fewer than 3 suggestions (e.g. only 1 product cluster), fill up to 3 from available products
+  if (suggested.length < 3) {
+    for (const c of clusters) {
+      for (const u of c.urls) {
+        if (!suggested.includes(u)) {
+          suggested.push(u);
+          if (suggested.length >= 3) break;
+        }
+      }
+      if (suggested.length >= 3) break;
+    }
+  }
+
   // Prioritize most recent: sort by brand_url_index last_sitemap_refresh_at descending if available
   // We keep cluster order deterministic but ensure suggested respects freshness by reordering suggested by recency map
   const recency = new Map(urls.map(r => [r.url, r.last_sitemap_refresh_at] as const));

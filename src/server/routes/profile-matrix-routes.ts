@@ -1,8 +1,9 @@
 // story: e08 Test slice — durable production matrix routes
 import { Hono } from 'hono';
-import { getVersionById, listVersions } from '../../db/repositories/profile-version-repo';
+import { getVersionById, listVersions, updateVersionEvidence } from '../../db/repositories/profile-version-repo';
 import { getRepresentativeSuite } from '../../db/repositories/representative-suite-repo';
 import { runMatrix, getMatrixResult } from '../../onboarding/profile-test-matrix';
+import { runProfileForUrl } from '../../onboarding/profile-runner-client';
 
 export const profileMatrixRoutes = new Hono();
 
@@ -25,37 +26,63 @@ profileMatrixRoutes.post('/domains/:domain/profile/test-matrix', async (c) => {
   if (samples.length === 0) return c.json({ error: 'no samples' }, 400);
   const runner = async (sample: { id: string; url: string; expectedTitle: string }) => {
     try {
-      const { runProfileForUrl } = await import('../../onboarding/profile-runner-client');
+      const sel = (version.selectors ?? {}) as Record<string, any>;
       const profile = {
         id: version.id,
         domain: version.domain,
-        titleSelector: (version.selectors as Record<string, string>).title_selector ?? null,
-        priceSelector: (version.selectors as Record<string, string>).price_selector ?? null,
-        descriptionSelector: (version.selectors as Record<string, string>).description_selector ?? null,
-        brandSelector: (version.selectors as Record<string, string>).brand_selector ?? null,
-        imagesSelector: (version.selectors as Record<string, string>).images_selector ?? null,
-        sitemapProductUrlPattern: null,
-        customSelectors: {},
-        titleOptionalSelectors: [],
-        variantSelectionStrategy: null,
-        runtime: version.runtime as 'static' | 'rendered',
-        shopifyJsonPath: 0,
-        customSelectorMetadata: {},
+        titleSelector: sel.titleSelector ?? sel.title_selector ?? null,
+        priceSelector: sel.priceSelector ?? sel.price_selector ?? null,
+        descriptionSelector: sel.descriptionSelector ?? sel.description_selector ?? null,
+        brandSelector: sel.brandSelector ?? sel.brand_selector ?? null,
+        imagesSelector: sel.imagesSelector ?? sel.images_selector ?? sel.imageSelector ?? sel.image_selector ?? null,
+        sitemapProductUrlPattern: sel.sitemapProductUrlPattern ?? sel.sitemap_product_url_pattern ?? null,
+        customSelectors: sel.customSelectors ?? sel.custom_selectors ?? {},
+        titleOptionalSelectors: sel.titleOptionalSelectors ?? sel.title_optional_selectors ?? [],
+        variantSelectionStrategy: sel.variantSelectionStrategy ?? null,
+        runtime: (version.runtime as 'static' | 'rendered') ?? 'rendered',
+        shopifyJsonPath: sel.shopifyJsonPath ?? 0,
+        customSelectorMetadata: sel.customSelectorMetadata ?? {},
         createdAt: version.createdAt,
         updatedAt: version.createdAt,
       } as unknown as import('../../db/repositories/extractor-profile-repo').ExtractorProfile;
       const res = await runProfileForUrl({ sourceUrl: sample.url, profile, expected: { name: sample.expectedTitle } });
-      if (!res.ok) return { extractedTitle: null, provenance: 'profile_runner_failed', artifactHash: 'no-hash', success: false, failureReason: res.error };
-      const extracted = (res.data as { title?: string | null }).title ?? null;
+      if (!res.ok) return { extractedTitle: null, provenance: 'profile_runner_failed', artifactHash: 'no-hash', success: false, failureReason: res.error, extractedProduct: null };
+      const data = res.data as any;
+      const extracted = data?.title ?? null;
       const success = !!extracted;
       const artifactHash = res.sourceContentHash ?? 'no-hash';
-      const provenance = (res.fieldProvenance as Record<string, string>).title ?? 'profile_selector';
-      return { extractedTitle: extracted, provenance, artifactHash, success, failureReason: success ? null : 'title missing' };
+      const provenance = (res.fieldProvenance as Record<string, string>)?.title ?? 'profile_selector';
+      const allImages = Array.isArray(data?.images) && data.images.length > 0
+        ? data.images
+        : [data?.primaryImage, ...(Array.isArray(data?.additionalImages) ? data.additionalImages : [])].filter(Boolean);
+
+      return {
+        extractedTitle: extracted,
+        provenance,
+        artifactHash,
+        success,
+        failureReason: success ? null : 'title missing',
+        extractedProduct: data ? {
+          title: data.title ?? null,
+          brand: data.brand ?? null,
+          price: data.price ?? null,
+          description: data.description ?? null,
+          images: allImages,
+          customFields: data.customFields ?? {},
+        } : null,
+      };
     } catch (e) {
-      return { extractedTitle: null, provenance: 'runner_error', artifactHash: 'no-hash', success: false, failureReason: String(e) };
+      return { extractedTitle: null, provenance: 'runner_error', artifactHash: 'no-hash', success: false, failureReason: String(e), extractedProduct: null };
     }
   };
   const result = await runMatrix({ domain, draftVersion: versionId, samples, runner });
+  try {
+    const actualHashes = [...new Set(result.rows.flatMap(r => r.cells.map(c => c.artifactHash)))].sort();
+    const sampleIds = result.rows.map(r => r.sampleId);
+    updateVersionEvidence(versionId, { sampleIds, artifactHashes: actualHashes });
+  } catch (_e) {
+    // Non-fatal if DB update fails in test/fallback env
+  }
   return c.json(result);
 });
 

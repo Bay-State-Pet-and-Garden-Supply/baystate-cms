@@ -407,7 +407,7 @@ describe('domain-level extraction release (epic #46 Phase 4/8)', () => {
 describe('approval is durable and never implies export', () => {
   it('approved item stays reviewState approved and category approved until drafts/export', () => {
     const batchId = makeBatch();
-    const id = createItem(batchId, { upc: 'E1', name: 'X', stage: 'review', stageStatus: 'completed' });
+    const id = createItem(batchId, { upc: 'E1', name: 'X', stage: 'review', stageStatus: 'completed', curationDataJson: JSON.stringify({ suggestedPages: ['Some Category Page'] }) });
     markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
     markApproved({ itemId: id, batchId, approvedBy: 'manager' });
     // The approval path advances review → promotion automatically.

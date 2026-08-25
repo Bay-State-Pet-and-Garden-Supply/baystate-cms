@@ -7,6 +7,7 @@ import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { startSourcingGeneration } from '../../db/repositories/onboarding-evidence-repo';
 import { listConflictsForItem } from '../../db/repositories/onboarding-conflict-repo';
 import { reconcileDistributorEvidence, evaluateDistributorEvidence } from '../../onboarding/sourcing-reconciler';
+import { SourcingDecisionV2Schema } from '../../shared/schemas/onboarding';
 import type { EvidenceAttempt } from '../../shared/schemas/distributor-evidence';
 
 function makeAttempt(
@@ -406,5 +407,53 @@ describe('Sourcing evidence reconciler (ADR 0014)', () => {
     const unknown = await reconcileDistributorEvidence(itemId, [a1], generationId);
     expect(unknown.hasUnknownVariantAxis).toBe(true);
     expect(unknown.acceptedAttemptIds).toEqual(['a1']);
+  });
+
+  test('auto-resolved warnings for long text fields (description, images) are capped <= 500 characters and pass V2 decision schema', async () => {
+    const longDesc1 = 'A'.repeat(800);
+    const longDesc2 = 'B'.repeat(800);
+    const longImages1 = Array.from({ length: 15 }, (_, i) => `https://example.com/cdn/products/high_res_image_variant_${i}_catalog_asset.jpg`);
+    const longImages2 = Array.from({ length: 15 }, (_, i) => `https://other.com/assets/images/variant_${i}_photo.png`);
+
+    const a1 = makeAttempt('a1', 'bradley', {
+      upc: '012345678905',
+      brand: 'Nutro',
+      description: longDesc1,
+      images: longImages1,
+    });
+    const a2 = makeAttempt('a2', 'central_pet', {
+      upc: '012345678905',
+      brand: 'Nutro',
+      description: longDesc2,
+      images: longImages2,
+    });
+
+    const result = await reconcileDistributorEvidence(itemId, [a1, a2], generationId);
+
+    expect(result.hasHardIdentityConflict).toBe(false);
+    expect(result.softConflictCount).toBeGreaterThan(0);
+    expect(result.warnings.length).toBeGreaterThan(0);
+
+    for (const w of result.warnings) {
+      expect(w.length).toBeLessThanOrEqual(500);
+    }
+
+    const decision = {
+      schemaVersion: 2,
+      route: 'distributor_record_to_extraction' as const,
+      origin: 'automatic_policy' as const,
+      acceptedEvidenceAttemptIds: result.acceptedAttemptIds,
+      providerIds: result.providerIds,
+      sourcingGenerationId: generationId,
+      evidenceHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      sourceType: 'distributor_record' as const,
+      target: 'extraction' as const,
+      conflicts: [],
+      warnings: result.warnings,
+      decidedAt: new Date().toISOString(),
+    };
+
+    const parseResult = SourcingDecisionV2Schema.safeParse(decision);
+    expect(parseResult.success).toBe(true);
   });
 });

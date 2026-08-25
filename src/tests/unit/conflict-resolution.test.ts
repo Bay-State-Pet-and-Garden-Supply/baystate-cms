@@ -476,7 +476,7 @@ describe('Conflict Resolution & Multi-Conflict Stage Isolation Tests', () => {
 
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
-    expect(after?.sourcingDecision?.route).toBe('evidence_to_discovery');
+    expect(after?.sourcingDecision?.route).toBe('fallback_to_discovery');
     expect(after?.sourceType).toBe('official_page');
   });
 
@@ -505,7 +505,7 @@ describe('Conflict Resolution & Multi-Conflict Stage Isolation Tests', () => {
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
     expect(after?.stageStatus).toBe('pending');
-    expect(after?.sourcingDecision?.route).toBe('evidence_to_discovery');
+    expect(after?.sourcingDecision?.route).toBe('fallback_to_discovery');
     expect(after?.sourceType).toBe('official_page');
   });
 

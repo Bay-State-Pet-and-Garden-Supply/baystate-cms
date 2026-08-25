@@ -1,6 +1,7 @@
 import { extractProductJsonFromHtml } from './shopify-json';
 import { diffRegisterVsExpected, tokenSet } from './variant-resolver';
 import type { InsertSourceData } from '../db/repositories/onboarding-source-repo';
+import type { VariantUrlInput } from '../db/repositories/brand-url-index-repo';
 
 export interface VariantResolutionContext {
   upc: string;
@@ -196,6 +197,27 @@ export function resolveVariantsFromHtml(
       url: buildVariantUrl(baseUrl, String(v.id)),
     };
   });
+
+  // Background indexing of variant URLs and their barcodes/SKUs into local brand URL index
+  try {
+    const parsedUrl = new URL(baseUrl);
+    const domain = parsedUrl.hostname;
+    const variantInputs: VariantUrlInput[] = candidates.map(c => ({
+      url: c.url,
+      baseUrl,
+      title: c.title ? `${productJson.title || ''} - ${c.title}`.trim().replace(/^-\s*/, '') : null,
+      upc: c.barcode || null,
+      sku: c.sku || null,
+      brand: context.brandHint || productJson.vendor || null,
+      variantTokens: [c.option1, c.option2, c.option3].filter(Boolean) as string[],
+      price: c.price,
+    }));
+    import('../db/repositories/brand-url-index-repo')
+      .then(mod => mod.indexVariantUrls(domain, variantInputs))
+      .catch(() => {});
+  } catch {
+    // Non-critical background index update
+  }
 
   // Extract hints and specific variant tokens from expected context
   const hints = diffRegisterVsExpected(context.rawName, context.expectedName, context.brandHint);

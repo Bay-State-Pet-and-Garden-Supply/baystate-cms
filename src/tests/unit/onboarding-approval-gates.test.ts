@@ -222,6 +222,42 @@ describe('consequential edit reopens approved promotion items (epic #46 audit fi
     const promoteBody = await promoteRes.json();
     expect(promoteBody.failures[0]?.reason).toBe('approval_invalidated');
   });
+
+  // e10s02 (review full-field form): quantity became a reviewer-editable
+  // official-page field, so it must be CONSEQUENTIAL — a quantity edit
+  // invalidates durable review exactly like name/price edits.
+  it('treats quantity edits as consequential (e10s02): invalidates durable review', async () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'P8', name: 'X', stage: 'promotion', stageStatus: 'pending' });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+    markApproved({ itemId: id, batchId, approvedBy: 'manager' });
+
+    const res = await makeApp().request(`/api/onboarding/items/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quantity: 12 }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(findItemById(id)!.quantity).toBe(12);
+    const state = getReviewState(id)!;
+    expect(state.reviewInvalidatedAt).not.toBeNull();
+    expect(state.approvedAt).toBeNull();
+  });
+
+  it('stores unparseable quantity edits as null rather than garbage (e10s02)', async () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'P9', name: 'X', stage: 'review', stageStatus: 'pending' });
+
+    const res = await makeApp().request(`/api/onboarding/items/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quantity: 'many' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(findItemById(id)!.quantity).toBeNull();
+  });
 });
 
 function getBatchIdOf(item: { batchId: string }): string {

@@ -87,7 +87,6 @@ export const CORE_FIELDS: readonly FieldDefinition[] = [
 // ─── Standard Custom Fields (stored in customSelectors JSON) ─────────────────
 
 export const STANDARD_CUSTOM_FIELDS: readonly FieldDefinition[] = [
-  { key: 'skuSelector', label: 'SKU', outputTarget: 'customFields', valueType: 'text', cardinality: 'single', category: 'identity' },
   { key: 'ingredientsSelector', label: 'Ingredients', outputTarget: 'customFields', valueType: 'text', cardinality: 'single', category: 'nutrition' },
   { key: 'guaranteedAnalysisSelector', label: 'Guaranteed analysis', outputTarget: 'customFields', valueType: 'structured', cardinality: 'single', category: 'nutrition' },
   { key: 'caloriesSelector', label: 'Calories', outputTarget: 'customFields', valueType: 'text', cardinality: 'single', category: 'nutrition' },
@@ -113,7 +112,6 @@ export const FIELD_GROUP_ORDER: readonly FieldCategory[] = [
   'description',
   'nutrition',
   'details',
-  'variants',
 ];
 
 // ─── Label map ──────────────────────────────────────────────────────────────

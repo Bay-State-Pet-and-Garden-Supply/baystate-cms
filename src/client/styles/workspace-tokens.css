@@ -27,8 +27,8 @@
   --color-muted-gold: var(--color-muted-gold);
 
   --grid-cols: 12;
-  --gutter: 24px;
-  --container-max: 1380px;
+  --gutter: 20px;
+  --container-max: 100%;
 
   --font-display: 'Arvo', Georgia, serif;
   --font-body: 'Inter', system-ui, -apple-system, sans-serif;
@@ -50,12 +50,14 @@
 .ws-grid-toggle.is-visible { display: block; }
 
 .ws-container {
-  max-width: var(--container-max);
-  margin: 0 auto;
-  padding: 0 var(--space-3);
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0 24px;
   display: grid;
   grid-template-columns: repeat(12, 1fr);
   gap: var(--gutter);
+  box-sizing: border-box;
 }
 
 @media (max-width: 1024px) {
@@ -63,3 +65,4 @@
   .ws-container > div { grid-column: 1 / -1 !important; }
   .ws-container > div > div[style*="sticky"] { position: static !important; }
 }
+

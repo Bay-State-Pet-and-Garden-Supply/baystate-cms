@@ -149,10 +149,14 @@ describe('ShopSite built-in output policy (issue #17 J)', () => {
     product.core.seo.searchKeywords = '';
     const { xml } = denormalizeProduct(product);
     expect(xml).not.toContain('<SaleAmount>');
-    expect(xml).not.toContain('<ProductDescription>');
     expect(xml).not.toContain('<Weight>');
     expect(xml).not.toContain('<SearchKeywords>');
     expect(xml).not.toContain('<MoreInfoImage1>');
+    // Description is empty → no More Information text or More Info page flag.
+    expect(xml).not.toContain('<MoreInformationText>');
+    expect(xml).not.toContain('<DisplayMoreInformationPage_>');
+    // ProductDescription carries the product NAME per the upload convention.
+    expect(xml).toContain('<ProductDescription><![CDATA[Builtin Policy Product]]></ProductDescription>');
     // Always-emitted fields keep their DTD defaults.
     expect(xml).toContain('<MinimumQuantity>0</MinimumQuantity>');
     expect(xml).toContain('<ProductType>Tangible</ProductType>');

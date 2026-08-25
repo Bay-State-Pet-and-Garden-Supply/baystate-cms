@@ -22,6 +22,7 @@
  */
 
 import type { BayStateSeed } from '../config-generator';
+import { DEFAULT_LOCAL_VISION_MODEL } from '../../shared/vision-model-defaults';
 
 const createdAt = '2026-08-01T12:00:00.000Z';
 
@@ -752,7 +753,7 @@ export const BayStatePetGardenSeed: BayStateSeed = {
 
   modelPolicy: {
     defaultProvider: 'ollama',
-    defaultModel: 'qwen2.5vl:latest',
+    defaultModel: DEFAULT_LOCAL_VISION_MODEL,
     providerLocalities: { ollama: 'local' },
     stageOverrides: {},
     imageDataSharing: 'local_only',

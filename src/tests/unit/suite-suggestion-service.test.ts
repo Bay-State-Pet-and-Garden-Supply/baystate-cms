@@ -71,4 +71,33 @@ describe('getSuiteSuggestion — verifier-filtered (e07s02t02)', () => {
     expect(s.filteredReasons['failed_extraction']).toBe(1);
     expect(s.suggested).not.toContain('https://example.com/products/bad');
   });
+
+  it('filters non-product paths like root /, /agents.md, /cart and static files', () => {
+    const mockFind = vi.mocked(findUrlsByDomain);
+    mockFind.mockReturnValue({
+      urls: [
+        { url: 'https://earthbath.com/products/no-chew-spray', extraction_status: null, last_sitemap_refresh_at: '2026-08-19T10:00:00Z' } as any,
+        { url: 'https://earthbath.com/products/hypo-shampoo', extraction_status: null, last_sitemap_refresh_at: '2026-08-19T11:00:00Z' } as any,
+        { url: 'https://earthbath.com/products/ear-wipes', extraction_status: null, last_sitemap_refresh_at: '2026-08-19T12:00:00Z' } as any,
+        { url: 'https://earthbath.com/agents.md', extraction_status: null, last_sitemap_refresh_at: '2026-08-19T12:00:00Z' } as any,
+        { url: 'https://earthbath.com/', extraction_status: null, last_sitemap_refresh_at: '2026-08-19T12:00:00Z' } as any,
+        { url: 'https://earthbath.com/cart', extraction_status: null, last_sitemap_refresh_at: '2026-08-19T12:00:00Z' } as any,
+      ],
+      total: 6,
+    });
+    const s = getSuiteSuggestion('earthbath.com');
+    // Non-product URLs filtered out
+    expect(s.filteredReasons['non_product_path']).toBe(3);
+    expect(s.clusters.length).toBe(1);
+    expect(s.clusters[0].prefix).toBe('/products');
+    // Fills up to 3 distinct product URLs from /products
+    expect(s.suggested.length).toBe(3);
+    expect(s.suggested).toContain('https://earthbath.com/products/no-chew-spray');
+    expect(s.suggested).toContain('https://earthbath.com/products/hypo-shampoo');
+    expect(s.suggested).toContain('https://earthbath.com/products/ear-wipes');
+    expect(s.suggested).not.toContain('https://earthbath.com/agents.md');
+    expect(s.suggested).not.toContain('https://earthbath.com/');
+    expect(s.suggested).not.toContain('https://earthbath.com/cart');
+  });
 });
+

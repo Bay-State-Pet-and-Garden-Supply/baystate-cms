@@ -126,6 +126,18 @@ describe('normalizeAndValidateCustomFields', () => {
     expect(result).toHaveLength(0);
   });
 
+  it('rejects SKU as a blocked custom field', () => {
+    const rawField = Object.assign(makeRawField(), { proposedKey: 'sku', label: 'SKU' });
+    const result = normalizeAndValidateCustomFields(
+      SIMPLE_PRODUCT_HTML,
+      [rawField],
+      requestedKeys,
+      existingKeys,
+    );
+
+    expect(result).toHaveLength(0);
+  });
+
   it('rejects collisions with requested fields', () => {
     const result = normalizeAndValidateCustomFields(
       SIMPLE_PRODUCT_HTML,
@@ -305,7 +317,7 @@ describe('normalizeAndValidateCustomFields', () => {
     expect(result[0].status).toBe('suggested');
   });
 
-  it('accepts an SKU field', () => {
+  it('blocks SKU / Product SKU fields', () => {
     const result = normalizeAndValidateCustomFields(
       SIMPLE_PRODUCT_HTML,
       [makeRawField({
@@ -317,11 +329,7 @@ describe('normalizeAndValidateCustomFields', () => {
       [],
     );
 
-    // "SKU" is in SEMANTIC_ALIASES under skuSelector, but "Product SKU" label and
-    // "productSku" key may or may not match. Check result.
-    // The alias check is: if requestedKeys includes skuSelector, it's a duplicate.
-    // skuSelector is NOT in requestedKeys, so it should pass through.
-    expect(result).toHaveLength(1);
-    expect(result[0].key).toBe('productSkuSelector');
+    // SKU is blocked: the system uses UPC exclusively and does not extract SKUs.
+    expect(result).toHaveLength(0);
   });
 });

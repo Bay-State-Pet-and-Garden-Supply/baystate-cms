@@ -127,6 +127,19 @@ export function evaluateSelectorLocally(
     };
   }
 
+  // Reject JSON-LD pseudo-selectors.
+  if (trimmed.toLowerCase().startsWith('jsonld:')) {
+    return {
+      status: 'failed',
+      extractedPreview: null,
+      matchCount: 0,
+      warnings: [
+        'Only CSS selectors are supported. JSON-LD pseudo-selectors (jsonld:*) cannot be queried as CSS selectors in the DOM.',
+      ],
+      error: 'Unsupported selector syntax: jsonld:* is not a CSS selector',
+    };
+  }
+
   // Parse and evaluate.
   let doc: Document;
   try {

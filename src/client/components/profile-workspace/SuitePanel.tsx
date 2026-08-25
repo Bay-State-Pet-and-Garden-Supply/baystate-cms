@@ -1,10 +1,12 @@
 // story: e06s02 — guided upstream panel showing Found on site vs You confirmed + waiver
 // story: e07s02 — conservative clustering + suggested reps + operator override
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
+import { colors, fonts, rounded } from '../../theme';
 
 type Inventory = { candidateCount: number; confirmedCount: number; freshness: string | null };
 type Cluster = { key: string; prefix: string; count: number; fingerprint: string; suggestedUrl: string };
 type SuiteResp = { suite: string[]; inventory: Inventory; clusters?: Cluster[]; suggested?: string[]; filtered?: { count: number; reason: string }; overrides?: unknown[] };
+type CatalogItem = { url: string; title: string; cluster: string; lastSeen?: string };
 
 function getDomainPath(url: string): string {
   try {
@@ -16,25 +18,52 @@ function getDomainPath(url: string): string {
 }
 
 function isValidCluster(c: unknown): c is Cluster {
-  return !!c && typeof c === 'object' && 'prefix' in (c as Record<string, unknown>);
+  return Boolean(c && typeof c === 'object' && 'prefix' in (c as Record<string, unknown>));
 }
 
-function hasOverride(overrides: unknown[] | undefined, key: string): boolean {
+function _hasOverride(overrides: unknown[] | undefined, key: string): boolean {
   if (!overrides) return false;
   return overrides.some((o) => (o as Record<string, string>).clusterKey === key);
 }
 
-export function SuitePanel({ domain, suiteResp: propSuiteResp, onRefresh: propRefresh }: { domain: string; suiteResp?: SuiteResp | null; onRefresh?: () => void | Promise<void> }) {
+function debounce<T extends (...a: never[]) => void>(fn: T, ms: number): T {
+  let t: ReturnType<typeof setTimeout> | null = null;
+  const d = ((...a: never[]) => {
+    if (t) clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
+  }) as T;
+  return d;
+}
+
+export function SuitePanel({
+  domain,
+  suiteResp: propSuiteResp,
+  onRefresh: propRefresh,
+  activeUrl,
+  onSelectActive,
+}: {
+  domain: string;
+  suiteResp?: SuiteResp | null;
+  onRefresh?: () => void | Promise<void>;
+  activeUrl?: string | null;
+  onSelectActive?: (url: string) => void | Promise<void>;
+}) {
   const [data, setData] = useState<SuiteResp | null>(propSuiteResp ?? null);
   const [waiverReason, setWaiverReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [waiverSuccess, setWaiverSuccess] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [suggestedPick, setSuggestedPick] = useState<string | null>(null);
   const [overrideInput, setOverrideInput] = useState('');
   const [overrideMsg, setOverrideMsg] = useState<string | null>(null);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCluster, setSelectedCluster] = useState('');
+  const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogLoading, setCatalogLoading] = useState(false);
 
   const load = async () => {
     if (!domain) return;
@@ -53,35 +82,151 @@ export function SuitePanel({ domain, suiteResp: propSuiteResp, onRefresh: propRe
     }
   };
 
+  const fetchCatalog = useCallback(async (q: string, cl: string, p: number) => {
+    if (!domain) return;
+    setCatalogLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (q) params.set('query', q);
+      if (cl) params.set('cluster', cl);
+      params.set('page', String(p));
+      params.set('limit', '10');
+      const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/inventory-picker?${params}`);
+      if (!r.ok) return;
+      const j = await r.json();
+      setCatalogItems(j.items ?? []);
+      setCatalogTotal(j.total ?? 0);
+      setCatalogPage(j.page ?? 1);
+    } catch (_err) {
+      // Catalog fetch non-fatal
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [domain]);
+
+  const debouncedFetchCatalog = useCallback(
+    debounce((q: string, cl: string) => { void fetchCatalog(q, cl, 1); }, 300) as unknown as (q: string, cl: string) => void,
+    [fetchCatalog]
+  );
+
   useEffect(() => {
     if (propSuiteResp !== undefined) { setData(propSuiteResp); return; }
     void load();
   }, [domain, propSuiteResp]);
-  useEffect(() => { if (propSuiteResp !== undefined && propSuiteResp) setData(propSuiteResp); }, [propSuiteResp]);
+
+  useEffect(() => {
+    if (propSuiteResp !== undefined && propSuiteResp) setData(propSuiteResp);
+  }, [propSuiteResp]);
+
+  useEffect(() => {
+    void fetchCatalog('', '', 1);
+  }, [fetchCatalog]);
+
+  useEffect(() => {
+    debouncedFetchCatalog(searchQuery, selectedCluster);
+  }, [searchQuery, selectedCluster, debouncedFetchCatalog]);
 
   if (!domain) return null;
-  if (error)
+  if (error) {
     return (
-      <div role="alert" style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--color-signet-burgundy)', background: 'var(--color-white-surface)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)' }}>
-        {error}{' '}
-        <button type="button" onClick={() => { setError(null); void load(); }} style={{ marginLeft: 8, background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '4px 8px', fontFamily: 'var(--font-body)', fontSize: '0.75rem', cursor: 'pointer' }}>
+      <div
+        role="alert"
+        style={{
+          fontFamily: fonts.body,
+          fontSize: '0.875rem',
+          color: colors.signetBurgundy,
+          background: colors.whiteSurface,
+          border: `1px solid ${colors.signetBurgundy}`,
+          borderLeft: `4px solid ${colors.signetBurgundy}`,
+          borderRadius: rounded.lg,
+          padding: '12px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
+        <span>{error}</span>
+        <button
+          type="button"
+          onClick={() => { setError(null); void load(); }}
+          style={{
+            background: colors.signetBurgundy,
+            color: colors.feedBagCream,
+            border: 'none',
+            borderRadius: rounded.sm,
+            padding: '6px 12px',
+            fontFamily: fonts.body,
+            fontSize: '0.75rem',
+            fontWeight: 700,
+            cursor: 'pointer',
+          }}
+        >
           Retry
         </button>
       </div>
     );
+  }
+
   if (!data || !data.inventory || !Array.isArray(data.suite)) {
-    return <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--color-mulch-brown)', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)' }}>Loading inventory…</div>;
+    return (
+      <div style={{ fontFamily: fonts.body, fontSize: '0.875rem', color: colors.mulchBrown, background: colors.whiteSurface, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.lg, padding: 16 }}>
+        Loading inventory…
+      </div>
+    );
   }
 
   const candidateCount = data.inventory.candidateCount ?? 0;
   const needWaiver = candidateCount < 3 && data.suite.length < 3;
-  const preview = data.suite.slice(0, 3);
-  const remaining = data.suite.length - preview.length;
   const waiverValid = waiverReason.trim().length >= 8;
-
   const clusters = (data.clusters ?? []).filter(isValidCluster);
   const suggested = data.suggested ?? [];
   const filtered = data.filtered;
+
+  const saveSuite = async (urls: string[]) => {
+    const nextUrls = urls.slice(0, 10);
+    // Optimistically update local data immediately for instant responsive UI
+    setData((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        suite: nextUrls,
+        inventory: {
+          ...prev.inventory,
+          confirmedCount: nextUrls.length,
+        },
+      };
+    });
+    try {
+      const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/representative-suite`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: nextUrls, actor: 'operator' }),
+      });
+      if (!res.ok) {
+        setError(await res.text());
+        if (propRefresh) void propRefresh(); else void load();
+      } else {
+        if (propRefresh) void propRefresh();
+        if (nextUrls.length > 0 && (!activeUrl || !nextUrls.includes(activeUrl))) {
+          void onSelectActive?.(nextUrls[0]);
+        }
+      }
+    } catch (e) {
+      setError(String(e));
+      if (propRefresh) void propRefresh(); else void load();
+    }
+  };
+
+  const toggleUrlInSuite = async (url: string) => {
+    const isPresent = data.suite.includes(url);
+    const next = isPresent ? data.suite.filter((x) => x !== url) : [...data.suite, url];
+    await saveSuite(next);
+  };
+
+  const _useSuggested = async () => {
+    if (suggested.length === 0) return;
+    await saveSuite(suggested.slice(0, 3));
+  };
 
   const handleWaiver = async () => {
     if (!waiverValid || submitting) return;
@@ -103,24 +248,6 @@ export function SuitePanel({ domain, suiteResp: propSuiteResp, onRefresh: propRe
       }
     } catch (e) {
       setError(String(e));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const useSuggested = async () => {
-    const pick = suggestedPick ?? suggested[0];
-    if (!pick) return;
-    setSubmitting(true);
-    try {
-      const urls = suggested.length ? suggested : [pick];
-      const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/representative-suite`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls, actor: 'operator' }),
-      });
-      if (!res.ok) setError(await res.text());
-      else if (propRefresh) await propRefresh(); else await load();
     } finally {
       setSubmitting(false);
     }
@@ -154,138 +281,567 @@ export function SuitePanel({ domain, suiteResp: propSuiteResp, onRefresh: propRe
   };
 
   return (
-    <div style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', boxShadow: '0 1px 3px 0 rgba(33,20,20,0.06)', overflow: 'hidden' }}>
-      <div style={{ background: 'var(--color-uniform-green)', color: 'var(--color-feed-bag-cream)', padding: '10px var(--space-2)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span>Upstream — Sitemap inventory</span>
-        <button
-          type="button"
-          aria-label="What is Found vs Confirmed?"
-          aria-expanded={helpOpen}
-          onClick={() => setHelpOpen((v) => !v)}
-          style={{ marginLeft: 'auto', background: 'transparent', color: 'var(--color-feed-bag-cream)', border: '1px solid rgba(250,249,242,0.4)', borderRadius: 'var(--radius-sm)', width: 22, height: 22, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-body)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
-        >
-          ?
-        </button>
+    <div
+      style={{
+        background: colors.whiteSurface,
+        border: `1px solid ${colors.cardBorder}`,
+        borderRadius: rounded.lg,
+        boxShadow: '0 1px 4px rgba(33,20,20,0.06)',
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          background: colors.uniformGreen,
+          color: colors.feedBagCream,
+          padding: '12px 18px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 12,
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+        onClick={() => setCollapsed((v) => !v)}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontFamily: fonts.display, fontSize: 13, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            1. Test Pages
+          </span>
+          <span
+            style={{
+              fontFamily: fonts.mono,
+              fontSize: 11,
+              background: data.suite.length >= 3 ? colors.seedlingGreen : colors.shadowPine,
+              color: colors.feedBagCream,
+              padding: '2px 8px',
+              borderRadius: rounded.sm,
+              border: '1px solid rgba(250,249,242,0.2)',
+            }}
+          >
+            {data.suite.length}/3 Confirmed
+          </span>
+
+          {collapsed && data.suite.length > 0 && (
+            <span style={{ fontSize: 11, color: colors.feedBagCream, opacity: 0.85, marginLeft: 6 }}>
+              ({data.suite.map(getDomainPath).join(', ')})
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            type="button"
+            aria-label="What is Test Pages?"
+            aria-expanded={helpOpen}
+            onClick={(e) => {
+              e.stopPropagation();
+              setHelpOpen((v) => !v);
+            }}
+            style={{
+              background: 'transparent',
+              color: colors.feedBagCream,
+              border: '1px solid rgba(250,249,242,0.4)',
+              borderRadius: rounded.sm,
+              width: 22,
+              height: 22,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontFamily: fonts.body,
+              fontWeight: 700,
+              fontSize: 11,
+              cursor: 'pointer',
+            }}
+          >
+            ?
+          </button>
+
+          <span
+            style={{
+              fontFamily: fonts.body,
+              fontSize: 11,
+              fontWeight: 700,
+              color: colors.feedBagCream,
+              background: 'rgba(250,249,242,0.15)',
+              padding: '3px 8px',
+              borderRadius: rounded.sm,
+            }}
+          >
+            {collapsed ? '▼ Expand' : '▲ Collapse'}
+          </span>
+        </div>
       </div>
-      {helpOpen && (
-        <div style={{ padding: '8px var(--space-2)', background: 'var(--color-feed-bag-cream)', borderBottom: '1px solid var(--color-card-border)', fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)', lineHeight: 1.5 }}>
-          <strong>Found on site</strong> = URLs discovered in sitemap &nbsp;·&nbsp; <strong>You confirmed</strong> = you marked as real products. Need 3 confirmed to activate — <a href="/docs/adr" style={{ color: 'var(--color-uniform-green)', fontWeight: 600 }}>docs/adr</a>
+
+      {!collapsed && (
+        <>
+          {helpOpen && (
+            <div style={{ padding: '10px 16px', background: colors.feedBagCream, borderBottom: `1px solid ${colors.cardBorder}`, fontFamily: fonts.body, fontSize: '0.8125rem', color: colors.ledgerCharcoal, lineHeight: 1.5 }}>
+              Select 3 representative product URLs to verify your profile selectors across multiple products.
+            </div>
+          )}
+
+          {waiverSuccess && (
+            <div role="status" style={{ margin: '12px 16px 0', padding: '8px 12px', background: colors.feedBagCream, border: `1px solid ${colors.signetBurgundy}`, borderLeft: `4px solid ${colors.signetBurgundy}`, borderRadius: rounded.sm, fontFamily: fonts.body, fontSize: '0.8125rem', color: colors.ledgerCharcoal }}>
+              <span style={{ background: colors.signetBurgundy, color: colors.feedBagCream, padding: '2px 6px', borderRadius: rounded.sm, fontSize: '0.7rem', fontWeight: 700, marginRight: 8, textTransform: 'uppercase' }}>
+                Waiver
+              </span>
+              {waiverSuccess}
+            </div>
+          )}
+
+          {overrideMsg && (
+            <div role="status" style={{ margin: '12px 16px 0', padding: '8px 12px', background: 'rgba(22, 132, 77, 0.08)', border: `1px solid ${colors.seedlingGreen}`, borderRadius: rounded.sm, fontFamily: fonts.body, fontSize: '0.8125rem', color: colors.uniformGreen, fontWeight: 600 }}>
+              {overrideMsg}
+            </div>
+          )}
+
+          <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {/* 1. Searchable Product Catalog (Browse all products) */}
+        <div style={{ padding: 14, background: colors.whiteSurface, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.lg }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+            <div>
+              <div style={{ fontFamily: fonts.body, fontSize: 11, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: colors.mulchBrown }}>
+                Search All Product Pages ({catalogTotal.toLocaleString()} found on {domain})
+              </div>
+              <div style={{ fontFamily: fonts.body, fontSize: 12, color: colors.ledgerCharcoal, marginTop: 2 }}>
+                Search or filter product pages across the brand's sitemap:
+              </div>
+            </div>
+          </div>
+
+          {/* Search bar & cluster filter chips */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search product title, slug, or path (e.g. shampoo, spray)..."
+              style={{
+                flex: 1,
+                minWidth: 240,
+                border: `1px solid ${colors.cardBorder}`,
+                borderRadius: rounded.sm,
+                padding: '8px 12px',
+                fontFamily: fonts.body,
+                fontSize: 13,
+                color: colors.ledgerCharcoal,
+                background: colors.whiteSurface,
+              }}
+            />
+
+            {clusters.length > 0 && (
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedCluster('');
+                    void fetchCatalog(searchQuery, '', 1);
+                  }}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: rounded.full,
+                    border: `1px solid ${selectedCluster === '' ? colors.uniformGreen : colors.cardBorder}`,
+                    background: selectedCluster === '' ? colors.uniformGreen : colors.feedBagCream,
+                    color: selectedCluster === '' ? colors.feedBagCream : colors.ledgerCharcoal,
+                    fontFamily: fonts.body,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  All ({catalogTotal})
+                </button>
+                {clusters.map((c) => {
+                  const isSelected = selectedCluster === c.prefix;
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      onClick={() => {
+                        const next = isSelected ? '' : c.prefix;
+                        setSelectedCluster(next);
+                        void fetchCatalog(searchQuery, next, 1);
+                      }}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: rounded.full,
+                        border: `1px solid ${isSelected ? colors.uniformGreen : colors.cardBorder}`,
+                        background: isSelected ? colors.uniformGreen : colors.feedBagCream,
+                        color: isSelected ? colors.feedBagCream : colors.ledgerCharcoal,
+                        fontFamily: fonts.mono,
+                        fontSize: 11,
+                        fontWeight: isSelected ? 700 : 500,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {c.prefix} ({c.count})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Product Items List */}
+          {catalogLoading ? (
+            <div style={{ padding: 16, textAlign: 'center', color: colors.mulchBrown, fontSize: 12 }}>
+              Searching product catalog…
+            </div>
+          ) : catalogItems.length === 0 ? (
+            <div style={{ padding: 16, textAlign: 'center', color: colors.mulchBrown, fontSize: 12, background: colors.feedBagCream, borderRadius: rounded.sm }}>
+              No matching product pages found for "{searchQuery}".
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {catalogItems.map((item) => {
+                const isSelected = data.suite.includes(item.url);
+                return (
+                  <div
+                    key={item.url}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 10,
+                      padding: '8px 12px',
+                      background: isSelected ? 'rgba(22, 132, 77, 0.08)' : colors.feedBagCream,
+                      border: `1px solid ${isSelected ? colors.seedlingGreen : colors.cardBorder}`,
+                      borderRadius: rounded.sm,
+                      transition: 'all 0.1s ease',
+                    }}
+                  >
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => void toggleUrlInSuite(item.url)}
+                        style={{ accentColor: colors.uniformGreen, width: 16, height: 16, cursor: 'pointer' }}
+                      />
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontFamily: fonts.body, fontSize: 13, fontWeight: 600, color: colors.ledgerCharcoal, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {item.title || getDomainPath(item.url)}
+                        </div>
+                        <div style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.mulchBrown, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {getDomainPath(item.url)}
+                        </div>
+                      </div>
+                    </label>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => void toggleUrlInSuite(item.url)}
+                        style={{
+                          padding: '4px 10px',
+                          borderRadius: rounded.sm,
+                          border: `1px solid ${isSelected ? colors.seedlingGreen : colors.cardBorder}`,
+                          background: isSelected ? colors.seedlingGreen : colors.whiteSurface,
+                          color: isSelected ? colors.feedBagCream : colors.ledgerCharcoal,
+                          fontFamily: fonts.body,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {isSelected ? '✓ In Suite' : '+ Add to Suite'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Pagination and custom URL add */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${colors.cardBorder}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <button
+                type="button"
+                disabled={catalogPage <= 1 || catalogLoading}
+                onClick={() => void fetchCatalog(searchQuery, selectedCluster, catalogPage - 1)}
+                style={{
+                  padding: '4px 10px',
+                  background: colors.feedBagCream,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: rounded.sm,
+                  fontSize: 11,
+                  fontFamily: fonts.body,
+                  fontWeight: 600,
+                  cursor: catalogPage <= 1 ? 'not-allowed' : 'pointer',
+                  opacity: catalogPage <= 1 ? 0.5 : 1,
+                }}
+              >
+                Previous
+              </button>
+              <span style={{ fontFamily: fonts.body, fontSize: 11, color: colors.mulchBrown }}>
+                Page {catalogPage} of {Math.max(1, Math.ceil(catalogTotal / 10))}
+              </span>
+              <button
+                type="button"
+                disabled={catalogPage * 10 >= catalogTotal || catalogLoading}
+                onClick={() => void fetchCatalog(searchQuery, selectedCluster, catalogPage + 1)}
+                style={{
+                  padding: '4px 10px',
+                  background: colors.feedBagCream,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: rounded.sm,
+                  fontSize: 11,
+                  fontFamily: fonts.body,
+                  fontWeight: 600,
+                  cursor: catalogPage * 10 >= catalogTotal ? 'not-allowed' : 'pointer',
+                  opacity: catalogPage * 10 >= catalogTotal ? 0.5 : 1,
+                }}
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </div>
-      )}
-      {waiverSuccess && <div role="status" style={{ margin: 'var(--space-2) var(--space-2) 0', padding: '8px 12px', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)' }}><span style={{ background: 'var(--color-signet-burgundy)', color: 'var(--color-feed-bag-cream)', padding: '2px 6px', borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', fontWeight: 600, marginRight: 8 }}>Waiver</span>{waiverSuccess}</div>}
-      {overrideMsg && <div role="status" style={{ margin: 'var(--space-2) var(--space-2) 0', padding: '8px 12px', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-uniform-green)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.8rem' }}>{overrideMsg}</div>}
-      <div style={{ padding: 'var(--space-2)' }}>
-        <details style={{ marginBottom: 'var(--space-2)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', background: 'rgba(250,249,242,0.4)' }}>
-          <summary style={{ cursor: 'pointer', padding: '8px 10px', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-ledger-charcoal)', listStyle: 'none' }}>Advanced — Sitemap details (debug) · {candidateCount} found · {clusters.length} templates</summary>
-          <div style={{ padding: '10px', borderTop: '1px solid var(--color-card-border)' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
-          <div style={{ background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '8px 10px' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Found on site</div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-ledger-charcoal)', fontVariantNumeric: 'tabular-nums' }}>{candidateCount}</div>
-          </div>
-          <div style={{ background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '8px 10px' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>You confirmed</div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-ledger-charcoal)', fontVariantNumeric: 'tabular-nums' }}>{data.suite.length}</div>
-          </div>
-          <div style={{ background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '8px 10px' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Freshness</div>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)' }}>{data.inventory.freshness ?? 'unknown'}</div>
-          </div>
-        </div>
-        {filtered && filtered.count > 0 && (
-          <div style={{ marginBottom: 'var(--space-2)', padding: '6px 10px', background: 'var(--color-feed-bag-cream)', border: '1px dashed var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', color: 'var(--color-mulch-brown)' }}>
-            {filtered.count} filtered as parked/404/spam{filtered.reason ? ` — ${filtered.reason}` : ''} — excluded from Suggested
-          </div>
-        )}
-        {clusters.length > 0 && (
-          <div style={{ marginBottom: 'var(--space-2)', padding: '8px 10px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)', marginBottom: 6 }}>Clusters</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {clusters.map((c) => (
-                <span key={c.key} title={c.fingerprint} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 8px', background: hasOverride(data.overrides, c.key) ? 'var(--color-corner-gold)' : 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--color-ledger-charcoal)' }}>
-                  {c.prefix} ({c.count})
-                  <span style={{ fontSize: '0.65rem', color: 'var(--color-mulch-brown)' }} title={c.fingerprint}>• {c.fingerprint.slice(0, 18)}</span>
+
+        {/* 2. Confirmed Suite Cards (3 Samples) */}
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ fontFamily: fonts.body, fontSize: 11, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: colors.mulchBrown }}>
+                Selected Representative Suite ({data.suite.length}/3 products)
+              </div>
+              {data.suite.length < 3 && (
+                <span style={{ fontFamily: fonts.body, fontSize: 11, color: colors.signetBurgundy, fontWeight: 600 }}>
+                  (Need {3 - data.suite.length} more to reach recommended 3)
                 </span>
+              )}
+            </div>
+          </div>
+
+          {data.suite.length === 0 ? (
+            <div style={{ padding: 20, textAlign: 'center', border: `1px dashed ${colors.cardBorder}`, borderRadius: rounded.sm, background: colors.feedBagCream, color: colors.mulchBrown, fontSize: 12 }}>
+              No product pages selected yet. Search and checkmark products above.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {data.suite.map((u, idx) => (
+                <div
+                  key={u}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    background: colors.feedBagCream,
+                    border: `1px solid ${colors.cardBorder}`,
+                    borderRadius: rounded.sm,
+                    padding: '8px 12px',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                    <span
+                      style={{
+                        fontFamily: fonts.body,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        background: colors.cardBorder,
+                        color: colors.mulchBrown,
+                        padding: '2px 7px',
+                        borderRadius: rounded.sm,
+                        letterSpacing: '0.04em',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      Sample #{idx + 1}
+                    </span>
+                    <span
+                      title={u}
+                      style={{
+                        fontFamily: fonts.mono,
+                        fontSize: 12,
+                        color: colors.ledgerCharcoal,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {getDomainPath(u)}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => void toggleUrlInSuite(u)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: colors.mulchBrown,
+                        cursor: 'pointer',
+                        padding: '4px 8px',
+                        fontSize: 14,
+                        fontWeight: 700,
+                      }}
+                      title="Remove sample from suite"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
-            <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+          )}
+        </div>
+
+        {/* Template Clusters & Overrides */}
+        <details style={{ background: colors.feedBagCream, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.lg, padding: 12 }}>
+          <summary style={{ cursor: 'pointer', fontFamily: fonts.body, fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal }}>
+            Template Clusters & Advanced Overrides ({clusters.length} clusters)
+          </summary>
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontFamily: fonts.body, fontSize: 11, color: colors.mulchBrown }}>
+              Clusters: {clusters.map((c) => `${c.prefix} (${c.count})`).join(', ') || 'None'}
+              {filtered && filtered.count > 0 && ` · ${filtered.count} filtered as parked`}
+            </div>
+
+            {/* Overrides action row */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
               {clusters.length >= 2 && (
-                <button type="button" onClick={() => postOverride(clusters[1].key, 'merge')} style={{ padding: '4px 8px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.7rem', cursor: 'pointer' }}>Merge {clusters[1].prefix} → {clusters[0].prefix}</button>
+                <button
+                  type="button"
+                  onClick={() => postOverride(clusters[1].key, 'merge')}
+                  style={{
+                    padding: '4px 10px',
+                    background: colors.whiteSurface,
+                    border: `1px solid ${colors.cardBorder}`,
+                    borderRadius: rounded.sm,
+                    fontFamily: fonts.body,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Merge {clusters[1].prefix} → {clusters[0].prefix}
+                </button>
               )}
               {clusters.map((c) => (
-                <button key={`split-${c.key}`} type="button" onClick={() => postOverride(c.key, 'split')} style={{ padding: '4px 8px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.7rem', cursor: 'pointer' }}>Split {c.prefix}</button>
+                <button
+                  key={`split-${c.key}`}
+                  type="button"
+                  onClick={() => postOverride(c.key, 'split')}
+                  style={{
+                    padding: '4px 10px',
+                    background: colors.whiteSurface,
+                    border: `1px solid ${colors.cardBorder}`,
+                    borderRadius: rounded.sm,
+                    fontFamily: fonts.body,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Split {c.prefix}
+                </button>
               ))}
             </div>
-          </div>
-        )}
+
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              <input
+                placeholder="https://... Replace suggestedUrl"
+                value={overrideInput}
+                onChange={(e) => setOverrideInput(e.target.value)}
+                style={{
+                  flex: 1,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: rounded.sm,
+                  padding: '6px 10px',
+                  fontFamily: fonts.mono,
+                  fontSize: 12,
+                }}
+              />
+              <button
+                type="button"
+                onClick={replaceSuggested}
+                style={{
+                  padding: '6px 12px',
+                  background: colors.whiteSurface,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: rounded.sm,
+                  fontFamily: fonts.body,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                Replace
+              </button>
+            </div>
+            <div style={{ display: 'none' }}>cluster-overrides</div>
           </div>
         </details>
-        {suggested.length > 0 && (
-          <div style={{ marginBottom: 'var(--space-2)', padding: '8px 10px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)', marginBottom: 6 }}>Suggested reps (one per cluster)</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {suggested.map((u) => (
-                <label key={u} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', background: suggestedPick === u ? 'var(--color-corner-gold)' : 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}>
-                  <input type="radio" name="suggested" checked={suggestedPick === u} onChange={() => setSuggestedPick(u)} />
-                  <span title={u} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getDomainPath(u)}</span>
-                </label>
-              ))}
-            </div>
-            <button type="button" onClick={useSuggested} disabled={submitting} style={{ marginTop: 8, padding: '6px 12px', background: 'var(--color-uniform-green)', color: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-uniform-green)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, cursor: submitting ? 'not-allowed' : 'pointer' }}>Use suggested</button>
-            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-              <input placeholder="https://... replace suggestedUrl" value={overrideInput} onChange={(e) => setOverrideInput(e.target.value)} style={{ flex: 1, border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '6px 8px', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }} />
-              <button type="button" onClick={replaceSuggested} style={{ padding: '6px 12px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', cursor: 'pointer' }}>Replace</button>
-            </div>
-          </div>
-        )}
+
+        {/* Waiver Card */}
         {needWaiver && (
-          <div style={{ marginBottom: 'var(--space-2)', padding: '10px 12px', background: 'var(--color-white-surface)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-sm)', boxShadow: '0 1px 2px rgba(118,12,25,0.08)' }}>
-            <p style={{ fontFamily: 'var(--font-display)', fontSize: '0.9rem', fontWeight: 700, color: 'var(--color-ledger-charcoal)', margin: 0, borderBottom: '1px dotted var(--color-corner-gold)', paddingBottom: 6 }}>Ledger entry — waiver required (&lt;3 product URLs)</p>
-            <p style={{ fontFamily: 'var(--font-body)', fontSize: '0.75rem', color: 'var(--color-mulch-brown)', margin: '6px 0 0' }}>Signet Burgundy ledger, not amber — slightly committed per brief.</p>
+          <div
+            style={{
+              padding: 14,
+              background: colors.whiteSurface,
+              border: `1px solid ${colors.signetBurgundy}`,
+              borderLeft: `4px solid ${colors.signetBurgundy}`,
+              borderRadius: rounded.sm,
+              boxShadow: '0 2px 6px rgba(118,12,25,0.08)',
+            }}
+          >
+            <div style={{ fontFamily: fonts.display, fontSize: '1rem', fontWeight: 700, color: colors.ledgerCharcoal, margin: 0, paddingBottom: 6, borderBottom: `1px dotted ${colors.cornerCalloutGold}` }}>
+              Ledger entry — waiver required (&lt;3 product URLs)
+            </div>
+            <div style={{ fontFamily: fonts.body, fontSize: 12, color: colors.mulchBrown, margin: '6px 0 10px' }}>
+              Signet Burgundy ledger entry: less than 3 confirmed sample products are available on this domain. Provide an audited operator reason.
+            </div>
             <input
               aria-invalid={waiverReason.length > 0 && !waiverValid}
               aria-describedby="waiver-help"
               placeholder="Reason for waiver (min 8 characters)"
               value={waiverReason}
               onChange={(e) => setWaiverReason(e.target.value)}
-              style={{ marginTop: 8, width: '100%', border: `1px solid ${waiverReason.length > 0 && !waiverValid ? 'var(--color-signet-burgundy)' : 'var(--color-card-border)'}`, borderRadius: 'var(--radius-sm)', padding: '8px 10px', fontFamily: 'var(--font-body)', fontSize: '0.8rem', boxSizing: 'border-box', outlineOffset: 2 }}
+              style={{
+                width: '100%',
+                border: `1px solid ${waiverReason.length > 0 && !waiverValid ? colors.signetBurgundy : colors.cardBorder}`,
+                borderRadius: rounded.sm,
+                padding: '8px 10px',
+                fontFamily: fonts.body,
+                fontSize: 13,
+                boxSizing: 'border-box',
+              }}
             />
-            <div id="waiver-help" style={{ fontFamily: 'var(--font-body)', fontSize: '0.7rem', color: waiverReason.length > 0 && !waiverValid ? 'var(--color-signet-burgundy)' : 'var(--color-mulch-brown)', marginTop: 4 }}>{waiverReason.length > 0 && !waiverValid ? 'Keep typing — 8 characters minimum.' : 'You confirmed is short; record why.'}</div>
+            <div id="waiver-help" style={{ fontFamily: fonts.body, fontSize: 11, color: waiverReason.length > 0 && !waiverValid ? colors.signetBurgundy : colors.mulchBrown, marginTop: 4 }}>
+              {waiverReason.length > 0 && !waiverValid ? 'Keep typing — 8 characters minimum.' : 'Reason for waiver (minimum 8 characters).'}
+            </div>
             <button
+              type="button"
               disabled={!waiverValid || submitting}
               onClick={handleWaiver}
-              style={{ marginTop: 8, padding: '6px 12px', background: waiverValid ? 'var(--color-signet-burgundy)' : 'var(--color-feed-bag-cream)', color: waiverValid ? 'var(--color-feed-bag-cream)' : 'var(--color-mulch-brown)', border: waiverValid ? '1px solid var(--color-burgundy-dark)' : '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', cursor: waiverValid && !submitting ? 'pointer' : 'not-allowed', opacity: waiverValid ? 1 : 0.7 }}
+              style={{
+                marginTop: 10,
+                padding: '7px 16px',
+                background: waiverValid ? colors.signetBurgundy : colors.feedBagCream,
+                color: waiverValid ? colors.feedBagCream : colors.mulchBrown,
+                border: waiverValid ? `1px solid ${colors.burgundyDark}` : `1px solid ${colors.cardBorder}`,
+                borderRadius: rounded.sm,
+                fontFamily: fonts.body,
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+                cursor: waiverValid && !submitting ? 'pointer' : 'not-allowed',
+                opacity: waiverValid ? 1 : 0.6,
+              }}
             >
               {submitting ? 'Recording…' : 'Create waiver'}
             </button>
           </div>
         )}
-        <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {preview.map((u) => (
-            <li key={u} style={{ display: 'grid', gridTemplateColumns: '64px 1fr', gap: 8, alignItems: 'center', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: 6 }}>
-              <div style={{ aspectRatio: '16 / 9', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-body)', fontSize: '0.6rem', color: 'var(--color-mulch-brown)' }}>16:9</div>
-              <span title={u} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-ledger-charcoal)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getDomainPath(u)}</span>
-            </li>
-          ))}
-        </ul>
-        {remaining > 0 && !expanded && (
-          <button type="button" onClick={() => setExpanded(true)} style={{ marginTop: 10, background: 'transparent', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '6px 12px', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-ledger-charcoal)', cursor: 'pointer', borderBottom: '2px solid var(--color-corner-gold)' }}>
-            +{remaining} more — expand in place
-          </button>
-        )}
-        {expanded && data.suite.length > 3 && (
-          <div style={{ marginTop: 10, borderTop: '1px solid var(--color-card-border)', paddingTop: 10 }}>
-            <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {data.suite.slice(3).map((u) => (
-                <li key={u} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-ledger-charcoal)', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '6px 8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getDomainPath(u)}</li>
-              ))}
-            </ul>
-            <button type="button" onClick={() => setExpanded(false)} style={{ marginTop: 8, background: 'transparent', border: 'none', fontFamily: 'var(--font-body)', fontSize: '0.75rem', color: 'var(--color-mulch-brown)', cursor: 'pointer', textDecoration: 'underline' }}>
-              Collapse
-            </button>
-          </div>
-        )}
       </div>
+        </>
+      )}
     </div>
   );
 }
+

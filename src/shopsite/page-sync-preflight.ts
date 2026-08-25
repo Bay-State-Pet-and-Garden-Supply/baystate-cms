@@ -51,6 +51,36 @@ export async function preflightPagesSync(options: {
   );
 
   if (verifiedRecords.length === 0) {
+    // ShopSite's pages export is degraded: it returned no verifiable identities
+    // (no PageID in the XML — observed when the live store stops emitting
+    // PageID, even though the page set itself is unchanged, 211/211 names
+    // still present). Failing closed here would block every export with no
+    // way for the operator to proceed. When we have an active verified
+    // import, treat the catalog as unchanged and keep it, with an explicit
+    // warning. The next successful export that *does* carry PageIDs will
+    // reconcile normally; a truly empty store (no pages at all) still fails
+    // because there is no active import to fall back to.
+    const degradedActive = getActivePageImport(options.workspaceId);
+    if (degradedActive) {
+      const degradedVerifiedCount = listVerifiedPageOptions(options.workspaceId).length;
+      if (degradedVerifiedCount > 0) {
+        const degradedWarnings = [
+          ...(downloadResult.warnings ?? []),
+          `ShopSite Pages export contained no verifiable page identities (hash ${downloadResult.sourceHash.slice(0, 8)}); ` +
+            `retaining active verified catalog (${degradedVerifiedCount} pages, hash ${degradedActive.sourceHash.slice(0, 8)}). ` +
+            `Ask your ShopSite admin why PageID stopped exporting.`,
+        ];
+        return {
+          status: 'up_to_date',
+          sourceHash: degradedActive.sourceHash,
+          verifiedCount: degradedVerifiedCount,
+          message:
+            `Page catalog retained — ShopSite export is degraded (no PageID, hash ${downloadResult.sourceHash.slice(0, 8)}). ` +
+            `Using active verified catalog (${degradedVerifiedCount} pages).`,
+          warnings: degradedWarnings,
+        };
+      }
+    }
     throw new Error(
       `ShopSite Pages preflight found no verified pages in downloaded XML (hash ${downloadResult.sourceHash.slice(0, 8)}).`,
     );

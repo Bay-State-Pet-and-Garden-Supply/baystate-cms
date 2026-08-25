@@ -121,16 +121,6 @@ export const STANDARD_PROFILE_FIELDS: readonly ProfileField[] = [
     description: 'Brand or manufacturer name',
     validationHints: { minLength: 1 },
   },
-  {
-    key: 'skuSelector',
-    label: 'SKU',
-    outputTarget: 'customFields',
-    valueType: 'text',
-    cardinality: 'single',
-    selectorField: 'custom_selectors',
-    category: 'identity',
-    description: 'Manufacturer SKU / part number',
-  },
   // ── Pricing ──────────────────────────────────────────────────────────────
   // Deprecated: priceSelector is not generated or promoted.
   // The DB column still exists for backward compatibility with existing profiles.

@@ -30,10 +30,20 @@ export interface MatrixCell {
   failureReason: string | null;
 }
 
+export interface ExtractedProductPreview {
+  title?: string | null;
+  brand?: string | null;
+  price?: string | null;
+  description?: string | null;
+  images?: string[];
+  customFields?: Record<string, string>;
+}
+
 export interface MatrixRow {
   sampleId: string;
   sampleUrl: string;
   cells: MatrixCell[];
+  extractedProduct?: ExtractedProductPreview | null;
 }
 
 export interface MatrixResult {
@@ -61,7 +71,14 @@ export async function runMatrix(input: {
   domain: string;
   draftVersion: string;
   samples: MatrixSample[];
-  runner: (sample: MatrixSample) => Promise<{ extractedTitle: string | null; provenance: string; artifactHash: string; success: boolean; failureReason?: string | null }>;
+  runner: (sample: MatrixSample) => Promise<{
+    extractedTitle: string | null;
+    provenance: string;
+    artifactHash: string;
+    success: boolean;
+    failureReason?: string | null;
+    extractedProduct?: ExtractedProductPreview | null;
+  }>;
 }): Promise<MatrixResult> {
   const rows: MatrixRow[] = [];
   for (const s of input.samples) {
@@ -69,6 +86,7 @@ export async function runMatrix(input: {
     rows.push({
       sampleId: s.id,
       sampleUrl: s.url,
+      extractedProduct: r.extractedProduct ?? { title: r.extractedTitle },
       cells: [{
         field: 'title',
         extracted: r.extractedTitle,

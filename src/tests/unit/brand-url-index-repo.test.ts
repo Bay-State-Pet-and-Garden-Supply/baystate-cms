@@ -14,6 +14,7 @@ import {
   deleteBrandUrlById,
   deleteBrandUrlsByIds,
   deleteBrandUrlsByDomain,
+  indexVariantUrls,
 } from '../../db/repositories/brand-url-index-repo';
 import {
   recordRefreshRun,
@@ -335,4 +336,78 @@ describe('Brand URL Index & Sitemap Telemetry Repositories', () => {
       expect(economics.serperCallsAvoided).toBe(4);
     });
   });
+
+  describe('indexVariantUrls', () => {
+    it('should index multiple variant URLs with distinct barcodes and enable lookupByUpc', () => {
+      const variants = [
+        {
+          url: 'https://kongcompany.com/products/classic-red?variant=1001',
+          baseUrl: 'https://kongcompany.com/products/classic-red',
+          title: 'KONG Classic - Small',
+          upc: '035585111018',
+          sku: 'KONG-SM',
+          brand: 'KONG',
+          variantTokens: ['Small', 'Red'],
+          price: 9.99,
+        },
+        {
+          url: 'https://kongcompany.com/products/classic-red?variant=1002',
+          baseUrl: 'https://kongcompany.com/products/classic-red',
+          title: 'KONG Classic - Medium',
+          upc: '035585111025',
+          sku: 'KONG-MD',
+          brand: 'KONG',
+          variantTokens: ['Medium', 'Red'],
+          price: 12.99,
+        },
+      ];
+
+      const affected = indexVariantUrls('kongcompany.com', variants);
+      expect(affected).toBe(2);
+
+      // Verify Tier 1 exact UPC lookup returns the exact variant URL
+      const matchSm = lookupByUpc('kongcompany.com', '035585111018');
+      expect(matchSm).not.toBeNull();
+      expect(matchSm?.url).toBe('https://kongcompany.com/products/classic-red?variant=1001');
+      expect(matchSm?.title).toBe('KONG Classic - Small');
+      expect(matchSm?.upc).toBe('035585111018');
+
+      const matchMd = lookupByUpc('kongcompany.com', '035585111025');
+      expect(matchMd).not.toBeNull();
+      expect(matchMd?.url).toBe('https://kongcompany.com/products/classic-red?variant=1002');
+      expect(matchMd?.sku).toBe('KONG-MD');
+
+      // Verify Tier 2 exact SKU lookup
+      const skuHit = lookupBySku('kongcompany.com', 'kong-md');
+      expect(skuHit).not.toBeNull();
+      expect(skuHit?.url).toBe('https://kongcompany.com/products/classic-red?variant=1002');
+    });
+
+    it('should update existing variant records when re-indexed', () => {
+      indexVariantUrls('acme.com', [
+        {
+          url: 'https://acme.com/p/toy?variant=1',
+          title: 'Toy V1',
+          upc: '111111111111',
+        },
+      ]);
+
+      const initial = lookupByUpc('acme.com', '111111111111');
+      expect(initial?.title).toBe('Toy V1');
+
+      indexVariantUrls('acme.com', [
+        {
+          url: 'https://acme.com/p/toy?variant=1',
+          title: 'Toy V1 Updated',
+          upc: '111111111111',
+          sku: 'ACME-1',
+        },
+      ]);
+
+      const updated = lookupByUpc('acme.com', '111111111111');
+      expect(updated?.title).toBe('Toy V1 Updated');
+      expect(updated?.sku).toBe('ACME-1');
+    });
+  });
 });
+

@@ -296,7 +296,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     const afterLast = findItemById(item.id);
     expect(afterLast?.stage).toBe('discovery');
     expect(afterLast?.stageStatus).toBe('pending');
-    expect(afterLast?.sourcingDecision?.route).toBe('evidence_to_discovery');
+    expect(afterLast?.sourcingDecision?.route).toBe('fallback_to_discovery');
     expect(afterLast?.sourcingDecision?.origin).toBe('operator_override');
   });
 

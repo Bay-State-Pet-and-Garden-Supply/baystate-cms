@@ -1,5 +1,5 @@
 /**
- * ProfileBuilder — public entrypoint for the profile builder workspace.
+ * ProfileBuilder — public entrypoint for the profile builder workspace (General Store).
  *
  * Renders inline only; modal overlay removed (e07s04) — canonical surface is /settings/domains/:domain/profile.
  *
@@ -29,6 +29,7 @@ import { GeneratedCustomFieldsPanel } from './components/GeneratedCustomFieldsPa
 import { BuildCanvas } from './components/BuildCanvas';
 import type { ProfileBuilderProps, FieldCategory } from './profileBuilderTypes';
 import type { ExtractorProfile } from './profileBuilderTypes';
+import { colors, fonts, rounded } from '../../theme';
 
 export type { ProfileBuilderProps };
 export type { ExtractorProfile };
@@ -37,16 +38,9 @@ const workspaceStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: 16,
-  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  fontFamily: fonts.body,
   fontSize: 14,
-  color: '#111827',
-};
-
-const mainGridStyle: React.CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 360px',
-  gap: 16,
-  alignItems: 'start',
+  color: colors.ledgerCharcoal,
 };
 
 const leftColumnStyle: React.CSSProperties = {
@@ -54,16 +48,6 @@ const leftColumnStyle: React.CSSProperties = {
   flexDirection: 'column',
   gap: 16,
 };
-
-const rightRailStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 16,
-  position: 'sticky',
-  top: 16,
-};
-
-// story: e07s04 — modal overlay removed; ProfileBuilder is inline only (canonical /settings/domains/:domain/profile)
 
 /**
  * Group field definitions by category for rendering.
@@ -107,79 +91,194 @@ export function ProfileBuilder(props: ProfileBuilderProps) {
     .map((key) => getFieldDefinition(key) ?? createArbitraryCustomField(key))
     .filter((d): d is FieldDefinition => d !== null);
 
-  // Collect into "Custom" group (details category).
+  const isInline = props.mode === 'inline';
+
+  const assignedCount = Object.values(state.fields).filter((f) => f && f.status !== 'unassigned').length;
+  const totalCore = CORE_FIELDS.length;
+
   const mainContent = (
     <div style={workspaceStyle}>
-      <DomainBar state={state} controller={controller} />
-      <SnapshotPanel state={state} controller={controller} />
+      {!isInline && <DomainBar state={state} controller={controller} />}
+      {!isInline && <SnapshotPanel state={state} controller={controller} />}
 
-      {/* ── Generate draft from 3 confirmed samples (suite-based, primary task) ── */}
-      <GenerateDraftTask state={state} controller={controller} />
-      {state.generation.error && (
-        <div style={{
-          padding: '8px 10px', background: state.generation.error.code === 'LLM_NOT_CONFIGURED' ? 'var(--color-feed-bag-cream)' : '#fee2e2', borderRadius: 6, color: state.generation.error.code === 'LLM_NOT_CONFIGURED' ? 'var(--color-mulch-brown)' : '#991b1b', fontSize: 12, border: state.generation.error.code === 'LLM_NOT_CONFIGURED' ? '1px solid var(--color-card-border)' : 'none',
-        }}>
-          {state.generation.error.code === 'LLM_NOT_CONFIGURED' ? 'LLM unavailable for profile_generation — fail-closed. You can still edit selectors manually under Advanced.' : state.generation.error.message}
+      {/* Unified Action Toolbar */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 12,
+          background: colors.whiteSurface,
+          border: `1px solid ${colors.cardBorder}`,
+          borderRadius: rounded.lg,
+          padding: '12px 18px',
+          boxShadow: '0 1px 3px rgba(33, 20, 20, 0.04)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <GenerateDraftTask state={state} controller={controller} />
+          <span
+            style={{
+              fontFamily: fonts.mono,
+              fontSize: 11,
+              fontWeight: 700,
+              color: assignedCount >= totalCore ? colors.seedlingGreen : colors.mulchBrown,
+              background: colors.feedBagCream,
+              padding: '4px 10px',
+              borderRadius: rounded.sm,
+              border: `1px solid ${colors.cardBorder}`,
+            }}
+          >
+            {assignedCount}/{totalCore} Core Fields Configured
+          </span>
         </div>
-      )}
-      <BuildCanvasSection state={state} controller={controller} />
-      <details style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)' }}>
-        <summary style={{ cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: '0.8rem', fontWeight: 600 }}>Advanced — manual selector editing & snapshot-only fallback</summary>
-        <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
-          <button type="button" disabled={!state.snapshot || state.generation.status === 'generating'} onClick={() => controller.generateSelectors()} style={{ background: state.snapshot && state.generation.status !== 'generating' ? 'var(--color-uniform-green)' : '#9ca3af', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', fontSize: 12, fontWeight: 600, cursor: state.snapshot && state.generation.status !== 'generating' ? 'pointer' : 'not-allowed' }}>Generate from snapshot (fallback)</button>
-        </div>
-      </details>
 
-      <div style={mainGridStyle}>
-        <div style={leftColumnStyle}>
-          {FIELD_GROUP_ORDER.map((category) => {
-            const catFields = grouped.get(category) ?? [];
-            if (catFields.length === 0) return null;
-
-            return (
-              <FieldGroup
-                key={category}
-                category={category}
-                fields={catFields}
-                state={state}
-                controller={controller}
-              />
-            );
-          })}
-
-          {/* Custom field group (arbitrary custom fields) */}
-          {customFieldDefs.length > 0 && (
-            <FieldGroup
-              category="details"
-              fields={customFieldDefs}
-              state={state}
-              controller={controller}
-            />
-          )}
-
-          {/* Add custom field */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <AddCustomFieldInput controller={controller} />
-
-          {/* Generated custom field suggestions */}
-          <GeneratedCustomFieldsPanel state={state} controller={controller} />
-        </div>
-
-        <div style={rightRailStyle}>
-          <ArtifactBrowser
-            snapshot={state.snapshot}
-            artifactUrlResolver={props.artifactUrlResolver}
-          />
-          <ExtractionPreview state={state} controller={controller} />
+          <button
+            type="button"
+            onClick={controller.saveProfile}
+            disabled={state.requests.save.loading}
+            style={{
+              padding: '6px 16px',
+              background: state.requests.save.success ? colors.seedlingGreen : colors.uniformGreen,
+              color: colors.feedBagCream,
+              border: `1px solid ${state.requests.save.success ? colors.seedlingGreen : colors.shadowPine}`,
+              borderRadius: rounded.sm,
+              fontFamily: fonts.body,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: state.requests.save.loading ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              boxShadow: '0 1px 3px rgba(20,83,45,0.2)',
+              transition: 'background 150ms ease',
+            }}
+          >
+            {state.requests.save.loading ? (
+              <><span>⏳</span> Saving Draft…</>
+            ) : state.requests.save.success ? (
+              <><span>✓</span> Draft Saved</>
+            ) : (
+              <><span>💾</span> Save Profile Draft</>
+            )}
+          </button>
         </div>
       </div>
 
-      <ValidationSamplesPanel state={state} controller={controller} />
-      <ValidationMatrix state={state} />
-      <SaveBar state={state} controller={controller} />
+      {state.requests.save.error && (
+        <div
+          style={{
+            padding: '10px 14px',
+            background: 'rgba(118, 12, 25, 0.08)',
+            borderRadius: rounded.sm,
+            color: colors.signetBurgundy,
+            fontSize: 12,
+            border: `1px solid ${colors.signetBurgundy}`,
+            fontFamily: fonts.body,
+          }}
+        >
+          <strong>Save Error:</strong> {state.requests.save.error}
+        </div>
+      )}
+
+      {state.generation.error && (
+        <div
+          style={{
+            padding: '10px 14px',
+            background: state.generation.error.code === 'LLM_NOT_CONFIGURED' ? colors.feedBagCream : 'rgba(118, 12, 25, 0.08)',
+            borderRadius: rounded.sm,
+            color: state.generation.error.code === 'LLM_NOT_CONFIGURED' ? colors.mulchBrown : colors.signetBurgundy,
+            fontSize: 12,
+            border: `1px solid ${state.generation.error.code === 'LLM_NOT_CONFIGURED' ? colors.cardBorder : colors.signetBurgundy}`,
+            fontFamily: fonts.body,
+          }}
+        >
+          {state.generation.error.code === 'LLM_NOT_CONFIGURED' ? 'LLM unavailable for profile_generation — fail-closed. You can still select elements visually or edit selectors manually under Advanced.' : state.generation.error.message}
+        </div>
+      )}
+
+      <BuildCanvasSection state={state} controller={controller} />
+
+      <div style={leftColumnStyle}>
+        {FIELD_GROUP_ORDER.map((category) => {
+          const catFields = grouped.get(category) ?? [];
+          if (catFields.length === 0) return null;
+
+          return (
+            <FieldGroup
+              key={category}
+              category={category}
+              fields={catFields}
+              state={state}
+              controller={controller}
+            />
+          );
+        })}
+
+        {/* Custom field group (arbitrary custom fields) */}
+        {customFieldDefs.length > 0 && (
+          <FieldGroup
+            category="details"
+            fields={customFieldDefs}
+            state={state}
+            controller={controller}
+          />
+        )}
+
+        {/* Generated custom field suggestions */}
+        <GeneratedCustomFieldsPanel state={state} controller={controller} />
+
+        {/* Bottom Save & Proceed Action Banner */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 12,
+            padding: '14px 20px',
+            background: colors.whiteSurface,
+            border: `1px solid ${colors.cardBorder}`,
+            borderRadius: rounded.lg,
+            boxShadow: '0 1px 3px rgba(33, 20, 20, 0.04)',
+            marginTop: 4,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal }}>
+              Ready to validate your selectors?
+            </div>
+            <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 2 }}>
+              Save this draft version to run live extraction tests on all 3 sample pages in Step 3.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={controller.saveProfile}
+            disabled={state.requests.save.loading}
+            style={{
+              padding: '8px 22px',
+              background: state.requests.save.success ? colors.seedlingGreen : colors.uniformGreen,
+              color: colors.feedBagCream,
+              border: 'none',
+              borderRadius: rounded.sm,
+              fontFamily: fonts.body,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: state.requests.save.loading ? 'not-allowed' : 'pointer',
+              boxShadow: '0 2px 4px rgba(20,83,45,0.2)',
+            }}
+          >
+            {state.requests.save.loading ? 'Saving Draft…' : state.requests.save.success ? '✓ Draft Saved — Proceed to Step 3 Below ↓' : '💾 Save Draft & Proceed to Validation →'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 
-  // story: e07s04 — deprecated modal branch removed; inline is the only surface
   if (props.mode === 'modal') {
     throw new Error('ProfileBuilder mode="modal" is removed — use getProfileWorkspacePath');
   }
@@ -207,12 +306,12 @@ function AddCustomFieldInput({ controller }: AddCustomFieldInputProps) {
     <div
       style={{
         display: 'flex',
-        gap: 6,
+        gap: 8,
         alignItems: 'center',
-        padding: '8px 10px',
-        background: '#fff',
-        borderRadius: 8,
-        border: '1px dashed #d1d5db',
+        padding: '10px 14px',
+        background: colors.whiteSurface,
+        borderRadius: rounded.lg,
+        border: `1px dashed ${colors.cardBorder}`,
       }}
     >
       <input
@@ -223,10 +322,11 @@ function AddCustomFieldInput({ controller }: AddCustomFieldInputProps) {
         placeholder="Custom field name (e.g. Flavor)"
         style={{
           flex: 1,
-          padding: '6px 10px',
-          border: '1px solid #d1d5db',
-          borderRadius: 6,
+          padding: '7px 12px',
+          border: `1px solid ${colors.cardBorder}`,
+          borderRadius: rounded.sm,
           fontSize: 13,
+          fontFamily: fonts.body,
         }}
       />
       <button
@@ -234,13 +334,15 @@ function AddCustomFieldInput({ controller }: AddCustomFieldInputProps) {
         onClick={handleAdd}
         disabled={!name.trim()}
         style={{
-          background: name.trim() ? '#2563eb' : '#9ca3af',
-          color: '#fff',
-          border: 'none',
-          borderRadius: 6,
-          padding: '6px 14px',
+          background: name.trim() ? colors.uniformGreen : colors.feedBagCream,
+          color: name.trim() ? colors.feedBagCream : colors.mulchBrown,
+          border: `1px solid ${name.trim() ? colors.shadowPine : colors.cardBorder}`,
+          borderRadius: rounded.sm,
+          padding: '7px 16px',
           fontSize: 12,
-          fontWeight: 600,
+          fontWeight: 700,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
           cursor: name.trim() ? 'pointer' : 'not-allowed',
           whiteSpace: 'nowrap',
         }}
@@ -260,7 +362,26 @@ function GenerateDraftTask({ state, controller }: { state: any; controller: any 
   const tip = !ready ? `Need 3 confirmed samples — have ${confirmed}. Confirm via SuitePanel or needs waiver.` : undefined;
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
-      <button type="button" title={tip} disabled={disabled} onClick={() => (controller as { generateDraftFromSuite?: (u: string[]) => void }).generateDraftFromSuite?.(state.samples.filter((s: { confirmed: boolean }) => s.confirmed).slice(0, 3).map((s: { url: string }) => s.url))} style={{ background: !disabled ? 'var(--color-uniform-green)' : 'var(--color-feed-bag-cream)', color: !disabled ? 'var(--color-feed-bag-cream)' : 'var(--color-mulch-brown)', border: `1px solid ${!disabled ? 'var(--color-shadow-pine)' : 'var(--color-card-border)'}`, borderRadius: 'var(--radius-sm)', padding: '8px 16px', fontFamily: 'var(--font-body)', fontSize: 13, fontWeight: 700, cursor: !disabled ? 'pointer' : 'not-allowed' }}>
+      <button
+        type="button"
+        title={tip}
+        disabled={disabled}
+        onClick={() => (controller as { generateDraftFromSuite?: (u: string[]) => void }).generateDraftFromSuite?.(state.samples.filter((s: { confirmed: boolean }) => s.confirmed).slice(0, 3).map((s: { url: string }) => s.url))}
+        style={{
+          background: !disabled ? colors.uniformGreen : colors.feedBagCream,
+          color: !disabled ? colors.feedBagCream : colors.mulchBrown,
+          border: `1px solid ${!disabled ? colors.shadowPine : colors.cardBorder}`,
+          borderRadius: rounded.sm,
+          padding: '8px 18px',
+          fontFamily: fonts.body,
+          fontSize: 12,
+          fontWeight: 700,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
+          cursor: !disabled ? 'pointer' : 'not-allowed',
+          boxShadow: !disabled ? '0 1px 2px rgba(20,83,45,0.15)' : 'none',
+        }}
+      >
         {generating ? 'Generating draft…' : 'Generate draft from 3 confirmed samples'}
       </button>
     </div>
@@ -295,3 +416,4 @@ function buildCanvasGroups(state: any): Array<{ group: string; fields: Array<{ k
 function hasPending(groups: Array<{ fields: Array<{ decision: string }> }>): boolean {
   return groups.some((g) => g.fields.some((f) => f.decision === 'pending'));
 }
+

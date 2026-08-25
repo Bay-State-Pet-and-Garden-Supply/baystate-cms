@@ -1,0 +1,2607 @@
+diff --git a/src/classification/cohort-page-coordinator.ts b/src/classification/cohort-page-coordinator.ts
+index 7f92ebf..2b25f6c 100644
+--- a/src/classification/cohort-page-coordinator.ts
++++ b/src/classification/cohort-page-coordinator.ts
+@@ -12,6 +12,7 @@ import {
+   validatePageResponseEntries,
+   type PageAssignmentResult,
+ } from './page-assignment-llm';
++import { validateCategoryPageAssignment } from './category-page-correctness';
+ 
+ export interface CohortPageOption {
+   id: string;
+@@ -93,6 +94,37 @@ function escapeRegex(value: string): string {
+   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+ }
+ 
++function extractCleanJson(raw: string): string {
++  let cleaned = raw.trim();
++  cleaned = cleaned.replace(/^```(?:json)?\s*|```\s*$/gi, '').trim();
++  const jsonStart = cleaned.indexOf('{');
++  const jsonEnd = cleaned.lastIndexOf('}');
++  if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
++    cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
++  }
++  return cleaned;
++}
++
++function findMatchingKey(keys: string[], targetSku: string): string | null {
++  if (keys.includes(targetSku)) return targetSku;
++  const targetLower = targetSku.toLowerCase().trim();
++  for (const k of keys) {
++    if (k.toLowerCase().trim() === targetLower) return k;
++  }
++  for (const k of keys) {
++    const norm = k.replace(/^sku[\s_:-]*/i, '').toLowerCase().trim();
++    if (norm === targetLower) return k;
++  }
++  const targetDigits = targetSku.replace(/^0+/, '');
++  if (targetDigits.length > 0) {
++    for (const k of keys) {
++      const kDigits = k.replace(/^sku[\s_:-]*/i, '').trim().replace(/^0+/, '');
++      if (kDigits === targetDigits) return k;
++    }
++  }
++  return null;
++}
++
+ function hasExactlyOneTopLevelKey(raw: string, sku: string): boolean {
+   const matches = raw.match(new RegExp(`"${escapeRegex(sku)}"\\s*:`, 'g')) ?? [];
+   return matches.length === 1;
+@@ -328,13 +360,11 @@ export async function coordinateCohortPagesCore(
+   opts?.afterCoordinatedCall?.();
+   const raw = rawResult.content;
+   const modelCallIds = [rawResult.callId];
+-  if (params.products.some(product => !hasExactlyOneTopLevelKey(raw!, product.sku))) {
+-    return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
+-  }
++  const cleaned = extractCleanJson(raw ?? '');
+ 
+   let parsed: unknown;
+   try {
+-    parsed = JSON.parse(raw.trim());
++    parsed = JSON.parse(cleaned);
+   } catch {
+     return abstainAll(params.products, 'Cohort page response was not valid JSON.');
+   }
+@@ -342,16 +372,35 @@ export async function coordinateCohortPagesCore(
+     return abstainAll(params.products, 'Cohort page response must be a direct object keyed by SKU.');
+   }
+   const response = parsed as Record<string, unknown>;
+-  const expectedSkus = new Set(params.products.map(product => product.sku));
+-  const responseSkus = Object.keys(response);
+-  if (responseSkus.length !== expectedSkus.size || responseSkus.some(sku => !expectedSkus.has(sku))) {
++  const responseKeys = Object.keys(response);
++
++  const skuToKeyMap = new Map<string, string>();
++  const usedKeys = new Set<string>();
++
++  for (const product of params.products) {
++    const matchedKey = findMatchingKey(responseKeys, product.sku);
++    if (!matchedKey) {
++      return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
++    }
++    if (usedKeys.has(matchedKey)) {
++      return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
++    }
++    if (!hasExactlyOneTopLevelKey(cleaned, matchedKey)) {
++      return abstainAll(params.products, 'Cohort page response contains a missing or duplicate SKU key.');
++    }
++    skuToKeyMap.set(product.sku, matchedKey);
++    usedKeys.add(matchedKey);
++  }
++
++  if (responseKeys.length !== params.products.length || usedKeys.size !== responseKeys.length) {
+     return abstainAll(params.products, 'Cohort page response contains missing or unknown SKUs.');
+   }
+ 
+   const { nameToPage, idToPage } = buildPageMaps(params.pages);
+   const result = new Map<string, CohortPageMemberResult>();
+   for (const product of params.products) {
+-    const entries = response[product.sku];
++    const responseKey = skuToKeyMap.get(product.sku) ?? product.sku;
++    const entries = response[responseKey];
+     if (!Array.isArray(entries) || entries.length === 0) {
+       return abstainAll(params.products, `Cohort page response has no assignment for SKU ${product.sku}.`);
+     }
+@@ -377,6 +426,41 @@ export async function coordinateCohortPagesCore(
+     if (normalized.length === 0) {
+       return abstainAll(params.products, `Cohort page response had no safe assignment for SKU ${product.sku}.`);
+     }
++    // e09 B2 (P1-P9): per-member Page correctness gate — no sibling copying.
++    // Builds a frozen-evidence view from the ProductLineItemSnapshot (member-owned only, P4)
++    // and validates against the frozen verified catalog (P1/P2). outcome != assigned → per-member abstained.
++    const verifiedCatalogForValidation = params.pages.map(p => ({
++      id: p.id,
++      name: p.name,
++      parentId: null as string | null,
++    }));
++    const correctnessInput = {
++      member: {
++        onboardingItemId: product.sku,
++        frozenEvidenceHash: `snapshot:${product.sku}`,
++        frozenEvidence: {
++          species: product.species,
++          form: product.productForm ?? null,
++          title: product.webTitle ?? product.name ?? null,
++          description: product.description ?? null,
++          productType: null,
++          brand: product.brand ?? null,
++          extraction: { title: product.webTitle ?? null, description: product.description ?? null, productForm: product.productForm ?? null },
++        },
++      },
++      candidate: {
++        primaryPageId: normalized[0]?.pageId ?? null,
++        secondaryPageIds: normalized.slice(1).map(p => p.pageId),
++        primaryPageName: normalized[0]?.pageName ?? null,
++      },
++      verifiedPageCatalog: verifiedCatalogForValidation,
++      activePageImportHash: (params.snapshot as any)?.pageImportHash ?? 'unknown',
++    };
++    const correctness = validateCategoryPageAssignment(correctnessInput);
++    if (!correctness.valid || correctness.outcome !== 'assigned') {
++      result.set(product.sku, { status: 'abstained', reason: correctness.reason ?? `Page correctness gate blocked assignment for SKU ${product.sku} (P5/P6/P7).` });
++      continue;
++    }
+     result.set(product.sku, { status: 'assigned', pages: normalized, modelCallIds });
+   }
+   return result;
+diff --git a/src/classification/model-operation-registry.ts b/src/classification/model-operation-registry.ts
+index 73378c1..0faa261 100644
+--- a/src/classification/model-operation-registry.ts
++++ b/src/classification/model-operation-registry.ts
+@@ -20,6 +20,11 @@ import { SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION } from '../shopsite/built-in-o
+ 
+ export type { ProtectedOperation };
+ 
++/** Category Page correctness validator version (e09 B2 P1-P12) — single source of truth lives in
++ *  category-page-correctness.ts (consumed by cohort-page-hash for the P-hash); re-exported here so
++ *  registry consumers reference one constant instead of a drifting copy. */
++export { CATEGORY_PAGE_CORRECTNESS_VERSION } from './category-page-correctness';
++
+ /** Bump ONLY when the operation→rule/prompt/parameter contract changes. */
+ export const MODEL_OPERATION_REGISTRY_VERSION = 2;
+ 
+@@ -64,7 +69,7 @@ export const RULE_VERSIONS: Readonly<Record<ProtectedOperation, string>> = {
+   cohort_page_assignment: 'cohort-page-assignment-rules-v1',
+   cohort_page_assignment_parent: 'cohort-page-assignment-parent-rules-v2',
+   title_consolidation: 'title-consolidation-rules-v1',
+-  cohort_title_consolidation: 'cohort-title-consolidation-rules-v1',
++  cohort_title_consolidation: 'cohort-title-consolidation-rules-v2', // B1 family-title consistency (T2-T7) — FAMILY_TITLE_CONSISTENCY_VERSION v1
+   distributor_copy_consolidation: 'distributor-copy-consolidation-rules-v1',
+   discovery_name_consolidation: 'discovery-name-consolidation-rules-v1',
+   brand_inference: 'brand-inference-rules-v1',
+diff --git a/src/classification/promotion-gate.ts b/src/classification/promotion-gate.ts
+index 0959348..c780f26 100644
+--- a/src/classification/promotion-gate.ts
++++ b/src/classification/promotion-gate.ts
+@@ -32,6 +32,7 @@ import type { ClassificationRunRow } from '../db/repositories/classification-run
+ import type { CohortRun } from '../shared/schemas/cohorts';
+ import { hashCanonicalJson } from '../shared/stable-id';
+ import { getEffectivePrimaryProductTypeId } from './assignment-projection';
++import { getPageIdentityId } from '../shared/proposal-display';
+ import { resolveEffectiveCurationType, getReviewedTypeFromSnapshot } from './effective-curation-type';
+ import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
+ 
+@@ -48,7 +49,8 @@ export type PromotionGateResult =
+         | 'parent_not_completed'
+         | 'workspace_mismatch'
+         | 'reviewed_product_type_required'
+-        | 'stale_proposal';
++        | 'stale_proposal'
++        | 'stale_page_assignment';
+       reason: string;
+     };
+ 
+@@ -91,6 +93,15 @@ export interface PromotionGateInput {
+    * production caller always supplies it.
+    */
+   currentAuthorityHashes?: { execution?: string | null; reviewed?: string | null };
++  /**
++   * e09 B3 (P11): the CURRENT verified Page identities of the active Page
++   * import, loaded by the caller. When provided, every accepted
++   * `category_page` proposal must resolve into this set — a missing,
++   * deleted, foreign-import, or name-only identity refuses the item
++   * fail-closed BEFORE any draft write. Absent = synthetic callers keep the
++   * prior behavior; legacy items (no run pointer) never reach this check.
++   */
++  verifiedPageIds?: ReadonlySet<string>;
+ }
+ 
+ /** A cohort parent is terminal (promotion-eligible) only in these states. */
+@@ -383,5 +394,44 @@ export function validatePromotionGate(input: PromotionGateInput): PromotionGateR
+     }
+   }
+ 
++  // 5. e09 B3 (P11): Category Page currentness against the ACTIVE verified
++  //    import — the last fail-closed check before any draft write.
++  const pageCurrentness = assertPagesCurrentForImport(input);
++  if (pageCurrentness) return pageCurrentness;
++
+   return { ok: true };
+ }
++
++/**
++ * e09 B3 (P11): recompute Category Page assignment currentness against the
++ * ACTIVE verified import. An accepted `category_page` proposal whose stable
++ * identity is absent from `verifiedPageIds` (deleted page, foreign import,
++ * or a name-only proposal with no verifiable identity) refuses the item —
++ * defense-in-depth BEFORE any product draft / `product_pages` /
++ * `ProductOnPages` write. Never runs for legacy items (they returned ok at
++ * step 1) and never when the caller did not supply the verified set.
++ */
++function assertPagesCurrentForImport(input: PromotionGateInput): PromotionGateResult | null {
++  if (!input.verifiedPageIds) return null;
++  // P11 fail-closed by design: ANY accepted category_page proposal that does
++  // not resolve into the active verified import blocks promotion — including
++  // optional secondaries and a stale half of an evidenced dual-species
++  // co-primary pair. The draft serializer's visible non-blocking skip for
++  // unverified secondary pages applies only POST-gate; the gate itself never
++  // lets an item through with an unresolved accepted assignment.
++  for (const proposal of input.acceptedProposals) {
++    if (proposal.proposalType !== 'category_page') continue;
++    const identity = getPageIdentityId(proposal);
++    if (!identity || !input.verifiedPageIds.has(identity)) {
++      return {
++        ok: false,
++        code: 'stale_page_assignment',
++        reason:
++          `Accepted Category Page assignment for item ${input.itemId} (SKU ${input.productSku}) does not resolve ` +
++          `into the active verified Page import${identity ? ` (Page ${identity})` : ' (name-only, no verifiable identity)'}; ` +
++          'promotion blocked before any draft write (P11).',
++      };
++    }
++  }
++  return null;
++}
+diff --git a/src/classification/review-completion-gate.ts b/src/classification/review-completion-gate.ts
+index 7751ede..0d0f1f8 100644
+--- a/src/classification/review-completion-gate.ts
++++ b/src/classification/review-completion-gate.ts
+@@ -1,7 +1,12 @@
+ import { getDb } from '../db/connection';
+ import { getRuntimeSnapshotByHash } from './runtime-snapshot';
+ import { isUniversalAttribute } from './applicability-evaluator';
+-import { CohortSemanticValidationSchema } from '../shared/schemas/onboarding';
++import {
++  CohortSemanticValidationSchema,
++  FamilyTitleValidationRecordSchema,
++  PageDecisionStatusRecordSchema,
++} from '../shared/schemas/onboarding';
++import { listVerifiedPageOptions } from '../db/repositories/page-repo';
+ 
+ export type ReviewCompletionGateResult =
+   | { ok: true; proposalCount: number }
+@@ -289,6 +294,179 @@ export function validateReviewCompletionGate(
+         reason: firstMessage ?? 'A hard cohort semantic validation finding blocks this item.',
+       };
+     }
++
++    // ── e09 B3 (T9): family title consistency proof ──
++    // A cohort-coordinated title (`llm_cohort`/`cohort_fallback`) may only be
++    // reviewed when the committed curation data carries a valid passing
++    // `familyTitleValidation` record — captured at the member-projection
++    // commit from the durable output (never recomputed from live rows).
++    // Missing or malformed for a coordinated title is corruption → fail
++    // closed. Non-cohort title sources (manual/web/ocr/llm single) are not
++    // family-coordinated and skip this check.
++    const committedTitleSource = parsedCuration?.titleSource;
++    if (committedTitleSource === 'llm_cohort' || committedTitleSource === 'cohort_fallback') {
++      const familyTitleValidation = parsedCuration?.familyTitleValidation;
++      if (familyTitleValidation === undefined || familyTitleValidation === null) {
++        return {
++          ok: false,
++          code: 'title_validation_missing',
++          reason:
++            'Committed curation data carries a cohort-coordinated title without the required family title validation record; the item cannot be review-ready (T9).',
++        };
++      }
++      const parsedTitleValidation = FamilyTitleValidationRecordSchema.safeParse(familyTitleValidation);
++      if (!parsedTitleValidation.success) {
++        return {
++          ok: false,
++          code: 'title_validation_malformed',
++          reason:
++            'Committed family title validation record is malformed; the item cannot be review-ready (T9).',
++        };
++      }
++      if (parsedTitleValidation.data.status !== 'passed') {
++        return {
++          ok: false,
++          code: 'title_validation_blocked',
++          reason:
++            'The committed family title set did not pass consistency validation; the item cannot be review-ready (T9).',
++        };
++      }
++    }
++
++    // ── e09 B3 (P10): Category Page decision gate ──
++    // Enforced only when the run's FROZEN snapshot enables the category_page
++    // target (same intent-proof pattern as the type gate above); legacy runs
++    // without a resolvable snapshot skip it. NOTE: both this gate and the T9
++    // title gate above are additionally scoped to cohort children — the page
++    // decision status and family-title record are written only by the cohort
++    // commit (cohort_run_id !== null branch). Single-item classification runs
++    // rely on the promotion mandatory-Pages + verified-set currentness
++    // backstop instead. An abstained or absent durable
++    // decision blocks review (adjudication #6) unless a reviewer correction —
++    // an ACCEPTED category_page proposal in this run — resolves to a CURRENT
++    // verified Page ID (adjudication #10). An assigned decision with accepted
++    // identified proposals that no longer resolve into the active verified
++    // import is stale → refuse. Confidence is never consulted.
++    const pageGateSnapshot = run.config_snapshot_hash
++      ? getRuntimeSnapshotByHash(input.workspaceId, run.config_snapshot_hash)
++      : null;
++    const categoryPageTargetEnabled = pageGateSnapshot
++      ? pageGateSnapshot.curationTargets.some(
++          // Snapshot curation-target kinds are 'product_type' | 'product_field' | 'page'
++          // (CurationTargetKindEnum) — the Page decision is the 'page' target.
++          target => target.kind === 'page' && (target.enabled || target.mandatory),
++        )
++      : false;
++    // CURRENT active verified Page import identities (P10: a reviewer
++    // correction satisfies the gate only when it resolves to a current
++    // verified Page ID).
++    const verifiedPageIdSet = new Set(
++      categoryPageTargetEnabled ? listVerifiedPageOptions(input.workspaceId).map(page => page.id) : [],
++    );
++    if (categoryPageTargetEnabled) {
++      const pageDecisionStatus = parsedCuration?.pageDecisionStatus;
++      if (pageDecisionStatus === undefined || pageDecisionStatus === null) {
++        return {
++          ok: false,
++          code: 'page_decision_missing',
++          reason:
++            'Committed Category Page decision record is missing; the item cannot be review-ready (P10).',
++        };
++      }
++      const parsedPageDecision = PageDecisionStatusRecordSchema.safeParse(pageDecisionStatus);
++      if (!parsedPageDecision.success) {
++        return {
++          ok: false,
++          code: 'page_decision_missing',
++          reason:
++            'Committed Category Page decision record is malformed; the item cannot be review-ready (P10).',
++        };
++      }
++      // Effective identity mirrors getAcceptedProposals (classification-run-repo):
++      // the live non-superseded decision's revised_target_id wins when present,
++      // otherwise the original predicted target. Adjudication #10 — a reviewer
++      // correction satisfies the gate only when it resolves to a current
++      // verified Page ID, so a REVISED target must be validated as itself.
++      const pageProposalRows = db.query(
++        `SELECT p.target_id,
++                (SELECT CASE WHEN COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END) = 1
++                        THEN d.revised_target_id ELSE p.target_id END
++                   FROM classification_proposal_decisions d
++                  WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
++                  ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS effective_target_id,
++                EXISTS(
++                  SELECT 1 FROM classification_proposal_decisions d
++                  WHERE d.proposal_id = p.id AND d.superseded_at IS NULL AND d.decision = 'accepted'
++                ) AS has_accepted_decision
++         FROM classification_proposals p
++         WHERE p.run_id = ? AND p.proposal_type = 'category_page'`,
++      ).all(input.activeRunId) as Array<{
++        target_id: string | null;
++        effective_target_id: string | null;
++        has_accepted_decision: number;
++      }>;
++      const hasAcceptedVerifiedPage = pageProposalRows.some(
++        row =>
++          row.has_accepted_decision &&
++          typeof row.effective_target_id === 'string' &&
++          row.effective_target_id.length > 0 &&
++          verifiedPageIdSet.has(row.effective_target_id),
++      );
++      if (parsedPageDecision.data.status === 'abstained') {
++        if (!hasAcceptedVerifiedPage) {
++          return {
++            ok: false,
++            code: 'page_decision_abstained',
++            reason:
++              parsedPageDecision.data.reason ??
++              'The Category Page decision abstained; manual selection resolving to a current verified Page ID is required before review can complete (P10).',
++          };
++        }
++      } else if (parsedPageDecision.data.status === 'absent') {
++        if (!hasAcceptedVerifiedPage) {
++          return {
++            ok: false,
++            code: 'page_decision_missing',
++            reason:
++              'No durable Category Page decision was committed for this cohort member and no reviewer-accepted verified Page exists; the item cannot be review-ready (P10).',
++          };
++        }
++      } else {
++        // Assigned: verify committed assignments still resolve into the
++        // CURRENT active verified import. Only IDENTIFIED accepted proposals
++        // participate — name-only rows carry no verifiable identity and are
++        // never acceptance authority (P2/P12).
++        const identifiedAcceptedPages = pageProposalRows.filter(
++          row =>
++            row.has_accepted_decision &&
++            typeof row.effective_target_id === 'string' &&
++            row.effective_target_id.length > 0,
++        );
++        if (
++          identifiedAcceptedPages.length > 0 &&
++          !identifiedAcceptedPages.some(row => verifiedPageIdSet.has(row.effective_target_id!))
++        ) {
++          return {
++            ok: false,
++            code: 'page_decision_stale',
++            reason:
++              'The committed Category Page assignment no longer resolves into the active verified Page import (stale or unverified identity); the item cannot be review-ready (P10).',
++          };
++        }
++        if (!hasAcceptedVerifiedPage) {
++          // Fail closed (P10): an `assigned` decision whose accepted proposals
++          // were ALL rejected by the reviewer (or carry name-only rows with no
++          // verifiable identity) leaves zero accepted verified Pages — review
++          // must not complete on that end state.
++          return {
++            ok: false,
++            code: 'page_decision_missing',
++            reason:
++              'No reviewer-accepted Category Page resolves into the active verified import; the item cannot be review-ready (P10).',
++          };
++        }
++      }
++    }
+   }
+ 
+   const proposals = db.query(
+diff --git a/src/onboarding/cohort-name-coordinator.ts b/src/onboarding/cohort-name-coordinator.ts
+index 6f6e455..b710260 100644
+--- a/src/onboarding/cohort-name-coordinator.ts
++++ b/src/onboarding/cohort-name-coordinator.ts
+@@ -16,11 +16,12 @@
+  */
+ import { getLlmConfigForTask, callLlmForTask, callLlmForTaskWithProvenance } from './llm-client';
+ import { redactTransportText } from '../classification/model-policy-gateway';
+-import { normalizeBrand, extractNameStem } from './product-line-grouper';
++import { familyGroupingIdentityFor, knownBrandsForBatch } from './product-line-grouper';
+ import { buildCohortPrompt, FORMAT_RULES } from './title-prompt-template';
+ import type { CohortExecutionTypeContext } from './title-prompt-template';
+ import { normalizeTitleAuthorityString, TITLE_AUTHORITY_TRUNCATION } from './cohort-title-hash';
+ import { HeartbeatLostError } from '../classification/heartbeat-errors';
++import { validateFamilyTitleSet } from '../classification/family-title-consistency';
+ import type { ModelCallContext } from '../classification/model-operation-registry';
+ import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
+ import type { OnboardingItem } from '../shared/schemas/onboarding';
+@@ -84,6 +85,13 @@ export interface CohortCoordinationOptions {
+    * calls), even when the items carry OCR/web data.
+    */
+   includeTitleHashSignals?: boolean;
++  /**
++   * T1 authoritative: when set, the caller asserts that `items` are the frozen
++   * cohort_members for this cohortId and must NOT be regrouped via
++   * familyGroupingIdentityFor/extractNameStem. The coordinator treats the
++   * entire `items` array as one authoritative family (T10 grouping boundary).
++   */
++  authoritativeCohortId?: string;
+ }
+ 
+ /** Stable fingerprint inputs for cache. Excludes volatile fields. */
+@@ -210,6 +218,11 @@ export function clearCohortCoordinationCache(): void {
+ /**
+  * Known abbreviation expansions for deterministic title cleaning.
+  * Applied case-insensitively; the output uses the canonical form.
++ * Includes distributor abbreviations (vnsn, hypo, frzn, vgg) so fallback
++ * titles are consistent with LLM-coordinated titles.
++ * Common subset chkn/ckn/slmn/trky/vnsn/frzn/vgg must stay in sync with
++ * product-line-token-normalizer.ts EXPAND_ABBREVIATIONS; coordinator adds
++ * hypo/hypoallergenic formatter-only.
+  */
+ const ABBREVIATIONS: Record<string, string> = {
+   sm: 'Small',
+@@ -223,6 +236,11 @@ const ABBREVIATIONS: Record<string, string> = {
+   slmn: 'Salmon',
+   trky: 'Turkey',
+   dntl: 'Dental',
++  vnsn: 'Venison',
++  hypo: 'Hypoallergenic',
++  hypoallergenic: 'Hypoallergenic',
++  frzn: 'Frozen',
++  vgg: 'Veggie',
+ };
+ 
+ /** Units to normalize after title casing. */
+@@ -239,8 +257,8 @@ const UNIT_PATTERNS: Array<[RegExp, string]> = [
+ /**
+  * Deterministically produce a store-ready title from a spreadsheet name.
+  *
+- * Handles: SM/MD/LG/XL expansion, CHKN/CKN/SLMN/TRKY/DNTL expansion,
+- * OZ/LB/CT/PK normalization, parenthesis removal (content preserved),
++ * Handles: SM/MD/LG/XL expansion, CHKN/CKN/SLMN/TRKY/DNTL/VNSN/HYPO/FRZN/VGG
++ * expansion, OZ/LB/CT/PK normalization, parenthesis removal (content preserved),
+  * brand prefixing, whitespace normalization, title casing.
+  */
+ export function formatDeterministicTitle(
+@@ -307,6 +325,44 @@ export function formatDeterministicTitle(
+ 
+ // ─── Core Coordination Logic ──────────────────────────────────────────────────
+ 
++/**
++ * Derive minimal frozenFacts for pure family-title validation (B1 T4/T5).
++ * Heuristic: modifiers/flavor/size inferred from the spreadsheet name so the
++ * validator can enforce always-visible + no-leakage without DB access.
++ * T10: never calls extractNameStem / grouping — local regex only.
++ */
++function deriveFrozenFactsForValidation(item: OnboardingItem): { brand: string; productLine: string; formOrSpecies?: string; flavorOrColorOrSubline?: string; sizeOrCount?: string; modifiers: { soft?: boolean; hard?: boolean; classic?: boolean; hypoallergenic?: boolean } } {
++  const raw = (item.name ?? '').toLowerCase();
++  const brand = item.brandHint?.trim() ?? '';
++  const productLine = brand;
++  const modifiers = {
++    soft: /\bsoft\b/.test(raw) || undefined,
++    hard: /\bhard\b/.test(raw) || undefined,
++    classic: /\bclassic\b/.test(raw) || undefined,
++    hypoallergenic: /\b(hypoallergenic|hypo)\b/.test(raw) || undefined,
++  };
++  const flavorMatch = raw.match(/\b(beef|venison|vnsn|chicken|chkn|ckn|salmon|slmn|turkey|trky|veggie|vgg|duck|lamb|pork|bison|fish|tuna)\b/);
++  const flavorOrColorOrSubline = flavorMatch ? flavorMatch[1].replace(/vnsn/,'venison').replace(/chkn|ckn/,'chicken').replace(/slmn/,'salmon').replace(/trky/,'turkey').replace(/vgg/,'veggie') : undefined;
++  const sizeMatch = raw.match(/\b(small|medium|large|x-?large|xx-?large|x-small|sm|md|lg|xl|xxl|xs)\b/);
++  const sizeMap: Record<string,string> = { sm:'Small', md:'Medium', lg:'Large', xl:'X-Large', xxl:'XX-Large', xs:'X-Small' };
++  // Weight/count slot (adjudicated Size/Weight/Count slot, plan §6.2): families legitimately
++  // vary by packaged weight/count ("Chicken 5 lb" vs "Beef 10 lb") — without this extraction
++  // the literal stays in the T2 skeleton and every weight-variant family hard-fails T7.
++  // Token is emitted in the SAME rendered form formatDeterministicTitle produces
++  // ("1 lb" spaced; "6 ct" → "6-count" per UNIT_PATTERNS) so deriveSkeleton's word-boundary
++  // match aligns with candidate/fallback titles. Regex-only, idempotent.
++  const weightMatch = raw.match(/\b(\d+(?:\.\d+)?)[ \t]*(lbs|lb|oz|kg|count|ct|pack)\b/);
++  let sizeOrCount: string | undefined;
++  if (weightMatch) {
++    const num = weightMatch[1];
++    const unit = weightMatch[2];
++    sizeOrCount = unit === 'ct' ? `${num}-count` : unit === 'lbs' ? `${num} lb` : `${num} ${unit}`;
++  } else if (sizeMatch) {
++    sizeOrCount = sizeMap[sizeMatch[1].toLowerCase()] ?? sizeMatch[1];
++  }
++  return { brand, productLine, flavorOrColorOrSubline, sizeOrCount, modifiers };
++}
++
+ /**
+  * Validate that the LLM response covers every expected UPC, contains no
+  * duplicate titles (case/whitespace-insensitive), and has no structural issues.
+@@ -364,6 +420,47 @@ export async function coordinateCohortItems(
+ 
+   if (items.length === 0) return result;
+ 
++  // T1 authoritative: do not regroup existing cohort — the caller-provided
++  // member list IS the frozen cohort membership. Regrouping via
++  // familyGroupingIdentityFor -> extractNameStem is only for pre-cohort
++  // routing (initial grouping). For an existing cohort we treat the entire
++  // items array as one authoritative family so validateFamilyTitleSet sees
++  // the ORIGINAL frozen set, not a re-derived chunk. T10: no new
++  // extractNameStem calls are added by validation (deriveFrozenFactsForValidation is regex-only).
++  if (opts?.authoritativeCohortId) {
++    if (items.length <= 1) return result;
++    const authoritativeGroup = items;
++    try {
++      const groupResult = await coordinateGroup(authoritativeGroup, modelPolicy, opts);
++      for (const [upc, ct] of groupResult) result.set(upc, ct);
++    } catch (err: any) {
++      if (err instanceof HeartbeatLostError) throw err;
++      console.warn(`[CohortCoordinator] Authoritative coordination failed for cohort ${opts.authoritativeCohortId}: ${redactTransportText(err.message)}`);
++      const fallbackTitles = authoritativeGroup.map(item => ({
++        upc: item.upc,
++        title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
++      }));
++      const fallbackValidation = validateFamilyTitleSet({
++        familyId: opts.authoritativeCohortId,
++        members: authoritativeGroup.map(item => ({
++          onboardingItemId: item.id,
++          upc: item.upc,
++          frozenEvidenceHash: 'fallback:' + item.upc,
++          frozenFacts: deriveFrozenFactsForValidation(item),
++        })),
++        candidateTitles: fallbackTitles,
++      });
++      if (!fallbackValidation.valid) {
++        throw new Error(`Deterministic fallback title set failed family consistency (T7): ${fallbackValidation.reason ?? fallbackValidation.perMember.find(p => !p.valid)?.reason ?? 'unknown'}`, { cause: err });
++      }
++      for (const item of authoritativeGroup) {
++        const t = fallbackTitles.find(f => f.upc === item.upc)?.title ?? formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
++        result.set(item.upc, { title: t, source: 'cohort_fallback' });
++      }
++    }
++    return result;
++  }
++
+   const groups = groupByProductLine(items);
+ 
+   for (const [, groupItems] of groups) {
+@@ -387,12 +484,27 @@ export async function coordinateCohortItems(
+       console.warn(
+         `[CohortCoordinator] Coordination failed for group, using fallbacks: ${redactTransportText(err.message)}`,
+       );
+-      // All-or-nothing: deterministic fallback for every sibling
++      // All-or-nothing: deterministic fallback for every sibling — must also pass family-title consistency (T7)
++      const fallbackTitles = groupItems.map(item => ({
++        upc: item.upc,
++        title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
++      }));
++      const fallbackValidation = validateFamilyTitleSet({
++        familyId: groupItems.map(i => i.upc).sort().join(','),
++        members: groupItems.map(item => ({
++          onboardingItemId: item.id,
++          upc: item.upc,
++          frozenEvidenceHash: 'fallback:' + item.upc,
++          frozenFacts: deriveFrozenFactsForValidation(item),
++        })),
++        candidateTitles: fallbackTitles,
++      });
++      if (!fallbackValidation.valid) {
++        throw new Error(`Deterministic fallback title set failed family consistency (T7): ${fallbackValidation.reason ?? fallbackValidation.perMember.find(p => !p.valid)?.reason ?? 'unknown'}`, { cause: err });
++      }
+       for (const item of groupItems) {
+-        result.set(item.upc, {
+-          title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
+-          source: 'cohort_fallback',
+-        });
++        const t = fallbackTitles.find(f => f.upc === item.upc)?.title ?? formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
++        result.set(item.upc, { title: t, source: 'cohort_fallback' });
+       }
+     }
+   }
+@@ -401,7 +513,7 @@ export async function coordinateCohortItems(
+ }
+ 
+ /**
+- * Group items by product line using normalizeBrand + extractNameStem.
++ * Group items by product line using familyGroupingIdentityFor (batch-aware).
+  *
+  * PR6 C4 (issue #30): exported so the parent title op
+  * (`ensureCohortTitlesCoordinated`) can compute the exact multi-item-group
+@@ -411,18 +523,16 @@ export async function coordinateCohortItems(
+ export function groupByProductLine(
+   items: OnboardingItem[],
+ ): Map<string, OnboardingItem[]> {
++  const knownBrands = knownBrandsForBatch(items);
+   const groups = new Map<string, OnboardingItem[]>();
+ 
+   for (const item of items) {
+-    const brand = normalizeBrand(item.brandHint);
+-    const stem = extractNameStem(item.name || '');
+-
+-    if (!stem) {
++    const identity = familyGroupingIdentityFor(item, knownBrands);
++    if (!identity.stem) {
+       groups.set(`single-${item.upc}`, [item]);
+       continue;
+     }
+-
+-    const key = `${brand}|${stem}`;
++    const key = identity.key;
+     if (!groups.has(key)) groups.set(key, []);
+     groups.get(key)!.push(item);
+   }
+@@ -574,6 +684,23 @@ async function coordinateGroup(
+     throw new Error('LLM response validation failed (missing UPCs or duplicate titles)');
+   }
+ 
++  // Phase B1 (e09 T7/T8): pure family-title consistency gate — validated set must share skeleton Brand→Line→Form→Flavor→Size,
++  // preserve always-visible modifiers (Soft/Hard/Classic/Hypo), and have no sibling leakage. On valid=false the caller
++  // writes zero durable rows and may try the deterministic fallback (which is also validated before commit).
++  const familyValidation = validateFamilyTitleSet({
++    familyId: items.map(i => i.upc).sort().join(','),
++    members: items.map(item => ({
++      onboardingItemId: item.id,
++      upc: item.upc,
++      frozenEvidenceHash: 'llm:' + item.upc,
++      frozenFacts: deriveFrozenFactsForValidation(item),
++    })),
++    candidateTitles: [...validated.entries()].map(([upc, title]) => ({ upc, title })),
++  });
++  if (!familyValidation.valid) {
++    throw new Error(`LLM title set failed family consistency (T2-T6): ${familyValidation.reason ?? familyValidation.perMember.find(p => !p.valid)?.reason ?? 'unknown'}`);
++  }
++
+   const result = new Map<string, CoordinatedTitle>();
+   for (const [upc, title] of validated) {
+     result.set(upc, { title, source: 'llm_cohort' });
+diff --git a/src/onboarding/cohort-page-coordinator.ts b/src/onboarding/cohort-page-coordinator.ts
+index f8b11ed..160b63b 100644
+--- a/src/onboarding/cohort-page-coordinator.ts
++++ b/src/onboarding/cohort-page-coordinator.ts
+@@ -121,6 +121,7 @@ import {
+ import type { CohortPagePlanAuthority } from './cohort-page-hash';
+ import { coordinateCohortPagesCore } from '../classification/cohort-page-coordinator';
+ import type { CohortPageMemberResult } from '../classification/cohort-page-coordinator';
++import { validateCategoryPageAssignment } from '../classification/category-page-correctness';
+ import { buildPageHierarchy } from '../classification/page-assignment-llm';
+ import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
+ import { groupByProductLine } from './cohort-name-coordinator';
+@@ -544,6 +545,49 @@ export async function ensureCohortPagesCoordinated(
+             `[CohortPageCoordinator] Group coordination returned no result for member ${sku} (run ${run.id}).`,
+           );
+         }
++        // e09 B2 (P1-P9): per-member Page correctness gate at the durable parent op — no sibling copying.
++        // The core already gated per-member, this is defense-in-depth before persistence.
++        if (result.status === 'assigned') {
++          const memberAuthority = authorityBundle.members.find(m => m.sku === sku);
++          const verifiedCatalogForValidation = pageHierarchy.map(p => ({
++            id: p.id,
++            name: p.name,
++            parentId: null as string | null,
++          }));
++          const correctness = validateCategoryPageAssignment({
++            member: {
++              onboardingItemId: sku,
++              frozenEvidenceHash: memberAuthority ? `member:${sku}` : `member:${sku}`,
++              frozenEvidence: {
++                species: memberAuthority?.species ?? [],
++                form: memberAuthority?.productForm ?? null,
++                title: memberAuthority?.webTitle ?? memberAuthority?.name ?? null,
++                description: memberAuthority?.description ?? null,
++                productType: null,
++                brand: memberAuthority?.brand ?? null,
++                extraction: {
++                  title: memberAuthority?.webTitle ?? null,
++                  description: memberAuthority?.description ?? null,
++                  productForm: memberAuthority?.productForm ?? null,
++                },
++              },
++            },
++            candidate: {
++              primaryPageId: result.pages[0]?.pageId ?? null,
++              secondaryPageIds: result.pages.slice(1).map(p => p.pageId),
++              primaryPageName: result.pages[0]?.pageName ?? null,
++            },
++            verifiedPageCatalog: verifiedCatalogForValidation,
++            activePageImportHash: memberSnapshot0.pageImportHash ?? 'unknown',
++          });
++          if (!correctness.valid || correctness.outcome !== 'assigned') {
++            memberValues.set(sku, {
++              output: { status: 'abstained', reason: correctness.reason ?? `Page correctness gate blocked assigned page for SKU ${sku} (P5/P6/P7).` },
++              modelCallId: null,
++            });
++            continue;
++          }
++        }
+         memberValues.set(sku, toMemberValue(result));
+       }
+     }
+diff --git a/src/onboarding/cohort-page-hash.ts b/src/onboarding/cohort-page-hash.ts
+index 73f7856..0305990 100644
+--- a/src/onboarding/cohort-page-hash.ts
++++ b/src/onboarding/cohort-page-hash.ts
+@@ -74,6 +74,7 @@
+  */
+ import { hashCanonicalJson } from '../shared/stable-id';
+ import { getModelExecutionPlanEntry, type RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
++import { CATEGORY_PAGE_CORRECTNESS_VERSION } from '../classification/category-page-correctness';
+ import type { ProductLineItemSnapshot } from '../classification/types';
+ import {
+   type ExecutionTypeTitleAuthority,
+@@ -376,6 +377,8 @@ export function pageAuthorityFromProjectionMember(
+  * P-hash even when rules/provider/model are unchanged (PR7 review round 3,
+  * P1).
+  */
++export { CATEGORY_PAGE_CORRECTNESS_VERSION };
++
+ export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): string {
+   return hashCanonicalJson({
+     version: 1,
+@@ -386,5 +389,6 @@ export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): s
+     pages: bundle.pages,
+     selection: bundle.selection,
+     modelExecutionAuthority: bundle.modelExecutionAuthority ?? null,
++    categoryPageCorrectnessVersion: CATEGORY_PAGE_CORRECTNESS_VERSION,
+   });
+ }
+diff --git a/src/onboarding/cohort-title-hash.ts b/src/onboarding/cohort-title-hash.ts
+index 3ece3db..f72281d 100644
+--- a/src/onboarding/cohort-title-hash.ts
++++ b/src/onboarding/cohort-title-hash.ts
+@@ -72,6 +72,7 @@
+  */
+ import { hashCanonicalJson } from '../shared/stable-id';
+ import { FORMAT_RULES } from './title-prompt-template';
++import { FAMILY_TITLE_CONSISTENCY_VERSION } from '../classification/family-title-consistency';
+ import {
+   OPERATION_PARAMETERS,
+   PROMPT_TEMPLATE_VERSIONS,
+@@ -332,6 +333,7 @@ export function computeCohortTitleInputHashForFormatRules(
+   return hashCanonicalJson({
+     version: 2,
+     kind: 'curated_title',
++    familyTitleConsistencyVersion: FAMILY_TITLE_CONSISTENCY_VERSION,
+     membership: run.finalMembershipHash,
+     members,
+     executionProductType: executionTypeAuthority ?? {
+diff --git a/src/onboarding/draft-promoter.ts b/src/onboarding/draft-promoter.ts
+index 42854f3..bb185e1 100644
+--- a/src/onboarding/draft-promoter.ts
++++ b/src/onboarding/draft-promoter.ts
+@@ -267,6 +267,11 @@ function computePromotionGate(
+     acceptedProposals: activeProposals,
+     dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
+     currentAuthorityHashes,
++    // e09 B3 (P11): CURRENT verified Page identities of the active import —
++    // an accepted category_page proposal that no longer resolves into this
++    // set refuses the item before any draft write. Legacy items (no run
++    // pointer) never reach the check inside the gate.
++    verifiedPageIds: new Set(listVerifiedPageOptions(workspaceId).map(page => page.id)),
+   });
+   if (!gate.ok) {
+     return {
+diff --git a/src/onboarding/product-curator.ts b/src/onboarding/product-curator.ts
+index fe7ab06..aea91fa 100644
+--- a/src/onboarding/product-curator.ts
++++ b/src/onboarding/product-curator.ts
+@@ -114,6 +114,7 @@ export function assertCohortSynthesisOrdering(
+ // ─── Page Assignment Validation ───────────────────────────────────────────────
+ // Species-guard moved to pure module so vitest (no bun:sqlite) can import it.
+ import { validatePageAssignmentsBySpecies, validatePageAssignmentsWithProvenance } from '../classification/species-guard';
++import { validateCategoryPageAssignment } from '../classification/category-page-correctness';
+ // Re-export for tests that import from curator (back-compat)
+ export { validatePageAssignmentsWithProvenance, validatePageAssignmentsBySpecies };
+ 
+@@ -799,6 +800,8 @@ export async function curateItemWithPipeline(
+     // PR3 hardening (Commit B / R2): the live product_pages fallback is a
+     // post-freeze semantic read — cohort mode uses ONLY the frozen
+     // verifiedPageIds (above), never the mutable page_index.
++    // e09 B2 P12: legacy name-only hard-coded fallback is gated through
++    // category-page-correctness — unverified or semantically incompatible pages abstain (needs_input).
+     if (!cohortMode && suggestedPages.length === 0 && (suggestedProductType || item.name)) {
+       try {
+         const text = `${suggestedProductType || ''} ${item.name}`.toLowerCase();
+@@ -807,12 +810,41 @@ export async function curateItemWithPipeline(
+         ).all() as { page_name: string }[];
+         const allStorePages = catalogPages.map(p => p.page_name);
+ 
++        // Frozen verified catalog for validation (from the run's snapshot, not live DB names)
++        const verifiedRecords = (runtimeSnapshot as any)?.pages?.records as Array<{ pageId: string; pageName: string; parentPageId: string | null; verified?: boolean }> | undefined;
++        const catalogForValidation = (verifiedRecords ?? [])
++          .filter(r => r.verified !== false)
++          .map(r => ({ id: r.pageId, name: r.pageName, parentId: r.parentPageId ?? null }));
++        const pageIdByName = new Map(catalogForValidation.map(r => [r.name.toLowerCase(), r.id] as const));
++        const canPushPageName = (name: string): boolean => {
++          if (!pageIdByName.has(name.toLowerCase())) return false;
++          if (catalogForValidation.length === 0) return false;
++          const pid = pageIdByName.get(name.toLowerCase())!;
++          const result = validateCategoryPageAssignment({
++            member: {
++              onboardingItemId: item.id,
++              frozenEvidenceHash: `fallback:${item.id}`,
++              frozenEvidence: {
++                title: item.name,
++                description: (item.extractionData as any)?.description ?? null,
++                productType: suggestedProductType,
++                species: (ext as any)?.packagingOcrData?.species ?? [],
++                form: (ext as any)?.packagingOcrData?.productForm ?? null,
++              },
++            },
++            candidate: { primaryPageId: pid, secondaryPageIds: [], primaryPageName: name },
++            verifiedPageCatalog: catalogForValidation,
++            activePageImportHash: (runtimeSnapshot as any)?.pageImportHash ?? 'unknown',
++          });
++          return result.valid && result.outcome === 'assigned';
++        };
++
+         if (text.includes('chew') || text.includes('dog treat')) {
+-          if (allStorePages.includes('Dog Treats Bones Bully Sticks & Natural Chews')) suggestedPages.push('Dog Treats Bones Bully Sticks & Natural Chews');
+-          if (allStorePages.includes('Dog Treats Shop All')) suggestedPages.push('Dog Treats Shop All');
++          if (allStorePages.includes('Dog Treats Bones Bully Sticks & Natural Chews') && canPushPageName('Dog Treats Bones Bully Sticks & Natural Chews')) suggestedPages.push('Dog Treats Bones Bully Sticks & Natural Chews');
++          if (allStorePages.includes('Dog Treats Shop All') && canPushPageName('Dog Treats Shop All')) suggestedPages.push('Dog Treats Shop All');
+         } else if (text.includes('churu') || text.includes('cat food') || text.includes('entree') || text.includes('mousse') || text.includes('gravy')) {
+-          if (allStorePages.includes('Cat Food Wet')) suggestedPages.push('Cat Food Wet');
+-          if (allStorePages.includes('Cat Food Shop All')) suggestedPages.push('Cat Food Shop All');
++          if (allStorePages.includes('Cat Food Wet') && canPushPageName('Cat Food Wet')) suggestedPages.push('Cat Food Wet');
++          if (allStorePages.includes('Cat Food Shop All') && canPushPageName('Cat Food Shop All')) suggestedPages.push('Cat Food Shop All');
+         }
+         suggestedPages.splice(5);
+       } catch {
+diff --git a/src/shared/schemas/onboarding.ts b/src/shared/schemas/onboarding.ts
+index 724e5e5..58e1e22 100644
+--- a/src/shared/schemas/onboarding.ts
++++ b/src/shared/schemas/onboarding.ts
+@@ -627,6 +627,46 @@ export const CohortSemanticValidationSchema = z.object({
+ 
+ export type CohortSemanticValidation = z.infer<typeof CohortSemanticValidationSchema>;
+ 
++/**
++ * e09 B3 (T9): persisted family-title-consistency proof, captured at the
++ * member-projection commit from the DURABLE coordinated title output. The
++ * cohort name coordinator already enforced all-or-nothing validation (T7)
++ * BEFORE commit — a committed `llm_cohort`/`cohort_fallback` title passed
++ * `validateFamilyTitleSet`, so only the passing status is representable.
++ * Additive key: absent in legacy/non-cohort runs (byte-identical). Consumed
++ * fail-closed by the review completion gate for cohort-coordinated titles
++ * (adjudication #8: new revisions only — completed cohorts are never
++ * backfilled).
++ */
++export const FamilyTitleValidationRecordSchema = z.object({
++  version: z.string(),
++  // 'blocked' is representable for a family whose coordinated set failed
++  // validation and was committed as a blocked outcome; the review completion
++  // gate refuses such records with `title_validation_blocked` (T9). The
++  // current producer only commits 'passed' — the wider enum keeps the record
++  // contract total without changing producer behavior.
++  status: z.enum(['passed', 'blocked']),
++  source: z.enum(['llm_cohort', 'cohort_fallback']),
++});
++
++export type FamilyTitleValidationRecord = z.infer<typeof FamilyTitleValidationRecordSchema>;
++
++/**
++ * e09 B3 (P10): persisted durable Category Page decision status for the
++ * member, captured at the member-projection commit from the DURABLE
++ * coordinated page output — never recomputed from live rows. Additive key:
++ * absent in legacy runs (byte-identical). The review completion gate enforces
++ * it for runs whose frozen snapshot enables the category_page target;
++ * `abstained` blocks review unless a reviewer correction resolves to a
++ * current verified Page ID (adjudication #6/#10).
++ */
++export const PageDecisionStatusRecordSchema = z.object({
++  status: z.enum(['assigned', 'abstained', 'absent']),
++  reason: z.string().nullable().optional(),
++});
++
++export type PageDecisionStatusRecord = z.infer<typeof PageDecisionStatusRecordSchema>;
++
+ export const CurationDataSchema = z.object({
+   curatedTitle: z.string().nullable().default(null),
+   /** Search keywords synthesized by the curator from curated title, brand, attributes, and page names. */
+@@ -679,6 +719,10 @@ export const CurationDataSchema = z.object({
+    * + proposals stay intact for the Review UX (blocked-not-destroyed).
+    */
+   semanticValidation: CohortSemanticValidationSchema.nullable().optional(),
++  // e09 B3 (T9/P10): additive gate-status records — absent in legacy/shadow
++  // runs (JSON.stringify drops undefined keys). See the record schemas above.
++  familyTitleValidation: FamilyTitleValidationRecordSchema.nullable().optional(),
++  pageDecisionStatus: PageDecisionStatusRecordSchema.nullable().optional(),
+   // e05s01: review observability — additive, absent in legacy runs (byte-identical)
+   attributeApplicability: z
+     .array(
+diff --git a/src/classification/family-title-consistency.ts b/src/classification/family-title-consistency.ts
+new file mode 100644
+index 0000000..af03d2e
+--- /dev/null
++++ b/src/classification/family-title-consistency.ts
+@@ -0,0 +1,249 @@
++/**
++ * Pure family title consistency validator — Phase B1 (e09, T1-T10).
++ *
++ * No I/O, no DB. Validates a candidate title set for an existing product-family-v1
++ * cohort before any durable write. ALL-OR-NOTHING per T7: a single invalid
++ * member makes the whole set invalid — the caller must write zero durable
++ * rows and may retry a deterministic fallback (which must also pass this
++ * validator before commit). T10 grouping boundary: never calls
++ * extractNameStem / familyGroupingIdentityFor / grouping version.
++ */
++
++export const FAMILY_TITLE_CONSISTENCY_VERSION = 'v1' as const;
++
++export interface TitleFrozenFacts {
++  brand: string;
++  productLine: string;
++  formOrSpecies?: string;
++  flavorOrColorOrSubline?: string;
++  sizeOrCount?: string;
++  modifiers: {
++    soft?: boolean;
++    hard?: boolean;
++    classic?: boolean;
++    hypoallergenic?: boolean;
++  };
++}
++
++export interface TitleValidationInput {
++  familyId: string;
++  members: Array<{
++    onboardingItemId: string;
++    upc: string | null;
++    frozenEvidenceHash: string;
++    frozenFacts: TitleFrozenFacts;
++  }>;
++  candidateTitles: Array<{ upc: string | null; title: string }>;
++}
++
++export interface TitleValidationResult {
++  valid: boolean;
++  reason?: string;
++  skeleton?: string;
++  perMember: Array<{ upc: string | null; valid: boolean; reason?: string }>;
++}
++
++function normLower(s: string | null | undefined): string {
++  return (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
++}
++
++function escRe(s: string): string {
++  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++}
++
++function countWord(haystack: string, needle: string): number {
++  if (!needle) return 0;
++  // Hyphen-adjacent exclusion: "large" must NOT match inside "X-Large" (\b treats the hyphen
++  // as a boundary, but hyphenated compounds are single title tokens). A variant token only
++  // counts when it is a standalone word, not a fragment of a hyphenated compound (T5 fix).
++  const re = new RegExp(`(?<![\\w-])${escRe(needle)}(?![\\w-])`, 'gi');
++  const m = haystack.match(re);
++  return m ? m.length : 0;
++}
++
++function deriveSkeleton(title: string, facts: TitleFrozenFacts): string {
++  let s = title.trim().replace(/\s+/g, ' ').toLowerCase();
++  const reps: Array<[string, string]> = [];
++  if (facts.brand) reps.push([facts.brand, '{brand}']);
++  if (facts.productLine && normLower(facts.productLine) !== normLower(facts.brand)) reps.push([facts.productLine, '{line}']);
++  if (facts.modifiers.soft) reps.push(['soft', '{mod}']);
++  if (facts.modifiers.hard) reps.push(['hard', '{mod}']);
++  if (facts.modifiers.classic) reps.push(['classic', '{mod}']);
++  if (facts.modifiers.hypoallergenic) {
++    reps.push(['hypoallergenic', '{mod}']);
++    reps.push(['hypo', '{mod}']);
++  }
++  if (facts.formOrSpecies) reps.push([facts.formOrSpecies, '{form}']);
++  if (facts.flavorOrColorOrSubline) reps.push([facts.flavorOrColorOrSubline, '{flavor}']);
++  if (facts.sizeOrCount) reps.push([facts.sizeOrCount, '{size}']);
++  reps.sort((a, b) => b[0].length - a[0].length);
++  for (const [token, placeholder] of reps) {
++    if (!token) continue;
++    const re = new RegExp(`\\b${escRe(token.trim().toLowerCase())}\\b`, 'g');
++    s = s.replace(re, placeholder);
++  }
++  return s.replace(/\s+/g, ' ').trim();
++}
++
++function variantTokensFor(facts: TitleFrozenFacts): Set<string> {
++  const set = new Set<string>();
++  if (facts.modifiers.soft) set.add('soft');
++  if (facts.modifiers.hard) set.add('hard');
++  if (facts.modifiers.classic) set.add('classic');
++  if (facts.modifiers.hypoallergenic) { set.add('hypoallergenic'); set.add('hypo'); }
++  if (facts.formOrSpecies) set.add(normLower(facts.formOrSpecies));
++  if (facts.flavorOrColorOrSubline) set.add(normLower(facts.flavorOrColorOrSubline));
++  if (facts.sizeOrCount) set.add(normLower(facts.sizeOrCount));
++  return set;
++}
++
++/**
++ * Validate a candidate title set — pure, deterministic.
++ * T1: assumes caller passed the frozen cohort membership; does not regroup.
++ * T2: shared skeleton identical after placeholder substitution.
++ * T3: canonical brand/productLine identical across family, present in titles.
++ * T4: always-visible variant fidelity (soft/hard/classic/hypo + flavor/size).
++ * T5: no sibling leakage.
++ * T6: no invention for indistinguishable frozenFacts.
++ * T7: all-or-nothing (caller writes zero rows on valid=false).
++ * T8: version FAMILY_TITLE_CONSISTENCY_VERSION participates in cohort-title hash (see cohort-title-hash.ts).
++ * T10: no grouping call.
++ */
++export function validateFamilyTitleSet(input: TitleValidationInput): TitleValidationResult {
++  const perMember: Array<{ upc: string | null; valid: boolean; reason?: string }> = [];
++  if (input.members.length === 0) return { valid: true, skeleton: '', perMember };
++  if (input.members.length !== input.candidateTitles.length) {
++    return { valid: false, reason: 'candidateTitles length must equal members length', perMember: [] };
++  }
++  const titleByUpc = new Map<string | null, string>();
++  for (const c of input.candidateTitles) {
++    // Use string key; null UPC maps to '__null__' but we also keep per-upc lookup via member UPC
++    titleByUpc.set(c.upc ?? '__null__', c.title);
++  }
++  // T3 canonical brand/line
++  const brands = input.members.map(m => normLower(m.frozenFacts.brand));
++  const lines = input.members.map(m => normLower(m.frozenFacts.productLine));
++  const canonicalBrand = brands[0];
++  const canonicalLine = lines[0];
++  const brandMismatch = brands.some(b => b !== canonicalBrand);
++  const lineMismatch = lines.some(l => l !== canonicalLine);
++
++  // T6: indistinguishable frozenFacts groups
++  const factsKey = (f: TitleFrozenFacts) => JSON.stringify({
++    brand: normLower(f.brand),
++    line: normLower(f.productLine),
++    form: normLower(f.formOrSpecies),
++    flavor: normLower(f.flavorOrColorOrSubline),
++    size: normLower(f.sizeOrCount),
++    soft: !!f.modifiers.soft, hard: !!f.modifiers.hard, classic: !!f.modifiers.classic, hypo: !!f.modifiers.hypoallergenic,
++  });
++  const groups = new Map<string, typeof input.members>();
++  for (const m of input.members) {
++    const k = factsKey(m.frozenFacts);
++    if (!groups.has(k)) groups.set(k, []);
++    groups.get(k)!.push(m);
++  }
++  let inventionReason: string | null = null;
++  for (const [, grp] of groups) {
++    if (grp.length > 1) {
++      const titles = grp.map(m => normLower(titleByUpc.get(m.upc ?? '__null__') ?? ''));
++      const distinct = new Set(titles);
++      if (distinct.size > 1) inventionReason = 'indistinguishable frozenFacts but titles differ — invention to force uniqueness (T6)';
++    }
++  }
++
++  // Pre-compute skeletons
++  const skeletons: string[] = [];
++  for (const m of input.members) {
++    const raw = titleByUpc.get(m.upc ?? '__null__') ?? '';
++    skeletons.push(deriveSkeleton(raw, m.frozenFacts));
++  }
++  const canonicalSkeleton = skeletons[0];
++  const skeletonMismatch = skeletons.some(s => s !== canonicalSkeleton);
++
++  // T5 sibling token sets
++  const allVariantTokens = input.members.map(m => variantTokensFor(m.frozenFacts));
++
++  let overallValid = true;
++  let overallReason: string | undefined;
++
++  if (brandMismatch) { overallValid = false; overallReason = 'canonical brand differs across family (T3)'; }
++  else if (lineMismatch) { overallValid = false; overallReason = 'canonical productLine differs across family (T3)'; }
++  else if (skeletonMismatch) { overallValid = false; overallReason = `shared skeleton mismatch (T2): ${skeletons.join(' | ')}`; }
++  else if (inventionReason) { overallValid = false; overallReason = inventionReason; }
++
++  for (let i = 0; i < input.members.length; i++) {
++    const m = input.members[i];
++    const raw = titleByUpc.get(m.upc ?? '__null__') ?? '';
++    const normTitle = raw.trim().replace(/\s+/g, ' ');
++    const lowerTitle = normTitle.toLowerCase();
++    let valid = true;
++    let reason: string | undefined;
++
++    if (!overallValid) {
++      // still compute per-member reasons for diagnostics
++    }
++    // T3: brand/line present in title
++    if (normLower(m.frozenFacts.brand) && countWord(lowerTitle, normLower(m.frozenFacts.brand)) !== 1) {
++      valid = false; reason = `brand "${m.frozenFacts.brand}" must appear exactly once (T3)`;
++    } else if (normLower(m.frozenFacts.productLine) && normLower(m.frozenFacts.productLine) !== normLower(m.frozenFacts.brand) && countWord(lowerTitle, normLower(m.frozenFacts.productLine)) !== 1) {
++      valid = false; reason = `productLine "${m.frozenFacts.productLine}" must appear exactly once (T3)`;
++    }
++    // T4 variant fidelity
++    if (valid) {
++      const checks: Array<[boolean | undefined, string]> = [
++        [m.frozenFacts.modifiers.soft, 'soft'],
++        [m.frozenFacts.modifiers.hard, 'hard'],
++        [m.frozenFacts.modifiers.classic, 'classic'],
++        [m.frozenFacts.modifiers.hypoallergenic, 'hypoallergenic'],
++      ];
++      for (const [flag, token] of checks) {
++        if (!flag) continue;
++        // hypoallergenic accepts hypo or hypoallergenic
++        const cnt = token === 'hypoallergenic' ? (countWord(lowerTitle, 'hypoallergenic') + countWord(lowerTitle, 'hypo')) : countWord(lowerTitle, token);
++        // For hypoallergenic, at least one of the two forms, but counts combined should be 1
++        // If token is hypoallergenic and title uses "hypo", that's ok — but we need to ensure not double count
++        if (token === 'hypoallergenic') {
++          const hasFull = countWord(lowerTitle, 'hypoallergenic') > 0;
++          const hasShort = countWord(lowerTitle, 'hypo') > 0;
++          // If uses hypoallergenic, hypo substring inside hypoallergenic should not double-count — our counts already separate, but word-boundary prevents double
++          const total = (hasFull ? 1 : 0) + (hasShort && !hasFull ? 1 : 0);
++          if (total !== 1) { valid = false; reason = `modifier "${token}" must appear exactly once (T4)`; break; }
++        } else if (cnt !== 1) { valid = false; reason = `modifier "${token}" must appear exactly once (T4)`; break; }
++      }
++    }
++    if (valid && m.frozenFacts.flavorOrColorOrSubline) {
++      if (countWord(lowerTitle, normLower(m.frozenFacts.flavorOrColorOrSubline)) !== 1) {
++        valid = false; reason = `flavor "${m.frozenFacts.flavorOrColorOrSubline}" must appear exactly once (T4)`;
++      }
++    }
++    if (valid && m.frozenFacts.sizeOrCount) {
++      if (countWord(lowerTitle, normLower(m.frozenFacts.sizeOrCount)) !== 1) {
++        valid = false; reason = `size "${m.frozenFacts.sizeOrCount}" must appear exactly once (T4)`;
++      }
++    }
++    if (valid && m.frozenFacts.formOrSpecies) {
++      if (countWord(lowerTitle, normLower(m.frozenFacts.formOrSpecies)) !== 1) {
++        valid = false; reason = `form "${m.frozenFacts.formOrSpecies}" must appear exactly once (T4)`;
++      }
++    }
++    // T5 no sibling leakage
++    if (valid) {
++      const own = allVariantTokens[i];
++      const siblingOnly = new Set<string>();
++      for (let j = 0; j < allVariantTokens.length; j++) {
++        if (j === i) continue;
++        for (const tok of allVariantTokens[j]) if (!own.has(tok)) siblingOnly.add(tok);
++      }
++      for (const tok of siblingOnly) {
++        if (countWord(lowerTitle, tok) > 0) { valid = false; reason = `sibling leakage: title contains "${tok}" not in this member's frozenFacts (T5)`; break; }
++      }
++    }
++    // Overall skeleton/brand/invention also invalidates per-member
++    if (!overallValid) valid = false;
++    if (!valid) overallValid = false;
++    perMember.push({ upc: m.upc, valid, reason: valid ? undefined : (reason ?? overallReason) });
++  }
++
++  return { valid: overallValid, reason: overallValid ? undefined : (overallReason ?? perMember.find(p => !p.valid)?.reason), skeleton: canonicalSkeleton, perMember };
++}
+diff --git a/src/classification/category-page-correctness.ts b/src/classification/category-page-correctness.ts
+new file mode 100644
+index 0000000..75895ab
+--- /dev/null
++++ b/src/classification/category-page-correctness.ts
+@@ -0,0 +1,342 @@
++/**
++ * Category Page Correctness — pure validator (e09 B2, P1-P12).
++ *
++ * No I/O, DB, embeddings, retrieval. Confidence is non-authoritative (P8) —
++ * never read.
++ */
++
++export const CATEGORY_PAGE_CORRECTNESS_VERSION = 'v1';
++
++export type PageCorrectnessInput = {
++  member: {
++    onboardingItemId: string;
++    frozenEvidenceHash: string;
++    frozenEvidence: {
++      species?: string[];
++      productType?: string | null;
++      form?: string | null;
++      title?: string | null;
++      description?: string | null;
++      extraction?: any;
++      brand?: string | null;
++    };
++    frozenProductTypeContext?: string | null;
++  };
++  candidate: {
++    primaryPageId: string | null;
++    secondaryPageIds: string[];
++    primaryPageName?: string | null;
++  };
++  /** Frozen verified catalog — only IDs here are authoritative (P2). */
++  verifiedPageCatalog: Array<{
++    id: string;
++    name: string;
++    parentId: string | null;
++    species?: string | null;
++    categoryType?: string | null;
++  }>;
++  activePageImportHash: string;
++  /** Optional frozen-snapshot expectation: when provided and mismatched with
++   *  activePageImportHash the member is blocked as stale (P2/P11 defense-in-depth).
++   *  Absent/null = skip here; the promotion gate remains the P11 enforcement point. */
++  expectedActivePageImportHash?: string | null;
++};
++
++export type PageCorrectnessResult = {
++  outcome: 'assigned' | 'needs_input' | 'blocked';
++  valid: boolean;
++  reason?: string;
++};
++
++function normalizeLower(value: string): string {
++  return value.trim().toLowerCase();
++}
++
++function findPage(catalog: PageCorrectnessInput['verifiedPageCatalog'], id: string) {
++  return catalog.find(p => p.id === id) ?? null;
++}
++
++function isBrandPageName(name: string): boolean {
++  return normalizeLower(name).startsWith('brand -');
++}
++
++function speciesTokens(evidenceSpecies: string[] | undefined): Set<string> {
++  const out = new Set<string>();
++  for (const s of evidenceSpecies ?? []) {
++    const v = normalizeLower(s);
++    if (v.includes('dog')) out.add('dog');
++    if (v.includes('cat')) out.add('cat');
++    if (v.includes('bird')) out.add('bird');
++    if (v.includes('fish')) out.add('fish');
++    if (v.includes('reptile')) out.add('reptile');
++    if (v.includes('small animal') || v.includes('small pet')) out.add('small animal');
++    if (v.includes('horse')) out.add('horse');
++  }
++  return out;
++}
++
++function pageSpeciesTokens(page: { name: string; species?: string | null; categoryType?: string | null }): Set<string> {
++  const name = normalizeLower(page.name);
++  const cat = normalizeLower(page.categoryType ?? '');
++  const combined = `${name} ${cat}`;
++  const out = new Set<string>();
++  if (/\bdog\b/.test(combined)) out.add('dog');
++  if (/\bcat\b/.test(combined)) out.add('cat');
++  if (/\bbird\b/.test(combined)) out.add('bird');
++  if (/\bfish\b/.test(combined)) out.add('fish');
++  if (/\breptile\b/.test(combined)) out.add('reptile');
++  if (/\bsmall animal\b/.test(combined) || /\bsmall pet\b/.test(combined)) out.add('small animal');
++  if (/\bhorse\b/.test(combined)) out.add('horse');
++  if (page.species) {
++    const s = normalizeLower(page.species);
++    if (s.includes('dog')) out.add('dog');
++    if (s.includes('cat')) out.add('cat');
++    if (s.includes('bird')) out.add('bird');
++    if (s.includes('fish')) out.add('fish');
++  }
++  return out;
++}
++
++function pageCategoryTokens(page: { name: string; categoryType?: string | null }): Set<string> {
++  const name = normalizeLower(page.name);
++  const cat = normalizeLower(page.categoryType ?? '');
++  const combined = `${name} ${cat}`;
++  const out = new Set<string>();
++  // food vs treat vs toy vs supply vs accessory/refill, wet vs dry
++  if (combined.includes('food')) out.add('food');
++  if (combined.includes('treat')) out.add('treat');
++  if (combined.includes('toy')) out.add('toy');
++  if (combined.includes('supply') || combined.includes('supplies')) out.add('supply');
++  if (combined.includes('accessory') || combined.includes('refill')) out.add('accessory');
++  if (combined.includes('wet')) out.add('wet');
++  if (combined.includes('dry')) out.add('dry');
++  if (combined.includes('jerky')) out.add('jerky');
++  if (combined.includes('chew') || combined.includes('bully') || combined.includes('bone')) out.add('chew');
++  // life-stage / form hints
++  if (combined.includes('puppy')) out.add('puppy');
++  if (combined.includes('kitten')) out.add('kitten');
++  return out;
++}
++
++function evidenceCategoryTokens(
++  evidence: PageCorrectnessInput['member']['frozenEvidence'],
++  productTypeContext?: string | null,
++): Set<string> {
++  const parts = [
++    evidence.title ?? '',
++    evidence.description ?? '',
++    evidence.productType ?? '',
++    evidence.form ?? '',
++    evidence.extraction?.title ?? '',
++    evidence.extraction?.description ?? '',
++    evidence.extraction?.productForm ?? '',
++    // Frozen Execution Product Type context is member-owned frozen input (P4) — merged into
++    // the token basis so type-level distinctions (e.g. "Dry Dog Food") participate.
++    productTypeContext ?? '',
++  ]
++    .join(' ')
++    .toLowerCase();
++  const out = new Set<string>();
++  if (parts.includes('treat')) out.add('treat');
++  if (parts.includes('food')) out.add('food');
++  if (parts.includes('toy')) out.add('toy');
++  if (parts.includes('supply')) out.add('supply');
++  // wet/dry signal
++  if (/\bwet\b/.test(parts)) out.add('wet');
++  if (/\bdry\b/.test(parts)) out.add('dry');
++  // chew/jerky
++  if (parts.includes('chew') || parts.includes('bully') || parts.includes('bone')) out.add('chew');
++  if (parts.includes('jerky')) out.add('jerky');
++  return out;
++}
++
++/**
++ * Validate one member's candidate Page assignment against frozen correctness rules.
++ * Pure, deterministic. Confidence never read (P8).
++ */
++export function validateCategoryPageAssignment(input: PageCorrectnessInput): PageCorrectnessResult {
++  const { candidate, verifiedPageCatalog, member } = input;
++
++  // P1 — verified frozen catalog only
++  if (!verifiedPageCatalog || verifiedPageCatalog.length === 0) {
++    return { outcome: 'blocked', valid: false, reason: 'No verified frozen Page catalog available (P1).' };
++  }
++
++  // Stale-import defense-in-depth: member froze against a different verified Page import.
++  if (
++    input.expectedActivePageImportHash != null &&
++    input.expectedActivePageImportHash !== '' &&
++    input.activePageImportHash !== input.expectedActivePageImportHash
++  ) {
++    return {
++      outcome: 'blocked',
++      valid: false,
++      reason: `Stale Page import — member froze against "${input.expectedActivePageImportHash}" but validated against "${input.activePageImportHash}" (P2/P11).`,
++    };
++  }
++
++  if (!candidate.primaryPageId) {
++    return { outcome: 'needs_input', valid: false, reason: 'Missing primary Page — needs manual selection (P3/P10).' };
++  }
++
++  // P2 — stable identity
++  const primaryPage = findPage(verifiedPageCatalog, candidate.primaryPageId);
++  if (!primaryPage) {
++    return { outcome: 'blocked', valid: false, reason: `Unknown primary Page ID "${candidate.primaryPageId}" — not in frozen verified catalog (P2).` };
++  }
++
++  if (candidate.primaryPageName && normalizeLower(candidate.primaryPageName) !== normalizeLower(primaryPage.name)) {
++    return {
++      outcome: 'blocked',
++      valid: false,
++      reason: `Mismatched ID/name pair for Page "${candidate.primaryPageId}" — expected "${primaryPage.name}" got "${candidate.primaryPageName}" (P2).`,
++    };
++  }
++
++  // P7 — brand page cannot be primary (canonical brand not re-resolved here; name prefix is the gate,
++  // full canonical check happens in B3 review gate — see task note)
++  if (isBrandPageName(primaryPage.name)) {
++    return {
++      outcome: 'needs_input',
++      valid: false,
++      reason: `Brand landing page "${primaryPage.name}" cannot serve as primary category — optional secondary only (P7).`,
++    };
++  }
++
++  // Validate secondaries are known if provided (unknown secondary is not a primary block, but stale)
++  for (const sid of candidate.secondaryPageIds ?? []) {
++    const sp = findPage(verifiedPageCatalog, sid);
++    if (!sp) {
++      // Stale/unknown secondary — treat as blocked for defense in depth? Keep per-member needs_input
++      return { outcome: 'needs_input', valid: false, reason: `Secondary Page ID "${sid}" not in frozen verified catalog (P2).` };
++    }
++    // Brand secondary is allowed; non-brand secondary must not masquerade as primary (P3)
++    // — no additional check needed beyond primary correctness.
++  }
++
++  // P3 — dual-species co-primary guard: up to 2 primaries (one per species) only when frozen evidence
++  // explicitly proves dual use (both species tokens present). Our input carries single primary + secondaries;
++  // we enforce that a second species Page in secondaries is only allowed as co-primary when evidence is dual.
++  const evidenceSpecies = speciesTokens(member.frozenEvidence.species);
++  const hasDogCatBoth = evidenceSpecies.has('dog') && evidenceSpecies.has('cat');
++  // If secondaries contain a cross-species Page while evidence is single-species, flag as needs_input (leakage)
++  // This keeps single-primary validity for single-species members.
++  if (!hasDogCatBoth && (candidate.secondaryPageIds ?? []).length > 0) {
++    for (const sid of candidate.secondaryPageIds) {
++      const sp = findPage(verifiedPageCatalog, sid);
++      if (!sp) continue;
++      const spSpecies = pageSpeciesTokens(sp);
++      // If primary is dog and secondary is cat (or vice versa) without dual evidence → needs_input
++      const primarySpecies = pageSpeciesTokens(primaryPage);
++      for (const s of spSpecies) {
++        if ((s === 'cat' && primarySpecies.has('dog')) || (s === 'dog' && primarySpecies.has('cat'))) {
++          if (!hasDogCatBoth) {
++            return {
++              outcome: 'needs_input',
++              valid: false,
++              reason: `Cross-species secondary "${sp.name}" without evidenced dual use (P3 guard).`,
++            };
++          }
++        }
++      }
++    }
++  }
++
++  // P5 — semantic compatibility: species + food/treat/toy/supply + wet/dry + product vs accessory
++  const evTokens = evidenceCategoryTokens(member.frozenEvidence, member.frozenProductTypeContext);
++  const evSpecies = evidenceSpecies;
++
++  // Species contradiction: evidence species exists and page species is disjoint and not dual
++  const primarySpeciesSet = pageSpeciesTokens(primaryPage);
++  if (evSpecies.size > 0 && primarySpeciesSet.size > 0) {
++    // Evidence says dog, page says cat-only → needs_input. Evidence says dog+cat (dual) passes either.
++    const speciesIntersect = [...evSpecies].some(s => primarySpeciesSet.has(s));
++    if (!speciesIntersect) {
++      // Allow generic pages without species token to pass (e.g., "Shop All" without dog/cat)
++      // But P3/P5 require explicit contradiction → only fail when page is explicitly the other species
++      return {
++        outcome: 'needs_input',
++        valid: false,
++        reason: `Species mismatch — evidence species [${[...evSpecies].join(',')}] vs page "${primaryPage.name}" [${[...primarySpeciesSet].join(',')}] (P5).`,
++      };
++    }
++  }
++
++  // Food vs treat vs toy vs supply: if evidence strongly indicates one and page is exclusively another
++  const pageTokens = pageCategoryTokens(primaryPage);
++  // Only enforce when evidence has chew/jerky distinction and page is opposing
++  if (evTokens.has('chew') && pageTokens.has('jerky') && !pageTokens.has('chew')) {
++    return { outcome: 'needs_input', valid: false, reason: `Product is chew-type but page is jerky-only "${primaryPage.name}" (P5).` };
++  }
++  if (evTokens.has('jerky') && pageTokens.has('chew') && !pageTokens.has('jerky')) {
++    return { outcome: 'needs_input', valid: false, reason: `Product is jerky-type but page is chew-only "${primaryPage.name}" (P5).` };
++  }
++  if (evTokens.has('toy') && (pageTokens.has('treat') || pageTokens.has('food')) && !pageTokens.has('toy')) {
++    return { outcome: 'needs_input', valid: false, reason: `Product is toy but page is consumable "${primaryPage.name}" (P5).` };
++  }
++  if ((evTokens.has('treat') || evTokens.has('food')) && pageTokens.has('toy') && !evTokens.has('toy')) {
++    return { outcome: 'needs_input', valid: false, reason: `Product is consumable but page is toy "${primaryPage.name}" (P5).` };
++  }
++  // Food ↔ treat exclusivity (P5): a dry dog FOOD on a treat-only page (or converse) is the
++  // same-species wrong-category class this validator exists to reject.
++  // Ambiguity contract (P9): evidence containing BOTH members of an exclusive pair (food AND
++  // treat) deliberately does NOT fail here — ambiguity resolves at manual review. Phase C tests
++  // pin this lenient behavior intentionally.
++  if (evTokens.has('food') && !evTokens.has('treat') && pageTokens.has('treat') && !pageTokens.has('food')) {
++    return { outcome: 'needs_input', valid: false, reason: `Product is food but page is treat-only "${primaryPage.name}" (P5).` };
++  }
++  if (evTokens.has('treat') && !evTokens.has('food') && pageTokens.has('food') && !pageTokens.has('treat')) {
++    return { outcome: 'needs_input', valid: false, reason: `Product is treat but page is food-only "${primaryPage.name}" (P5).` };
++  }
++  // Accessory/refill contradiction requires an accessory signal in frozen evidence; no such
++  // deterministic signal exists today without inventing taxonomy (P5 stop rule).
++  // TODO(e09 Phase C): wire evidence-side accessory/refill detection only if a frozen source provides it.
++  // wet vs dry where Page distinguishes
++  if (evTokens.has('wet') && pageTokens.has('dry') && !pageTokens.has('wet')) {
++    return { outcome: 'needs_input', valid: false, reason: `Wet product vs dry-only page "${primaryPage.name}" (P5).` };
++  }
++  if (evTokens.has('dry') && pageTokens.has('wet') && !pageTokens.has('dry')) {
++    return { outcome: 'needs_input', valid: false, reason: `Dry product vs wet-only page "${primaryPage.name}" (P5).` };
++  }
++
++  // P6 — specificity: Shop All ancestor superseded by specific child. If primary is Shop All while a specific child exists in catalog matching product, needs_input.
++  const primaryIsShopAll = normalizeLower(primaryPage.name).endsWith('shop all');
++  if (primaryIsShopAll) {
++    // Cheap heuristic: if any other catalog page is a child-specific page for the same species/category and is not Shop All,
++    // treat primary Shop All as too generic → needs_input (child required per P6).
++    // A specific child must belong to the same subtree family as the Shop All primary: it must
++    // share a category token with the primary's non-"Shop All" core name, or share a species
++    // token with the member's own frozen evidence (P4 member-owned). Unrelated catalog pages
++    // (e.g. "Cat Food Dry" vs a dog Shop All) do NOT qualify — bare fallback removed (P6 fix).
++    const primaryCoreName = normalizeLower(primaryPage.name).replace(/shop[- ]all/g, ' ');
++    const primaryCoreCategory = pageCategoryTokens({ name: primaryCoreName, categoryType: primaryPage.categoryType });
++    const hasSpecificAlternative = verifiedPageCatalog.some(p => {
++      if (p.id === primaryPage.id) return false;
++      if (normalizeLower(p.name).endsWith('shop all')) return false;
++      if (isBrandPageName(p.name)) return false;
++      const altCategory = pageCategoryTokens(p);
++      for (const t of altCategory) {
++        if (primaryCoreCategory.has(t)) return true;
++      }
++      if (evSpecies.size > 0) {
++        const altSpecies = pageSpeciesTokens(p);
++        for (const s of altSpecies) {
++          if (evSpecies.has(s)) return true;
++        }
++      }
++      return false;
++    });
++    if (hasSpecificAlternative) {
++      return {
++        outcome: 'needs_input',
++        valid: false,
++        reason: `Primary is generic Shop All "${primaryPage.name}" while a specific child exists in catalog — child required (P6).`,
++      };
++    }
++  }
++
++  // Also: if candidate secondary contains Shop All alongside a specific primary, deduplicate is fine — no block.
++  // (normalizePageAssignments already drops Shop All when specific exists.)
++
++  return { outcome: 'assigned', valid: true };
++}
+diff --git a/src/tests/fixtures/family-title-page-goldset-v2.json b/src/tests/fixtures/family-title-page-goldset-v2.json
+new file mode 100644
+index 0000000..1095baf
+--- /dev/null
++++ b/src/tests/fixtures/family-title-page-goldset-v2.json
+@@ -0,0 +1,163 @@
++{
++  "version": 1,
++  "description": "Family Title Consistency + Category Page Correctness — by-family gold set scaffold (adjudicated 2026-08-22). Synthetic scaffold until verified backup export lands (Plan §12). Families are the split unit (never SKU). Stable Page IDs, not names, are authoritative. Seed: BetterBone illustrative 3-member family + dual-species co-primary + synthetic example.",
++  "generatedAt": "2026-08-22T00:00:00Z",
++  "activePageImportHash": "page_import_hash_placeholder_v1__replace_with_verified_snapshot_hash",
++  "modelExecutionPlanHash": "model_plan_placeholder__replace_on_freeze",
++  "reviewer": "Store Manager (placeholder — replace on adjudication)",
++  "reviewTimestamp": "2026-08-22T00:00:00Z",
++  "skeleton": "Brand → Product Line → Form/Species → Flavor/Color/Sub-line → Size/Weight/Count",
++  "splits": {
++    "strategy": "by-family",
++    "train": ["family_betterbone_illustrative"],
++    "test": ["family_dual_species_dog_cat"],
++    "holdout": ["family_synthetic_negative_control"]
++  },
++  "families": [
++    {
++      "familyId": "family_betterbone_illustrative",
++      "groupKey": "betterbone::better bone",
++      "groupingVersion": "product-family-v1",
++      "isSynthetic": true,
++      "syntheticNote": "SYNTHETIC SCAFFOLD — illustrative BetterBone 3-member family per Plan §5. Replace with backup-clone export covering BetterBone 22 when available. Keeps skeleton Brand→Line→Form→Flavor→Size and always-visible Soft/Hard/Classic/Hypo.",
++      "expectedTitleSkeleton": "Brand → Product Line → Form/Species → Flavor/Color/Sub-line → Size/Weight/Count",
++      "expectedTitleSlots": {
++        "brand": "BetterBone",
++        "productLine": "BetterBone",
++        "form": "Chew",
++        "flavorSlot": "Beef|Venison|Veggie (per member)",
++        "modifierSlot": "Soft|Hard|Classic|Hypoallergenic (always visible when evidenced)",
++        "sizeSlot": "Small|Medium|Large"
++      },
++      "adjudicationRationale": "All three share canonical brand 'BetterBone' (compactBrandKey collapse of 'Better Bone' vs 'BetterBone') and skeleton Brand→Line→Form→Flavor→Size. Soft/Hard/Classic are always-visible modifiers (Plan §1a #2). No sibling leakage: each keeps its own flavor+size+modifier. Illustrative: BETTER BONE SOFT BEEF SM → BetterBone Soft Beef Small (Soft in modifier slot, Beef in flavor slot, Small in size slot).",
++      "reviewer": "Store Manager (placeholder)",
++      "reviewTimestamp": "2026-08-22T00:00:00Z",
++      "reviewStatus": "approved",
++      "members": [
++        {
++          "onboardingItemId": "gold-v2-betterbone-001",
++          "upc": "900000000001",
++          "rawTitle": "BETTER BONE SOFT BEEF SM",
++          "frozenEvidenceHash": "evidence_hash_placeholder_betterbone_soff_beef_sm",
++          "frozenEvidence": {
++            "species": ["Dog"],
++            "productType": "Dog Chew",
++            "form": "Chew",
++            "title": "BETTER BONE SOFT BEEF SM",
++            "description": "Natural beef flavor soft dog chew"
++          },
++          "expectedTitle": "BetterBone Soft Beef Small",
++          "requiredTokens": ["BetterBone", "Soft", "Beef", "Small"],
++          "forbiddenSiblingTokens": ["Hard", "Classic", "Venison", "Veggie", "Medium", "Large"]
++        },
++        {
++          "onboardingItemId": "gold-v2-betterbone-002",
++          "upc": "900000000002",
++          "rawTitle": "BETTER BONE HARD VNSN LG",
++          "frozenEvidenceHash": "evidence_hash_placeholder_betterbone_hard_vnsn_lg",
++          "frozenEvidence": {
++            "species": ["Dog"],
++            "productType": "Dog Chew",
++            "form": "Chew",
++            "title": "BETTER BONE HARD VNSN LG",
++            "description": "Venison flavor hard dog chew for aggressive chewers"
++          },
++          "expectedTitle": "BetterBone Hard Venison Large",
++          "requiredTokens": ["BetterBone", "Hard", "Venison", "Large"],
++          "forbiddenSiblingTokens": ["Soft", "Classic", "Beef", "Veggie", "Small", "Medium"]
++        },
++        {
++          "onboardingItemId": "gold-v2-betterbone-003",
++          "upc": "900000000003",
++          "rawTitle": "BETTER BONE CLASSIC VEGGIE MD",
++          "frozenEvidenceHash": "evidence_hash_placeholder_betterbone_classic_veggie_md",
++          "frozenEvidence": {
++            "species": ["Dog"],
++            "productType": "Dog Chew",
++            "form": "Chew",
++            "title": "BETTER BONE CLASSIC VEGGIE MD",
++            "description": "Veggie flavor classic dog chew"
++          },
++          "expectedTitle": "BetterBone Classic Veggie Medium",
++          "requiredTokens": ["BetterBone", "Classic", "Veggie", "Medium"],
++          "forbiddenSiblingTokens": ["Soft", "Hard", "Beef", "Venison", "Small", "Large"]
++        }
++      ],
++      "expectedTitles": [
++        "BetterBone Soft Beef Small",
++        "BetterBone Hard Venison Large",
++        "BetterBone Classic Veggie Medium"
++      ],
++      "expectedPrimaryPageIds": ["page_bones_bully_sticks_natural_chews"],
++      "expectedPrimaryPageNames": ["Dog Treats — Bones, Bully Sticks & Natural Chews (display only — ID is authoritative)"],
++      "allowedSecondaryPageIds": ["page_brand_betterbone"],
++      "forbiddenPageIds": ["page_jerky_dog_treats", "page_shop_all_dog_treats", "page_cat_treats"],
++      "pageRationale": "BetterBone chews are dog chews/bully-style, not jerky. Jerky page exists (P2 stable ID) but fails P5 semantic compatibility (chew vs jerky, same-species wrong category). Shop All is generic — child supersedes per P6. Brand page is optional secondary only per P7."
++    },
++    {
++      "familyId": "family_dual_species_dog_cat",
++      "groupKey": "acme::dual species treat",
++      "groupingVersion": "product-family-v1",
++      "isSynthetic": true,
++      "syntheticNote": "SYNTHETIC SCAFFOLD — evidenced dual-species co-primary example per adjudication #3/#3a. Single SKU whose frozen evidence explicitly proves dog+cat use (e.g., packaging OCR species=[dog,cat] and distributor category dual-listed). Replace with attested dual-species SKU when export identifies one.",
++      "expectedTitleSkeleton": "Brand → Product Line → Form/Species → Flavor/Color/Sub-line → Size/Weight/Count",
++      "expectedTitleSlots": {
++        "brand": "Acme",
++        "productLine": "Dual Treat",
++        "sizeSlot": "5 lb"
++      },
++      "adjudicationRationale": "Evidenced dual-species co-primary allowed only when frozen evidence explicitly proves dual use (Plan §1a #3a). This member carries explicit dog+cat evidence, so two primaries (one per species) are correct per amended P3. Without such evidence, a second primary would be duplication.",
++      "reviewer": "Store Manager (placeholder)",
++      "reviewTimestamp": "2026-08-22T00:00:00Z",
++      "reviewStatus": "approved",
++      "members": [
++        {
++          "onboardingItemId": "gold-v2-dual-001",
++          "upc": "900000000010",
++          "rawTitle": "Acme Dual Species Treat Chicken 5 lb",
++          "frozenEvidenceHash": "evidence_hash_placeholder_dual_species_proof_dog_cat",
++          "expectedTitle": "Acme Dual Treat Chicken 5 lb",
++          "requiredTokens": ["Acme", "Chicken", "5 lb"],
++          "frozenEvidenceSpecies": ["dog", "cat"],
++          "forbiddenSiblingTokens": []
++        }
++      ],
++      "expectedTitles": ["Acme Dual Treat Chicken 5 lb"],
++      "coPrimaryEncodingNote": "The validator contract encodes co-primary as dog-primary + cat-secondary (single primaryPageId + secondaryPageIds per member). Phase C tests must assert the dog primary with the cat page as secondary, and pin that completeness of BOTH species pages is a fixture expectation, not a validator-enforced one.",
++      "expectedPrimaryPageIds": ["page_dog_treats_general", "page_cat_treats_general"],
++      "expectedPrimaryPageNames": ["Dog Treats (display only)", "Cat Treats (display only)"],
++      "allowedSecondaryPageIds": ["page_brand_acme"],
++      "forbiddenPageIds": ["page_jerky_dog_treats", "page_shop_all_dog_treats"],
++      "pageRationale": "Evidenced dual-species → two primaries, one per species per P3 amendment. Each ID must be from frozen verified catalog (P2) and pass P5 species check. Brand page optional secondary only."
++    },
++    {
++      "familyId": "family_synthetic_negative_control",
++      "groupKey": "synthetic::negative-control-toy-vs-treat",
++      "groupingVersion": "product-family-v1",
++      "isSynthetic": true,
++      "syntheticNote": "SYNTHETIC — negative control for P5 semantic compatibility (toy vs treat, same species). Ensures validator rejects wrong-category case even when species matches. Keep labeled synthetic per Plan §12; not attested production evidence.",
++      "expectedTitleSkeleton": "Brand → Product Line → Form/Species → Flavor/Color/Sub-line → Size/Weight/Count",
++      "adjudicationRationale": "Same-species wrong category must fail P5. A dog toy assigned to a dog treat page (or vice versa) is incorrect even though species matches. This family guards that P5 distinction.",
++      "reviewer": "Store Manager (placeholder)",
++      "reviewTimestamp": "2026-08-22T00:00:00Z",
++      "reviewStatus": "approved",
++      "members": [
++        {
++          "onboardingItemId": "gold-v2-synth-001",
++          "upc": "900000000020",
++          "rawTitle": "Acme Chew Toy Beef Small",
++          "frozenEvidenceHash": "evidence_hash_placeholder_toy_vs_treat_negative",
++          "expectedTitle": "Acme Chew Toy Beef Small",
++          "requiredTokens": ["Acme", "Beef", "Small"],
++          "forbiddenSiblingTokens": []
++        }
++      ],
++      "expectedTitles": ["Acme Chew Toy Beef Small"],
++      "expectedPrimaryPageIds": ["page_dog_toys_chew"],
++      "expectedPrimaryPageNames": ["Dog Toys — Chew Toys (display only)"],
++      "allowedSecondaryPageIds": [],
++      "forbiddenPageIds": ["page_jerky_dog_treats", "page_bones_bully_sticks_natural_chews", "page_dog_treats_general"],
++      "pageRationale": "Toy vs treat distinction per P5 (food vs treat vs toy vs supply). Correct primary is the toy chew page, not any treat page, despite all being dog Pages."
++    }
++  ]
++}
+diff --git a/src/tests/unit/family-title-consistency.test.ts b/src/tests/unit/family-title-consistency.test.ts
+new file mode 100644
+index 0000000..077e42d
+--- /dev/null
++++ b/src/tests/unit/family-title-consistency.test.ts
+@@ -0,0 +1,183 @@
++/**
++ * e09 Phase C — pure family title consistency validator tests (T1-T10).
++ *
++ * Contract under test: src/classification/family-title-consistency.ts
++ * Adjudicated skeleton (Plan §1a #1): Brand → Line → Form → Flavor → Size/Count;
++ * Soft/Hard/Classic/Hypo are ALWAYS visible when evidenced (Plan §1a #2).
++ * All-or-nothing (T7); deterministic (same input → deep-equal result).
++ * No DB, no grouping calls (T10) — pure function tests only.
++ */
++import { describe, it, expect } from 'vitest';
++import {
++  validateFamilyTitleSet,
++  FAMILY_TITLE_CONSISTENCY_VERSION,
++} from '../../classification/family-title-consistency';
++import type { TitleFrozenFacts, TitleValidationInput } from '../../classification/family-title-consistency';
++
++const HASH = 'evidence-hash';
++
++function facts(overrides: {
++  brand?: string;
++  productLine?: string;
++  form?: string;
++  flavor?: string;
++  size?: string;
++  soft?: boolean;
++  hard?: boolean;
++  classic?: boolean;
++  hypo?: boolean;
++}): TitleFrozenFacts {
++  return {
++    brand: overrides.brand ?? 'BetterBone',
++    productLine: overrides.productLine ?? 'BetterBone',
++    formOrSpecies: overrides.form,
++    flavorOrColorOrSubline: overrides.flavor,
++    sizeOrCount: overrides.size,
++    modifiers: {
++      soft: overrides.soft ?? false,
++      hard: overrides.hard ?? false,
++      classic: overrides.classic ?? false,
++      hypoallergenic: overrides.hypo ?? false,
++    },
++  };
++}
++
++function member(upc: string, f: TitleFrozenFacts): TitleValidationInput['members'][number] {
++  return { onboardingItemId: `item-${upc}`, upc, frozenEvidenceHash: `${HASH}-${upc}`, frozenFacts: f };
++}
++
++/** The adjudicated BetterBone illustrative family (Plan §5 desired output). */
++function betterboneInput(titles?: string[]): TitleValidationInput {
++  return {
++    familyId: 'family_betterbone_illustrative',
++    members: [
++      member('900000000001', facts({ flavor: 'Beef', size: 'Small', soft: true })),
++      member('900000000002', facts({ flavor: 'Venison', size: 'Large', hard: true })),
++      member('900000000003', facts({ flavor: 'Veggie', size: 'Medium', classic: true })),
++    ],
++    candidateTitles: (
++      titles ?? ['BetterBone Soft Beef Small', 'BetterBone Hard Venison Large', 'BetterBone Classic Veggie Medium']
++    ).map((title, index) => ({ upc: `90000000000${index + 1}`, title })),
++  };
++}
++
++describe('e09 Phase C — validateFamilyTitleSet (T1-T10)', () => {
++  it('exports a durable version constant (T8 authority participation)', () => {
++    expect(FAMILY_TITLE_CONSISTENCY_VERSION).toBe('v1');
++  });
++
++  it('valid family differing only in approved variant slots passes (adjudicated skeleton)', () => {
++    const result = validateFamilyTitleSet(betterboneInput());
++    expect(result.valid).toBe(true);
++    expect(result.reason).toBeUndefined();
++    // Shared skeleton: Brand → Mod → Flavor → Size with identical placeholder order.
++    expect(result.skeleton).toBe('{brand} {mod} {flavor} {size}');
++    expect(result.perMember.every(m => m.valid)).toBe(true);
++  });
++
++  it('FAILS: inconsistent slot order across siblings (T2)', () => {
++    const result = validateFamilyTitleSet(
++      betterboneInput(['BetterBone Soft Beef Small', 'BetterBone Venison Hard Large', 'BetterBone Classic Veggie Medium']),
++    );
++    expect(result.valid).toBe(false);
++    expect(result.reason).toMatch(/T2|skeleton/i);
++  });
++
++  it('FAILS: inconsistent brand rendering ("Better Bone" vs "BetterBone") breaks the shared skeleton (T2/T3)', () => {
++    const result = validateFamilyTitleSet(
++      betterboneInput(['BetterBone Soft Beef Small', 'Better Bone Hard Venison Large', 'BetterBone Classic Veggie Medium']),
++    );
++    expect(result.valid).toBe(false);
++    expect(result.reason).toMatch(/T2|skeleton|T3|brand/i);
++  });
++
++  it('FAILS: always-visible modifier dropped while frozenFacts says evidenced (T4, Plan §1a #2)', () => {
++    const result = validateFamilyTitleSet(
++      betterboneInput(['BetterBone Beef Small', 'BetterBone Hard Venison Large', 'BetterBone Classic Veggie Medium']),
++    );
++    expect(result.valid).toBe(false);
++    expect(result.perMember[0].valid).toBe(false);
++    expect(result.perMember[0].reason).toMatch(/soft|T4|skeleton/i);
++  });
++
++  it('FAILS: flavor appearing twice (T4 exactly-once)', () => {
++    const result = validateFamilyTitleSet(
++      betterboneInput(['BetterBone Soft Beef Beef Small', 'BetterBone Hard Venison Large', 'BetterBone Classic Veggie Medium']),
++    );
++    expect(result.valid).toBe(false);
++    expect(result.perMember[0].reason).toMatch(/Beef.*exactly once|T4/i);
++  });
++
++  it('FAILS: sibling leakage — Beef Small member carries the sibling token Large (T5)', () => {
++    const result = validateFamilyTitleSet(
++      betterboneInput(['BetterBone Soft Beef Small Large', 'BetterBone Hard Venison Large', 'BetterBone Classic Veggie Medium']),
++    );
++    expect(result.valid).toBe(false);
++    // Either the dedicated leakage branch or the skeleton mismatch catches it —
++    // both are correct rejections; assert the member was rejected with a reason.
++    expect(result.perMember[0].valid).toBe(false);
++    expect(result.perMember[0].reason).toBeDefined();
++  });
++
++  it('FAILS: invention to force uniqueness — indistinguishable frozenFacts with differing titles (T6)', () => {
++    const input = {
++      familyId: 'family-t6',
++      members: [
++        member('900000000011', facts({ flavor: 'Beef', size: 'Small', soft: true })),
++        member('900000000012', facts({ flavor: 'Beef', size: 'Small', soft: true })),
++      ],
++      candidateTitles: [
++        { upc: '900000000011', title: 'BetterBone Soft Beef Small' },
++        { upc: '900000000012', title: 'BETTERBONE SOFT BEEF SMALL!' },
++      ],
++    };
++    const result = validateFamilyTitleSet(input);
++    // T6 OUTCOME is enforced: indistinguishable facts with distinct titles are
++    // rejected, never auto-differentiated. Attribution note (recorded in the
++    // acceptance report): the shared-skeleton check (T2) runs BEFORE the
++    // dedicated invention branch in the current validator ordering, so the
++    // rejection reason cites the skeleton mismatch for this shape.
++    expect(result.valid).toBe(false);
++    expect(result.reason).toMatch(/skeleton|T2|invention|T6/i);
++  });
++
++  it('FAILS: duplicate titles across members with distinct frozenFacts', () => {
++    const result = validateFamilyTitleSet(
++      betterboneInput(['BetterBone Soft Beef Small', 'BetterBone Soft Beef Small', 'BetterBone Classic Veggie Medium']),
++    );
++    expect(result.valid).toBe(false);
++  });
++
++  it('all-or-nothing: one invalid member invalidates the whole set (T7)', () => {
++    const result = validateFamilyTitleSet(betterboneInput());
++    expect(result.valid).toBe(true);
++    const poisoned = validateFamilyTitleSet(
++      betterboneInput(['BetterBone Soft Beef Small', 'Broken Title No Facts Here', 'BetterBone Classic Veggie Medium']),
++    );
++    expect(poisoned.valid).toBe(false);
++    expect(poisoned.perMember.some(m => !m.valid)).toBe(true);
++  });
++
++  it('singleton family passes with token-safety rules only', () => {
++    const result = validateFamilyTitleSet({
++      familyId: 'family-singleton',
++      members: [member('900000000021', facts({ brand: 'Acme', productLine: 'Chew Toy', form: 'Toy', flavor: 'Beef', size: 'Small' }))],
++      candidateTitles: [{ upc: '900000000021', title: 'Acme Chew Toy Beef Small' }],
++    });
++    expect(result.valid).toBe(true);
++  });
++
++  it('candidate count mismatch refuses closed', () => {
++    const input = betterboneInput();
++    input.candidateTitles = input.candidateTitles.slice(0, 2);
++    const result = validateFamilyTitleSet(input);
++    expect(result.valid).toBe(false);
++    expect(result.reason).toMatch(/length/i);
++  });
++
++  it('determinism: same input produces deep-equal results across runs', () => {
++    const first = validateFamilyTitleSet(betterboneInput());
++    const second = validateFamilyTitleSet(betterboneInput());
++    expect(second).toEqual(first);
++  });
++});
+diff --git a/src/tests/unit/category-page-correctness.test.ts b/src/tests/unit/category-page-correctness.test.ts
+new file mode 100644
+index 0000000..75fca55
+--- /dev/null
++++ b/src/tests/unit/category-page-correctness.test.ts
+@@ -0,0 +1,367 @@
++/**
++ * e09 Phase C — pure category page correctness validator tests (P1-P12).
++ *
++ * Contract under test: src/classification/category-page-correctness.ts
++ * Adjudicated decisions (Plan §1a): evidenced dual-species co-primary allowed
++ * (encoded dog-primary + cat-secondary); brand Pages optional secondary only;
++ * child supersedes Shop All; confidence never read (P8).
++ * No DB — small in-file catalog fixtures only.
++ */
++import { describe, it, expect } from 'vitest';
++import {
++  validateCategoryPageAssignment,
++  CATEGORY_PAGE_CORRECTNESS_VERSION,
++} from '../../classification/category-page-correctness';
++import type { PageCorrectnessInput } from '../../classification/category-page-correctness';
++
++/** In-file frozen verified catalog fixture covering every P5/P6/P7 distinction. */
++const CATALOG: PageCorrectnessInput['verifiedPageCatalog'] = [
++  { id: 'page_dog_food_dry', name: 'Dog Food Dry', parentId: null, species: null },
++  { id: 'page_dog_food_canned', name: 'Dog Food Canned', parentId: null, species: null },
++  { id: 'page_jerky_dog_treats', name: 'Jerky Dog Treats', parentId: null, species: null },
++  { id: 'page_bones_bully_sticks_natural_chews', name: 'Dog Treats — Bones, Bully Sticks & Natural Chews', parentId: null, species: null },
++  { id: 'page_dog_treats_general', name: 'Dog Treats', parentId: null, species: null },
++  { id: 'page_cat_treats', name: 'Cat Treats', parentId: null, species: null },
++  { id: 'page_cat_food_dry', name: 'Cat Food Dry', parentId: null, species: null },
++  { id: 'page_dog_toys_chew', name: 'Dog Toys — Chew Toys', parentId: null, species: null },
++  { id: 'page_shop_all_dog_treats', name: 'Dog Treats Shop All', parentId: null, species: null },
++  { id: 'page_shop_all_generic', name: 'Pet Supplies Shop All', parentId: null, species: null },
++  { id: 'page_brand_acme', name: 'Brand - Acme', parentId: null, species: null },
++];
++
++const IMPORT_HASH = 'import-hash-N1';
++
++function memberInput(overrides: {
++  species?: string[];
++  title?: string;
++  description?: string;
++  productType?: string | null;
++  form?: string | null;
++  productTypeContext?: string | null;
++}): PageCorrectnessInput['member'] {
++  return {
++    onboardingItemId: 'item-1',
++    frozenEvidenceHash: 'evidence-hash-1',
++    frozenEvidence: {
++      species: overrides.species ?? ['Dog'],
++      productType: overrides.productType ?? null,
++      form: overrides.form ?? null,
++      title: overrides.title ?? null,
++      description: overrides.description ?? null,
++      extraction: undefined,
++    },
++    frozenProductTypeContext: overrides.productTypeContext ?? null,
++  };
++}
++
++function input(overrides: {
++  member?: PageCorrectnessInput['member'];
++  primaryPageId?: string | null;
++  secondaryPageIds?: string[];
++  primaryPageName?: string | null;
++  expectedHash?: string | null;
++  catalog?: PageCorrectnessInput['verifiedPageCatalog'];
++}): PageCorrectnessInput {
++  // Explicit null primaryPageId must survive — the P3/P10 missing-primary
++  // branch is under test; do NOT coalesce it away.
++  const primaryPageId = 'primaryPageId' in overrides ? (overrides.primaryPageId ?? null) : 'page_dog_food_dry';
++  return {
++    member: overrides.member ?? memberInput({}),
++    candidate: {
++      primaryPageId,
++      secondaryPageIds: overrides.secondaryPageIds ?? [],
++      primaryPageName: overrides.primaryPageName ?? null,
++    },
++    verifiedPageCatalog: overrides.catalog ?? CATALOG,
++    activePageImportHash: IMPORT_HASH,
++    expectedActivePageImportHash: overrides.expectedHash === undefined ? null : overrides.expectedHash,
++  };
++}
++
++describe('e09 Phase C — validateCategoryPageAssignment (P1-P12)', () => {
++  it('exports a durable version constant', () => {
++    expect(CATEGORY_PAGE_CORRECTNESS_VERSION).toBe('v1');
++  });
++
++  // ── P1 / P2: verified frozen catalog only; stable identity ──
++  it('P1: empty catalog → blocked, no assignment', () => {
++    const result = validateCategoryPageAssignment(input({ catalog: [] }));
++    expect(result.outcome).toBe('blocked');
++    expect(result.valid).toBe(false);
++    expect(result.reason).toMatch(/P1/);
++  });
++
++  it('P2: unknown Page ID → blocked', () => {
++    const result = validateCategoryPageAssignment(input({ primaryPageId: 'page_nonexistent' }));
++    expect(result.outcome).toBe('blocked');
++    expect(result.reason).toMatch(/P2/);
++  });
++
++  it('P2: mismatched ID/name pair → blocked', () => {
++    const result = validateCategoryPageAssignment(
++      input({ primaryPageId: 'page_dog_food_dry', primaryPageName: 'Some Other Page' }),
++    );
++    expect(result.outcome).toBe('blocked');
++    expect(result.reason).toMatch(/P2|mismatch/i);
++  });
++
++  it('P2/P10: name-only output (no stable ID) is refused as missing primary — identity never inferred from a display name', () => {
++    // NOTE: at validator level this manifests as needs_input (manual selection),
++    // NOT blocked: the promotion gate is the component that refuses name-only
++    // acceptance with stale_page_assignment (see promotion-gate.test.ts).
++    const result = validateCategoryPageAssignment(input({ primaryPageId: null, primaryPageName: 'Dog Food Dry' }));
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/P3|P10|manual/i);
++  });
++
++  // ── P3: required primary ──
++  it('P3: null primary → needs_input; a secondary alone cannot satisfy the primary requirement', () => {
++    const withSecondaryOnly = validateCategoryPageAssignment(input({ primaryPageId: null, secondaryPageIds: ['page_brand_acme'] }));
++    expect(withSecondaryOnly.outcome).toBe('needs_input');
++    const secondaryBrandAlone = validateCategoryPageAssignment(
++      input({
++        primaryPageId: null,
++        secondaryPageIds: ['page_dog_food_dry'],
++        member: memberInput({ title: 'Acme Dry Dog Food Beef' }),
++      }),
++    );
++    expect(secondaryBrandAlone.outcome).toBe('needs_input');
++    expect(secondaryBrandAlone.reason).toMatch(/primary/i);
++  });
++
++  // ── P5: semantic compatibility (same-species wrong category) ──
++  it('P5: dry dog FOOD evidence on Dog Treats page → needs_input (food vs treat)', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Purina Pro Plan Dry Dog Food Beef 10 lb', productTypeContext: 'Dry Dog Food' }),
++        primaryPageId: 'page_dog_treats_general',
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/food.*treat|treat.*food/i);
++  });
++
++  it('P5: converse — treat evidence on food-only page → needs_input', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Chicken Jerky Dog Treats' }),
++        primaryPageId: 'page_dog_food_dry',
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/P5/i);
++  });
++
++  it('P5: chew-vs-jerky contradiction → needs_input (BetterBone chew on Jerky page)', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({
++          title: 'BETTER BONE SOFT BEEF SM',
++          description: 'Natural beef flavor soft dog chew',
++          productType: 'Dog Chew',
++        }),
++        primaryPageId: 'page_jerky_dog_treats',
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/chew.*jerky|jerky/i);
++  });
++
++  it('P5: toy-vs-treat contradiction → needs_input even with matching species', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Chew Toy Beef Small' }),
++        primaryPageId: 'page_dog_treats_general',
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/toy/i);
++  });
++
++  it('P5: correct chew lands on the bones/bully chews page → assigned', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({
++          title: 'BETTER BONE SOFT BEEF SM',
++          description: 'Natural beef flavor soft dog chew',
++          productType: 'Dog Chew',
++        }),
++        primaryPageId: 'page_bones_bully_sticks_natural_chews',
++      }),
++    );
++    expect(result.outcome).toBe('assigned');
++  });
++
++  // ── P6: specificity and hierarchy ──
++  it('P6: specific child as primary passes alongside its Shop All ancestor in catalog', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Dry Dog Food Beef' }),
++        primaryPageId: 'page_dog_food_dry',
++        secondaryPageIds: [],
++      }),
++    );
++    expect(result.outcome).toBe('assigned');
++  });
++
++  it('P6: Shop All as primary while a matching specific child exists → needs_input', () => {
++    // Treat-type evidence keeps the P5 food↔treat rule out of the way so the
++    // dedicated P6 specificity branch is what rejects the generic primary.
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Dog Treats Chicken' }),
++        primaryPageId: 'page_shop_all_dog_treats',
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/P6|child/i);
++  });
++
++  it('P6 regression: an UNRELATED alternative does not force needs_input for a legitimate Shop All primary', () => {
++    // No evidence species + no shared category token between the core
++    // "Pet Supplies" and "Dog Food Dry"/"Dog Treats" alternatives → the bare
++    // fallback that over-blocked was removed (B2 review F2).
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ species: [], title: 'Generic Pet Supply Item' }),
++        primaryPageId: 'page_shop_all_generic',
++      }),
++    );
++    expect(result.outcome).toBe('assigned');
++  });
++
++  // ── P7: brand page separation ──
++  it('P7: brand landing page as PRIMARY → refused', () => {
++    const result = validateCategoryPageAssignment(input({ primaryPageId: 'page_brand_acme' }));
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/P7|secondary only/i);
++  });
++
++  it('P7: brand landing page as SECONDARY is valid', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Dry Dog Food Beef' }),
++        primaryPageId: 'page_dog_food_dry',
++        secondaryPageIds: ['page_brand_acme'],
++      }),
++    );
++    expect(result.outcome).toBe('assigned');
++  });
++
++  // ── P8: confidence is non-authoritative — the API has no confidence input ──
++  it('P8: extra properties (including injected confidence fields) cannot change the outcome', () => {
++    const base = input({
++      member: memberInput({ title: 'Acme Dry Dog Food Beef' }),
++      primaryPageId: 'page_dog_food_dry',
++    });
++    const decorated = input({
++      member: memberInput({ title: 'Acme Dry Dog Food Beef' }),
++      primaryPageId: 'page_dog_food_dry',
++    });
++    // Simulate a caller smuggling confidence onto inputs: the validator's
++    // contract reads none of these, so results must be identical.
++    (decorated.candidate as Record<string, unknown>).confidence = 0.99;
++    (decorated.member.frozenEvidence as Record<string, unknown>).confidence = 0.99;
++    expect(validateCategoryPageAssignment(decorated)).toEqual(validateCategoryPageAssignment(base));
++  });
++
++  // ── Dual-species co-primary (Plan §1a #3/#3a) ──
++  it('dual-species: evidenced dog+cat use encodes co-primary as dog primary + cat secondary → assigned', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({
++          species: ['dog', 'cat'],
++          title: 'Acme Dual Species Treat Chicken 5 lb',
++          description: 'For dogs and cats',
++        }),
++        primaryPageId: 'page_dog_treats_general',
++        secondaryPageIds: ['page_cat_treats'],
++      }),
++    );
++    expect(result.outcome).toBe('assigned');
++  });
++
++  it('single-species evidence with a cross-species secondary → needs_input (no unevidenced co-primary)', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ species: ['dog'], title: 'Acme Dog Treat Chicken' }),
++        primaryPageId: 'page_dog_treats_general',
++        secondaryPageIds: ['page_cat_treats'],
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/dual|cross-species|P3/i);
++  });
++
++  it('P5: single-species evidence against the other species-only page → needs_input', () => {
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ species: ['Dog'], title: 'Acme Dog Treat Chicken' }),
++        primaryPageId: 'page_cat_treats',
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++    expect(result.reason).toMatch(/species|P5/i);
++  });
++
++  // ── Ambiguity contract (P9 pin) ──
++  it('P9 pin (lenient): evidence containing BOTH members of the guarded pair (food AND treat) deliberately passes — ambiguity resolves at manual review', () => {
++    // The food↔treat rules are explicitly guarded with !evTokens.has(other);
++    // mixed evidence does not fail either exclusive rule. Deliberate leniency:
++    // per P9 ambiguity becomes a review decision, not a silent guess.
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Meal Mixing Dog Food and Treat Blend' }),
++        primaryPageId: 'page_dog_food_dry',
++      }),
++    );
++    expect(result.outcome).toBe('assigned');
++  });
++
++  it('P9 pin (strict): chew+jerky mixed evidence against a chew-only page still refuses — asymmetric rule documented', () => {
++    // Unlike food↔treat, the chew↔jerky rules carry no both-present guard, so
++    // mixed evidence on an exclusive page refuses. Pin current behavior.
++    const result = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Chew and Jerky Bites' }),
++        primaryPageId: 'page_bones_bully_sticks_natural_chews',
++      }),
++    );
++    expect(result.outcome).toBe('needs_input');
++  });
++
++  // ── Stale import defense-in-depth ──
++  it('expectedActivePageImportHash mismatch → blocked (stale import)', () => {
++    const result = validateCategoryPageAssignment(
++      input({ member: memberInput({ title: 'Acme Dry Dog Food Beef' }), expectedHash: 'import-hash-N0' }),
++    );
++    expect(result.outcome).toBe('blocked');
++    expect(result.valid).toBe(false);
++    expect(result.reason).toMatch(/[Ss]tale/);
++  });
++
++  it('absent expectedActivePageImportHash → stale check skipped (promotion gate remains the P11 enforcement point)', () => {
++    const result = validateCategoryPageAssignment(
++      input({ member: memberInput({ title: 'Acme Dry Dog Food Beef' }), expectedHash: null }),
++    );
++    expect(result.outcome).toBe('assigned');
++  });
++
++  // ── Per-member isolation (P9) ──
++  it('per-member isolation: one ambiguous member result does not alter a sibling result', () => {
++    const ambiguous = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'BETTER BONE SOFT BEEF SM', description: 'soft dog chew', productType: 'Dog Chew' }),
++        primaryPageId: 'page_jerky_dog_treats',
++      }),
++    );
++    const sibling = validateCategoryPageAssignment(
++      input({
++        member: memberInput({ title: 'Acme Dry Dog Food Beef' }),
++        primaryPageId: 'page_dog_food_dry',
++      }),
++    );
++    expect(ambiguous.outcome).toBe('needs_input');
++    expect(sibling.outcome).toBe('assigned');
++  });
++});
+diff --git a/src/tests/unit/family-title-page-goldset.test.ts b/src/tests/unit/family-title-page-goldset.test.ts
+new file mode 100644
+index 0000000..958ac1a
+--- /dev/null
++++ b/src/tests/unit/family-title-page-goldset.test.ts
+@@ -0,0 +1,309 @@
++/**
++ * e09 Phase C — goldset-driven validation tests.
++ *
++ * Fixture under test: src/tests/fixtures/family-title-page-goldset-v2.json
++ * Plan §12 contract: by-family entries, STABLE Page IDs (never names),
++ * frozenEvidenceHash per member, explicit synthetic labeling, reviewer +
++ * adjudication rationale, and train/test/holdout splits that partition
++ * FAMILIES (never SKUs) without overlap.
++ *
++ * The fixture is currently the SYNTHETIC scaffold (Plan §12/Phase A): these
++ * tests execute the real validators against it AND enforce the labeling
++ * discipline that keeps synthetic scenarios out of production-attested claims.
++ */
++import { describe, it, expect } from 'vitest';
++import fs from 'fs';
++import path from 'path';
++import { validateFamilyTitleSet } from '../../classification/family-title-consistency';
++import type { TitleFrozenFacts } from '../../classification/family-title-consistency';
++import { validateCategoryPageAssignment } from '../../classification/category-page-correctness';
++import type { PageCorrectnessInput } from '../../classification/category-page-correctness';
++
++// ─── Fixture ────────────────────────────────────────────────────────────────
++
++interface GoldsetMember {
++  onboardingItemId: string;
++  upc: string;
++  rawTitle?: string;
++  frozenEvidenceHash: string;
++  frozenEvidence?: Record<string, unknown>;
++  frozenEvidenceSpecies?: string[];
++  expectedTitle: string;
++  requiredTokens: string[];
++  forbiddenSiblingTokens: string[];
++}
++interface GoldsetFamily {
++  familyId: string;
++  groupKey: string;
++  groupingVersion: string;
++  isSynthetic: boolean;
++  syntheticNote?: string;
++  expectedTitleSkeleton?: string;
++  expectedTitleSlots?: Record<string, string>;
++  adjudicationRationale: string;
++  reviewer: string;
++  reviewTimestamp: string;
++  reviewStatus: string;
++  members: GoldsetMember[];
++  expectedTitles: string[];
++  expectedPrimaryPageIds: string[];
++  allowedSecondaryPageIds?: string[];
++  forbiddenPageIds?: string[];
++  coPrimaryEncodingNote?: string;
++}
++interface Goldset {
++  version: number;
++  activePageImportHash: string;
++  modelExecutionPlanHash: string;
++  reviewer: string;
++  reviewTimestamp: string;
++  skeleton: string;
++  splits: { strategy: string; train: string[]; test: string[]; holdout: string[] };
++  families: GoldsetFamily[];
++}
++
++const fixturePath = path.join(__dirname, '..', 'fixtures', 'family-title-page-goldset-v2.json');
++const goldset: Goldset = JSON.parse(fs.readFileSync(fixturePath, 'utf-8'));
++
++// ─── Catalog fixture mirroring the goldset's referenced stable Page IDs ─────
++
++const CATALOG: PageCorrectnessInput['verifiedPageCatalog'] = [
++  { id: 'page_jerky_dog_treats', name: 'Jerky Dog Treats', parentId: null },
++  { id: 'page_shop_all_dog_treats', name: 'Dog Treats Shop All', parentId: null },
++  { id: 'page_cat_treats', name: 'Cat Treats', parentId: null },
++  { id: 'page_bones_bully_sticks_natural_chews', name: 'Dog Treats — Bones, Bully Sticks & Natural Chews', parentId: null },
++  { id: 'page_dog_treats_general', name: 'Dog Treats', parentId: null },
++  { id: 'page_cat_treats_general', name: 'Cat Treats', parentId: null },
++  { id: 'page_dog_toys_chew', name: 'Dog Toys — Chew Toys', parentId: null },
++  { id: 'page_brand_betterbone', name: 'Brand - BetterBone', parentId: null },
++  { id: 'page_brand_acme', name: 'Brand - Acme', parentId: null },
++];
++
++// ─── Frozen-facts derivation from the ratified slot contract ────────────────
++
++const SIZE_TOKEN_RE = /^(small|medium|large|x-large|\d+\s*(lb|oz|kg|g|count|ct|pack))$/i;
++const MODIFIER_TOKENS = new Set(['soft', 'hard', 'classic', 'hypoallergenic', 'hypo']);
++
++function frozenFactsFor(family: GoldsetFamily, member: GoldsetMember): TitleFrozenFacts {
++  const slots = family.expectedTitleSlots ?? {};
++  const brand = String(slots.brand ?? '');
++  const productLine = String(slots.productLine ?? brand);
++  const lower = member.requiredTokens.map(token => token.toLowerCase());
++  const isSize = (token: string) => SIZE_TOKEN_RE.test(token);
++  const isFlavor = (token: string) =>
++    !MODIFIER_TOKENS.has(token.toLowerCase()) &&
++    !isSize(token) &&
++    token.toLowerCase() !== brand.toLowerCase() &&
++    token.toLowerCase() !== productLine.toLowerCase();
++  return {
++    brand,
++    productLine,
++    flavorOrColorOrSubline: member.requiredTokens.find(isFlavor),
++    sizeOrCount: member.requiredTokens.find(isSize),
++    modifiers: {
++      soft: lower.includes('soft'),
++      hard: lower.includes('hard'),
++      classic: lower.includes('classic'),
++      hypoallergenic: lower.includes('hypoallergenic') || lower.includes('hypo'),
++    },
++  };
++}
++
++function pageInput(
++  member: GoldsetMember,
++  primaryPageId: string | null,
++  secondaryPageIds: string[],
++): PageCorrectnessInput {
++  // Enrich thin scaffold evidence: species from the explicit dual-species key
++  // when present, otherwise Dog; the raw title always participates (P4
++  // member-owned evidence).
++  const evidence = {
++    ...(member.frozenEvidence ?? {}),
++    species: member.frozenEvidenceSpecies ?? (member.frozenEvidence?.species as string[] | undefined) ?? ['Dog'],
++    title: (member.frozenEvidence?.title as string | undefined) ?? member.rawTitle ?? member.expectedTitle,
++  };
++  return {
++    member: {
++      onboardingItemId: member.onboardingItemId,
++      frozenEvidenceHash: member.frozenEvidenceHash,
++      frozenEvidence: evidence as PageCorrectnessInput['member']['frozenEvidence'],
++    },
++    candidate: { primaryPageId, secondaryPageIds, primaryPageName: null },
++    verifiedPageCatalog: CATALOG,
++    activePageImportHash: goldset.activePageImportHash,
++    expectedActivePageImportHash: null,
++  };
++}
++
++// ─── §12 schema contract ────────────────────────────────────────────────────
++
++describe('e09 Phase C — goldset fixture schema (Plan §12)', () => {
++  it('loads and carries the freeze-level metadata', () => {
++    expect(goldset.version).toBe(1);
++    expect(goldset.activePageImportHash).toBeTruthy();
++    expect(goldset.modelExecutionPlanHash).toBeTruthy();
++    expect(goldset.reviewer).toBeTruthy();
++    expect(goldset.reviewTimestamp).toBeTruthy();
++    expect(goldset.skeleton).toMatch(/Brand/);
++  });
++
++  it('splits partition FAMILIES (not SKUs) into disjoint train/test/holdout', () => {
++    expect(goldset.splits.strategy).toBe('by-family');
++    const familyIds = goldset.families.map(family => family.familyId).sort();
++    const splitIds = [...goldset.splits.train, ...goldset.splits.test, ...goldset.splits.holdout].sort();
++    expect(splitIds).toEqual(familyIds);
++    const all = new Set(splitIds);
++    expect(all.size).toBe(splitIds.length);
++  });
++
++  it('every family carries adjudication provenance and stable Page IDs', () => {
++    for (const family of goldset.families) {
++      expect(family.groupingVersion).toBe('product-family-v1');
++      expect(family.reviewer).toBeTruthy();
++      expect(family.reviewTimestamp).toBeTruthy();
++      expect(family.reviewStatus).toBe('approved');
++      expect(family.adjudicationRationale).toBeTruthy();
++      expect(Array.isArray(family.expectedTitles)).toBe(true);
++      expect(family.expectedTitles.length).toBe(family.members.length);
++      for (const pageId of [
++        ...(family.expectedPrimaryPageIds ?? []),
++        ...(family.allowedSecondaryPageIds ?? []),
++        ...(family.forbiddenPageIds ?? []),
++      ]) {
++        expect(pageId).toMatch(/^page_/);
++      }
++      for (const member of family.members) {
++        expect(member.onboardingItemId).toBeTruthy();
++        expect(member.upc).toBeTruthy();
++        expect(member.frozenEvidenceHash).toMatch(/.+/);
++        expect(member.expectedTitle).toBeTruthy();
++        expect(Array.isArray(member.requiredTokens)).toBe(true);
++        expect(Array.isArray(member.forbiddenSiblingTokens)).toBe(true);
++      }
++    }
++  });
++
++  it('synthetic scenarios are explicitly labeled and separated from production-attested ones', () => {
++    for (const family of goldset.families) {
++      expect(typeof family.isSynthetic).toBe('boolean');
++      if (family.isSynthetic) {
++        expect(family.syntheticNote).toMatch(/synthetic/i);
++      }
++    }
++    // Scaffold state pin (Plan §12): until the verified backup export lands,
++    // EVERY family is synthetic — none may claim production attestation.
++    const synthetic = goldset.families.filter(family => family.isSynthetic);
++    const attested = goldset.families.filter(family => !family.isSynthetic);
++    expect(synthetic.length).toBe(goldset.families.length);
++    expect(attested.length).toBe(0);
++  });
++});
++
++// ─── Focus 1 execution: validateFamilyTitleSet against expected titles ──────
++
++describe('e09 Phase C — goldset title execution (Focus 1)', () => {
++  it('every family expected title set passes validateFamilyTitleSet under the adjudicated skeleton', () => {
++    for (const family of goldset.families) {
++      const result = validateFamilyTitleSet({
++        familyId: family.familyId,
++        members: family.members.map(member => ({
++          onboardingItemId: member.onboardingItemId,
++          upc: member.upc,
++          frozenEvidenceHash: member.frozenEvidenceHash,
++          frozenFacts: frozenFactsFor(family, member),
++        })),
++        candidateTitles: family.expectedTitles.map((title, index) => ({
++          upc: family.members[index].upc,
++          title,
++        })),
++      });
++      expect(result.valid, `${family.familyId}: ${result.reason ?? ''}`).toBe(true);
++    }
++  });
++
++  it('goldset family-1 keeps always-visible modifiers and distinct variant slots (Plan §1a #2)', () => {
++    const betterbone = goldset.families.find(family => family.familyId === 'family_betterbone_illustrative');
++    expect(betterbone).toBeDefined();
++    const result = validateFamilyTitleSet({
++      familyId: betterbone!.familyId,
++      members: betterbone!.members.map(member => ({
++        onboardingItemId: member.onboardingItemId,
++        upc: member.upc,
++        frozenEvidenceHash: member.frozenEvidenceHash,
++        frozenFacts: frozenFactsFor(betterbone!, member),
++      })),
++      candidateTitles: betterbone!.expectedTitles.map((title, index) => ({
++        upc: betterbone!.members[index].upc,
++        title,
++      })),
++    });
++    expect(result.skeleton).toBe('{brand} {mod} {flavor} {size}');
++    // Each sibling's own modifier/flavor/size survives; no sibling leakage.
++    expect(betterbone!.expectedTitles[0]).toContain('Soft');
++    expect(betterbone!.expectedTitles[1]).toContain('Hard');
++    expect(betterbone!.expectedTitles[2]).toContain('Classic');
++    expect(betterbone!.expectedTitles[0]).not.toMatch(/Venison|Large/);
++    expect(betterbone!.expectedTitles[1]).not.toMatch(/Beef|Small/);
++  });
++});
++
++// ─── Focus 2 execution: validateCategoryPageAssignment per member ───────────
++
++describe('e09 Phase C — goldset page execution (Focus 2)', () => {
++  it('family-1 BetterBone: correct primary assigns; every forbiddenPageId is rejected', () => {
++    const family = goldset.families.find(f => f.familyId === 'family_betterbone_illustrative');
++    expect(family).toBeDefined();
++    for (const member of family!.members) {
++      const assigned = validateCategoryPageAssignment(pageInput(member, family!.expectedPrimaryPageIds[0], []));
++      expect(assigned.outcome, `${member.upc}: ${assigned.reason ?? ''}`).toBe('assigned');
++
++      const withBrandSecondary = validateCategoryPageAssignment(
++        pageInput(member, family!.expectedPrimaryPageIds[0], family!.allowedSecondaryPageIds ?? []),
++      );
++      expect(withBrandSecondary.outcome).toBe('assigned');
++
++      for (const forbiddenId of family!.forbiddenPageIds ?? []) {
++        const rejected = validateCategoryPageAssignment(pageInput(member, forbiddenId, []));
++        expect(rejected.valid, `${member.upc} should reject ${forbiddenId}`).toBe(false);
++        expect(['needs_input', 'blocked']).toContain(rejected.outcome);
++      }
++    }
++  });
++
++  it('family-3 negative control: toy-vs-treat wrong-category pages are rejected despite matching species', () => {
++    const family = goldset.families.find(f => f.familyId === 'family_synthetic_negative_control');
++    expect(family).toBeDefined();
++    const member = family!.members[0];
++    const assigned = validateCategoryPageAssignment(pageInput(member, family!.expectedPrimaryPageIds[0], []));
++    expect(assigned.outcome, assigned.reason).toBe('assigned');
++    for (const forbiddenId of family!.forbiddenPageIds ?? []) {
++      const rejected = validateCategoryPageAssignment(pageInput(member, forbiddenId, []));
++      expect(rejected.valid, `${forbiddenId} should be rejected`).toBe(false);
++      expect(['needs_input', 'blocked']).toContain(rejected.outcome);
++    }
++  });
++
++  it('family-2 dual-species: co-primary encodes as dog primary + cat secondary per coPrimaryEncodingNote', () => {
++    const family = goldset.families.find(f => f.familyId === 'family_dual_species_dog_cat');
++    expect(family).toBeDefined();
++    expect(family!.coPrimaryEncodingNote).toMatch(/dog-primary \+ cat-secondary/i);
++    const member = family!.members[0];
++
++    const assigned = validateCategoryPageAssignment(
++      pageInput(member, 'page_dog_treats_general', ['page_cat_treats_general']),
++    );
++    expect(assigned.outcome, assigned.reason).toBe('assigned');
++
++    // Completeness of BOTH species Pages is a FIXTURE expectation, not a
++    // validator-enforced one (per the encoding note) — a dog-only primary with
++    // dual evidence still validates as assigned.
++    const dogOnly = validateCategoryPageAssignment(pageInput(member, 'page_dog_treats_general', []));
++    expect(dogOnly.outcome).toBe('assigned');
++
++    // Control: WITHOUT evidenced dual use the same encoding refuses.
++    const unevidencedDual = validateCategoryPageAssignment(
++      pageInput({ ...member, frozenEvidenceSpecies: ['dog'] }, 'page_dog_treats_general', ['page_cat_treats_general']),
++    );
++    expect(unevidencedDual.outcome).toBe('needs_input');
++  });
++});

@@ -14,7 +14,10 @@ export type Cluster = {
 
 export function templateAwarePrefix(url: string): string {
   try {
-    const p = new URL(url).pathname;
+    let p = url;
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      p = new URL(url).pathname;
+    }
     const segs = p.split('/').filter(Boolean);
     if (segs.length === 0) return '/';
     if (segs[0] === 'products' && segs.length >= 1) return '/products';

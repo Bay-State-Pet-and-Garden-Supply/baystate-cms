@@ -1,10 +1,11 @@
 /**
  * GeneratedCustomFieldsPanel — displays pending custom-field proposals
- * from the generation service.
+ * from the generation service (General Store).
  */
 
 import React from 'react';
 import type { ProfileBuilderState, ProfileBuilderController } from '../profileBuilderTypes';
+import { colors, fonts, rounded } from '../../../theme';
 
 interface Props {
   state: ProfileBuilderState;
@@ -12,104 +13,119 @@ interface Props {
 }
 
 const sectionStyle: React.CSSProperties = {
-  marginTop: 8,
-  padding: 12,
-  background: '#faf5ff',
-  borderRadius: 8,
-  border: '2px solid #e9d5ff',
+  marginTop: 12,
+  padding: 14,
+  background: colors.feedBagCream,
+  borderRadius: rounded.lg,
+  border: `1px solid ${colors.cardBorder}`,
+  borderLeft: `4px solid ${colors.cornerCalloutGold}`,
 };
 
 const titleStyle: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 600,
-  color: '#6b21a8',
-  margin: '0 0 8px',
+  fontFamily: fonts.display,
+  fontSize: '0.9375rem',
+  fontWeight: 700,
+  color: colors.ledgerCharcoal,
+  margin: '0 0 10px',
 };
 
 const cardStyle: React.CSSProperties = {
-  padding: 8,
-  marginBottom: 6,
-  background: '#fff',
-  borderRadius: 6,
-  border: '1px solid #e5e7eb',
+  padding: 12,
+  marginBottom: 8,
+  background: colors.whiteSurface,
+  borderRadius: rounded.sm,
+  border: `1px solid ${colors.cardBorder}`,
+  boxShadow: '0 1px 2px rgba(33, 20, 20, 0.04)',
 };
 
 const fieldLabel: React.CSSProperties = {
+  fontFamily: fonts.body,
   fontSize: 13,
-  fontWeight: 600,
-  color: '#111827',
-  marginBottom: 2,
+  fontWeight: 700,
+  color: colors.ledgerCharcoal,
+  marginBottom: 4,
 };
 
 const selectorStyle: React.CSSProperties = {
   fontSize: 12,
-  fontFamily: 'monospace',
-  color: '#1e293b',
+  fontFamily: fonts.mono,
+  color: colors.ledgerCharcoal,
   wordBreak: 'break-all',
-  marginBottom: 4,
+  marginBottom: 6,
+  background: colors.feedBagCream,
+  padding: '4px 8px',
+  borderRadius: rounded.sm,
+  border: `1px solid ${colors.cardBorder}`,
 };
 
 const metaStyle: React.CSSProperties = {
   fontSize: 11,
-  color: '#6b7280',
-  marginBottom: 4,
+  fontFamily: fonts.body,
+  color: colors.mulchBrown,
+  marginBottom: 6,
   display: 'flex',
-  gap: 6,
+  gap: 8,
   flexWrap: 'wrap',
 };
 
 const warnStyle: React.CSSProperties = {
   fontSize: 11,
-  color: '#92400e',
-  background: '#fef3c7',
-  padding: '3px 8px',
-  borderRadius: 4,
-  marginBottom: 4,
+  color: colors.ledgerCharcoal,
+  background: 'rgba(246, 219, 18, 0.2)',
+  border: `1px solid ${colors.mutedGold}`,
+  padding: '4px 8px',
+  borderRadius: rounded.sm,
+  marginBottom: 6,
 };
 
 const previewStyle: React.CSSProperties = {
   fontSize: 12,
-  color: '#374151',
+  color: colors.ledgerCharcoal,
   fontStyle: 'italic',
-  marginBottom: 4,
+  marginBottom: 6,
   wordBreak: 'break-all',
 };
 
 const actionsStyle: React.CSSProperties = {
   display: 'flex',
   gap: 6,
-  marginTop: 4,
+  marginTop: 6,
 };
 
 const acceptBtn: React.CSSProperties = {
-  background: '#7c3aed',
-  color: '#fff',
+  background: colors.uniformGreen,
+  color: colors.feedBagCream,
   border: 'none',
-  borderRadius: 4,
-  padding: '3px 10px',
-  fontSize: 12,
-  fontWeight: 600,
+  borderRadius: rounded.sm,
+  padding: '5px 12px',
+  fontSize: 11,
+  fontWeight: 700,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
   cursor: 'pointer',
+  boxShadow: '0 1px 2px rgba(20, 83, 45, 0.15)',
 };
 
 const rejectBtn: React.CSSProperties = {
-  background: 'none',
-  color: '#6b7280',
-  border: '1px solid #d1d5db',
-  borderRadius: 4,
-  padding: '3px 10px',
-  fontSize: 12,
-  fontWeight: 500,
+  background: colors.whiteSurface,
+  color: colors.mulchBrown,
+  border: `1px solid ${colors.cardBorder}`,
+  borderRadius: rounded.sm,
+  padding: '5px 12px',
+  fontSize: 11,
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
   cursor: 'pointer',
 };
 
 function qualityBadge(q: string): React.CSSProperties {
-  const base: React.CSSProperties = { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999, textTransform: 'uppercase' };
+  const base: React.CSSProperties = { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: rounded.full, textTransform: 'uppercase', letterSpacing: '0.04em' };
   switch (q) {
-    case 'high': return { ...base, background: '#dcfce7', color: '#166534' };
-    case 'medium': return { ...base, background: '#dbeafe', color: '#1e40af' };
-    case 'low': return { ...base, background: '#fef3c7', color: '#92400e' };
-    default: return { ...base, background: '#fee2e2', color: '#991b1b' };
+    case 'high': return { ...base, background: 'rgba(22, 132, 77, 0.15)', color: colors.seedlingGreen, border: `1px solid ${colors.seedlingGreen}44` };
+    case 'medium': return { ...base, background: 'rgba(20, 83, 45, 0.12)', color: colors.uniformGreen, border: `1px solid ${colors.uniformGreen}44` };
+    case 'low': return { ...base, background: 'rgba(246, 219, 18, 0.3)', color: colors.ledgerCharcoal, border: `1px solid ${colors.mutedGold}` };
+    default: return { ...base, background: 'rgba(118, 12, 25, 0.1)', color: colors.signetBurgundy, border: `1px solid ${colors.signetBurgundy}44` };
   }
 }
 
@@ -122,7 +138,7 @@ export function GeneratedCustomFieldsPanel({ state, controller }: Props) {
 
   return (
     <div style={sectionStyle}>
-      <div style={titleStyle}>Suggested custom fields</div>
+      <div style={titleStyle}>Suggested Custom Fields</div>
       {pending.map((s) => (
         <div key={s.key} style={cardStyle}>
           <div style={fieldLabel}>{s.label}</div>
@@ -130,7 +146,7 @@ export function GeneratedCustomFieldsPanel({ state, controller }: Props) {
           <div style={metaStyle}>
             <span style={qualityBadge(s.quality)}>{s.quality}</span>
             <span>{s.validation.matchedCount} match{s.validation.matchedCount !== 1 ? 'es' : ''}</span>
-            {s.explanation && <span style={{ color: '#6b7280' }}>· {s.explanation}</span>}
+            {s.explanation && <span>· {s.explanation}</span>}
           </div>
           {s.preview?.text && <div style={previewStyle}>Preview: {s.preview.text}</div>}
           {s.preview?.values && s.preview.values.length > 0 && (
@@ -154,3 +170,4 @@ export function GeneratedCustomFieldsPanel({ state, controller }: Props) {
     </div>
   );
 }
+

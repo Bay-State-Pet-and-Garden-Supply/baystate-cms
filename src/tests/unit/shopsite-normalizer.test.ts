@@ -156,7 +156,7 @@ describe('ShopSite Normalization Preservation', () => {
     expect(pf16!.editable).toBe(true);
   });
 
-  it('should include GTIN tag for numeric SKUs', () => {
+  it('should include GTIN tag for numeric SKUs (v15 schema field)', () => {
     const customXml = `<Product>
       <SKU>0123456789012</SKU>
       <Name>Test Product</Name>
@@ -178,7 +178,7 @@ describe('ShopSite Normalization Preservation', () => {
     expect(denorm.xml).toContain('<ProductType>Tangible</ProductType>');
   });
 
-  it('should include MoreInformationText when description is present', () => {
+  it('should put the product name in ProductDescription and the description in MoreInformationText', () => {
     const customXml = `<Product>
       <SKU>DESC-TEST</SKU>
       <Name>Desc Test</Name>
@@ -186,8 +186,65 @@ describe('ShopSite Normalization Preservation', () => {
     </Product>`;
     const parsed = parseProductsXml(customXml).products[0];
     const { product } = normalizeProduct(parsed, 'test-workspace');
+    expect(product.core.description).toBe('Test description here');
     const denorm = denormalizeProduct(product);
+    expect(denorm.xml).toContain('<ProductDescription><![CDATA[Desc Test]]></ProductDescription>');
     expect(denorm.xml).toContain('<MoreInformationText><![CDATA[Test description here]]></MoreInformationText>');
+    expect(denorm.xml).toContain('<DisplayMoreInformationPage>checked</DisplayMoreInformationPage>');
+  });
+
+  it('should omit MoreInformationText and the More Info flag when there is no description', () => {
+    const customXml = `<Product>
+      <SKU>NODESC</SKU>
+      <Name>No Description</Name>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    expect(product.core.description).toBeNull();
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).not.toContain('<MoreInformationText>');
+    expect(denorm.xml).not.toContain('<DisplayMoreInformationPage>');
+    // ProductDescription still carries the product name per upload convention.
+    expect(denorm.xml).toContain('<ProductDescription><![CDATA[No Description]]></ProductDescription>');
+  });
+
+  it('should honor an explicit preserved DisplayMoreInformationPage_ opt-out', () => {
+    const customXml = `<Product>
+      <SKU>OPTOUT</SKU>
+      <Name>Opt Out</Name>
+      <MoreInformationText><![CDATA[Copy that stays hidden.]]></MoreInformationText>
+      <DisplayMoreInformationPage>uncheck</DisplayMoreInformationPage>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).toContain('<MoreInformationText><![CDATA[Copy that stays hidden.]]></MoreInformationText>');
+    expect(denorm.xml).toContain('<DisplayMoreInformationPage>uncheck</DisplayMoreInformationPage>');
+  });
+
+  it('should emit MoreInformationText exactly once (no double-emission from preserved elements)', () => {
+    const customXml = `<Product>
+      <SKU>SINGLE-EMIT</SKU>
+      <Name>Single Emit</Name>
+      <ProductDescription><![CDATA[Legacy description text]]></ProductDescription>
+      <MoreInformationText><![CDATA[Legacy description text]]></MoreInformationText>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml.match(/<MoreInformationText>/g)?.length ?? 0).toBe(1);
+    expect(denorm.xml.match(/<DisplayMoreInformationPage>/g)?.length ?? 0).toBe(1);
+  });
+
+  it('should not treat a ProductDescription that equals the Name as a description on import', () => {
+    const customXml = `<Product>
+      <SKU>ECHO</SKU>
+      <Name>Echo Prod</Name>
+      <ProductDescription><![CDATA[Echo Prod]]></ProductDescription>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    expect(product.core.description).toBeNull();
   });
 
   it('should omit empty Price tag when price is null', () => {

@@ -41,7 +41,7 @@ export function ApprovedQueue({
               onChange={() => onToggle(item.itemId)}
             />
             <span className="ow-row-main">
-              <span className="ow-row-title">{item.name}</span>
+              <span className="ow-row-title">{item.curatedTitle || item.name}</span>
               <span className="ow-row-sub">UPC {item.upc}{item.brand ? ` · ${item.brand}` : ''}</span>
             </span>
             <span className="ow-row-meta">

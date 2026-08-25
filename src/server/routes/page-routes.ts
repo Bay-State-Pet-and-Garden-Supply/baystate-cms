@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import {
   listPages,
   listVerifiedPageOptions,
+  getActivePageImportHash,
   listProvisionalCandidates,
   getProductPages,
   clearProductPages,
@@ -22,11 +23,14 @@ router.get('/pages', async (c) => {
 });
 
 // Authoritative Page options — only verified identities from the active import.
+// activeImportHash (e09 round-3 FIX 1) lets the Review UI stamp a reviewer
+// Category Page correction with the import it was captured against.
 router.get('/pages/verified-options', async (c) => {
   const workspace = findWorkspace();
   if (!workspace) return c.json({ error: 'No workspace configured' }, 409);
   const pages = listVerifiedPageOptions(workspace.id);
-  return c.json({ pages });
+  const activeImportHash = getActivePageImportHash(workspace.id);
+  return c.json({ pages, activeImportHash });
 });
 
 // Provisional candidates — scanned ProductOnPages fragments (review context only).

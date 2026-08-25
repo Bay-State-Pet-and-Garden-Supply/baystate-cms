@@ -1,31 +1,71 @@
 /**
- * ArtifactBrowser — displays snapshot artifacts and diagnostics.
+ * ArtifactBrowser — displays snapshot artifacts and diagnostics (General Store).
  * Screenshots render inline when the URL resolves; otherwise fall back to path display.
  */
 
 import React from 'react';
 import type { SnapshotResponse } from '../../../../shared/schemas/extraction-worker';
 import { defaultArtifactUrlResolver } from '../artifactUrls';
+import { colors, fonts, rounded } from '../../../theme';
 
 interface ArtifactBrowserProps {
   snapshot: SnapshotResponse | null;
   artifactUrlResolver?: (ref: string) => string | null;
 }
 
-function badgeStyle(bg: string, fg: string): React.CSSProperties {
-  return { display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999, background: bg, color: fg, marginRight: 4, marginBottom: 2 };
-}
-
 const s: Record<string, React.CSSProperties> = {
-  panel: { background: '#fff', borderRadius: 8, border: '1px solid #e5e7eb', padding: 12 },
-  title: { fontSize: 14, fontWeight: 600, color: '#111827', margin: '0 0 8px' },
-  section: { marginBottom: 8 },
-  sectionTitle: { fontSize: 12, fontWeight: 600, color: '#4b5563', margin: '0 0 4px' },
-  jsonBlock: { fontSize: 10, fontFamily: 'monospace', background: '#f9fafb', padding: 8, borderRadius: 4, maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 },
-  screenshot: { maxWidth: '100%', borderRadius: 6, marginBottom: 8 },
-  fallback: { fontSize: 11, color: '#9ca3af', fontStyle: 'italic', padding: '8px 0' },
-  list: { fontSize: 11, color: '#374151', margin: 0, padding: '0 0 0 16px' },
-  warning: { fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '2px 8px', borderRadius: 4, marginBottom: 2 },
+  panel: {
+    background: colors.whiteSurface,
+    borderRadius: rounded.lg,
+    border: `1px solid ${colors.cardBorder}`,
+    padding: 14,
+    boxShadow: '0 1px 3px rgba(33, 20, 20, 0.04)',
+  },
+  title: {
+    fontFamily: fonts.display,
+    fontSize: '0.9375rem',
+    fontWeight: 700,
+    color: colors.ledgerCharcoal,
+    margin: '0 0 10px',
+    paddingBottom: 6,
+    borderBottom: `1px solid ${colors.cardBorder}`,
+  },
+  section: { marginBottom: 10 },
+  sectionTitle: {
+    fontFamily: fonts.body,
+    fontSize: 11,
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    color: colors.mulchBrown,
+    margin: '0 0 4px',
+  },
+  jsonBlock: {
+    fontSize: 10,
+    fontFamily: fonts.mono,
+    background: colors.feedBagCream,
+    border: `1px solid ${colors.cardBorder}`,
+    padding: 8,
+    borderRadius: rounded.sm,
+    maxHeight: 120,
+    overflow: 'auto',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+    margin: 0,
+    color: colors.ledgerCharcoal,
+  },
+  screenshot: { maxWidth: '100%', borderRadius: rounded.sm, marginBottom: 8, border: `1px solid ${colors.cardBorder}` },
+  fallback: { fontSize: 11, color: colors.mulchBrown, fontStyle: 'italic', padding: '6px 0' },
+  list: { fontSize: 11, fontFamily: fonts.body, color: colors.ledgerCharcoal, margin: 0, padding: '0 0 0 16px' },
+  warning: {
+    fontSize: 11,
+    color: colors.ledgerCharcoal,
+    background: 'rgba(246, 219, 18, 0.2)',
+    border: `1px solid ${colors.mutedGold}`,
+    padding: '3px 8px',
+    borderRadius: rounded.sm,
+    marginBottom: 4,
+  },
 };
 
 export function ArtifactBrowser({ snapshot, artifactUrlResolver }: ArtifactBrowserProps) {
@@ -55,7 +95,7 @@ export function ArtifactBrowser({ snapshot, artifactUrlResolver }: ArtifactBrows
       ) : snapshot.screenshotRef ? (
         <div style={s.fallback}>
           Screenshot artifact captured but is not browser-accessible from this environment.
-          <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>{snapshot.screenshotRef}</div>
+          <div style={{ fontSize: 10, color: colors.mulchBrown, fontFamily: fonts.mono, marginTop: 2 }}>{snapshot.screenshotRef}</div>
         </div>
       ) : null}
 
@@ -78,9 +118,9 @@ export function ArtifactBrowser({ snapshot, artifactUrlResolver }: ArtifactBrows
               <div style={s.sectionTitle}>Image Candidates ({snapshot.imageCandidates.length})</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {snapshot.imageCandidates.slice(0, 6).map((url: string, i: number) => (
-                  <span key={i} style={{ display: 'inline-block', width: 48, height: 48, background: '#f3f4f6', borderRadius: 4, overflow: 'hidden', fontSize: 8, color: '#9ca3af', textAlign: 'center', lineHeight: '48px' }} title={url}>img</span>
+                  <span key={i} style={{ display: 'inline-block', width: 44, height: 44, background: colors.feedBagCream, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.sm, overflow: 'hidden', fontSize: 8, color: colors.mulchBrown, textAlign: 'center', lineHeight: '44px' }} title={url}>img</span>
                 ))}
-                {snapshot.imageCandidates.length > 6 && <span style={{ fontSize: 11, color: '#9ca3af', alignSelf: 'center' }}>+{snapshot.imageCandidates.length - 6} more</span>}
+                {snapshot.imageCandidates.length > 6 && <span style={{ fontSize: 11, color: colors.mulchBrown, alignSelf: 'center' }}>+{snapshot.imageCandidates.length - 6} more</span>}
               </div>
             </div>
           )}
@@ -98,6 +138,7 @@ export function ArtifactBrowser({ snapshot, artifactUrlResolver }: ArtifactBrows
           )}
         </>
       )}
+
 
       {!hasData && !snapshot.screenshotRef && <div style={s.fallback}>No structured data or artifacts available.</div>}
     </div>

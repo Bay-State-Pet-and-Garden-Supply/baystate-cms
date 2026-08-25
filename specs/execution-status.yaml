@@ -27,30 +27,7 @@ development_status:
   e07s01: done
   e07s02: done
   e07s03: done
-  e07s04: done
-  e08: done
-  e08s01: done
-  e08s02: done
-  e08s03: done
   e09: in_progress
   e09s01: done
   e09s02: done
   e09s03: in_progress
-# story timestamps (build_epic survey-context writes started_at; release-branch writes completed_at)
-stories:
-  e02s01:
-    status: done
-    started_at: "2026-08-20T02:03:59Z"
-    completed_at: "2026-08-20T02:32:30Z"
-  e02s02:
-    status: done
-    started_at: "2026-08-20T02:34:03Z"
-    completed_at: "2026-08-20T03:00:16Z"
-  e03s01:
-    status: done
-    started_at: "2026-08-20T03:14:05Z"
-    completed_at: "2026-08-20T03:24:53Z"
-  e03s02:
-    status: done
-    started_at: "2026-08-20T03:25:00Z"
-    completed_at: "2026-08-20T03:41:26Z"

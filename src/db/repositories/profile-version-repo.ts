@@ -142,6 +142,32 @@ export function createVersion(input: {
   return version!;
 }
 
+export function updateVersionEvidence(id: string, input: { sampleIds?: string[]; artifactHashes?: string[]; validationSummary?: Record<string, unknown> }): void {
+  if (useFallback()) {
+    const v = fallbackIds.get(id);
+    if (v) {
+      if (input.sampleIds) v.sampleIds = input.sampleIds;
+      if (input.artifactHashes) v.artifactHashes = [...input.artifactHashes].sort();
+      if (input.validationSummary) v.validationSummary = input.validationSummary;
+    }
+    return;
+  }
+  const db = getDbSafe();
+  const existing = getVersionById(id);
+  if (!existing) return;
+  const sampleIds = input.sampleIds ?? existing.sampleIds;
+  const artifactHashes = (input.artifactHashes ?? existing.artifactHashes).slice().sort();
+  const validationSummary = input.validationSummary ?? existing.validationSummary;
+  db.query(
+    `UPDATE profile_versions SET sample_ids = ?, artifact_hashes = ?, validation_summary = ? WHERE id = ?`
+  ).run(
+    JSON.stringify(sampleIds),
+    JSON.stringify(artifactHashes),
+    JSON.stringify(validationSummary),
+    id
+  );
+}
+
 export function getVersionById(id: string): ProfileVersion | null {
   if (useFallback()) return fallbackIds.get(id) ?? null;
   const db = getDbSafe();

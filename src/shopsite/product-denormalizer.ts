@@ -35,31 +35,13 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
 
   lines.push('<Product>');
 
-  // Core identity
-  lines.push(`  <SKU>${escapeXml(product.sku)}</SKU>`);
-
-  // GTIN — read from customFields first, fall back to numeric SKU
-  const gtinValue = product.customFields['GTIN']
-    || product.customFields['GoogleGTIN']
-    || (product.sku && /^\d{8,14}$/.test(product.sku) ? product.sku : null);
-  if (gtinValue) {
-    lines.push(`  <GTIN>${escapeXml(gtinValue)}</GTIN>`);
-  }
-  // GoogleGTIN — only emit when the product explicitly has a GoogleGTIN custom field
-  // (never auto-generated from SKU; <GTIN> alone satisfies Google Shopping requirements)
-  if (product.customFields['GoogleGTIN']) {
-    lines.push(`  <GoogleGTIN>${escapeXml(product.customFields['GoogleGTIN'])}</GoogleGTIN>`);
-  }
+  // ── Element order and names mirror the LIVE ShopSite 15 products db_xml
+  // export (version=15.0, DTD 2.9, 22,067-record reference download). The
+  // legacy-format export (no version param) has a DIFFERENT, smaller element
+  // set — never use it as the schema reference.
 
   lines.push(`  <Name>${escapeXml(product.core.name)}</Name>`);
 
-  // FileName — product detail HTML page name. Preserves explicit customField / preserved value if set;
-  // otherwise generates slugged filename from product name.
-  const fileName = product.customFields['FileName']
-    || (product.shopsite.preserved.unknownElements['FileName'] != null
-        ? String(product.shopsite.preserved.unknownElements['FileName'])
-        : generateFileName(product.core.name));
-  lines.push(`  <FileName>${escapeXml(fileName)}</FileName>`);
   // Price / SaleAmount — omit entirely when null or empty (DTD marks both as optional)
   if (product.core.price != null && product.core.price !== '') {
     lines.push(`  <Price>${escapeXml(product.core.price)}</Price>`);
@@ -68,36 +50,56 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     lines.push(`  <SaleAmount>${escapeXml(product.core.salePrice)}</SaleAmount>`);
   }
 
-  // Description - escape CDATA terminators (omit empty)
-  if (product.core.description) {
-    lines.push(`  <ProductDescription><![CDATA[${escapeCdata(product.core.description)}]]></ProductDescription>`);
-  }
-
-  // MoreInformationText — use custom field if provided, or preserved element, or sync from description
-  const moreInfoText = product.customFields['MoreInformationText']
-    || (product.shopsite.preserved.unknownElements['MoreInformationText'] != null
-        ? String(product.shopsite.preserved.unknownElements['MoreInformationText'])
-        : product.core.description);
-  if (moreInfoText) {
-    lines.push(`  <MoreInformationText><![CDATA[${escapeCdata(moreInfoText)}]]></MoreInformationText>`);
-  }
-
-  // Status
+  // Status — ProductDisabled is a real v15 schema field (present on 21,240 of
+  // 22,067 store records).
   lines.push(`  <ProductDisabled>${product.status === 'active' ? 'uncheck' : 'checked'}</ProductDisabled>`);
 
-  // Taxable
-  lines.push(`  <Taxable>${product.core.taxable ? 'checked' : 'uncheck'}</Taxable>`);
-
-  // MinimumQuantity — required by ShopSite DTD (default '0' per the built-in
-  // output policy when omitted).
+  // MinimumQuantity — v15 schema field (present on all store records); DTD
+  // default '0' per the built-in output policy when omitted.
   const minQty = product.customFields['MinimumQuantity']
     || (product.shopsite.preserved.unknownElements['MinimumQuantity'] != null
         ? String(product.shopsite.preserved.unknownElements['MinimumQuantity'])
         : builtInDefaultValue('MinimumQuantity') ?? '0');
   lines.push(`  <MinimumQuantity>${escapeXml(minQty)}</MinimumQuantity>`);
 
+  // Taxable
+  lines.push(`  <Taxable>${product.core.taxable ? 'checked' : 'uncheck'}</Taxable>`);
+
+  // Core identity — SKU is the dbupload uniqueName match key
+  lines.push(`  <SKU>${escapeXml(product.sku)}</SKU>`);
+
+  // Image — Graphic is always emitted (policy omission: 'always'); the DTD
+  // default 'none' applies when no primary image exists.
+  if (product.core.media.primary) {
+    lines.push(`  <Graphic>${escapeXml(product.core.media.primary)}</Graphic>`);
+  } else {
+    lines.push(`  <Graphic>${builtInDefaultValue('Graphic') ?? 'none'}</Graphic>`);
+  }
+
+  // SEO - escape CDATA terminators
+  if (product.core.seo.searchKeywords) {
+    const kwText = escapeCdata(product.core.seo.searchKeywords);
+    if (kwText.trim().length > 0) {
+      lines.push(`  <SearchKeywords><![CDATA[${kwText}]]></SearchKeywords>`);
+    }
+  }
+
+  // ProductDescription — per catalog upload convention, this short store-page
+  // slot always carries the product NAME; descriptive copy belongs in
+  // <MoreInformationText> below (renders on the product More Info page).
+  if (product.core.name) {
+    lines.push(`  <ProductDescription><![CDATA[${escapeCdata(product.core.name)}]]></ProductDescription>`);
+  }
+
+  // Weight — v15 schema position (after the quantity-pricing block, before
+  // the shipping carrier fields).
+  if (product.core.weight != null && product.core.weight !== '') {
+    lines.push(`  <Weight>${escapeXml(product.core.weight)}</Weight>`);
+  }
+
   // ShopSite <ProductType> — default to Tangible (policy DTD default) for
-  // physical goods if not specified.
+  // physical goods if not specified. Every record in the live store export
+  // carries Tangible.
   // Note: Internal Primary Product Type (e.g. dog_food_dry) must never be mapped to ShopSite <ProductType>.
   const shopSiteProductType = product.customFields['ProductType']
     || (product.shopsite.preserved.unknownElements['ProductType'] != null
@@ -110,31 +112,69 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     lines.push(`  <QuantityOnHand>${product.core.inventory.quantityOnHand}</QuantityOnHand>`);
   }
 
-  // Weight
-  if (product.core.weight != null && product.core.weight !== '') {
-    lines.push(`  <Weight>${escapeXml(product.core.weight)}</Weight>`);
+  // GTIN / GoogleGTIN — real v15 schema fields (GTIN present on 15,252 store
+  // records), emitted in the Google-base field group per the DTD sequence.
+  // GTIN falls back to the numeric SKU; GoogleGTIN only when explicit.
+  const gtinValue = product.customFields['GTIN']
+    || product.customFields['GoogleGTIN']
+    || (product.sku && /^\d{8,14}$/.test(product.sku) ? product.sku : null);
+  if (gtinValue) {
+    lines.push(`  <GTIN>${escapeXml(gtinValue)}</GTIN>`);
+  }
+  if (product.customFields['GoogleGTIN']) {
+    lines.push(`  <GoogleGTIN>${escapeXml(product.customFields['GoogleGTIN'])}</GoogleGTIN>`);
   }
 
-  // Availability
+  // Availability — v15 schema field (present on all store records).
   if (product.core.availability) {
     lines.push(`  <Availability>${escapeXml(product.core.availability)}</Availability>`);
   }
 
-  // Image — Graphic is always emitted (policy omission: 'always'); the DTD
-  // default 'none' applies when no primary image exists.
-  if (product.core.media.primary) {
-    lines.push(`  <Graphic>${escapeXml(product.core.media.primary)}</Graphic>`);
-    if (!product.shopsite.preserved.unknownElements['MoreInformationGraphic']) {
-      lines.push(`  <MoreInformationGraphic>${escapeXml(product.core.media.primary)}</MoreInformationGraphic>`);
+  // ProductOnPages — v15 structure: PageLink children with Name elements.
+  const pageNames = extractPageNames(product);
+  if (pageNames.length > 0) {
+    lines.push(`  <ProductOnPages>`);
+    for (const pageName of pageNames) {
+      lines.push(`    <PageLink>`);
+      lines.push(`      <Name>${escapeXml(pageName)}</Name>`);
+      lines.push(`    </PageLink>`);
     }
-  } else {
-    lines.push(`  <Graphic>${builtInDefaultValue('Graphic') ?? 'none'}</Graphic>`);
-    if (!product.shopsite.preserved.unknownElements['MoreInformationGraphic']) {
-      lines.push(`  <MoreInformationGraphic>${builtInDefaultValue('MoreInformationGraphic') ?? 'none'}</MoreInformationGraphic>`);
-    }
+    lines.push(`  </ProductOnPages>`);
   }
 
-  // Additional images (up to 20 slots) — only emit when populated
+  // DisplayMoreInformationPage — v15 element name (no trailing underscore);
+  // precedes MoreInformationText. Auto-enabled whenever descriptive copy
+  // ships, unless an explicit custom/preserved value opts out.
+  const moreInfoText = product.customFields['MoreInformationText']
+    || (product.shopsite.preserved.unknownElements['MoreInformationText'] != null
+        ? String(product.shopsite.preserved.unknownElements['MoreInformationText'])
+        : product.core.description);
+  if (moreInfoText) {
+    const displayFlagRaw = product.customFields['DisplayMoreInformationPage']
+      ?? product.customFields['DisplayMoreInformationPage_']
+      ?? (product.shopsite.preserved.unknownElements['DisplayMoreInformationPage'] != null
+          ? String(product.shopsite.preserved.unknownElements['DisplayMoreInformationPage'])
+          : (product.shopsite.preserved.unknownElements['DisplayMoreInformationPage_'] != null
+              ? String(product.shopsite.preserved.unknownElements['DisplayMoreInformationPage_'])
+              : null));
+    const displayDisabled = ['uncheck', 'unchecked', 'no', '0', 'false']
+      .includes((displayFlagRaw ?? '').trim().toLowerCase());
+    lines.push(`  <DisplayMoreInformationPage>${displayDisabled ? 'uncheck' : 'checked'}</DisplayMoreInformationPage>`);
+    lines.push(`  <MoreInformationText><![CDATA[${escapeCdata(moreInfoText)}]]></MoreInformationText>`);
+  }
+
+  // MoreInformationGraphic — always emitted (DTD default 'none'); a preserved
+  // store value wins over the primary image fallback.
+  const preservedMoreInfoGraphic = product.shopsite.preserved.unknownElements['MoreInformationGraphic'];
+  if (preservedMoreInfoGraphic != null && String(preservedMoreInfoGraphic).length > 0) {
+    lines.push(`  <MoreInformationGraphic>${escapeXml(String(preservedMoreInfoGraphic))}</MoreInformationGraphic>`);
+  } else if (product.core.media.primary) {
+    lines.push(`  <MoreInformationGraphic>${escapeXml(product.core.media.primary)}</MoreInformationGraphic>`);
+  } else {
+    lines.push(`  <MoreInformationGraphic>${builtInDefaultValue('MoreInformationGraphic') ?? 'none'}</MoreInformationGraphic>`);
+  }
+
+  // Additional images — v15 schema exposes 20 More Info image slots.
   for (let i = 0; i < 20; i++) {
     const img = product.core.media.additional?.[i];
     if (img) {
@@ -142,32 +182,37 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     }
   }
 
-  // SEO - escape CDATA terminators
-  if (product.core.seo.searchKeywords) {
-    const kwText = escapeCdata(product.core.seo.searchKeywords);
-    if (kwText.trim().length > 0) {
-      lines.push(`  <SearchKeywords><![CDATA[${kwText}]]></SearchKeywords>`);
-    }
-  }
+  // FileName — product detail HTML page name. Preserves explicit customField / preserved value if set;
+  // otherwise generates slugged filename from product name.
+  const fileName = product.customFields['FileName']
+    || (product.shopsite.preserved.unknownElements['FileName'] != null
+        ? String(product.shopsite.preserved.unknownElements['FileName'])
+        : generateFileName(product.core.name));
+  lines.push(`  <FileName>${escapeXml(fileName)}</FileName>`);
 
   // ProductField mappings from customFields - validate tag names. Custom
   // ProductField* values are NOT ShopSite built-ins (issue #17 J): they stay
   // on classification mapping/serialization, and the immutable built-in
-  // output policy governs only the DTD fields above. An unknown built-in
-  // policy key is never emitted through this generic path.
-  for (const [field, value] of Object.entries(product.customFields)) {
-    if (!value) continue;
-    if (isBuiltInOutputField(field)) continue; // governed by the policy, not custom serialization
-    if (!isValidXmlTagName(field)) {
-      warnings.push(`Skipping custom field "${field}" because it is not a valid XML tag name.`);
-      continue;
-    }
-    if (field.startsWith('ProductField') && value) {
-      lines.push(`  <${field}>${escapeXml(value)}</${field}>`);
-    }
+  // output policy governs only the DTD fields above. The live store defines
+  // ProductField1-32; emitted in numeric order at the store's canonical
+  // position (after QBImport).
+  const customFieldEntries = Object.entries(product.customFields)
+    .filter(([field, value]) => {
+      if (!value) return false;
+      if (isBuiltInOutputField(field)) return false; // governed by the policy, not custom serialization
+      if (!field.startsWith('ProductField')) return false; // only store custom fields serialize here (GTIN etc. are governed above)
+      if (!isValidXmlTagName(field)) {
+        warnings.push(`Skipping custom field "${field}" because it is not a valid XML tag name.`);
+        return false;
+      }
+      return true;
+    })
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+  for (const [field, value] of customFieldEntries) {
+    lines.push(`  <${field}>${escapeXml(value)}</${field}>`);
   }
 
-  // Preserved advanced blocks — skip ProductOnPages (handled below with proper Name tags)
+  // Preserved advanced blocks — skip ProductOnPages (handled above with proper PageLink/Name tags)
   const preserved = product.shopsite.preserved;
   for (const [blockName, blockXml] of Object.entries(preserved.advancedBlocks)) {
     if (blockName === 'ProductOnPages') continue;
@@ -175,10 +220,19 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     lines.push(`  ${blockXml}`);
   }
 
-  // Preserved unknown elements - validate tag names
+  // Preserved unknown elements - validate tag names. Skips: ProductOnPages
+  // (handled above), GTIN/GoogleGTIN variants + MinimumQuantity +
+  // ProductDisabled + Availability (governed fields already emitted),
+  // MoreInformationText / DisplayMoreInformationPage (both variants) /
+  // MoreInformationGraphic / FileName (handled above).
   for (const [tag, rawValue] of Object.entries(preserved.unknownElements)) {
     if (tag === 'ProductOnPages') continue;
-    if (tag === 'GTIN' || tag === 'GoogleGTIN' || tag === 'Google_GTIN') continue; // handled above
+    if (tag === 'GTIN' || tag === 'GoogleGTIN' || tag === 'Google_GTIN') continue;
+    if (tag === 'MinimumQuantity' || tag === 'ProductDisabled' || tag === 'Availability') continue;
+    if (tag === 'MoreInformationText') continue;
+    if (tag === 'DisplayMoreInformationPage' || tag === 'DisplayMoreInformationPage_') continue;
+    if (tag === 'MoreInformationGraphic') continue;
+    if (tag === 'FileName') continue;
     if (!isValidXmlTagName(tag)) {
       warnings.push(`Skipping unknown element "${tag}" because it is not a valid XML tag name.`);
       continue;
@@ -187,16 +241,6 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     if (stringVal) {
       lines.push(`  <${tag}>${escapeXml(stringVal)}</${tag}>`);
     }
-  }
-
-  // ProductOnPages — extract page names from any source, emit DTD-compliant <Name> children
-  const pageNames = extractPageNames(product);
-  if (pageNames.length > 0) {
-    lines.push(`  <ProductOnPages>`);
-    for (const pageName of pageNames) {
-      lines.push(`    <Name>${escapeXml(pageName)}</Name>`);
-    }
-    lines.push(`  </ProductOnPages>`);
   }
 
   lines.push('</Product>');

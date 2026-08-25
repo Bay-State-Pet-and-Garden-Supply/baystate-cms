@@ -1,0 +1,257 @@
+/**
+ * Epic #46 — Approved / Ready-to-Export view styles (Phase 7–8).
+ *
+ * Shared `ow-*` utility layer for the bulk-approval and export-draft
+ * surfaces. Uses the project theme variables from theme.css — no
+ * hard-coded colors.
+ */
+
+/* ── Panel headers ──────────────────────────────────────────────────────── */
+.ow-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.ow-panel-title {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-ledger-charcoal);
+}
+
+.ow-audit-line {
+  font-size: 0.8125rem;
+  color: var(--color-mulch-brown);
+}
+
+.ow-detail {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--color-mulch-brown);
+}
+
+/* ── Cards & sections ───────────────────────────────────────────────────── */
+.ow-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+}
+
+.ow-section + .ow-section {
+  margin-top: var(--spacing-sm);
+}
+
+.ow-section-title {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--color-ledger-charcoal);
+}
+
+/* ── Item list ──────────────────────────────────────────────────────────── */
+.ow-list {
+  display: flex;
+  flex-direction: column;
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.ow-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  min-height: 52px;
+  padding: var(--spacing-sm) var(--spacing-md);
+  transition: background-color var(--transition-fast);
+}
+
+.ow-row:hover {
+  background: var(--color-feed-bag-cream);
+}
+
+.ow-row + .ow-row {
+  border-top: 1px solid var(--color-card-border);
+}
+
+.ow-row input[type='checkbox'] {
+  width: 1.0625rem;
+  height: 1.0625rem;
+  flex-shrink: 0;
+  accent-color: var(--color-uniform-green);
+  cursor: pointer;
+}
+
+.ow-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ow-row-title {
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+  overflow-wrap: anywhere;
+}
+
+.ow-row-sub {
+  font-size: 0.8125rem;
+  color: var(--color-mulch-brown);
+  font-variant-numeric: tabular-nums;
+}
+
+.ow-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ── Status chips ───────────────────────────────────────────────────────── */
+.ow-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--color-mulch-brown);
+  background: var(--color-white-surface);
+}
+
+.ow-chip--success {
+  color: var(--color-success-text);
+  border-color: var(--color-success-border);
+  background: var(--color-success-bg);
+}
+
+.ow-chip--attention {
+  color: var(--color-warning-text);
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+/* ── Action bar ─────────────────────────────────────────────────────────── */
+.ow-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  padding-bottom: var(--spacing-xs);
+}
+
+.ow-actions-bar .ow-audit-line {
+  margin-left: auto;
+}
+
+/* ── Empty / loading / error states ─────────────────────────────────────── */
+.ow-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xl) var(--spacing-lg);
+  text-align: center;
+  background: var(--color-feed-bag-cream);
+  border: 1px dashed var(--color-card-border);
+  border-radius: var(--rounded-lg);
+}
+
+.ow-empty strong {
+  color: var(--color-ledger-charcoal);
+}
+
+.ow-empty span {
+  max-width: 46ch;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--color-mulch-brown);
+}
+
+.ow-loading {
+  padding: var(--spacing-lg) 0;
+  text-align: center;
+  font-size: 0.9375rem;
+  color: var(--color-mulch-brown);
+  animation: ow-loading-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes ow-loading-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.ow-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--rounded-md);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+  font-size: 0.875rem;
+}
+
+/* ── Confirm dialog ─────────────────────────────────────────────────────── */
+.ow-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: var(--spacing-lg);
+  background: rgba(33, 20, 20, 0.45);
+}
+
+.ow-dialog {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-lg);
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.ow-dialog-title {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1.0625rem;
+  font-weight: 700;
+  color: var(--color-ledger-charcoal);
+}
+
+.ow-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  padding-top: var(--spacing-xs);
+}

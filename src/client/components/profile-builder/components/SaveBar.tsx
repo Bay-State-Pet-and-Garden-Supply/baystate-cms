@@ -1,9 +1,10 @@
 /**
- * SaveBar — save controls with blocking errors, non-blocking warnings.
+ * SaveBar — save controls with blocking errors, non-blocking warnings (General Store).
  */
 
 import React from 'react';
 import type { ProfileBuilderState, ProfileBuilderController } from '../profileBuilderTypes';
+import { colors, fonts, rounded } from '../../../theme';
 
 interface SaveBarProps {
   state: ProfileBuilderState;
@@ -12,23 +13,85 @@ interface SaveBarProps {
 
 function dirtyBadgeStyle(dirty: boolean): React.CSSProperties {
   return {
-    fontSize: 12, fontWeight: 600, padding: '2px 10px', borderRadius: 999,
-    background: dirty ? '#fef3c7' : '#dcfce7', color: dirty ? '#92400e' : '#166534',
+    fontSize: 11,
+    fontWeight: 700,
+    padding: '3px 10px',
+    borderRadius: rounded.full,
+    background: dirty ? 'rgba(246, 219, 18, 0.3)' : 'rgba(22, 132, 77, 0.12)',
+    color: dirty ? colors.ledgerCharcoal : colors.seedlingGreen,
+    border: `1px solid ${dirty ? colors.mutedGold : colors.seedlingGreen}44`,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
   };
 }
 
 const s: Record<string, React.CSSProperties> = {
   bar: {
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-    padding: '12px 16px', background: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb', flexWrap: 'wrap',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: '12px 16px',
+    background: colors.whiteSurface,
+    borderRadius: rounded.lg,
+    border: `1px solid ${colors.cardBorder}`,
+    flexWrap: 'wrap',
+    boxShadow: '0 1px 4px rgba(33, 20, 20, 0.05)',
   },
   left: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' },
-  saveBtn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 24px', fontSize: 14, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' },
-  saveBtnDisabled: { background: '#9ca3af', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 24px', fontSize: 14, fontWeight: 600, cursor: 'not-allowed', whiteSpace: 'nowrap' },
-  errorBox: { padding: '6px 10px', background: '#fee2e2', borderRadius: 6, color: '#991b1b', fontSize: 12, flexBasis: '100%' },
-  warningBox: { padding: '6px 10px', background: '#fef3c7', borderRadius: 6, color: '#92400e', fontSize: 12, flexBasis: '100%' },
+  saveBtn: {
+    background: colors.uniformGreen,
+    color: colors.feedBagCream,
+    border: 'none',
+    borderRadius: rounded.sm,
+    padding: '8px 24px',
+    fontFamily: fonts.body,
+    fontSize: 13,
+    fontWeight: 700,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    boxShadow: '0 1px 2px rgba(20, 83, 45, 0.2)',
+  },
+  saveBtnDisabled: {
+    background: colors.feedBagCream,
+    color: colors.mulchBrown,
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
+    padding: '8px 24px',
+    fontFamily: fonts.body,
+    fontSize: 13,
+    fontWeight: 700,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    cursor: 'not-allowed',
+    whiteSpace: 'nowrap',
+    opacity: 0.6,
+  },
+  errorBox: {
+    padding: '8px 12px',
+    background: 'rgba(118, 12, 25, 0.08)',
+    border: `1px solid ${colors.signetBurgundy}`,
+    borderRadius: rounded.sm,
+    color: colors.signetBurgundy,
+    fontSize: 12,
+    fontFamily: fonts.body,
+    fontWeight: 600,
+    flexBasis: '100%',
+  },
+  warningBox: {
+    padding: '8px 12px',
+    background: 'rgba(246, 219, 18, 0.2)',
+    border: `1px solid ${colors.mutedGold}`,
+    borderRadius: rounded.sm,
+    color: colors.ledgerCharcoal,
+    fontSize: 12,
+    fontFamily: fonts.body,
+    flexBasis: '100%',
+  },
   warningList: { margin: '4px 0 0', paddingLeft: 16 },
-  successMsg: { fontSize: 13, color: '#166534', fontWeight: 600 },
+  successMsg: { fontSize: 13, color: colors.seedlingGreen, fontWeight: 700, fontFamily: fonts.body },
 };
 
 export function SaveBar({ state, controller }: SaveBarProps) {
@@ -101,3 +164,4 @@ export function SaveBar({ state, controller }: SaveBarProps) {
     </div>
   );
 }
+

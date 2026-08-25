@@ -25,6 +25,10 @@ const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
  * data that are not product details for our catalog.
  */
 const BLOCKED_CUSTOM_FIELDS = new Set([
+  'skuSelector',
+  'sku',
+  'itemSkuSelector',
+  'productSkuSelector',
   'priceSelector',
   'salePriceSelector',
   'regularPriceSelector',
@@ -40,6 +44,9 @@ const BLOCKED_CUSTOM_FIELDS = new Set([
 
 /** Label patterns that indicate a blocked field (case-insensitive check). */
 const BLOCKED_LABEL_PATTERNS = [
+  /^sku$/i,
+  /^item sku$/i,
+  /^product sku$/i,
   /^price$/i,
   /^sale price$/i,
   /^regular price$/i,

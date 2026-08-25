@@ -56,7 +56,7 @@ representativeSuiteRoutes.get('/domains/:domain/cluster-overrides', (c) => {
 });
 
 const putSchema = z.object({
-  urls: z.array(z.string().url()).min(1).max(10),
+  urls: z.array(z.string().url()).min(0).max(10),
   actor: z.string().min(1),
 });
 

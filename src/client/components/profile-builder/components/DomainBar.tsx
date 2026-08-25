@@ -1,9 +1,10 @@
 /**
- * DomainBar — domain input, active profile badge, runtime toggle, reset.
+ * DomainBar — domain input, active profile badge, runtime toggle, reset (General Store).
  */
 
 import React from 'react';
 import type { ProfileBuilderState, ProfileBuilderController } from '../profileBuilderTypes';
+import { colors, fonts, rounded } from '../../../theme';
 
 interface DomainBarProps {
   state: ProfileBuilderState;
@@ -12,13 +13,17 @@ interface DomainBarProps {
 
 function toggleBtnStyle(active: boolean): React.CSSProperties {
   return {
-    padding: '4px 12px',
+    padding: '6px 14px',
     fontSize: 12,
-    fontWeight: 600,
+    fontWeight: 700,
+    fontFamily: fonts.body,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
     border: 'none',
     cursor: 'pointer',
-    background: active ? '#2563eb' : '#fff',
-    color: active ? '#fff' : '#374151',
+    background: active ? colors.uniformGreen : colors.whiteSurface,
+    color: active ? colors.feedBagCream : colors.mulchBrown,
+    transition: 'all 150ms ease',
   };
 }
 
@@ -28,53 +33,57 @@ const s: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 12,
     padding: '12px 16px',
-    background: '#f9fafb',
-    borderRadius: 8,
-    border: '1px solid #e5e7eb',
+    background: colors.whiteSurface,
+    borderRadius: rounded.lg,
+    border: `1px solid ${colors.cardBorder}`,
     flexWrap: 'wrap',
+    boxShadow: '0 1px 4px rgba(33, 20, 20, 0.05)',
   },
-  label: { fontSize: 13, fontWeight: 500, color: '#4b5563', whiteSpace: 'nowrap' },
+  label: { fontFamily: fonts.body, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: colors.mulchBrown, whiteSpace: 'nowrap' },
   input: {
-    padding: '6px 10px',
-    border: '1px solid #d1d5db',
-    borderRadius: 6,
-    fontSize: 14,
-    fontFamily: 'monospace',
-    width: 240,
+    padding: '7px 12px',
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
+    fontSize: 13,
+    fontFamily: fonts.mono,
+    color: colors.ledgerCharcoal,
+    background: colors.whiteSurface,
+    width: 220,
   },
   badge: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 4,
-    fontSize: 11,
+    gap: 6,
+    fontSize: 10,
     fontWeight: 700,
-    padding: '2px 10px',
-    borderRadius: 999,
+    padding: '3px 10px',
+    borderRadius: rounded.full,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: '0.04em',
   },
   toggleGroup: {
     display: 'flex',
     gap: 0,
-    border: '1px solid #d1d5db',
-    borderRadius: 6,
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
     overflow: 'hidden',
   },
   resetBtn: {
-    background: 'none',
-    border: '1px solid #d1d5db',
-    borderRadius: 6,
-    padding: '4px 12px',
+    background: colors.whiteSurface,
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
+    padding: '6px 14px',
+    fontFamily: fonts.body,
     fontSize: 12,
+    fontWeight: 600,
     cursor: 'pointer',
-    color: '#6b7280',
+    color: colors.mulchBrown,
   },
-  profileInfo: { fontSize: 12, color: '#6b7280', marginLeft: 'auto' },
 };
 
 export function DomainBar({ state, controller }: DomainBarProps) {
   const { draft, activeProfile } = state;
-  const hasProfile = !!activeProfile;
+  const hasProfile = Boolean(activeProfile);
 
   return (
     <div style={s.bar}>
@@ -88,17 +97,17 @@ export function DomainBar({ state, controller }: DomainBarProps) {
       />
 
       {hasProfile && (
-        <span style={{ ...s.badge, background: '#dcfce7', color: '#166534', border: '1px solid #16a34a' }}>
+        <span style={{ ...s.badge, background: 'rgba(22, 132, 77, 0.12)', color: colors.seedlingGreen, border: `1px solid ${colors.seedlingGreen}44` }}>
           ✓ Active Profile
           {activeProfile!.updatedAt && (
-            <span style={{ fontWeight: 400, marginLeft: 4 }}>
-              {new Date(activeProfile!.updatedAt).toLocaleDateString()}
+            <span style={{ fontWeight: 400, marginLeft: 4, fontFamily: fonts.mono }}>
+              ({new Date(activeProfile!.updatedAt).toLocaleDateString()})
             </span>
           )}
         </span>
       )}
       {!hasProfile && draft.domain && (
-        <span style={{ ...s.badge, background: '#f3f4f6', color: '#6b7280', border: '1px solid #d1d5db' }}>
+        <span style={{ ...s.badge, background: colors.feedBagCream, color: colors.mulchBrown, border: `1px solid ${colors.cardBorder}` }}>
           No Profile
         </span>
       )}
@@ -127,3 +136,4 @@ export function DomainBar({ state, controller }: DomainBarProps) {
     </div>
   );
 }
+

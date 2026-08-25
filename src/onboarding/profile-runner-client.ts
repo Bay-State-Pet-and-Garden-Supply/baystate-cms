@@ -120,6 +120,7 @@ export async function runProfileExtraction(
   const cleanImages = cleanAndDeduplicateImages(rawImages, sourceUrl);
   ext.primaryImage = cleanImages[0] || null;
   ext.additionalImages = cleanImages.slice(1);
+  (ext as any).images = cleanImages;
 
   return {
     ok: true,

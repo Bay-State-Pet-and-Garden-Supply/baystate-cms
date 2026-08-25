@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * FieldCard — single field selector editor with status, preview, and actions.
  *
@@ -12,6 +11,7 @@ import React, { useState } from 'react';
 import { SelectorInput } from './SelectorInput';
 import { ValuePreviewGrid } from './ValuePreviewGrid';
 import { rankCandidates, evaluateValuesInstant } from '../hooks/useProfileBuilderController';
+import { colors, fonts, rounded } from '../../../theme';
 
 function hitTest(elements: Array<{ id: string; x: number; y: number; w: number; h: number }>, x: number, y: number): string | null {
   const hits = elements.filter(e => x >= e.x && x <= e.x + e.w && y >= e.y && y <= e.y + e.h);
@@ -35,113 +35,152 @@ const STYLE_MAP: Record<
   string,
   { bg: string; fg: string; label: string }
 > = {
-  unassigned: { bg: '#f3f4f6', fg: '#6b7280', label: 'unassigned' },
-  assigned: { bg: '#dbeafe', fg: '#1e40af', label: 'assigned' },
-  tested: { bg: '#dcfce7', fg: '#166534', label: 'tested' },
-  warning: { bg: '#fef3c7', fg: '#92400e', label: 'warning' },
-  failed: { bg: '#fee2e2', fg: '#991b1b', label: 'failed' },
-  validated: { bg: '#bbf7d0', fg: '#14532d', label: 'validated' },
+  unassigned: { bg: colors.feedBagCream, fg: colors.mulchBrown, label: 'unassigned' },
+  assigned: { bg: 'rgba(20, 83, 45, 0.1)', fg: colors.uniformGreen, label: 'assigned' },
+  tested: { bg: 'rgba(22, 132, 77, 0.12)', fg: colors.seedlingGreen, label: 'tested' },
+  warning: { bg: 'rgba(246, 219, 18, 0.3)', fg: colors.ledgerCharcoal, label: 'warning' },
+  failed: { bg: 'rgba(118, 12, 25, 0.1)', fg: colors.signetBurgundy, label: 'failed' },
+  validated: { bg: 'rgba(22, 132, 77, 0.18)', fg: colors.uniformGreen, label: 'validated' },
 };
 
 function statusBadgeStyle(st: string): React.CSSProperties {
   const m = STYLE_MAP[st] ?? STYLE_MAP.unassigned;
-  return { fontSize: 11, fontWeight: 700, padding: '1px 8px', borderRadius: 999, background: m.bg, color: m.fg, textTransform: 'uppercase' };
+  return {
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '2px 8px',
+    borderRadius: rounded.full,
+    background: m.bg,
+    color: m.fg,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    border: `1px solid ${m.fg}33`,
+  };
 }
 
 const s: Record<string, React.CSSProperties> = {
-  card: { padding: 10, marginBottom: 6, borderRadius: 6, border: '1px solid #e5e7eb', background: '#fff' },
-  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
-  label: { fontSize: 13, fontWeight: 600, color: '#111827' },
-  catBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999, background: '#f3f4f6', color: '#6b7280', marginLeft: 6, textTransform: 'uppercase' },
+  card: {
+    padding: 14,
+    marginBottom: 10,
+    borderRadius: rounded.md,
+    border: `1px solid ${colors.cardBorder}`,
+    background: colors.whiteSurface,
+    boxShadow: '0 1px 3px rgba(33, 20, 20, 0.04)',
+  },
+  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  label: { fontFamily: fonts.body, fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal },
+  catBadge: {
+    fontFamily: fonts.body,
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '2px 7px',
+    borderRadius: rounded.full,
+    background: colors.feedBagCream,
+    color: colors.mulchBrown,
+    marginLeft: 6,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    border: `1px solid ${colors.cardBorder}`,
+  },
   meta: {
+    fontFamily: fonts.mono,
     fontSize: 11,
-    color: '#6b7280',
-    marginBottom: 6,
+    color: colors.mulchBrown,
+    marginBottom: 8,
     display: 'flex',
-    gap: 6,
+    gap: 8,
     flexWrap: 'wrap',
   },
   pre: {
-    marginTop: 6,
-    padding: '6px 10px',
-    background: '#f9fafb',
-    borderRadius: 6,
+    marginTop: 8,
+    padding: '8px 10px',
+    background: colors.feedBagCream,
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
     fontSize: 12,
-    color: '#374151',
-    fontFamily: 'monospace',
-    maxHeight: 60,
+    color: colors.ledgerCharcoal,
+    fontFamily: fonts.mono,
+    maxHeight: 70,
     overflow: 'hidden',
     wordBreak: 'break-all',
   },
   warn: {
-    marginTop: 6,
-    padding: '4px 8px',
-    background: '#fef3c7',
-    borderRadius: 4,
+    marginTop: 8,
+    padding: '6px 10px',
+    background: 'rgba(246, 219, 18, 0.2)',
+    border: `1px solid ${colors.mutedGold}`,
+    borderRadius: rounded.sm,
     fontSize: 11,
-    color: '#92400e',
+    color: colors.ledgerCharcoal,
   },
   err: {
-    marginTop: 6,
-    padding: '4px 8px',
-    background: '#fee2e2',
-    borderRadius: 4,
+    marginTop: 8,
+    padding: '6px 10px',
+    background: 'rgba(118, 12, 25, 0.08)',
+    border: `1px solid ${colors.signetBurgundy}`,
+    borderRadius: rounded.sm,
     fontSize: 11,
-    color: '#991b1b',
+    color: colors.signetBurgundy,
+    fontWeight: 600,
   },
-  actions: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 },
+  actions: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 },
   clearBtn: {
-    background: 'none',
-    border: '1px solid #d1d5db',
-    borderRadius: 4,
-    padding: '2px 8px',
+    background: colors.whiteSurface,
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
+    padding: '4px 10px',
+    fontFamily: fonts.body,
     fontSize: 11,
+    fontWeight: 600,
     cursor: 'pointer',
-    color: '#6b7280',
+    color: colors.mulchBrown,
   },
   // Title optional rows
-  tRow: { display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 },
+  tRow: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 },
   tInput: {
     flex: 1,
-    padding: '4px 8px',
-    border: '1px solid #d1d5db',
-    borderRadius: 4,
+    padding: '6px 10px',
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
     fontSize: 12,
-    fontFamily: 'monospace',
+    fontFamily: fonts.mono,
   },
   tRemove: {
-    background: 'none',
-    border: '1px solid #d1d5db',
-    borderRadius: 4,
+    background: colors.whiteSurface,
+    border: `1px solid ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
     fontSize: 14,
     cursor: 'pointer',
-    padding: '2px 6px',
-    color: '#9ca3af',
+    padding: '4px 8px',
+    color: colors.mulchBrown,
     lineHeight: 1,
   },
   addRow: {
-    background: 'none',
-    border: '1px dashed #d1d5db',
-    borderRadius: 4,
-    padding: '2px 10px',
+    background: colors.feedBagCream,
+    border: `1px dashed ${colors.cardBorder}`,
+    borderRadius: rounded.sm,
+    padding: '6px 12px',
+    fontFamily: fonts.body,
     fontSize: 11,
+    fontWeight: 600,
     cursor: 'pointer',
-    color: '#6b7280',
-    marginTop: 4,
+    color: colors.uniformGreen,
+    marginTop: 6,
   },
   concat: {
-    marginTop: 4,
-    padding: '4px 8px',
-    background: '#f0fdf4',
-    borderRadius: 4,
+    marginTop: 6,
+    padding: '6px 10px',
+    background: 'rgba(22, 132, 77, 0.08)',
+    border: `1px solid ${colors.seedlingGreen}`,
+    borderRadius: rounded.sm,
     fontSize: 12,
-    color: '#166534',
+    color: colors.uniformGreen,
     fontStyle: 'italic',
     wordBreak: 'break-all',
   },
 };
 
-export function FieldCard({ field, selectorState, state, controller }: FieldCardProps) {
+export function FieldCardComponent({ field, selectorState, state, controller }: FieldCardProps) {
   const { key, label, category, deprecated } = field;
   const { selector, status, extractedPreview, matchCount, warnings, stability, error } = selectorState;
 
@@ -150,30 +189,30 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
     return <TitleOptionalCard state={state} controller={controller} />;
   }
 
-  // canGenerate removed with paste popover (e07s03) — visual correction via capture artifact replaces paste-HTML flow
-  const canGenerate = false as const;
+  const isAssigned = Boolean(selector && selector.trim());
 
   return (
     <div style={s.card}>
       <div style={s.header}>
-        <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={s.label}>{label}</span>
           <span style={s.catBadge}>{category}</span>
           {deprecated && (
-            <span style={{ ...s.catBadge, background: '#fee2e2', color: '#991b1b', marginLeft: 4 }}>
+            <span style={{ ...s.catBadge, background: '#fee2e2', color: '#991b1b' }}>
               deprecated
             </span>
           )}
         </div>
-        <span style={statusBadgeStyle(status)}>{STYLE_MAP[status]?.label ?? status}</span>
-      </div>
 
-      {(matchCount !== undefined || stability) && (
-        <div style={s.meta}>
-          {matchCount !== undefined && <span>Matches: {matchCount}</span>}
-          {stability && <span>Stability: {stability}</span>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {isAssigned && (
+            <span style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.uniformGreen, background: 'rgba(22,132,77,0.08)', padding: '2px 8px', borderRadius: rounded.sm, border: `1px solid rgba(22,132,77,0.2)` }}>
+              Active: {selector}
+            </span>
+          )}
+          <span style={statusBadgeStyle(status)}>{STYLE_MAP[status]?.label ?? status}</span>
         </div>
-      )}
+      </div>
 
       {(state.snapshot as any)?.dom && (
         <FieldCardPreview
@@ -181,34 +220,21 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
           label={label}
           selector={selector}
           snapshot={state.snapshot as any}
+          sampleCaptures={state.sampleCaptures}
           samples={state.samples.length > 0 ? state.samples : [{ id: 'preview', url: state.draft.productUrl || '' }]}
           controller={controller}
         />
       )}
 
-      {extractedPreview && status !== 'unassigned' && status !== 'failed' && (
-        <div style={s.pre}>
-          {Array.isArray(extractedPreview)
-            ? extractedPreview.slice(0, 3).map((item: string, i: number) => (
-                <div key={i} style={{ marginBottom: i < 2 ? 2 : 0, wordBreak: 'break-all' }}>{item}</div>
-              ))
-            : extractedPreview}
-          {Array.isArray(extractedPreview) && extractedPreview.length > 3 && (
-            <div style={{ color: '#9ca3af', marginTop: 2 }}>+{extractedPreview.length - 3} more</div>
-          )}
-        </div>
-      )}
-
-      {warnings.length > 0 && (
-        <div style={s.warn}>{warnings.map((w: string, i: number) => <div key={i}>{w}</div>)}</div>
-      )}
       {error && <div style={s.err}>{error}</div>}
 
       {/* ── Suggestion display ── */}
       {renderFieldSuggestion(field.key, state.generation.fieldSuggestions[field.key], controller)}
 
       <details style={{ marginTop: 8 }}>
-        <summary style={{ fontSize: 11, color: '#6b7280', cursor: 'pointer' }}>Advanced</summary>
+        <summary style={{ fontSize: 11, color: colors.mulchBrown, cursor: 'pointer', fontFamily: fonts.body, fontWeight: 600 }}>
+          Advanced (Manual Selector Input)
+        </summary>
         <div style={{ marginTop: 6 }}>
           <SelectorInput
             value={selector}
@@ -222,37 +248,81 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
       <div style={s.actions}>
         {selector && (
           <button type="button" style={s.clearBtn} onClick={() => controller.updateSelector(key, '')}>
-            Clear
+            Clear Selector
           </button>
         )}
-        {canGenerate && null}
       </div>
     </div>
   );
 }
 
-function FieldCardPreview({ fieldKey, label, selector, snapshot, samples, controller }: { fieldKey: string; label: string; selector: string; snapshot: any; samples: Array<{ id: string; url: string }>; controller: any }) {
+function FieldCardPreview({
+  fieldKey,
+  label,
+  selector,
+  snapshot,
+  sampleCaptures,
+  samples,
+  controller,
+}: {
+  fieldKey: string;
+  label: string;
+  selector: string;
+  snapshot: any;
+  sampleCaptures?: Record<string, { html: string; dom: string }>;
+  samples: Array<{ id: string; url: string }>;
+  controller: any;
+}) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [clickedText, setClickedText] = useState<string | undefined>(undefined);
-  // story: e07s03 — per-sample capture/evaluate: each sample evaluated against its own capture dom, not shared snapshot
-  const captures: Record<string, { html: string; dom: string }> = {};
-  for (const s of samples) {
-    // when per-sample captures exist in state (e.g., sampleCaptures[s.id]), use them; fallback to shared snapshot for now for true 3/3 matrix shape
-    const perSample = (snapshot as any)?.sampleCaptures?.[s.id] as { html?: string; dom?: string } | undefined;
-    captures[s.id] = { html: perSample?.html ?? snapshot.dom as string, dom: perSample?.dom ?? snapshot.dom as string };
-  }
-  const candidates = rankCandidates({ dom: snapshot.dom as string, html: snapshot.dom as string }, fieldKey, clickedText);
-  const values: Record<string, string | null> = {};
-  for (const s of samples) {
-    const cap = captures[s.id];
-    const top = candidates[0];
-    if (!top) values[s.id] = null;
-    else if (top.selector.startsWith('jsonld:')) {
-      // jsonld requires html parse — use evaluateValuesInstant on jsonld selector fallback to dom h1
-      values[s.id] = evaluateValuesInstant({ html: cap.html }, top.selector === 'jsonld:Product.name' ? 'h1' : top.selector) ?? evaluateValuesInstant({ html: cap.html }, selector);
-    } else values[s.id] = evaluateValuesInstant({ html: cap.html }, top.selector) ?? evaluateValuesInstant({ html: cap.html }, selector);
-  }
-  const elements: Array<{ id: string; x: number; y: number; w: number; h: number; text: string }> = (snapshot.elements as Array<{ id: string; x: number; y: number; w: number; h: number; text: string }>) ?? [];
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(Boolean(selector && selector.trim()));
+
+  const hasActiveSelector = Boolean(selector && selector.trim());
+
+  const captures = React.useMemo(() => {
+    const caps: Record<string, { html: string; dom: string }> = {};
+    for (const s of samples) {
+      const perSample = sampleCaptures?.[s.id] ?? sampleCaptures?.[s.url] ?? (snapshot as any)?.sampleCaptures?.[s.id];
+      caps[s.id] = {
+        html: perSample?.html ?? (snapshot?.dom as string) ?? '',
+        dom: perSample?.dom ?? (snapshot?.dom as string) ?? '',
+      };
+    }
+    return caps;
+  }, [samples, sampleCaptures, snapshot?.dom]);
+
+  const candidates = React.useMemo(() => {
+    return rankCandidates(
+      { dom: snapshot?.dom as string, html: snapshot?.dom as string },
+      fieldKey,
+      clickedText,
+    );
+  }, [snapshot?.dom, fieldKey, clickedText]);
+
+  const values = React.useMemo(() => {
+    const vals: Record<string, string | null> = {};
+    for (const s of samples) {
+      const cap = captures[s.id];
+      const top = candidates[0];
+      if (!top || !cap?.html) {
+        vals[s.id] = null;
+      } else {
+        vals[s.id] = evaluateValuesInstant({ html: cap.html }, top.selector) ?? evaluateValuesInstant({ html: cap.html }, selector);
+      }
+    }
+    return vals;
+  }, [samples, captures, candidates, selector]);
+
+  const previewSummary = React.useMemo(() => {
+    if (!selector) return null;
+    const firstSample = samples[0];
+    if (!firstSample) return null;
+    const cap = captures[firstSample.id];
+    if (!cap?.html) return null;
+    return evaluateValuesInstant({ html: cap.html }, selector);
+  }, [selector, samples, captures]);
+
+  const elements: Array<{ id: string; x: number; y: number; w: number; h: number; text: string; tag?: string }> = (snapshot.elements as Array<{ id: string; x: number; y: number; w: number; h: number; text: string; tag?: string }>) ?? [];
   const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (elements.length === 0) return;
     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
@@ -266,50 +336,202 @@ function FieldCardPreview({ fieldKey, label, selector, snapshot, samples, contro
     if (el?.text) {
       setClickedText(el.text);
       setPickerOpen(false);
+      setIsCollapsed(false);
     }
   };
-  const topCandidate = candidates[0];
-  const showAlternatives = candidates.length > 1 && candidates[0].score - candidates[1].score < 20;
+
   return (
     <div style={{ marginTop: 6 }}>
-      <ValuePreviewGrid samples={samples} candidates={candidates} values={values} fieldLabel={label} captures={captures} />
-      <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
-        <button type="button" style={{ background: '#111827', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 10px', fontSize: 12, cursor: 'pointer' }} onClick={async () => { await controller.captureSnapshot(); setPickerOpen(true); }}>
-          Select on page
-        </button>
-        {clickedText && <span style={{ fontSize: 11, color: '#6b7280' }}>picked: “{clickedText.slice(0, 40)}”</span>}
-      </div>
-      {showAlternatives && topCandidate && (
-        <div style={{ marginTop: 4, fontSize: 11, color: '#92400e' }}>Value alternatives available — top “{topCandidate.selector}” stable on {Object.values(values).filter(v => v).length}/{samples.length} — see Advanced for Why this choice?</div>
+      {/* ── Collapsed Compact View When Selector Active ── */}
+      {hasActiveSelector && isCollapsed ? (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 10,
+            padding: '8px 12px',
+            background: 'rgba(20, 83, 45, 0.04)',
+            border: `1px solid rgba(20, 83, 45, 0.2)`,
+            borderRadius: rounded.md,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 220 }}>
+            <span
+              style={{
+                fontFamily: fonts.mono,
+                fontSize: 11,
+                fontWeight: 700,
+                color: colors.uniformGreen,
+                background: 'rgba(20, 83, 45, 0.08)',
+                padding: '2px 8px',
+                borderRadius: rounded.sm,
+                border: '1px solid rgba(20, 83, 45, 0.25)',
+              }}
+            >
+              {selector}
+            </span>
+            {previewSummary && (
+              <span
+                style={{
+                  fontSize: 11,
+                  fontFamily: fonts.mono,
+                  color: colors.ledgerCharcoal,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  maxWidth: 280,
+                }}
+                title={previewSummary}
+              >
+                "{previewSummary}"
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <button
+              type="button"
+              onClick={() => setIsCollapsed(false)}
+              style={{
+                background: colors.whiteSurface,
+                border: `1px solid ${colors.cardBorder}`,
+                borderRadius: rounded.sm,
+                padding: '4px 10px',
+                fontFamily: fonts.body,
+                fontSize: 11,
+                fontWeight: 700,
+                color: colors.uniformGreen,
+                cursor: 'pointer',
+              }}
+            >
+              ▼ Change / View Candidates ({candidates.length})
+            </button>
+            <button
+              type="button"
+              style={{
+                background: colors.uniformGreen,
+                color: colors.feedBagCream,
+                border: 'none',
+                borderRadius: rounded.sm,
+                padding: '4px 10px',
+                fontFamily: fonts.body,
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+              onClick={async () => { await controller.captureSnapshot(); setPickerOpen(true); }}
+            >
+              Select on page
+            </button>
+          </div>
+        </div>
+      ) : (
+        /* ── Full Expanded Candidate Grid ── */
+        <div>
+          {hasActiveSelector && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+              <button
+                type="button"
+                onClick={() => setIsCollapsed(true)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: colors.mulchBrown,
+                  fontFamily: fonts.body,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  padding: '2px 6px',
+                }}
+              >
+                ▲ Collapse Candidates
+              </button>
+            </div>
+          )}
+
+          <ValuePreviewGrid
+            samples={samples}
+            candidates={candidates}
+            values={values}
+            fieldLabel={label}
+            captures={captures}
+            activeSelector={selector}
+            onSelectCandidate={(sel) => {
+              controller.updateSelector(fieldKey, sel);
+            }}
+          />
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                type="button"
+                style={{
+                  background: colors.uniformGreen,
+                  color: colors.feedBagCream,
+                  border: 'none',
+                  borderRadius: rounded.sm,
+                  padding: '6px 12px',
+                  fontFamily: fonts.body,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  boxShadow: '0 1px 2px rgba(20,83,45,0.15)',
+                }}
+                onClick={async () => { await controller.captureSnapshot(); setPickerOpen(true); }}
+              >
+                Select on page
+              </button>
+              {clickedText && <span style={{ fontFamily: fonts.body, fontSize: 11, color: colors.mulchBrown }}>picked: “{clickedText.slice(0, 40)}”</span>}
+            </div>
+
+            {hasActiveSelector && (
+              <button
+                type="button"
+                onClick={() => setIsCollapsed(true)}
+                style={{
+                  background: colors.feedBagCream,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: rounded.sm,
+                  padding: '4px 10px',
+                  fontFamily: fonts.body,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: colors.mulchBrown,
+                  cursor: 'pointer',
+                }}
+              >
+                ▲ Collapse
+              </button>
+            )}
+          </div>
+        </div>
       )}
       {pickerOpen && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setPickerOpen(false)}>
-          <div style={{ background: '#fff', borderRadius: 8, padding: 12, maxWidth: '90vw', maxHeight: '85vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <strong style={{ fontSize: 13 }}>Click the {label} on the page</strong>
-              <button type="button" style={{ border: '1px solid #d1d5db', borderRadius: 4, padding: '2px 8px', background: '#fff' }} onClick={() => setPickerOpen(false)}>Close</button>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(33,20,20,0.65)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(2px)' }} onClick={() => setPickerOpen(false)}>
+          <div style={{ background: colors.whiteSurface, borderRadius: rounded.lg, border: `1px solid ${colors.cardBorder}`, padding: 16, maxWidth: '90vw', maxHeight: '85vh', overflow: 'auto', boxShadow: '0 12px 32px rgba(33,20,20,0.2)' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingBottom: 8, borderBottom: `1px solid ${colors.cardBorder}` }}>
+              <strong style={{ fontFamily: fonts.display, fontSize: '1rem', color: colors.ledgerCharcoal }}>Click the {label} on the page</strong>
+              <button type="button" style={{ border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.sm, padding: '4px 10px', background: colors.whiteSurface, fontFamily: fonts.body, fontSize: 11, fontWeight: 600, cursor: 'pointer' }} onClick={() => setPickerOpen(false)}>Close</button>
             </div>
             {snapshot.screenshotBase64 ? (
-              <div style={{ position: 'relative', border: '1px solid #e5e7eb' }} onClick={handleOverlayClick}>
+              <div style={{ position: 'relative', border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.sm, overflow: 'hidden' }} onClick={handleOverlayClick}>
                 <img src={`data:image/png;base64,${snapshot.screenshotBase64}`} alt="capture" style={{ display: 'block', maxWidth: 760 }} />
                 <div style={{ position: 'absolute', inset: 0 }} />
               </div>
             ) : (
-              <div style={{ border: '1px solid #e5e7eb', padding: 12, maxHeight: 400, overflow: 'auto', fontSize: 12 }} onClick={handleOverlayClick}>
-                <div style={{ color: '#6b7280', marginBottom: 6 }}>Rendered screenshot unavailable — click is simulated via text list (static fallback)</div>
+              <div style={{ border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.sm, padding: 12, maxHeight: 400, overflow: 'auto', fontSize: 12, background: colors.feedBagCream }} onClick={handleOverlayClick}>
+                <div style={{ color: colors.mulchBrown, marginBottom: 8, fontFamily: fonts.body, fontSize: 11 }}>Rendered screenshot unavailable — click is simulated via text list (static fallback)</div>
                 {elements.length > 0 ? elements.slice(0, 40).map(el => (
-                  <button key={el.id} type="button" style={{ display: 'block', width: '100%', textAlign: 'left', padding: '4px 6px', border: '1px solid #f3f4f6', background: '#fff', cursor: 'pointer' }} onClick={() => { setClickedText(el.text); setPickerOpen(false); }}>{el.tag} — {el.text.slice(0, 60)}</button>
-                )) : <div style={{ color: '#9ca3af' }}>No element map — using DOM parse fallback</div>}
+                  <button key={el.id} type="button" style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 8px', border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.sm, background: colors.whiteSurface, marginBottom: 4, cursor: 'pointer', fontFamily: fonts.mono, fontSize: 11 }} onClick={() => { setClickedText(el.text); setPickerOpen(false); }}>{el.tag} — {el.text.slice(0, 60)}</button>
+                )) : <div style={{ color: colors.mulchBrown, fontFamily: fonts.body, fontSize: 11 }}>No element map — using DOM parse fallback</div>}
               </div>
             )}
-            <div style={{ marginTop: 8, fontSize: 11, color: '#6b7280' }}>Click maps via hitTest(elements) → rankCandidates(field, clickedText) → ValuePreviewGrid 3/3. Why this choice? in Advanced.</div>
+            <div style={{ marginTop: 10, fontSize: 11, color: colors.mulchBrown, fontFamily: fonts.body }}>Click maps via hitTest(elements) → candidate selectors updated.</div>
           </div>
         </div>
       )}
-      <details style={{ marginTop: 8 }}>
-        <summary style={{ fontSize: 11, color: '#6b7280', cursor: 'pointer' }}>Why this choice?</summary>
-        <div style={{ fontSize: 11, color: '#374151', marginTop: 4 }}>Top recipe “{candidates[0]?.selector}” source {candidates[0]?.source} stability {candidates[0]?.stability} score {candidates[0]?.score}. JSON-LD outranks only when normalized value agrees with clicked “{clickedText ?? ''}”. Field-aware tag for {fieldKey}.</div>
-      </details>
     </div>
   );
 }
@@ -319,44 +541,44 @@ function FieldCardPreview({ fieldKey, label, selector, snapshot, samples, contro
 const sug: Record<string, React.CSSProperties> = {
   wrapper: {
     marginTop: 8,
-    padding: '8px 10px',
-    background: '#f8fafc',
-    borderRadius: 6,
-    border: '1px solid #e2e8f0',
+    padding: '10px 12px',
+    background: colors.feedBagCream,
+    borderRadius: rounded.sm,
+    border: `1px solid ${colors.cardBorder}`,
   },
-  header: { fontSize: 11, fontWeight: 700, color: '#475569', marginBottom: 4, textTransform: 'uppercase' as const },
-  selector: { fontSize: 13, fontFamily: 'monospace', color: '#1e293b', wordBreak: 'break-all', marginBottom: 4 },
-  meta: { fontSize: 11, color: '#6b7280', marginBottom: 4, display: 'flex', gap: 6, flexWrap: 'wrap' },
-  preview: { fontSize: 12, color: '#374151', marginBottom: 4, fontStyle: 'italic', wordBreak: 'break-all' },
-  warn: { fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '3px 8px', borderRadius: 4, marginBottom: 4 },
-  err: { fontSize: 11, color: '#991b1b', background: '#fee2e2', padding: '3px 8px', borderRadius: 4, marginBottom: 4 },
-  actions: { display: 'flex', gap: 6, marginTop: 4 },
+  header: { fontSize: 11, fontWeight: 700, color: colors.mulchBrown, marginBottom: 6, textTransform: 'uppercase' as const, letterSpacing: '0.04em' },
+  selector: { fontSize: 12, fontFamily: fonts.mono, color: colors.ledgerCharcoal, wordBreak: 'break-all', marginBottom: 6, background: colors.whiteSurface, padding: '4px 8px', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` },
+  meta: { fontSize: 11, color: colors.mulchBrown, marginBottom: 6, display: 'flex', gap: 8, flexWrap: 'wrap' },
+  preview: { fontSize: 12, color: colors.ledgerCharcoal, marginBottom: 6, fontStyle: 'italic', wordBreak: 'break-all' },
+  warn: { fontSize: 11, color: colors.ledgerCharcoal, background: 'rgba(246,219,18,0.2)', border: `1px solid ${colors.mutedGold}`, padding: '4px 8px', borderRadius: rounded.sm, marginBottom: 6 },
+  err: { fontSize: 11, color: colors.signetBurgundy, background: 'rgba(118,12,25,0.08)', border: `1px solid ${colors.signetBurgundy}`, padding: '4px 8px', borderRadius: rounded.sm, marginBottom: 6 },
+  actions: { display: 'flex', gap: 6, marginTop: 6 },
   acceptBtn: {
-    background: '#2563eb', color: '#fff', border: 'none', borderRadius: 4,
-    padding: '3px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+    background: colors.uniformGreen, color: colors.feedBagCream, border: 'none', borderRadius: rounded.sm,
+    padding: '5px 12px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', cursor: 'pointer',
   },
   acceptLowBtn: {
-    background: '#f59e0b', color: '#fff', border: 'none', borderRadius: 4,
-    padding: '3px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+    background: colors.mutedGold, color: colors.ledgerCharcoal, border: 'none', borderRadius: rounded.sm,
+    padding: '5px 12px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', cursor: 'pointer',
   },
   rejectBtn: {
-    background: 'none', color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 4,
-    padding: '3px 10px', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+    background: colors.whiteSurface, color: colors.mulchBrown, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.sm,
+    padding: '5px 12px', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', cursor: 'pointer',
   },
   dismissBtn: {
-    background: 'none', color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 4,
-    padding: '2px 8px', fontSize: 11, cursor: 'pointer',
+    background: colors.whiteSurface, color: colors.mulchBrown, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.sm,
+    padding: '4px 10px', fontSize: 11, cursor: 'pointer',
   },
-  qualityBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999, textTransform: 'uppercase' as const },
-  noSel: { fontSize: 12, color: '#6b7280', fontStyle: 'italic', marginBottom: 4 },
+  qualityBadge: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: rounded.full, textTransform: 'uppercase' as const, letterSpacing: '0.04em' },
+  noSel: { fontSize: 12, color: colors.mulchBrown, fontStyle: 'italic', marginBottom: 4 },
 };
 
 function qualityBadgeStyle(quality: string): React.CSSProperties {
   switch (quality) {
-    case 'high': return { ...sug.qualityBadge, background: '#dcfce7', color: '#166534' };
-    case 'medium': return { ...sug.qualityBadge, background: '#dbeafe', color: '#1e40af' };
-    case 'low': return { ...sug.qualityBadge, background: '#fef3c7', color: '#92400e' };
-    default: return { ...sug.qualityBadge, background: '#fee2e2', color: '#991b1b' };
+    case 'high': return { ...sug.qualityBadge, background: 'rgba(22, 132, 77, 0.15)', color: colors.seedlingGreen, border: `1px solid ${colors.seedlingGreen}44` };
+    case 'medium': return { ...sug.qualityBadge, background: 'rgba(20, 83, 45, 0.12)', color: colors.uniformGreen, border: `1px solid ${colors.uniformGreen}44` };
+    case 'low': return { ...sug.qualityBadge, background: 'rgba(246, 219, 18, 0.3)', color: colors.ledgerCharcoal, border: `1px solid ${colors.mutedGold}` };
+    default: return { ...sug.qualityBadge, background: 'rgba(118, 12, 25, 0.1)', color: colors.signetBurgundy, border: `1px solid ${colors.signetBurgundy}44` };
   }
 }
 
@@ -511,3 +733,6 @@ function TitleOptionalCard({ state, controller }: TitleOptionalCardProps) {
     </div>
   );
 }
+
+export const FieldCard = React.memo(FieldCardComponent);
+export const TitleOptionalCardMemo = React.memo(TitleOptionalCard);

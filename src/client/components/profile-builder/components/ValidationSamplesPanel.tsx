@@ -1,196 +1,131 @@
 /**
- * ValidationSamplesPanel — manage sample URLs and trigger validation.
+ * ValidationSamplesPanel — simple URL selection dropdown and validation trigger.
  */
 
-import React, { useState } from 'react';
+import React from 'react';
 import type { ProfileBuilderState, ProfileBuilderController } from '../profileBuilderTypes';
+import { colors, fonts, rounded } from '../../../theme';
 
 interface ValidationSamplesPanelProps {
   state: ProfileBuilderState;
   controller: ProfileBuilderController;
+  availableUrls?: string[];
 }
 
-const s: Record<string, React.CSSProperties> = {
-  panel: {
-    background: '#fff',
-    borderRadius: 8,
-    border: '1px solid #e5e7eb',
-    padding: 12,
-  },
-  title: { fontSize: 14, fontWeight: 600, color: '#111827', margin: '0 0 8px' },
-  addRow: { display: 'flex', gap: 6, marginBottom: 10 },
-  input: {
-    flex: 1,
-    padding: '6px 10px',
-    border: '1px solid #d1d5db',
-    borderRadius: 6,
-    fontSize: 13,
-    fontFamily: 'monospace',
-  },
-  addBtn: {
-    background: '#2563eb',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 6,
-    padding: '6px 14px',
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-  },
-  sampleList: { display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 },
-  sampleRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '6px 8px',
-    background: '#f9fafb',
-    borderRadius: 6,
-    fontSize: 12,
-  },
-  sampleUrl: { flex: 1, fontFamily: 'monospace', fontSize: 11, color: '#374151', wordBreak: 'break-all' },
-  checkbox: { cursor: 'pointer', margin: 0 },
-  expectedInput: {
-    width: 120,
-    padding: '2px 6px',
-    border: '1px solid #d1d5db',
-    borderRadius: 4,
-    fontSize: 11,
-  },
-  removeBtn: {
-    background: 'none',
-    border: '1px solid #d1d5db',
-    borderRadius: 4,
-    fontSize: 14,
-    cursor: 'pointer',
-    padding: '2px 6px',
-    color: '#9ca3af',
-    lineHeight: 1,
-  },
-  validateBtn: {
-    background: '#16a34a',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 6,
-    padding: '8px 20px',
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  validateBtnDisabled: {
-    background: '#9ca3af',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 6,
-    padding: '8px 20px',
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'not-allowed',
-  },
-  empty: { fontSize: 12, color: '#9ca3af', fontStyle: 'italic', marginBottom: 10 },
-  count: { fontSize: 12, color: '#6b7280', marginBottom: 6 },
-};
+function getDomainPath(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.pathname;
+  } catch {
+    return url;
+  }
+}
 
-export function ValidationSamplesPanel({ state, controller }: ValidationSamplesPanelProps) {
-  const [urlInput, setUrlInput] = useState('');
-  const { samples, requests } = state;
-  const hasSamples = samples.length > 0;
+export function ValidationSamplesPanel({ state, controller, availableUrls = [] }: ValidationSamplesPanelProps) {
+  const { samples, requests, draft } = state;
 
-  const handleAdd = () => {
-    const trimmed = urlInput.trim();
-    if (!trimmed) return;
-    controller.addSample(trimmed);
-    setUrlInput('');
+  // Options from available suite URLs and draft product URL
+  const candidateOptions = Array.from(
+    new Set([
+      ...availableUrls,
+      draft.productUrl,
+      ...samples.map((s) => s.url),
+    ].filter(Boolean) as string[])
+  );
+
+  const activeUrl = draft.productUrl || candidateOptions[0] || '';
+
+  const handleSelectUrl = (url: string) => {
+    if (!url) return;
+    controller.setProductUrl(url);
+    controller.addSample(url);
   };
 
   return (
-    <div style={s.panel}>
-      <h4 style={s.title}>Validation Samples</h4>
-
-      <div style={s.addRow}>
-        <input
-          type="text"
-          style={s.input}
-          value={urlInput}
-          onChange={(e) => setUrlInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
-          placeholder="https://example.com/products/another-product"
-        />
-        <button
-          type="button"
-          style={s.addBtn}
-          onClick={handleAdd}
-          disabled={!urlInput.trim()}
+    <div
+      style={{
+        background: colors.whiteSurface,
+        borderRadius: rounded.lg,
+        border: `1px solid ${colors.cardBorder}`,
+        padding: '12px 16px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: 12,
+        boxShadow: '0 1px 3px rgba(33,20,20,0.04)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 280 }}>
+        <span style={{ fontFamily: fonts.display, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: colors.mulchBrown, whiteSpace: 'nowrap' }}>
+          Validation Sample:
+        </span>
+        <select
+          value={activeUrl}
+          onChange={(e) => handleSelectUrl(e.target.value)}
+          style={{
+            flex: 1,
+            padding: '7px 12px',
+            border: `1px solid ${colors.cardBorder}`,
+            borderRadius: rounded.sm,
+            fontSize: 12,
+            fontFamily: fonts.mono,
+            background: colors.feedBagCream,
+            color: colors.ledgerCharcoal,
+            cursor: 'pointer',
+          }}
         >
-          + Add
-        </button>
+          {candidateOptions.length === 0 ? (
+            <option value="">No product URLs available</option>
+          ) : (
+            candidateOptions.map((u) => (
+              <option key={u} value={u}>
+                {getDomainPath(u)}
+              </option>
+            ))
+          )}
+        </select>
       </div>
 
-      {hasSamples && (
-        <div style={s.count}>
-          {samples.length} sample{samples.length !== 1 ? 's' : ''}
-        </div>
-      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          type="button"
+          disabled={!activeUrl || requests.validate.loading}
+          onClick={controller.runValidation}
+          style={{
+            background: activeUrl && !requests.validate.loading ? colors.uniformGreen : colors.feedBagCream,
+            color: activeUrl && !requests.validate.loading ? colors.feedBagCream : colors.mulchBrown,
+            border: `1px solid ${activeUrl && !requests.validate.loading ? colors.shadowPine : colors.cardBorder}`,
+            borderRadius: rounded.sm,
+            padding: '7px 18px',
+            fontSize: 12,
+            fontFamily: fonts.body,
+            fontWeight: 700,
+            cursor: activeUrl && !requests.validate.loading ? 'pointer' : 'not-allowed',
+            boxShadow: activeUrl && !requests.validate.loading ? '0 1px 2px rgba(20,83,45,0.15)' : 'none',
+          }}
+        >
+          {requests.validate.loading ? 'Validating…' : 'Run Validation'}
+        </button>
 
-      {hasSamples ? (
-        <div style={s.sampleList}>
-          {samples.map((sample) => (
-            <div key={sample.id} style={s.sampleRow}>
-              <span style={s.sampleUrl}>
-                {sample.url.length > 50 ? sample.url.slice(0, 50) + '…' : sample.url}
-              </span>
-              <label style={{ fontSize: 11, color: '#6b7280', display: 'flex', alignItems: 'center', gap: 2 }}>
-                <input
-                  type="checkbox"
-                  style={s.checkbox}
-                  checked={sample.confirmed}
-                  onChange={(e) => controller.updateSample(sample.id, { confirmed: e.target.checked })}
-                />
-                Confirmed
-              </label>
-              <input
-                type="text"
-                style={s.expectedInput}
-                value={sample.expectedName ?? ''}
-                onChange={(e) => controller.updateSample(sample.id, { expectedName: e.target.value })}
-                placeholder="Expected name"
-              />
-              <button
-                type="button"
-                style={s.removeBtn}
-                onClick={() => controller.removeSample(sample.id)}
-                title="Remove sample"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div style={s.empty}>No sample URLs added yet.</div>
-      )}
-
-      <button
-        type="button"
-        style={hasSamples && !requests.validate.loading ? s.validateBtn : s.validateBtnDisabled}
-        onClick={controller.runValidation}
-        disabled={!hasSamples || requests.validate.loading}
-      >
-        {requests.validate.loading ? 'Validating…' : 'Run Validation'}
-      </button>
-
-      {requests.validate.error && (
-        <div style={{
-          marginTop: 8,
-          padding: '6px 10px',
-          background: '#fee2e2',
-          borderRadius: 6,
-          color: '#991b1b',
-          fontSize: 12,
-        }}>
-          {requests.validate.error}
-        </div>
-      )}
+        {requests.validate.error && (
+          <div
+            role="alert"
+            style={{
+              padding: '6px 12px',
+              background: 'rgba(118, 12, 25, 0.08)',
+              borderRadius: rounded.sm,
+              border: `1px solid ${colors.signetBurgundy}`,
+              color: colors.signetBurgundy,
+              fontSize: 11,
+            }}
+          >
+            {requests.validate.error}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
+
+

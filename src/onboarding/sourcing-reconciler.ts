@@ -77,6 +77,17 @@ export interface DistributorEvidenceEvaluation {
   warnings: string[];
 }
 
+function formatWarningValue(val: string, maxLen = 50): string {
+  const singleLine = val.replace(/\s+/g, ' ').trim();
+  if (singleLine.length <= maxLen) return singleLine;
+  return `${singleLine.slice(0, maxLen - 3)}...`;
+}
+
+function clampWarning(msg: string, maxLen = 480): string {
+  if (msg.length <= maxLen) return msg;
+  return `${msg.slice(0, maxLen - 3)}...`;
+}
+
 /**
  * Pure, side-effect-free evidence reconciliation (Amendment A).
  *
@@ -232,8 +243,10 @@ export function evaluateDistributorEvidence(
 
       softConflictCount++;
       warnings.push(
-        `Identity field '${field}' auto-resolved to '${winningCandidate.value}' from distributor '${winningCandidate.providerId}' ` +
-          `(alternatives: ${candidates.filter((c) => c !== winningCandidate).map((c) => `${c.providerId}='${c.value}'`).join(', ')})`,
+        clampWarning(
+          `Identity field '${field}' auto-resolved to '${formatWarningValue(winningCandidate.value)}' from distributor '${winningCandidate.providerId}' ` +
+            `(alternatives: ${candidates.filter((c) => c !== winningCandidate).map((c) => `${c.providerId}='${formatWarningValue(c.value)}'`).join(', ')})`,
+        ),
       );
 
       conflicts.push({ field, severity: 'soft', candidates });
@@ -246,8 +259,10 @@ export function evaluateDistributorEvidence(
       const rawDistinct = Array.from(new Set(candidates.map((c) => c.value.toLowerCase())));
       if (rawDistinct.length > 1) {
         warnings.push(
-          `Identity field '${field}' values agree after normalization (rule v${IDENTITY_NORMALIZATION_VERSION}): ` +
-            `${candidates.map((c) => `${c.providerId}=${c.value}`).join(', ')} → '${distinctValues[0]}'`,
+          clampWarning(
+            `Identity field '${field}' values agree after normalization (rule v${IDENTITY_NORMALIZATION_VERSION}): ` +
+              `${candidates.map((c) => `${c.providerId}=${formatWarningValue(c.value)}`).join(', ')} → '${distinctValues[0]}'`,
+          ),
         );
       }
       for (const c of candidates) {

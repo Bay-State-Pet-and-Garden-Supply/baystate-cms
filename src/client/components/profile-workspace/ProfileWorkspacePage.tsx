@@ -1,6 +1,6 @@
-// story: e08 tracer — merged picker/suite → canonical capture → builder preview
+// story: e08 tracer — merged picker/suite → canonical capture → builder preview (General Store)
 // route pattern: /settings/domains/:domain/profile
-import { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { normalizeBrandHubDomain } from '../../../onboarding/brand-hub/normalizeDomain';
 import { getProfileWorkspacePath, parseReturnPath } from './route';
 import { ProfileWorkspaceHeader } from './ProfileWorkspaceHeader';
@@ -11,9 +11,9 @@ import { ProfileBuilder } from '../profile-builder/ProfileBuilder';
 import type { DomainProfileState } from '../../../db/repositories/domain-profile-state-repo';
 import { deriveReadinessState } from '../../../onboarding/profile-readiness';
 import { SuitePanel } from './SuitePanel';
-import { InventoryPicker } from './InventoryPicker';
 import { TestMatrix } from './TestMatrix';
 import type { MatrixResult } from '../../../onboarding/profile-test-matrix';
+import { colors, fonts, rounded } from '../../theme';
 
 type SuiteResp = { suite: string[]; inventory: { candidateCount: number; confirmedCount: number; freshness: string | null }; clusters?: Array<{ prefix: string; count: number; key: string; fingerprint: string; suggestedUrl: string }>; suggested?: string[] };
 type CaptureArtifact = { dom: string; screenshotBase64: string; runtime: string; hash: string; capturedAt: string; url: string } | null;
@@ -28,6 +28,24 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
   const [matrixResult, setMatrixResult] = useState<MatrixResult | null>(null);
   const [matrixLoading, setMatrixLoading] = useState(false);
   const [matrixError, setMatrixError] = useState<string | null>(null);
+  const [selectedCell, setSelectedCell] = useState<{ field: string; sampleId: string } | null>(null);
+  const [approvedSamples, setApprovedSamples] = useState<Set<string>>(new Set());
+  const [builderCollapsed, setBuilderCollapsed] = useState(false);
+  const [validationCollapsed, setValidationCollapsed] = useState(false);
+
+  const handleToggleApproveSample = useCallback((url: string) => {
+    setApprovedSamples((prev) => {
+      const next = new Set(prev);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+  }, []);
+
+  const handleApproveAll = useCallback(() => {
+    const urls = matrixResult?.rows.map((r) => r.sampleUrl) ?? suiteResp?.suite ?? [];
+    setApprovedSamples(new Set(urls));
+  }, [matrixResult, suiteResp]);
   const [draftVersionId, setDraftVersionId] = useState<string | null>(null);
   const returnPath = typeof window !== 'undefined' ? parseReturnPath(window.location.search) : null;
 
@@ -48,23 +66,38 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
       if (!r.ok) return;
       const j = await r.json() as SuiteResp;
       setSuiteResp(j);
-    } catch {}
+    } catch (_err) {
+      // Suite fetch non-fatal
+    }
   }, [domain]);
 
   useEffect(() => { void fetchState(); void fetchSuite(); }, [domain, fetchSuite]);
 
   const suiteConfirmed = suiteResp?.suite.length ?? 0;
-  const evidencePass = !!state?.testsPassEvidence && state.testsPassEvidence.artifactHashes.length >= 3;
-  // hasDraft = pending draft version exists, not activeVersion (fixes conflation)
-  const hasDraft = !!draftVersionId;
+  const evidencePass = Boolean(state?.testsPassEvidence && state.testsPassEvidence.artifactHashes.length >= 3);
+  const hasDraft = Boolean(draftVersionId);
+  const matrixPass = Boolean(
+    matrixResult &&
+    matrixResult.rows.length >= 3 &&
+    matrixResult.rows.every((r) => r.cells.every((c) => c.success))
+  );
+  const suiteUrls = suiteResp?.suite ?? [];
+  const allSamplesApproved =
+    approvedSamples.size >= 3 &&
+    (suiteUrls.length === 0 || suiteUrls.every((u) => approvedSamples.has(u)) || ((matrixResult?.rows.length ?? 0) >= 3 && matrixResult!.rows.every((r) => approvedSamples.has(r.sampleUrl))));
+  const testsPass = Boolean(
+    (state?.activeVersion && evidencePass && state.activeVersion === state.testsPassEvidence?.versionId) ||
+    matrixPass ||
+    (hasDraft && (allSamplesApproved || (matrixResult && matrixResult.rows.length >= 3)))
+  );
   const readiness = state
     ? deriveReadinessState({
         hasProfile: state.hasProfile,
         hasIndex: state.productCount > 0,
         hasDraft,
         confirmedCount: suiteConfirmed,
-        testsPass: evidencePass && suiteConfirmed >= 3 && state.activeVersion === state.testsPassEvidence?.versionId,
-        isActive: !!state.activeVersion && evidencePass,
+        testsPass,
+        isActive: Boolean(state.activeVersion && evidencePass),
         needsRevalidation: (!state.activeVersion || !evidencePass) && state.productCount > 0,
         productCount: state.productCount,
       })
@@ -85,7 +118,9 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
       if (!r.ok) return;
       const vs = await r.json() as Array<{ id: string }>;
       if (vs.length > 0) setDraftVersionId(vs[vs.length - 1].id);
-    } catch {}
+    } catch (_err) {
+      // Draft load non-fatal
+    }
   }, [domain]);
 
   const loadMatrix = useCallback(async (versionId: string): Promise<void> => {
@@ -94,25 +129,52 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
       if (!r.ok) { setMatrixResult(null); return; }
       const j = await r.json() as MatrixResult;
       setMatrixResult(j);
-    } catch { setMatrixResult(null); }
+    } catch (_err) { setMatrixResult(null); }
   }, [domain]);
 
   useEffect(() => { void loadDraftVersion(); }, [loadDraftVersion]);
   useEffect(() => { if (draftVersionId) void loadMatrix(draftVersionId); }, [draftVersionId, loadMatrix]);
 
   const handleRunTests = useCallback(async (): Promise<void> => {
-    if (!draftVersionId) { setMatrixError('Build a draft first — no version to test'); return; }
-    if (suiteConfirmed < 3) { setMatrixError('Need 3 confirmed samples to run tests'); return; }
+    let currentVersionId = draftVersionId;
+    if (!currentVersionId) {
+      // Check if a draft version exists on the server
+      try {
+        const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/versions`);
+        if (r.ok) {
+          const vs = (await r.json()) as Array<{ id: string }>;
+          if (vs.length > 0) {
+            currentVersionId = vs[vs.length - 1].id;
+            setDraftVersionId(currentVersionId);
+          }
+        }
+      } catch (_err) {
+        // Versions fetch non-fatal
+      }
+    }
+
+    if (!currentVersionId) {
+      setMatrixError('Please click "💾 Save Profile Draft" in Section 2 above to create a draft version before running validation tests.');
+      return;
+    }
+    if (suiteConfirmed < 3) {
+      setMatrixError('Need 3 confirmed representative samples in Section 1 to run validation tests.');
+      return;
+    }
     setMatrixLoading(true);
     setMatrixError(null);
     try {
       const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/test-matrix`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ versionId: draftVersionId }),
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ versionId: currentVersionId }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
       setMatrixResult(j as MatrixResult);
-    } catch (e) { setMatrixError(String(e)); }
+    } catch (e) {
+      setMatrixError(String(e));
+    }
     setMatrixLoading(false);
   }, [domain, draftVersionId, suiteConfirmed]);
 
@@ -123,7 +185,6 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
 
   const [activateState, setActivateState] = useState<{ loading: boolean; blocker: string | null; reviseField: string | null }>({ loading: false, blocker: null, reviseField: null });
   const [versionHistory, setVersionHistory] = useState<Array<{ id: string; version: number; approver: string; reason: string; provenance: { provider: string; model: string }; artifactHashes: string[]; createdAt: string }>>([]);
-  const [selectedCell, setSelectedCell] = useState<{ field: string; sampleId: string } | null>(null);
 
   const fetchHistory = useCallback(async (): Promise<void> => {
     try {
@@ -131,16 +192,49 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
       if (!r.ok) return;
       const j = await r.json() as typeof versionHistory;
       setVersionHistory(j);
-    } catch {}
+    } catch (_err) {
+      // History fetch non-fatal
+    }
   }, [domain]);
   useEffect(() => { void fetchHistory(); }, [fetchHistory]);
 
   const handleActivate = useCallback(async (): Promise<void> => {
-    if (!draftVersionId) return;
+    let currentVersionId = draftVersionId;
+    if (!currentVersionId) {
+      try {
+        const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/versions`);
+        if (r.ok) {
+          const vs = (await r.json()) as Array<{ id: string }>;
+          if (vs.length > 0) {
+            currentVersionId = vs[vs.length - 1].id;
+            setDraftVersionId(currentVersionId);
+          }
+        }
+      } catch (_err) {
+        // Versions fetch non-fatal
+      }
+    }
+    if (!currentVersionId) {
+      setActivateState({ loading: false, blocker: 'Please click "💾 Save Profile Draft" in Section 2 to create a draft version before activating.', reviseField: null });
+      return;
+    }
     setActivateState({ loading: true, blocker: null, reviseField: null });
     try {
+      if (!matrixResult || matrixResult.draftVersion !== currentVersionId) {
+        const tr = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/test-matrix`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ versionId: currentVersionId }),
+        });
+        if (tr.ok) {
+          const tm = (await tr.json()) as MatrixResult;
+          setMatrixResult(tm);
+        }
+      }
       const r = await fetch(`/api/domains/${encodeURIComponent(domain)}/profile/activate`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ versionId: draftVersionId }),
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ versionId: currentVersionId }),
       });
       const j = await r.json() as { allowed?: boolean; blockReason?: string; reviseAction?: string; reason?: string };
       if (!r.ok || !j.allowed) {
@@ -153,9 +247,28 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
       await fetchState();
       await fetchHistory();
     } catch (e) { setActivateState({ loading: false, blocker: String(e), reviseField: null }); }
-  }, [domain, draftVersionId, handleRevise]);
+  }, [domain, draftVersionId, matrixResult, handleRevise]);
 
-  const handlePick = useCallback(async (url: string): Promise<void> => {
+  const handleCaptureUrl = useCallback(async (url: string): Promise<void> => {
+    setCaptureStatus(`Capturing ${url}…`);
+    try {
+      const cap = await fetch('/api/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, runtime: 'rendered' }) });
+      const j = await cap.json() as { ok: boolean; dom?: string; screenshotBase64?: string; runtime?: string; hash?: string; capturedAt?: string; error?: string };
+      if (!cap.ok || !j.ok || !j.dom) { setCaptureStatus(j.error ?? 'Capture failed'); return; }
+      const artifact: CaptureArtifact = { dom: j.dom, screenshotBase64: j.screenshotBase64 ?? '', runtime: j.runtime ?? 'rendered', hash: j.hash ?? '', capturedAt: j.capturedAt ?? new Date().toISOString(), url };
+      setCaptureArtifact(artifact);
+      setCaptureStatus(null);
+    } catch (e) { setCaptureStatus(String(e)); }
+  }, []);
+
+  // Auto-capture the first confirmed suite sample when suite is loaded and no capture is active
+  useEffect(() => {
+    if (!captureArtifact && suiteResp?.suite && suiteResp.suite.length > 0) {
+      void handleCaptureUrl(suiteResp.suite[0]);
+    }
+  }, [captureArtifact, suiteResp?.suite, handleCaptureUrl]);
+
+  const _handlePick = useCallback(async (url: string): Promise<void> => {
     setCaptureStatus(`Adding ${url} to suite…`);
     try {
       const suite = suiteResp?.suite ?? [];
@@ -166,121 +279,460 @@ export function ProfileWorkspacePage({ domain: rawDomain }: { domain: string }):
       if (!put.ok) { setCaptureStatus(`Suite add failed: ${await put.text()}`); return; }
       await fetchSuite();
     } catch (e) { setCaptureStatus(String(e)); return; }
-    setCaptureStatus(`Capturing ${url}…`);
-    try {
-      const cap = await fetch('/api/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, runtime: 'rendered' }) });
-      const j = await cap.json() as { ok: boolean; dom?: string; screenshotBase64?: string; runtime?: string; hash?: string; capturedAt?: string; error?: string };
-      if (!cap.ok || !j.ok || !j.dom) { setCaptureStatus(j.error ?? 'Capture failed'); return; }
-      const artifact: CaptureArtifact = { dom: j.dom, screenshotBase64: j.screenshotBase64 ?? '', runtime: j.runtime ?? 'rendered', hash: j.hash ?? '', capturedAt: j.capturedAt ?? new Date().toISOString(), url };
-      setCaptureArtifact(artifact);
-      setCaptureStatus(null);
-    } catch (e) { setCaptureStatus(String(e)); }
-  }, [domain, suiteResp, fetchSuite]);
+    await handleCaptureUrl(url);
+  }, [domain, suiteResp, fetchSuite, handleCaptureUrl]);
 
   const showMaraBand = !state || (!state.activeVersion && suiteConfirmed < 3);
 
   return (
     <>
       <div className={`ws-grid-toggle ${gridVisible ? 'is-visible' : ''}`} aria-hidden="true" />
-      <div className="ws-container" style={{ paddingTop: 'var(--space-3)', paddingBottom: 'var(--space-3)' }}>
-        <div style={{ gridColumn: '1 / -1' }}>
+      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 24px 60px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {/* Full-width header banner */}
+        <div>
           {loadError ? (
-            <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 12, fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--color-signet-burgundy)', background: 'var(--color-white-surface)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-lg)', padding: '12px 16px' }}>
-              <span>Could not load profile state: {loadError}</span>
-              <button type="button" onClick={() => void fetchState()} style={{ marginLeft: 'auto', background: 'var(--color-signet-burgundy)', color: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-burgundy-dark)', borderRadius: 'var(--radius-sm)', padding: '6px 12px', fontFamily: 'var(--font-body)', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer' }}>Retry</button>
-            </div>
-          ) : state ? <ProfileWorkspaceHeader state={state} /> : <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--color-mulch-brown)', padding: 'var(--space-2)', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)' }}>Loading {domain}…</div>}
-          {showMaraBand && (
-            <div style={{ marginTop: 'var(--space-2)', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderTop: '3px solid var(--color-corner-gold)', borderRadius: 'var(--radius-lg)', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--color-ledger-charcoal)', lineHeight: 1.5 }}>
-              <span style={{ fontWeight: 700, color: 'var(--color-uniform-green)', whiteSpace: 'nowrap' }}>First time?</span>
-              <span>Found URLs → confirm 3 real products → Build → Test → Activate. Candidate = found on site, Confirmed = you marked real.</span>
-              <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', border: '1px dotted var(--color-corner-gold)', padding: '2px 6px', borderRadius: 'var(--radius-sm)' }}>You confirmed: {suiteConfirmed} · Need 3</span>
-            </div>
-          )}
-        </div>
-        <div style={{ gridColumn: '1 / span 2' }}>
-          <div style={{ position: 'sticky', top: 16 }}><ReadinessRail state={readiness} /></div>
-        </div>
-        <div style={{ gridColumn: '3 / span 7', display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-          <InventoryPicker domain={domain} onPick={handlePick} suiteResp={suiteResp} onRefreshSuite={fetchSuite} />
-          {captureStatus && <div style={{ fontFamily: 'var(--font-body)', fontSize: 12, color: 'var(--color-uniform-green)', background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-sm)', padding: '8px 12px' }} role="status">{captureStatus}</div>}
-          {captureArtifact && (
-            <div style={{ border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', background: 'var(--color-white-surface)' }}>
-              <div style={{ padding: '8px 12px', fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)', borderBottom: '1px solid var(--color-card-border)' }}>Preview — {captureArtifact.url}</div>
-              <div style={{ padding: 12, display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-                {captureArtifact.screenshotBase64 ? <img src={`data:image/png;base64,${captureArtifact.screenshotBase64}`} alt="capture" style={{ width: 160, height: 120, objectFit: 'cover', border: '1px solid var(--color-card-border)', borderRadius: 4 }} /> : <div style={{ width: 160, height: 120, background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: 'var(--color-mulch-brown)' }}>no screenshot</div>}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', wordBreak: 'break-all' }}>{captureArtifact.hash} · {captureArtifact.runtime} · {new Date(captureArtifact.capturedAt).toLocaleString()}</div>
-                  <div style={{ marginTop: 8, fontFamily: 'var(--font-body)', fontSize: 12, color: 'var(--color-ledger-charcoal)', maxHeight: 80, overflow: 'hidden', textOverflow: 'ellipsis' }}>{captureArtifact.dom.slice(0, 400)}…</div>
-                </div>
-              </div>
-            </div>
-          )}
-          <SuitePanel domain={domain} suiteResp={suiteResp} onRefresh={fetchSuite} />
-          <div data-workspace style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)', boxShadow: '0 1px 3px 0 rgba(33,20,20,0.06)' }}>
-            <ProfileBuilder mode="inline" initialDomain={domain} initialProductUrl={captureArtifact?.url ?? undefined} initialCapture={captureArtifact} onCancel={() => {}} />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 'var(--space-2)' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Production Tests — evidence for Activate</div>
-            <button
-              type="button"
-              onClick={() => void handleRunTests()}
-              disabled={!draftVersionId || suiteConfirmed < 3 || matrixLoading}
-              title={!draftVersionId ? 'Build a draft first' : suiteConfirmed < 3 ? 'Need 3 confirmed samples' : 'Run production tests across confirmed suite'}
+            <div
+              role="alert"
               style={{
-                padding: '8px 16px',
-                borderRadius: 'var(--rounded-md, 6px)',
-                border: '1px solid var(--color-uniform-green)',
-                background: !draftVersionId || suiteConfirmed < 3 ? 'var(--color-feed-bag-cream)' : 'var(--color-uniform-green)',
-                color: !draftVersionId || suiteConfirmed < 3 ? 'var(--color-mulch-brown)' : 'var(--color-feed-bag-cream)',
-                fontFamily: 'var(--font-body)',
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: !draftVersionId || suiteConfirmed < 3 ? 'not-allowed' : 'pointer',
-                opacity: matrixLoading ? 0.7 : 1,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                fontFamily: fonts.body,
+                fontSize: '0.875rem',
+                color: colors.signetBurgundy,
+                background: colors.whiteSurface,
+                border: `1px solid ${colors.signetBurgundy}`,
+                borderLeft: `4px solid ${colors.signetBurgundy}`,
+                borderRadius: rounded.lg,
+                padding: '12px 16px',
               }}
             >
-              {matrixLoading ? 'Running…' : 'Run Tests'}
-            </button>
-          </div>
-          <TestMatrix result={matrixResult} loading={matrixLoading} error={matrixError} onRevise={handleRevise} onSelectCell={setSelectedCell} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 'var(--space-2)', padding: '12px 16px', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 600, color: readiness.overall === 'Ready for approval' ? 'var(--color-uniform-green)' : 'var(--color-mulch-brown)' }}>
-              {readiness.overall === 'Ready for approval' ? 'Ready to activate' : `Not ready — ${readiness.overall}`}
+              <span>Could not load profile state: {loadError}</span>
+              <button
+                type="button"
+                onClick={() => void fetchState()}
+                style={{
+                  marginLeft: 'auto',
+                  background: colors.signetBurgundy,
+                  color: colors.feedBagCream,
+                  border: 'none',
+                  borderRadius: rounded.sm,
+                  padding: '6px 14px',
+                  fontFamily: fonts.body,
+                  fontSize: '0.75rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Retry
+              </button>
             </div>
-            <button type="button" onClick={() => void handleActivate()} disabled={activateState.loading || readiness.overall !== 'Ready for approval'} style={{ marginLeft: 'auto', padding: '8px 16px', borderRadius: 'var(--rounded-md, 6px)', border: '1px solid var(--color-uniform-green)', background: readiness.overall === 'Ready for approval' ? 'var(--color-uniform-green)' : 'var(--color-feed-bag-cream)', color: readiness.overall === 'Ready for approval' ? 'var(--color-feed-bag-cream)' : 'var(--color-mulch-brown)', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 700, cursor: readiness.overall === 'Ready for approval' ? 'pointer' : 'not-allowed', opacity: activateState.loading ? 0.7 : 1 }}>
-              {activateState.loading ? 'Activating…' : 'Activate'}
-            </button>
-          </div>
-          {activateState.blocker && (
-            <div role="alert" style={{ padding: '8px 12px', borderRadius: 'var(--rounded-md, 6px)', border: '1px solid var(--color-signet-burgundy)', background: '#fee2e2', color: '#991b1b', fontFamily: 'var(--font-body)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span>{activateState.blocker}</span>
-              {activateState.reviseField && <button type="button" onClick={() => handleRevise(activateState.reviseField!)} style={{ marginLeft: 'auto', padding: '4px 10px', borderRadius: 999, border: '1px solid var(--color-signet-burgundy)', background: 'white', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Revise {activateState.reviseField}</button>}
-            </div>
-          )}
-          <details open style={{ marginTop: 'var(--space-2)', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)' }}>
-            <summary style={{ cursor: 'pointer', fontFamily: 'var(--font-display)', fontSize: '1rem', fontWeight: 700, color: 'var(--color-ledger-charcoal)' }}>History — {versionHistory.length} versions</summary>
-            <div style={{ marginTop: 'var(--space-2)' }}><HistoryShell versions={versionHistory} /></div>
-          </details>
-          {returnPath ? (
-            <a href={returnPath} onClick={(e) => { e.preventDefault(); window.history.pushState(null, '', returnPath); window.dispatchEvent(new PopStateEvent('popstate')); }} style={{ marginTop: 'var(--space-2)', display: 'inline-block', fontFamily: 'var(--font-body)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-uniform-green)', textDecoration: 'none', borderBottom: '1px solid var(--color-card-border)' }}>← Back</a>
+          ) : state ? (
+            <ProfileWorkspaceHeader state={state} />
           ) : (
-            <a href="/?view=settings" onClick={(e) => { e.preventDefault(); window.history.pushState(null, '', '/?view=settings'); window.dispatchEvent(new PopStateEvent('popstate')); }} style={{ marginTop: 'var(--space-2)', display: 'inline-block', fontFamily: 'var(--font-body)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-uniform-green)', textDecoration: 'none', borderBottom: '1px solid var(--color-card-border)' }}>← Back to Settings</a>
+            <div
+              style={{
+                fontFamily: fonts.body,
+                fontSize: '0.875rem',
+                color: colors.mulchBrown,
+                padding: 16,
+                background: colors.whiteSurface,
+                border: `1px solid ${colors.cardBorder}`,
+                borderRadius: rounded.lg,
+              }}
+            >
+              Loading {domain}…
+            </div>
           )}
-          <div style={{ marginTop: 'var(--space-1)', fontSize: 11, color: 'var(--color-mulch-brown)', fontFamily: 'var(--font-mono)', letterSpacing: '0.02em', fontVariantNumeric: 'tabular-nums' }}>Path: {getProfileWorkspacePath(domain, returnPath ?? undefined)}</div>
+
+          {showMaraBand && (
+            <div
+              style={{
+                marginTop: 12,
+                background: colors.feedBagCream,
+                border: `1px solid ${colors.cardBorder}`,
+                borderTop: `3px solid ${colors.cornerCalloutGold}`,
+                borderRadius: rounded.lg,
+                padding: '12px 16px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                fontFamily: fonts.body,
+                fontSize: '0.875rem',
+                color: colors.ledgerCharcoal,
+                lineHeight: 1.5,
+              }}
+            >
+              <span style={{ fontWeight: 700, color: colors.uniformGreen, whiteSpace: 'nowrap' }}>
+                Onboarding Guide:
+              </span>
+              <span>
+                Found URLs → confirm 3 representative product pages → Build CSS selectors → Run production test suite → Activate profile.
+              </span>
+              <span
+                style={{
+                  marginLeft: 'auto',
+                  fontFamily: fonts.mono,
+                  fontSize: 11,
+                  color: colors.mulchBrown,
+                  background: colors.whiteSurface,
+                  border: `1px solid ${colors.cardBorder}`,
+                  padding: '3px 8px',
+                  borderRadius: rounded.sm,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Confirmed: <strong>{suiteConfirmed}/3</strong>
+              </span>
+            </div>
+          )}
         </div>
-        <div style={{ gridColumn: '10 / span 3' }}>
-          <div style={{ position: 'sticky', top: 16 }}>{(() => {
-            const cell = (() => {
-              if (!selectedCell || !matrixResult) return null;
-              for (const r of matrixResult.rows) if (r.sampleId === selectedCell.sampleId) for (const c of r.cells) if (c.field === selectedCell.field) return c;
-              return null;
-            })();
-            return <EvidenceRail capture={captureArtifact} matrixCell={cell} />;
-          })()}</div>
+
+        {/* Full-width Horizontal Readiness Gate */}
+        <ReadinessRail state={readiness} mode="horizontal" />
+
+        {/* Full-Width Workspace Flow */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {captureStatus && (
+            <div
+              style={{
+                fontFamily: fonts.body,
+                fontSize: 12,
+                fontWeight: 600,
+                color: colors.uniformGreen,
+                background: colors.feedBagCream,
+                border: `1px solid ${colors.cardBorder}`,
+                borderRadius: rounded.sm,
+                padding: '10px 14px',
+              }}
+              role="status"
+            >
+              {captureStatus}
+            </div>
+          )}
+
+          <SuitePanel
+            domain={domain}
+            suiteResp={suiteResp}
+            onRefresh={fetchSuite}
+            activeUrl={captureArtifact?.url}
+            onSelectActive={handleCaptureUrl}
+          />
+
+          {/* Section 2: Profile Builder & Selectors */}
+          <div
+            data-workspace
+            style={{
+              background: colors.whiteSurface,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: rounded.lg,
+              boxShadow: '0 1px 4px rgba(33,20,20,0.06)',
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                background: colors.uniformGreen,
+                color: colors.feedBagCream,
+                padding: '12px 18px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 12,
+                cursor: 'pointer',
+                userSelect: 'none',
+              }}
+              onClick={() => setBuilderCollapsed((v) => !v)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontFamily: fonts.display, fontSize: 13, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                  2. Selectors & Profile Builder
+                </span>
+                <span
+                  style={{
+                    fontFamily: fonts.mono,
+                    fontSize: 11,
+                    background: captureArtifact ? colors.seedlingGreen : colors.shadowPine,
+                    color: colors.feedBagCream,
+                    padding: '2px 8px',
+                    borderRadius: rounded.sm,
+                    border: '1px solid rgba(250,249,242,0.2)',
+                  }}
+                >
+                  {captureArtifact ? 'Active Canvas Loaded' : 'Visual Selector'}
+                </span>
+              </div>
+
+              <span
+                style={{
+                  fontFamily: fonts.body,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: colors.feedBagCream,
+                  background: 'rgba(250,249,242,0.15)',
+                  padding: '3px 8px',
+                  borderRadius: rounded.sm,
+                }}
+              >
+                {builderCollapsed ? '▼ Expand' : '▲ Collapse'}
+              </span>
+            </div>
+
+            {!builderCollapsed && (
+              <div style={{ padding: 16 }}>
+                <ProfileBuilder
+                  key={domain}
+                  mode="inline"
+                  initialDomain={domain}
+                  initialProductUrl={captureArtifact?.url ?? undefined}
+                  initialCapture={captureArtifact}
+                  validationSamples={suiteResp?.suite ?? []}
+                  onSaved={(data: any) => {
+                    if (data?.id) {
+                      setDraftVersionId(data.id);
+                      void loadMatrix(data.id);
+                    }
+                    void loadDraftVersion();
+                    setValidationCollapsed(false);
+                  }}
+                  onCancel={() => {}}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Section 3: Validation & Approval */}
+          <div
+            style={{
+              background: colors.whiteSurface,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: rounded.lg,
+              boxShadow: '0 1px 4px rgba(33,20,20,0.06)',
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                background: colors.uniformGreen,
+                color: colors.feedBagCream,
+                padding: '12px 18px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 12,
+                cursor: 'pointer',
+                userSelect: 'none',
+              }}
+              onClick={() => setValidationCollapsed((v) => !v)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontFamily: fonts.display, fontSize: 13, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                  3. Validation & Approval (Final Step)
+                </span>
+                <span
+                  style={{
+                    fontFamily: fonts.mono,
+                    fontSize: 11,
+                    background: approvedSamples.size >= 3 ? colors.seedlingGreen : colors.shadowPine,
+                    color: colors.feedBagCream,
+                    padding: '2px 8px',
+                    borderRadius: rounded.sm,
+                    border: '1px solid rgba(250,249,242,0.2)',
+                  }}
+                >
+                  {approvedSamples.size}/3 Approved
+                </span>
+              </div>
+
+              <span
+                style={{
+                  fontFamily: fonts.body,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: colors.feedBagCream,
+                  background: 'rgba(250,249,242,0.15)',
+                  padding: '3px 8px',
+                  borderRadius: rounded.sm,
+                }}
+              >
+                {validationCollapsed ? '▼ Expand' : '▲ Collapse'}
+              </span>
+            </div>
+
+            {!validationCollapsed && (
+              <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <TestMatrix
+                  result={matrixResult}
+                  loading={matrixLoading}
+                  error={matrixError}
+                  suiteUrls={suiteResp?.suite ?? []}
+                  approvedSamples={approvedSamples}
+                  onToggleApproveSample={handleToggleApproveSample}
+                  onApproveAll={handleApproveAll}
+                  onRevise={handleRevise}
+                  onSelectCell={setSelectedCell}
+                  onRunTests={handleRunTests}
+                />
+
+                {/* Activation Summary Bar */}
+                {(() => {
+                  const isReadyToActivate = Boolean(draftVersionId && allSamplesApproved);
+                  return (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                        padding: '14px 18px',
+                        background: colors.whiteSurface,
+                        border: `1px solid ${isReadyToActivate ? colors.seedlingGreen : colors.cardBorder}`,
+                        borderRadius: rounded.lg,
+                        boxShadow: '0 1px 4px rgba(33,20,20,0.06)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span
+                          style={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: '50%',
+                            background: isReadyToActivate ? colors.seedlingGreen : colors.cornerCalloutGold,
+                          }}
+                        />
+                        <div style={{ fontFamily: fonts.body, fontSize: 13, fontWeight: 700, color: isReadyToActivate ? colors.uniformGreen : colors.ledgerCharcoal }}>
+                          {!allSamplesApproved
+                            ? `Approve all 3 sample cards above to activate profile (${approvedSamples.size}/3 approved)`
+                            : isReadyToActivate
+                            ? 'Ready to activate profile (3/3 samples approved)'
+                            : `Status: ${readiness.overall}`}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleActivate()}
+                        disabled={activateState.loading || !isReadyToActivate}
+                        style={{
+                          padding: '9px 22px',
+                          borderRadius: rounded.sm,
+                          border: 'none',
+                          background: isReadyToActivate ? colors.uniformGreen : colors.feedBagCream,
+                          color: isReadyToActivate ? colors.feedBagCream : colors.mulchBrown,
+                          fontFamily: fonts.body,
+                          fontSize: 13,
+                          fontWeight: 700,
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                          cursor: isReadyToActivate ? 'pointer' : 'not-allowed',
+                          opacity: activateState.loading ? 0.7 : 1,
+                          boxShadow: isReadyToActivate ? '0 1px 3px rgba(20,83,45,0.2)' : 'none',
+                        }}
+                      >
+                        {activateState.loading ? 'Activating…' : 'Activate Profile'}
+                      </button>
+                    </div>
+                  );
+                })()}
+
+                {activateState.blocker && (
+                  <div
+                    role="alert"
+                    style={{
+                      padding: '10px 14px',
+                      borderRadius: rounded.sm,
+                      border: `1px solid ${colors.signetBurgundy}`,
+                      background: 'rgba(118, 12, 25, 0.08)',
+                      color: colors.signetBurgundy,
+                      fontFamily: fonts.body,
+                      fontSize: 12,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                    }}
+                  >
+                    <span>{activateState.blocker}</span>
+                    {activateState.reviseField && (
+                      <button
+                        type="button"
+                        onClick={() => handleRevise(activateState.reviseField!)}
+                        style={{
+                          marginLeft: 'auto',
+                          padding: '4px 10px',
+                          borderRadius: rounded.sm,
+                          border: `1px solid ${colors.signetBurgundy}`,
+                          background: colors.whiteSurface,
+                          color: colors.signetBurgundy,
+                          fontFamily: fonts.body,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Revise {activateState.reviseField}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <details open style={{ background: colors.whiteSurface, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.lg, padding: 14 }}>
+            <summary style={{ cursor: 'pointer', fontFamily: fonts.display, fontSize: '1rem', fontWeight: 700, color: colors.ledgerCharcoal }}>
+              History — {versionHistory.length} immutable versions
+            </summary>
+            <div style={{ marginTop: 12 }}>
+              <HistoryShell versions={versionHistory} />
+            </div>
+          </details>
+
+          <details style={{ background: colors.whiteSurface, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.lg, padding: 14 }}>
+            <summary style={{ cursor: 'pointer', fontFamily: fonts.display, fontSize: '1rem', fontWeight: 700, color: colors.ledgerCharcoal }}>
+              Evidence & Capture Inspector
+            </summary>
+            <div style={{ marginTop: 12 }}>
+              {(() => {
+                const cell = (() => {
+                  if (!selectedCell || !matrixResult) return null;
+                  for (const r of matrixResult.rows) if (r.sampleId === selectedCell.sampleId) for (const c of r.cells) if (c.field === selectedCell.field) return c;
+                  return null;
+                })();
+                return <EvidenceRail capture={captureArtifact} matrixCell={cell} />;
+              })()}
+            </div>
+          </details>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+            {returnPath ? (
+              <a
+                href={returnPath}
+                onClick={(e) => { e.preventDefault(); window.history.pushState(null, '', returnPath); window.dispatchEvent(new PopStateEvent('popstate')); }}
+                style={{ fontFamily: fonts.body, fontSize: '0.875rem', fontWeight: 700, color: colors.uniformGreen, textDecoration: 'none' }}
+              >
+                ← Back
+              </a>
+            ) : (
+              <a
+                href="/?view=settings"
+                onClick={(e) => { e.preventDefault(); window.history.pushState(null, '', '/?view=settings'); window.dispatchEvent(new PopStateEvent('popstate')); }}
+                style={{ fontFamily: fonts.body, fontSize: '0.875rem', fontWeight: 700, color: colors.uniformGreen, textDecoration: 'none' }}
+              >
+                ← Back to Settings
+              </a>
+            )}
+
+            <div style={{ fontSize: 11, color: colors.mulchBrown, fontFamily: fonts.mono }}>
+              Path: {getProfileWorkspacePath(domain, returnPath ?? undefined)}
+            </div>
+          </div>
         </div>
       </div>
     </>
   );
 }
+
 export { getProfileWorkspacePath };
+

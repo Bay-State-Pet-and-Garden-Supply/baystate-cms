@@ -19,7 +19,13 @@ export function normalizeProduct(
   const name = fields['Name'] ?? fields['name'] ?? '';
   const price = fields['Price'] ?? fields['price'] ?? null;
   const saleAmount = fields['SaleAmount'] ?? fields['saleAmount'] ?? null;
-  const description = fields['ProductDescription'] ?? fields['description'] ?? null;
+  // Description resolution: descriptive copy lives in MoreInformationText
+  // (the upload convention stores the product NAME in ProductDescription).
+  // Fall back to ProductDescription for legacy exports, but never treat it as
+  // a description when it merely echoes the product name.
+  const rawProductDescription = fields['ProductDescription'] ?? fields['description'] ?? null;
+  const description = fields['MoreInformationText']
+    ?? (rawProductDescription && rawProductDescription !== name ? rawProductDescription : null);
   const graphic = fields['Graphic'] ?? null;
   const moreInfoGraphic = fields['MoreInformationGraphic'] ?? null;
   const quantityRaw = fields['QuantityOnHand'] ?? fields['quantity_on_hand'] ?? fields['Quantity'] ?? null;

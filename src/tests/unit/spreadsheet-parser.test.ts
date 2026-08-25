@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
-import { parseSpreadsheet, detectColumnMapping, applyColumnMapping } from '../../onboarding/spreadsheet-parser';
+import { parseSpreadsheet, detectColumnMapping, applyColumnMapping, splitGluedSizeBeforeBrand, moveTrailingBrandToFront } from '../../onboarding/spreadsheet-parser';
 import type { ColumnMapping } from '../../shared/schemas/onboarding';
 
 describe('Spreadsheet Parser', () => {
@@ -93,5 +93,79 @@ describe('Spreadsheet Parser', () => {
 
     expect(valid[0].name).toBe('WOOF POOMERGENCY LAVENDER');
     expect(valid[1].name).toBe('WOOF HONESTCHEW ANTLER SM');
+  });
+});
+
+describe('Import name normalization (glued size+brand / brand-last)', () => {
+  const fullMapping: ColumnMapping = {
+    upc: 'UPC',
+    name: 'Product Name',
+    price: null,
+    quantity: null,
+    brand: 'Brand',
+    department: null,
+    sourceUrl: null,
+    nameMergeWith: null,
+  };
+
+  it('splits a size abbreviation fused to the row brand hint (incident regression)', () => {
+    expect(splitGluedSizeBeforeBrand('BEEKEEPING GLOVES LGHARVEST LANE', 'Harvest Lane'))
+      .toBe('BEEKEEPING GLOVES LG HARVEST LANE');
+    expect(splitGluedSizeBeforeBrand('BEEKEEPING JACKET XLHARVEST LANE', 'HARVEST LANE'))
+      .toBe('BEEKEEPING JACKET XL HARVEST LANE');
+    // lowercase distributor variant
+    expect(splitGluedSizeBeforeBrand('beekeeping gloves lgharvest lane', 'harvest lane'))
+      .toBe('beekeeping gloves lg harvest lane');
+  });
+
+  it('never splits when the letters after the abbreviation are not the brand', () => {
+    // CHEWLIMITED glue is product-word fusion, not size+brand — left for curation
+    expect(splitGluedSizeBeforeBrand('NYLABONE POWER CHEWLIMITED CHKN XS', 'NYLABONE'))
+      .toBe('NYLABONE POWER CHEWLIMITED CHKN XS');
+    // unknown trailing text — no speculative splits
+    expect(splitGluedSizeBeforeBrand('GLOVES LGMYSTERY', 'Harvest Lane'))
+      .toBe('GLOVES LGMYSTERY');
+  });
+
+  it('is a no-op without a brand hint', () => {
+    expect(splitGluedSizeBeforeBrand('BEEKEEPING GLOVES LGHARVEST LANE', null))
+      .toBe('BEEKEEPING GLOVES LGHARVEST LANE');
+    expect(moveTrailingBrandToFront('WIDGET BOARD SOLID ACME', '')).toBe('WIDGET BOARD SOLID ACME');
+  });
+
+  it('moves a word-bounded trailing brand phrase to canonical brand-first form', () => {
+    expect(moveTrailingBrandToFront('BEEKEEPING GLOVES LG HARVEST LANE', 'Harvest Lane'))
+      .toBe('Harvest Lane BEEKEEPING GLOVES LG');
+    // comma/hyphen separators before the trailing brand are tolerated
+    expect(moveTrailingBrandToFront('Gloves Large - Harvest Lane', 'Harvest Lane'))
+      .toBe('Harvest Lane Gloves Large');
+  });
+
+  it('leaves ambiguous shapes untouched', () => {
+    // already brand-first → idempotent
+    expect(moveTrailingBrandToFront('HARVEST LANE BEEKEEPING GLOVES LG', 'Harvest Lane'))
+      .toBe('HARVEST LANE BEEKEEPING GLOVES LG');
+    // brand appears twice → refuse (cannot disambiguate)
+    expect(moveTrailingBrandToFront('HARVEST LANE SUIT VENTED HARVEST LANE', 'Harvest Lane'))
+      .toBe('HARVEST LANE SUIT VENTED HARVEST LANE');
+    // trailing text only PARTIALLY matches the brand → refuse
+    expect(moveTrailingBrandToFront('SUIT VENTED HARVEST', 'Harvest Lane'))
+      .toBe('SUIT VENTED HARVEST');
+  });
+
+  it('end-to-end: applyColumnMapping normalizes dirty rows exactly like the manual data fix', () => {
+    const rawRows = [
+      { UPC: '753677468139', 'Product Name': 'BEEKEEPING GLOVES LGHARVEST LANE', Brand: 'Harvest Lane' },
+      { UPC: '018214856511', 'Product Name': 'NYLABONE POWER CHEWLIMITED CHKN XS', Brand: 'NYLABONE' },
+      { UPC: '123456789012', 'Product Name': 'CLEAN NAME SM', Brand: 'Acme' },
+    ];
+    const { valid, errors } = applyColumnMapping(rawRows, fullMapping);
+    expect(errors.length).toBe(0);
+    // glued size+brand split AND brand moved to front — matches the DB fix
+    expect(valid[0].name).toBe('Harvest Lane BEEKEEPING GLOVES LG');
+    // identical-across-siblings glue never trips T2 — deliberately untouched
+    expect(valid[1].name).toBe('NYLABONE POWER CHEWLIMITED CHKN XS');
+    // clean row passthrough
+    expect(valid[2].name).toBe('CLEAN NAME SM');
   });
 });

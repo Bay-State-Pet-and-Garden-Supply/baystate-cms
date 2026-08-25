@@ -67,7 +67,7 @@ async function assertAllowedUrl(url: string): Promise<void> {
 
 function persistCapture(result: CaptureResult & { url: string }): CaptureResult {
   const dir = path.join(os.tmpdir(), 'baystate-captures');
-  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_e) { /* non-fatal */ }
   const ref = path.join(dir, `${result.hash}.json`);
   try {
     fs.writeFileSync(
@@ -84,7 +84,7 @@ function persistCapture(result: CaptureResult & { url: string }): CaptureResult 
       }),
       'utf-8',
     );
-  } catch {}
+  } catch (_e) { /* non-fatal */ }
   return { ...result, screenshotRef: ref };
 }
 
@@ -131,15 +131,63 @@ async function captureStatic(url: string): Promise<CaptureResult> {
 async function captureRendered(url: string): Promise<CaptureResult> {
   await assertAllowedUrl(url);
   let browser: any = null;
-  const deadline = setTimeout(() => { try { if (browser) browser.close(); } catch {} }, 15000);
+  const deadline = setTimeout(() => { try { if (browser) browser.close(); } catch (_e) { /* non-fatal */ } }, 25000);
   try {
     const { chromium } = await import('playwright');
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 900 },
+    });
     const page = await context.newPage();
-    page.on('request', async (req: any) => { try { const u = req.url(); if (u !== url) await assertAllowedUrl(u); } catch {} });
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 10000 });
-    await page.waitForTimeout(1000);
+    page.on('request', async (req: any) => {
+      try {
+        const u = req.url();
+        if (u !== url) await assertAllowedUrl(u);
+        const resourceType = req.resourceType();
+        // Abort non-essential tracking scripts and streaming media to accelerate capture
+        if (
+          resourceType === 'media' ||
+          /google-analytics|googletagmanager|facebook\.net|clarity\.ms|hotjar|privy|klaviyo|doubleclick|tiktok\.com|sentry\.io/i.test(u)
+        ) {
+          await req.abort().catch(() => {});
+          return;
+        }
+      } catch (_e) {
+        // Non-fatal
+      }
+    });
+
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      await page.waitForLoadState('load', { timeout: 3000 }).catch(() => {});
+    } catch {
+      await page.goto(url, { waitUntil: 'commit', timeout: 8000 }).catch(() => {});
+    }
+    await page.waitForTimeout(300);
+
+    // Suppress newsletter popups, promo modals, and cookie banners before screenshot
+    await page.evaluate(() => {
+      const popupSelectors = [
+        '[class*="modal" i]', '[class*="popup" i]', '[class*="newsletter" i]',
+        '[id*="modal" i]', '[id*="popup" i]', '[id*="newsletter" i]',
+        '[id*="klaviyo" i]', '[class*="klaviyo" i]', '[class*="privy" i]',
+        '[class*="cookie" i]', '[id*="cookie" i]', '[class*="banner" i]',
+        '#shopify-section-popup', '.overlay', '.backdrop',
+      ];
+      for (const sel of popupSelectors) {
+        for (const el of document.querySelectorAll(sel)) {
+          const style = window.getComputedStyle(el);
+          if (style.position === 'fixed' || style.position === 'absolute' || parseInt(style.zIndex, 10) > 100) {
+            (el as HTMLElement).style.display = 'none';
+          }
+        }
+      }
+    }).catch(() => {});
+
     const evaluated = await page.evaluate(() => {
       const elements: Array<{ id: string; tag: string; text: string; x: number; y: number; w: number; h: number; dataAttrs: string[] }> = [];
       let counter = 0;
@@ -158,7 +206,7 @@ async function captureRendered(url: string): Promise<CaptureResult> {
     });
     let dom: string = evaluated.dom;
     if (dom.length > 5 * 1024 * 1024) dom = dom.slice(0, 5 * 1024 * 1024);
-    let screenshotBase64 = await page.screenshot({ type: 'png' }).then((buf: Buffer) => buf.toString('base64'));
+    let screenshotBase64 = await page.screenshot({ type: 'png' }).then((buf: Buffer) => buf.toString('base64')).catch(() => '');
     if (screenshotBase64.length > 5 * 1024 * 1024) screenshotBase64 = screenshotBase64.slice(0, 5 * 1024 * 1024);
     await context.close();
     const capturedAt = new Date().toISOString();
@@ -168,11 +216,11 @@ async function captureRendered(url: string): Promise<CaptureResult> {
     return persistCapture(base);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    try { if (browser) await browser.close(); } catch {}
+    try { if (browser) await browser.close(); } catch (_e) { /* non-fatal */ }
     console.warn(`[profile-capture] rendered capture failed for ${redactUrl(url)}: ${msg}, falling back to static`);
     return captureStatic(url);
   } finally {
     clearTimeout(deadline);
-    try { if (browser) await browser.close(); } catch {}
+    try { if (browser) await browser.close(); } catch (_e) { /* non-fatal */ }
   }
 }

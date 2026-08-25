@@ -1,0 +1,254 @@
+[
+  {
+    "id": "b-adams-0",
+    "field": "size",
+    "promptV2": "10 FL OZ",
+    "promptV1": "10 FL OZ (296 mL)"
+  },
+  {
+    "id": "b-badlands-1",
+    "field": "weight",
+    "promptV2": "5 oz | 141.75 g",
+    "promptV1": "5 oz"
+  },
+  {
+    "id": "b-badlands-1",
+    "field": "flavorVariety",
+    "promptV2": "Superfood Formula",
+    "promptV1": "Superfood Formula with a blend of blueberry, pumpkin & lion's mane mus"
+  },
+  {
+    "id": "b-earth-animal-4",
+    "field": "productForm",
+    "promptV2": "dog chew",
+    "promptV1": "roll"
+  },
+  {
+    "id": "b-earthbath-5",
+    "field": "productForm",
+    "promptV2": "foaming paw wash",
+    "promptV1": "foam"
+  },
+  {
+    "id": "b-esbilac-6",
+    "field": "size",
+    "promptV2": "16 FL. OZ.",
+    "promptV1": "16 FL. OZ. (473 mL)"
+  },
+  {
+    "id": "b-esbilac-6",
+    "field": "productForm",
+    "promptV2": "liquid",
+    "promptV1": "Ready-to-Feed Formula"
+  },
+  {
+    "id": "b-ethical-pet-7",
+    "field": "brand",
+    "promptV2": "PetSafe",
+    "promptV1": "Unknown"
+  },
+  {
+    "id": "b-fresh-news-8",
+    "field": "size",
+    "promptV2": "20 liters",
+    "promptV1": "20 liters (1220 cu in)"
+  },
+  {
+    "id": "b-fresh-step-9",
+    "field": "productForm",
+    "promptV2": "clumping litter",
+    "promptV1": "multi-cat clumping litter"
+  },
+  {
+    "id": "b-fromm-10",
+    "field": "weight",
+    "promptV2": "3 oz (85 g)",
+    "promptV1": "85 g"
+  },
+  {
+    "id": "b-fromm-10",
+    "field": "productForm",
+    "promptV2": "wet food",
+    "promptV1": "cat food"
+  },
+  {
+    "id": "b-greenies-11",
+    "field": "productName",
+    "promptV2": "OCCUPY TWISTS",
+    "promptV1": "Greenies Occupy Twists"
+  },
+  {
+    "id": "b-greenies-11",
+    "field": "count",
+    "promptV2": "10 COUNT",
+    "promptV1": "10"
+  },
+  {
+    "id": "b-greenies-11",
+    "field": "productForm",
+    "promptV2": "chew",
+    "promptV1": "chewy texture"
+  },
+  {
+    "id": "b-harvest-lane-12",
+    "field": "productName",
+    "promptV2": "Pet Grooming Comb",
+    "promptV1": "Hair Pick Comb"
+  },
+  {
+    "id": "b-harvest-lane-12",
+    "field": "brand",
+    "promptV2": "PetGroom",
+    "promptV1": "Unknown"
+  },
+  {
+    "id": "b-harvest-lane-12",
+    "field": "productForm",
+    "promptV2": "grooming comb",
+    "promptV1": "Comb"
+  },
+  {
+    "id": "b-inaba-13",
+    "field": "productForm",
+    "promptV2": "wet food",
+    "promptV1": "Gravy"
+  },
+  {
+    "id": "b-inaba-churu-14",
+    "field": "productName",
+    "promptV2": "Churu Entrée Pâté",
+    "promptV1": "Churu Entrée Pâté for Senior"
+  },
+  {
+    "id": "b-inaba-churu-14",
+    "field": "productForm",
+    "promptV2": "wet food",
+    "promptV1": "pâté"
+  },
+  {
+    "id": "b-koha-16",
+    "field": "brand",
+    "promptV2": "KOAHA",
+    "promptV1": "KOA"
+  },
+  {
+    "id": "b-koha-16",
+    "field": "weight",
+    "promptV2": "12.5 oz (355 g)",
+    "promptV1": "12.5 oz"
+  },
+  {
+    "id": "b-koha-16",
+    "field": "productForm",
+    "promptV2": "wet food",
+    "promptV1": "Canned"
+  },
+  {
+    "id": "b-koha-16",
+    "field": "flavorVariety",
+    "promptV2": "Shredded Duck Entrée",
+    "promptV1": "Shredded Duck Entrée with Superfoods in a Savory Broth"
+  },
+  {
+    "id": "b-kong-17",
+    "field": "productName",
+    "promptV2": "Plush Toy",
+    "promptV1": "Fuzzy Beaver Toy"
+  },
+  {
+    "id": "gtin-850067859833",
+    "field": "productForm",
+    "promptV2": "plush toy",
+    "promptV1": "2-in-1 fetch ball & puzzle feeder"
+  },
+  {
+    "id": "gtin-850067859604",
+    "field": "productForm",
+    "promptV2": "backup bags",
+    "promptV1": "Backup bags for surprise doggy business"
+  },
+  {
+    "id": "gtin-850067859444",
+    "field": "productForm",
+    "promptV2": "toy",
+    "promptV1": "Bottle Cap"
+  },
+  {
+    "id": "hard-small-0",
+    "field": "productForm",
+    "promptV2": "tool",
+    "promptV1": "Rolling Pin"
+  },
+  {
+    "id": "hard-small-1",
+    "field": "productForm",
+    "promptV2": "tool",
+    "promptV1": "Rolling Pin"
+  },
+  {
+    "id": "hard-small-2",
+    "field": "productForm",
+    "promptV2": "cat toy",
+    "promptV1": "stick"
+  },
+  {
+    "id": "hard-small-3",
+    "field": "productForm",
+    "promptV2": "cat toy",
+    "promptV1": "stick"
+  },
+  {
+    "id": "hard-small-4",
+    "field": "productForm",
+    "promptV2": "toy",
+    "promptV1": "Metal"
+  },
+  {
+    "id": "b-nylabone-19",
+    "field": "productForm",
+    "promptV2": "chew toy",
+    "promptV1": "Bone"
+  },
+  {
+    "id": "b-nylabone-19",
+    "field": "flavorVariety",
+    "promptV2": "Big Roasted Chicken Flavor",
+    "promptV1": "Big Roasted Chicken"
+  },
+  {
+    "id": "b-earthbath-20",
+    "field": "size",
+    "promptV2": "16 fl. oz",
+    "promptV1": "16 fl. oz (472 ml)"
+  },
+  {
+    "id": "b-earthbath-20",
+    "field": "weight",
+    "promptV2": "472 ml",
+    "promptV1": "16 fl. oz"
+  },
+  {
+    "id": "b-kong-21",
+    "field": "productName",
+    "promptV2": "KONG Comfort Squeaks",
+    "promptV1": "KONG Comfort Squeaky Plush Toy"
+  },
+  {
+    "id": "b-instinct-22",
+    "field": "weight",
+    "promptV2": "16oz",
+    "promptV1": "16 oz"
+  },
+  {
+    "id": "b-instinct-22",
+    "field": "productForm",
+    "promptV2": "wet food",
+    "promptV1": "CAGE-FREE TURKEY RECIPE"
+  },
+  {
+    "id": "b-instinct-22",
+    "field": "flavorVariety",
+    "promptV2": "CAGE-FREE TURKEY RECIPE",
+    "promptV1": "Non-GMO Vegetables & Fruits"
+  }
+]

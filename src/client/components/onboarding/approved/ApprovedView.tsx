@@ -20,6 +20,7 @@ import {
   toggleSelection,
   type SelectionState,
 } from './approved-logic';
+import './approved.css';
 
 interface ApprovedViewProps {
   batchId: string;

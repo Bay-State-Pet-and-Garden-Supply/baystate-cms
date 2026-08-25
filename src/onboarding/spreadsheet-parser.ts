@@ -11,7 +11,7 @@ export interface ParsedSpreadsheet {
 /**
  * Parse an uploaded spreadsheet (XLS, XLSX, CSV) into headers and raw rows.
  */
-export function parseSpreadsheet(buffer: ArrayBuffer, fileName: string): ParsedSpreadsheet {
+export function parseSpreadsheet(buffer: ArrayBuffer, _fileName: string): ParsedSpreadsheet {
   const workbook = XLSX.read(buffer, { type: 'array' });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) {
@@ -104,6 +104,79 @@ export function detectColumnMapping(headers: string[]): Partial<ColumnMapping> {
   return mapping;
 }
 
+// ─── Name Normalization (incident #gloves-lg harvest) ─────────────────────────
+
+/**
+ * Size abbreviations recognized downstream by formatDeterministicTitle /
+ * deriveFrozenFactsForValidation (cohort-name-coordinator.ts). A glued pair
+ * like "LGHARVEST" defeats BOTH: \b-size expansion never fires (no word
+ * boundary inside the fused token) and the frozen-facts extractor never sees a
+ * standalone {size} slot — so multi-variant families hard-fail T7 family
+ * consistency (shared skeleton mismatch) and the cohort run aborts.
+ */
+const SIZE_ABBREVS = ['SM', 'MD', 'LG', 'XL', 'XS', 'XXL'] as const;
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Words of the brand hint joined by a flexible non-alphanumeric gap. */
+function flexibleBrandPattern(brandHint: string): string | null {
+  const words = brandHint.match(/[a-z0-9]+/gi);
+  if (!words || words.length === 0) return null;
+  return words.map(word => escapeRe(word)).join('[^A-Za-z0-9]+');
+}
+
+/**
+ * Rule 1 — split a size abbreviation FUSED to a following known-brand token
+ * ("BEEKEEPING GLOVES LGHARVEST LANE" + brand "Harvest Lane" →
+ * "BEEKEEPING GLOVES LG HARVEST LANE"). Only fires when the letters directly
+ * after the abbreviation begin the row's OWN brand hint, so unknown text is
+ * never speculatively split.
+ */
+export function splitGluedSizeBeforeBrand(name: string, brandHint: string | null | undefined): string {
+  const brand = brandHint?.trim();
+  if (!brand) return name;
+  const flexible = flexibleBrandPattern(brand);
+  if (!flexible) return name;
+  const re = new RegExp(`(?<![A-Za-z0-9])(?:${SIZE_ABBREVS.join('|')})(?=${flexible})`, 'gi');
+  // Inserting a separator space is idempotent: the split form can never rematch.
+  return name.replace(re, match => `${match} `);
+}
+
+/**
+ * Rule 2 — canonicalize brand-LAST names to brand-FIRST ("BEEKEEPING GLOVES LG
+ * HARVEST LANE" → "HARVEST LANE BEEKEEPING GLOVES LG") when the brand phrase:
+ * appears EXACTLY once, sits word-bounded at the very end, and the name does
+ * not already open with it. Without this, the deterministic title fallback
+ * prepends the brand (it only checks the head) and the duplicate trips T3
+ * "brand must appear exactly once" — another fail-closed cohort abort.
+ * Deliberately conservative: ambiguous shapes (brand mid-name, repeated brand,
+ * no trailing anchor) are left untouched for curation to resolve semantically.
+ */
+export function moveTrailingBrandToFront(name: string, brandHint: string | null | undefined): string {
+  const brand = brandHint?.trim();
+  if (!brand) return name;
+  const flexible = flexibleBrandPattern(brand);
+  if (!flexible) return name;
+  const headRe = new RegExp(`^${flexible}(?=\\s|$)`, 'i');
+  if (headRe.test(name)) return name;
+  const occurrences = name.match(new RegExp(`(?<![A-Za-z0-9])${flexible}(?![A-Za-z0-9])`, 'gi'));
+  if (!occurrences || occurrences.length !== 1) return name;
+  const tailRe = new RegExp(`^(.+?)[\\s,-]*((?:${flexible}))$`, 'i');
+  const m = name.match(tailRe);
+  if (!m || !m[1].trim()) return name;
+  return `${brand} ${m[1].replace(/[\s,-]+$/, '').trim()}`;
+}
+
+/**
+ * Import-time name normalization pipeline: glue-split, then brand-first
+ * canonicalization. Deterministic, idempotent, and a no-op for clean rows.
+ */
+export function normalizeImportedProductName(name: string, brandHint: string | null | undefined): string {
+  return moveTrailingBrandToFront(splitGluedSizeBeforeBrand(name, brandHint), brandHint);
+}
+
 /**
  * Apply a confirmed column mapping to raw spreadsheet rows,
  * producing validated SpreadsheetRow objects.
@@ -143,6 +216,11 @@ export function applyColumnMapping(
     const quantityRaw = mapping.quantity ? raw[mapping.quantity]?.trim() : null;
     const quantity = quantityRaw ? parseInt(quantityRaw, 10) : null;
     const brandHint = mapping.brand ? raw[mapping.brand]?.trim() || null : null;
+    // Normalize distributor naming defects BEFORE persistence: fused size+
+    // brand tokens ("LGHARVEST") and brand-last ordering both deterministically
+    // crash cohort title coordination downstream (T2 skeleton mismatch / T3
+    // duplicate brand) — see normalizeImportedProductName.
+    name = normalizeImportedProductName(name, brandHint);
     const departmentHint = mapping.department ? raw[mapping.department]?.trim() || null : null;
     const sourceUrlRaw = mapping.sourceUrl ? raw[mapping.sourceUrl]?.trim() || null : null;
 

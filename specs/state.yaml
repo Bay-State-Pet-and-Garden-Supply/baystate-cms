@@ -2,8 +2,9 @@
 # Workflow mode: solo-git (solo dev, land-branch.sh) | team-pr (gh pr)
 workflow_mode: solo-git
 active_flow: build_epic
-active_epic_id: null
-active_story_id: null
+
+active_epic_id: e09
+active_story_id: e09s01
 active_bug_id: null
 release:
   target_version: null
@@ -15,6 +16,7 @@ epic_cycle:
   completed_steps: [1, 2, 3, 4, 5, 6, 7, 8]
   audit_result: pass
   story_bcps: 5
+
 bug_cycle:
   current_step: null
   completed_steps: []
@@ -22,7 +24,8 @@ git:
   branch: main
   hash: 0c20592
 handoff:
-  last_step_completed: "v0.4.0 released (48 BCP) — e07 Workbench (29) + e08 Strategy Hub (19) landed together, inversion resolved, 10 blockers patched, typecheck green — https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/releases/tag/v0.4.0"
+  last_step_completed: "v0.4.0 released (48 BCP) + e01 (#58 onboarding handoff) — SpecialistWorkflowResult provenance landed (19 BCP total) — https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/releases/tag/v0.4.0"
+
   open_decisions: []
   required_reading:
     - CONVENTIONS.md
@@ -37,3 +40,4 @@ metrics:
   story_end: "2026-08-20T08:44:00Z"
   cycle_minutes: 18
   bcp_per_hour: 86.7
+

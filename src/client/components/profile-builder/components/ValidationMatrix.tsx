@@ -152,13 +152,12 @@ function draftToSelectorMapLocal(draft: any): Record<string, boolean> {
   if (draft.brandSelector) map.brandSelector = true;
   if (draft.descriptionSelector) map.descriptionSelector = true;
   if (draft.imagesSelector) map.imagesSelector = true;
-  if (draft.priceSelector) map.priceSelector = true;
   if (draft.titleOptionalSelectors && draft.titleOptionalSelectors.length > 0) map.titleOptionalSelectors = true;
   if (draft.customSelectors) { for (const key of Object.keys(draft.customSelectors)) map[key] = true; }
   return map;
 }
 
 function fieldLabel(key: string): string {
-  const labels: Record<string, string> = { titleSelector: 'Title', brandSelector: 'Brand', descriptionSelector: 'Description', imagesSelector: 'Images', priceSelector: 'Price' };
+  const labels: Record<string, string> = { titleSelector: 'Title', brandSelector: 'Brand', descriptionSelector: 'Description', imagesSelector: 'Images' };
   return labels[key] ?? key.replace(/Selector$/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
 }

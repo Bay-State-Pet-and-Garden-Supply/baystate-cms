@@ -169,6 +169,8 @@ export type ProfileBuilderAction =
 
   // Samples
   | { type: 'sample/add'; sample: ValidationSample }
+  | { type: 'samples/set'; samples: ValidationSample[] }
+  | { type: 'sampleCaptures/set'; sampleCaptures: Record<string, { html: string; dom: string }> }
   | { type: 'sample/update'; id: string; patch: Partial<ValidationSample> }
   | { type: 'sample/remove'; id: string }
 
@@ -818,6 +820,20 @@ export function profileBuilderReducer(
         validation: null,
       };
     }
+
+    case 'samples/set': {
+      return {
+        ...state,
+        samples: action.samples,
+        validation: null,
+      };
+    }
+
+    case 'sampleCaptures/set':
+      return {
+        ...state,
+        sampleCaptures: { ...(state.sampleCaptures ?? {}), ...action.sampleCaptures },
+      };
 
     case 'sample/update': {
       const samples = state.samples.map((s) =>

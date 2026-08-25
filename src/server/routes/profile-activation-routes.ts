@@ -4,6 +4,7 @@ import { getVersionById, setActiveVersion, createVersion, listVersions } from '.
 import { getMatrixResult } from '../../onboarding/profile-test-matrix';
 import { evaluateGate } from '../../onboarding/profile-activation-gate';
 import { getSuiteSuggestion } from '../../onboarding/suite-suggestion-service';
+import { templateAwarePrefix } from '../../onboarding/template-clustering';
 import { getDb } from '../../db/connection';
 import { hasValidWaiver } from '../../db/repositories/waiver-repo';
 
@@ -58,11 +59,18 @@ profileActivationRoutes.post('/domains/:domain/profile/activate', async (c) => {
   if (!version) return c.json({ error: 'version not found' }, 404);
   if (version.domain !== domain) return c.json({ error: 'version domain mismatch' }, 400);
   const matrix = getMatrixResult(domain, versionId);
-  let clusterIds: string[] = [];
-  try {
-    const suggestion = await getSuiteSuggestion(domain);
-    clusterIds = suggestion.clusters.map(cl => cl.prefix);
-  } catch { clusterIds = []; }
+  const sampleUrls = serverSampleIds(domain);
+  const clusterIds: string[] = (() => {
+    try {
+      const confirmedPrefixes = new Set(sampleUrls.map(u => templateAwarePrefix(u)));
+      const suggestion = getSuiteSuggestion(domain);
+      const matched = suggestion.clusters.map(cl => cl.prefix).filter(p => confirmedPrefixes.has(p));
+      if (matched.length > 0) return matched;
+      return Array.from(confirmedPrefixes);
+    } catch (_e) {
+      return Array.from(new Set(sampleUrls.map(u => templateAwarePrefix(u))));
+    }
+  })();
   const requiredResults = matrix
     ? matrix.rows.flatMap(r => r.cells.map(cell => ({ field: cell.field, success: cell.success, provenance: cell.provenance, artifactHash: cell.artifactHash, expected: cell.expected, extracted: cell.extracted })))
     : [];
@@ -95,13 +103,15 @@ profileActivationRoutes.post('/domains/:domain/profile/activate', async (c) => {
     const now = new Date().toISOString();
     for (const row of parked) {
       let h = '';
-      try { h = new URL(row.source_url ?? '').hostname.replace(/^www\./, '').toLowerCase(); } catch {}
+      try { h = new URL(row.source_url ?? '').hostname.replace(/^www\./, '').toLowerCase(); } catch (_err) { /* ignore invalid url */ }
       if (h === domain) {
         db.query("UPDATE onboarding_items SET status = 'pending', stage = 'extraction', stage_status = 'pending', error_message = NULL, updated_at = ? WHERE id = ?").run(now, row.id);
         released++;
       }
     }
-  } catch {}
+  } catch (_err) {
+    // Parked items release non-fatal
+  }
   // also sweep profile-blocked failed extraction items via canonical release (workspace-scoped)
   try {
     const { getCurrentWorkspace } = await import('../../server/services/workspace-service');
@@ -111,6 +121,8 @@ profileActivationRoutes.post('/domains/:domain/profile/activate', async (c) => {
       const res = (releaseDomainExtractionItems as any)(ws.id, domain, { releaseAllBlocked: true });
       released += (res.releasedIds?.length ?? 0);
     }
-  } catch {}
+  } catch (_err) {
+    // Extraction items release non-fatal
+  }
   return c.json({ allowed: true, activeVersionId: versionId, released });
 });

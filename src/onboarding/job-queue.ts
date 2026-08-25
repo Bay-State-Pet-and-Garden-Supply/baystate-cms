@@ -65,6 +65,7 @@ import {
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
 import { getCohortById, listCohortsByWorkspace, listWaitingCohortMemberIdsByWorkspace, insertCohortShadowObservationIfChanged } from '../db/repositories/curation-cohort-repo';
+import { findBatchById } from '../db/repositories/onboarding-batch-repo';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import { determineProductGroup } from './product-line-grouper';
 import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../classification/consistency-validator';
@@ -746,12 +747,21 @@ export class OnboardingWorker {
   /** Dispatch a claimed/resumed cohort run to the freeze + execute path. */
   private dispatchCohortRun(run: CohortRun, inFlightBatches?: Set<string>): void {
     if (this.running.has(run.id)) return;
-    if (inFlightBatches) {
-      try {
-        const cohort = getCohortById(run.cohortId);
-        if (cohort) inFlightBatches.add(cohort.batchId);
-      } catch { /* best-effort refresh set */ }
-    }
+    // Batch-state gate: cohort runs reach this point via claim, lease
+    // reclaim, or startup reclaim — none of which read batch state. A run
+    // whose owning batch is not active+running stays DORMANT here (never
+    // failed): it remains claimed and a later reclaim re-evaluates once the
+    // batch resumes. Mirrors the stage-leg gating in claimItemsForProcessing.
+    try {
+      const cohort = getCohortById(run.cohortId);
+      if (cohort) {
+        if (inFlightBatches) inFlightBatches.add(cohort.batchId);
+        const batch = findBatchById(cohort.batchId);
+        if (!batch || batch.status !== 'active' || batch.executionState !== 'running') {
+          return;
+        }
+      }
+    } catch { /* best-effort gate — never break the poll loop */ }
     const promise = this.processCohortRun(run);
     this.running.set(run.id, promise);
     promise.finally(() => this.running.delete(run.id));
@@ -937,11 +947,20 @@ export class OnboardingWorker {
         .filter((a) => a.outcome === 'source_error')
         .map((a) => {
           const code = a.errorCode ?? 'source_error';
-          const detail = a.errorMessage ? `: ${a.errorMessage}` : '';
-          return `Distributor ${a.providerId} lookup failed (${code}${detail})`;
+          const cleanMsg = a.errorMessage ? a.errorMessage.replace(/\s+/g, ' ').trim() : '';
+          const truncated = cleanMsg.length > 200 ? `${cleanMsg.slice(0, 197)}...` : cleanMsg;
+          const detail = truncated ? `: ${truncated}` : '';
+          const warning = `Distributor ${a.providerId} lookup failed (${code}${detail})`;
+          return warning.length > 480 ? `${warning.slice(0, 477)}...` : warning;
         });
 
     try {
+      // Everything that can fail lives inside the failure boundary: engine
+      // construction and generation load/create included.
+      const engine = this.engineFactory ? this.engineFactory() : new DefaultSourcingEngine();
+      generation = getCurrentSourcingGeneration(item.id) ?? startSourcingGeneration(item.id, 'automatic');
+      decidedAt = new Date().toISOString();
+
       // Marker-v0 rows are excluded by the claim filter; belt-and-suspenders:
       // they never receive automatic distributor routing or decisions.
       if (!isCurrentSourcingEntryPolicy(item.sourcingEntryPolicyVersion)) {
@@ -953,20 +972,17 @@ export class OnboardingWorker {
             origin: 'automatic_policy',
             acceptedEvidenceAttemptIds: [],
             providerIds: [],
+            sourcingGenerationId: generation.id,
+            sourceType: 'official_page',
+            target: 'discovery',
             conflicts: [],
             warnings: ['Legacy item excluded from automatic distributor routing (entry policy 0)'],
-            decidedAt: new Date().toISOString(),
+            decidedAt,
           },
           'discovery',
         );
         return;
       }
-
-      // Everything that can fail lives inside the failure boundary: engine
-      // construction and generation load/create included.
-      const engine = this.engineFactory ? this.engineFactory() : new DefaultSourcingEngine();
-      generation = getCurrentSourcingGeneration(item.id) ?? startSourcingGeneration(item.id, 'automatic');
-      decidedAt = new Date().toISOString();
 
       // Deterministic re-run: reuse existing current-generation attempts.
       if (getCurrentGenerationAttempts(item.id).length === 0) {
@@ -984,6 +1000,9 @@ export class OnboardingWorker {
                 origin: 'automatic_policy',
                 acceptedEvidenceAttemptIds: [],
                 providerIds: [],
+                sourcingGenerationId: generation.id,
+                sourceType: 'official_page',
+                target: 'discovery',
                 conflicts: [],
                 warnings: ['Item has no UPC/GTIN for distributor lookup'],
                 decidedAt,
@@ -1008,6 +1027,9 @@ export class OnboardingWorker {
                 origin: 'automatic_policy',
                 acceptedEvidenceAttemptIds: [],
                 providerIds: [],
+                sourcingGenerationId: generation.id,
+                sourceType: 'official_page',
+                target: 'discovery',
                 conflicts: [],
                 warnings: ['No enabled distributor connections'],
                 decidedAt,
@@ -1085,6 +1107,9 @@ export class OnboardingWorker {
             origin: 'automatic_policy',
             acceptedEvidenceAttemptIds: [],
             providerIds: reconcile.providerIds,
+            sourcingGenerationId: generation.id,
+            sourceType: 'official_page',
+            target: 'sourcing',
             // Epic #46 follow-up: reference the durable conflicts (the V2
             // schema requires ≥1 hard conflict; the old empty array
             // contradicted the persisted evidence-conflict rows).
@@ -1149,6 +1174,9 @@ export class OnboardingWorker {
             origin: 'automatic_policy',
             acceptedEvidenceAttemptIds: reconcile.acceptedAttemptIds,
             providerIds: reconcile.providerIds,
+            sourcingGenerationId: generation.id,
+            sourceType: 'official_page',
+            target: 'discovery',
             conflicts: [],
             warnings: [...reconcile.warnings, ...sourceErrorWarnings(attempts)],
             decidedAt,
@@ -1167,6 +1195,9 @@ export class OnboardingWorker {
             origin: 'automatic_policy',
             acceptedEvidenceAttemptIds: [],
             providerIds: reconcile.providerIds,
+            sourcingGenerationId: generation.id,
+            sourceType: 'official_page',
+            target: 'discovery',
             conflicts: [],
             warnings: [...reconcile.warnings, 'Distributor lookups failed; continuing to Discovery'],
             decidedAt,
@@ -1185,6 +1216,9 @@ export class OnboardingWorker {
           origin: 'automatic_policy',
           acceptedEvidenceAttemptIds: [],
           providerIds: reconcile.providerIds,
+          sourcingGenerationId: generation.id,
+          sourceType: 'official_page',
+          target: 'discovery',
           conflicts: [],
           warnings: reconcile.warnings,
           decidedAt,

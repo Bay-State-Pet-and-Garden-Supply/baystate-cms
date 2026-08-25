@@ -935,6 +935,9 @@ describe('Classification Pipeline Integration', () => {
     completeRun(run.id, 'completed_with_abstentions');
     decide(seedReviewProposal(run.id, item.upc), 'accepted');
     decide(seedReviewProposal(run.id, item.upc), 'deferred');
+    // Universal Category Page requirement: review never completes without an
+    // assignment resolving into the active verified import.
+    writeCurationData(item.id, { suggestedPages: ['Dog Food'] });
 
     expect(validateReviewCompletionGate({
       workspaceId,
@@ -1020,6 +1023,7 @@ describe('Classification Pipeline Integration', () => {
     writeCurationData(item.id, {
       curatedTitle: 'Some Title',
       classificationRunId: run.id,
+      suggestedPages: ['Dog Food'],
       semanticValidation: { status: 'passed', findings: [] },
     });
 
@@ -1053,6 +1057,7 @@ describe('Classification Pipeline Integration', () => {
     writeCurationData(item.id, {
       curatedTitle: 'Some Title',
       classificationRunId: run.id,
+      suggestedPages: ['Dog Food'],
     });
 
     const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });

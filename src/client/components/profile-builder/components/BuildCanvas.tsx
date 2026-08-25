@@ -1,6 +1,7 @@
-// story: e06s03 — Build canvas grouped fields with per-field governance (hierarchy-primary)
-// story: e06-polish — 1.A hierarchy (primary + overflow), 2.B committed palette, Devon keyboard
+// story: e06s03 — Build canvas grouped fields with per-field governance (General Store)
+// story: e06-polish — 1.A hierarchy, 2.B committed palette
 import React, { useState } from 'react';
+import { colors, fonts, rounded } from '../../../theme';
 
 interface FieldEntry {
   key: string;
@@ -42,10 +43,17 @@ function isPending(decision: string): boolean {
   return decision === 'pending';
 }
 
-function fieldStatusColor(decision: string): string {
-  if (decision === 'unsupported') return 'var(--color-mulch-brown)';
-  if (decision === 'accepted') return 'var(--color-seedling-green)';
-  return 'var(--color-ledger-charcoal)';
+function fieldStatusBadge(decision: string) {
+  switch (decision) {
+    case 'accepted':
+      return { bg: 'rgba(22, 132, 77, 0.12)', fg: colors.seedlingGreen, label: '✓ Accepted' };
+    case 'rejected':
+      return { bg: 'rgba(118, 12, 25, 0.1)', fg: colors.signetBurgundy, label: '✗ Rejected' };
+    case 'unsupported':
+      return { bg: colors.feedBagCream, fg: colors.mulchBrown, label: 'Unsupported' };
+    default:
+      return { bg: 'rgba(246, 219, 18, 0.3)', fg: colors.ledgerCharcoal, label: 'Pending Review' };
+  }
 }
 
 function FieldRow({
@@ -65,6 +73,7 @@ function FieldRow({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const pending = isPending(field.decision);
+  const badge = fieldStatusBadge(field.decision);
 
   return (
     <div
@@ -77,64 +86,90 @@ function FieldRow({
         }
       }}
       style={{
-        padding: 'var(--space-2)',
-        background: 'var(--color-white-surface)',
-        border: '1px solid var(--color-card-border)',
-        borderRadius: 'var(--radius-lg)',
+        padding: 14,
+        background: colors.whiteSurface,
+        border: `1px solid ${pending ? colors.mutedGold : colors.cardBorder}`,
+        borderLeft: `3px solid ${pending ? colors.cornerCalloutGold : field.decision === 'accepted' ? colors.seedlingGreen : field.decision === 'rejected' ? colors.signetBurgundy : colors.cardBorder}`,
+        borderRadius: rounded.sm,
         display: 'flex',
         flexDirection: 'column',
-        gap: 6,
+        gap: 8,
         outlineOffset: 2,
       }}
     >
-      <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', fontWeight: 600, color: 'var(--color-ledger-charcoal)', lineHeight: 1.3 }}>
-        {field.label}{' '}
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', fontWeight: 400 }}>
-          ({field.key})
-        </span>{' '}
-        —{' '}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+        <div style={{ fontFamily: fonts.body, fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal }}>
+          {field.label}{' '}
+          <span style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.mulchBrown, fontWeight: 400 }}>
+            ({field.key})
+          </span>
+        </div>
+
         <span
           style={{
-            fontSize: '0.7rem',
-            fontWeight: 600,
+            fontSize: 10,
+            fontWeight: 700,
             letterSpacing: '0.04em',
             textTransform: 'uppercase',
-            color: fieldStatusColor(field.decision),
-            background: field.decision === 'unsupported' ? 'var(--color-feed-bag-cream)' : 'transparent',
-            padding: '1px 5px',
-            borderRadius: 'var(--radius-sm)',
+            color: badge.fg,
+            background: badge.bg,
+            padding: '2px 8px',
+            borderRadius: rounded.full,
           }}
         >
-          {field.decision}
-        </span>{' '}
-        {field.decision === 'unsupported' && <em style={{ fontSize: '0.75rem', color: 'var(--color-mulch-brown)' }}>unsupported for domain</em>}
+          {badge.label}
+        </span>
       </div>
-      {field.active && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-ledger-charcoal)', background: 'var(--color-feed-bag-cream)', padding: '4px 6px', borderRadius: 'var(--radius-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>active: {field.active}</div>}
-      {field.draft && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-ledger-charcoal)', background: 'var(--color-white-surface)', border: '1px dashed var(--color-card-border)', padding: '4px 6px', borderRadius: 'var(--radius-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>draft: {field.draft}</div>}
+
+      {field.active && (
+        <div style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.mulchBrown, background: colors.feedBagCream, padding: '4px 8px', borderRadius: rounded.sm }}>
+          <strong>active:</strong> {field.active}
+        </div>
+      )}
+
+      {field.draft && (
+        <div style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.ledgerCharcoal, background: colors.whiteSurface, border: `1px dashed ${colors.cardBorder}`, padding: '4px 8px', borderRadius: rounded.sm }}>
+          <strong>draft:</strong> {field.draft}
+        </div>
+      )}
+
       {field.alternatives.length > 0 && (
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-mulch-brown)', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+          <span style={{ fontSize: 10, fontFamily: fonts.body, color: colors.mulchBrown, fontWeight: 600 }}>Alts:</span>
           {field.alternatives.map((a) => (
-            <code key={a.selector} style={{ background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', padding: '2px 5px', borderRadius: 'var(--radius-sm)' }}>
+            <code key={a.selector} style={{ fontFamily: fonts.mono, fontSize: 10, background: colors.feedBagCream, border: `1px solid ${colors.cardBorder}`, padding: '2px 6px', borderRadius: rounded.sm }}>
               {a.selector}
             </code>
           ))}
         </div>
       )}
-      {field.warnings.length > 0 && <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, color: 'var(--color-signet-burgundy)', background: 'rgba(118,12,25,0.06)', padding: '4px 6px', borderRadius: 'var(--radius-sm)', borderLeft: '2px solid var(--color-signet-burgundy)' }}>warnings: {field.warnings.join('; ')}</div>}
-      {field.preview && <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-ledger-charcoal)', background: 'var(--color-feed-bag-cream)', padding: '6px 8px', borderRadius: 'var(--radius-sm)', borderLeft: '2px solid var(--color-uniform-green)' }}>{field.preview}</div>}
+
+      {field.warnings.length > 0 && (
+        <div style={{ fontFamily: fonts.body, fontSize: 11, color: colors.signetBurgundy, background: 'rgba(118,12,25,0.06)', padding: '4px 8px', borderRadius: rounded.sm, borderLeft: `2px solid ${colors.signetBurgundy}` }}>
+          ⚠ {field.warnings.join('; ')}
+        </div>
+      )}
+
+      {field.preview && (
+        <div style={{ fontFamily: fonts.body, fontSize: 12, color: colors.ledgerCharcoal, background: colors.feedBagCream, padding: '6px 10px', borderRadius: rounded.sm, borderLeft: `3px solid ${colors.uniformGreen}` }}>
+          <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: colors.mulchBrown, marginRight: 6 }}>Extracted:</span>
+          {field.preview}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap', alignItems: 'center', position: 'relative' }}>
         <button
           type="button"
           onClick={() => onAccept(field.key)}
           disabled={!pending}
           style={{
-            background: pending ? 'var(--color-uniform-green)' : 'var(--color-feed-bag-cream)',
-            color: pending ? 'var(--color-feed-bag-cream)' : 'var(--color-mulch-brown)',
-            border: pending ? '1px solid var(--color-shadow-pine)' : '1px solid var(--color-card-border)',
-            borderRadius: 'var(--radius-sm)',
+            background: pending ? colors.uniformGreen : colors.feedBagCream,
+            color: pending ? colors.feedBagCream : colors.mulchBrown,
+            border: pending ? `1px solid ${colors.shadowPine}` : `1px solid ${colors.cardBorder}`,
+            borderRadius: rounded.sm,
             padding: '6px 14px',
-            fontFamily: 'var(--font-body)',
-            fontSize: '0.7rem',
+            fontFamily: fonts.body,
+            fontSize: 11,
             fontWeight: 700,
             letterSpacing: '0.04em',
             textTransform: 'uppercase',
@@ -145,18 +180,19 @@ function FieldRow({
         >
           Accept
         </button>
+
         <button
           type="button"
           onClick={() => onReject(field.key)}
           disabled={!pending}
           style={{
-            background: 'var(--color-white-surface)',
-            color: 'var(--color-ledger-charcoal)',
-            border: '1px solid var(--color-card-border)',
-            borderRadius: 'var(--radius-sm)',
+            background: colors.whiteSurface,
+            color: colors.ledgerCharcoal,
+            border: `1px solid ${colors.cardBorder}`,
+            borderRadius: rounded.sm,
             padding: '6px 12px',
-            fontFamily: 'var(--font-body)',
-            fontSize: '0.7rem',
+            fontFamily: fonts.body,
+            fontSize: 11,
             fontWeight: 600,
             letterSpacing: '0.04em',
             textTransform: 'uppercase',
@@ -166,6 +202,7 @@ function FieldRow({
         >
           Reject
         </button>
+
         <div style={{ position: 'relative' }}>
           <button
             type="button"
@@ -173,19 +210,20 @@ function FieldRow({
             aria-haspopup="menu"
             onClick={() => setMenuOpen((v) => !v)}
             style={{
-              background: menuOpen ? 'var(--color-feed-bag-cream)' : 'transparent',
-              color: 'var(--color-ledger-charcoal)',
-              border: '1px solid var(--color-card-border)',
-              borderRadius: 'var(--radius-sm)',
+              background: menuOpen ? colors.feedBagCream : 'transparent',
+              color: colors.ledgerCharcoal,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: rounded.sm,
               padding: '6px 10px',
-              fontFamily: 'var(--font-body)',
-              fontSize: '0.75rem',
+              fontFamily: fonts.body,
+              fontSize: 11,
               fontWeight: 600,
               cursor: 'pointer',
             }}
           >
             … More
           </button>
+
           {menuOpen && (
             <div
               role="menu"
@@ -193,26 +231,41 @@ function FieldRow({
                 position: 'absolute',
                 top: 'calc(100% + 6px)',
                 left: 0,
-                background: 'var(--color-white-surface)',
-                border: '1px solid var(--color-card-border)',
-                borderRadius: 'var(--radius-lg)',
+                background: colors.whiteSurface,
+                border: `1px solid ${colors.cardBorder}`,
+                borderRadius: rounded.lg,
                 boxShadow: '0 8px 24px rgba(33,20,20,0.12)',
                 padding: 6,
                 minWidth: 160,
                 zIndex: 20,
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 4,
+                gap: 2,
               }}
             >
-              <button role="menuitem" type="button" onClick={() => { setMenuOpen(false); onSuggest(field.key); }} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: '8px 10px', fontFamily: 'var(--font-body)', fontSize: '0.8rem', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}>
+              <button
+                role="menuitem"
+                type="button"
+                onClick={() => { setMenuOpen(false); onSuggest(field.key); }}
+                style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: '8px 10px', fontFamily: fonts.body, fontSize: 12, cursor: 'pointer', borderRadius: rounded.sm }}
+              >
                 ✨ Suggest alternative
               </button>
-              <button role="menuitem" type="button" onClick={() => { setMenuOpen(false); onExplain(field.key); }} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: '8px 10px', fontFamily: 'var(--font-body)', fontSize: '0.8rem', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}>
+              <button
+                role="menuitem"
+                type="button"
+                onClick={() => { setMenuOpen(false); onExplain(field.key); }}
+                style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: '8px 10px', fontFamily: fonts.body, fontSize: 12, cursor: 'pointer', borderRadius: rounded.sm }}
+              >
                 ? Explain failure
               </button>
-              <button role="menuitem" type="button" onClick={() => { setMenuOpen(false); onRevise(field.key, 'feedback'); }} style={{ textAlign: 'left', background: 'transparent', color: 'var(--color-signet-burgundy)', border: 'none', padding: '8px 10px', fontFamily: 'var(--font-body)', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}>
-                ↻ Revise
+              <button
+                role="menuitem"
+                type="button"
+                onClick={() => { setMenuOpen(false); onRevise(field.key, 'feedback'); }}
+                style={{ textAlign: 'left', background: 'transparent', color: colors.signetBurgundy, border: 'none', padding: '8px 10px', fontFamily: fonts.body, fontSize: 12, fontWeight: 600, cursor: 'pointer', borderRadius: rounded.sm }}
+              >
+                ↻ Revise selector
               </button>
             </div>
           )}
@@ -225,20 +278,21 @@ function FieldRow({
 function BulkActions({ fields, onAccept }: { fields: FieldEntry[]; onAccept: (k: string) => void }): React.ReactElement | null {
   const pending = fields.filter((f) => isPending(f.decision));
   if (pending.length < 2) return null;
+
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
       <button
         type="button"
         onClick={() => pending.forEach((f) => onAccept(f.key))}
         style={{
-          background: 'transparent',
-          color: 'var(--color-uniform-green)',
-          border: '1px solid var(--color-card-border)',
-          borderRadius: 'var(--radius-sm)',
-          padding: '6px 12px',
-          fontFamily: 'var(--font-body)',
-          fontSize: '0.7rem',
-          fontWeight: 600,
+          background: colors.whiteSurface,
+          color: colors.uniformGreen,
+          border: `1px solid ${colors.uniformGreen}`,
+          borderRadius: rounded.sm,
+          padding: '6px 14px',
+          fontFamily: fonts.body,
+          fontSize: 11,
+          fontWeight: 700,
           letterSpacing: '0.04em',
           textTransform: 'uppercase',
           cursor: 'pointer',
@@ -254,24 +308,93 @@ export function BuildCanvas({ fieldGroups, onAccept, onReject, onSuggest, onExpl
   const allFields = fieldGroups.flatMap((g) => g.fields);
 
   return (
-    <div data-testid="build-canvas" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+    <div data-testid="build-canvas" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {provenance && (
-        <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.75rem', color: 'var(--color-mulch-brown)', background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderLeft: '3px solid var(--color-signet-burgundy)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap', alignItems: 'center' }}>
-          <span style={{ background: 'var(--color-uniform-green)', color: 'var(--color-feed-bag-cream)', padding: '2px 6px', borderRadius: 'var(--radius-sm)', fontFamily: 'var(--font-body)', fontSize: '0.7rem', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>{provenance.disclosureBadge}</span>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{provenance.provider}/{provenance.model}</span>
-          {provenance.htmlLeftMachine && <span style={{ color: 'var(--color-signet-burgundy)', fontWeight: 600 }}>· HTML left machine</span>}
+        <div
+          style={{
+            fontFamily: fonts.body,
+            fontSize: 12,
+            color: colors.mulchBrown,
+            background: colors.whiteSurface,
+            border: `1px solid ${colors.cardBorder}`,
+            borderLeft: `4px solid ${colors.signetBurgundy}`,
+            borderRadius: rounded.sm,
+            padding: '10px 14px',
+            display: 'flex',
+            gap: 10,
+            flexWrap: 'wrap',
+            alignItems: 'center',
+          }}
+        >
+          <span
+            style={{
+              background: colors.uniformGreen,
+              color: colors.feedBagCream,
+              padding: '2px 8px',
+              borderRadius: rounded.sm,
+              fontFamily: fonts.body,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+            }}
+          >
+            {provenance.disclosureBadge}
+          </span>
+          <span style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.ledgerCharcoal }}>
+            {provenance.provider}/{provenance.model}
+          </span>
+          {provenance.htmlLeftMachine && (
+            <span style={{ color: colors.signetBurgundy, fontWeight: 600 }}>
+              · HTML sent to model
+            </span>
+          )}
           <details style={{ marginLeft: 'auto' }}>
-            <summary style={{ cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-mulch-brown)' }}>details</summary>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }}>{provenance.promptHash} · {provenance.configId}</span>
+            <summary style={{ cursor: 'pointer', fontFamily: fonts.mono, fontSize: 10, color: colors.mulchBrown }}>
+              details
+            </summary>
+            <span style={{ fontFamily: fonts.mono, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }}>
+              {provenance.promptHash} · {provenance.configId}
+            </span>
           </details>
         </div>
       )}
-      {!canSave && <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.8rem', color: 'var(--color-signet-burgundy)', background: 'rgba(118,12,25,0.06)', border: '1px solid var(--color-signet-burgundy)', borderLeft: '3px solid var(--color-signet-burgundy)', padding: '8px 12px', borderRadius: 'var(--radius-sm)' }}>pending decisions block Save/Activate — accept, reject, or mark unsupported per field</div>}
+
+      {!canSave && (
+        <div
+          style={{
+            fontFamily: fonts.body,
+            fontSize: 12,
+            color: colors.signetBurgundy,
+            background: 'rgba(118,12,25,0.06)',
+            border: `1px solid ${colors.signetBurgundy}`,
+            borderLeft: `4px solid ${colors.signetBurgundy}`,
+            padding: '10px 14px',
+            borderRadius: rounded.sm,
+            fontWeight: 600,
+          }}
+        >
+          Pending decisions block Save / Activate — accept, reject, or mark unsupported per field.
+        </div>
+      )}
+
       <BulkActions fields={allFields} onAccept={onAccept} />
+
       {fieldGroups.map((g) => (
-        <div key={g.group} style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-2)', boxShadow: '0 1px 3px 0 rgba(33,20,20,0.06)' }}>
-          <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1rem', fontWeight: 700, color: 'var(--color-ledger-charcoal)', margin: '0 0 var(--space-2)', paddingBottom: 'var(--space-1)', borderBottom: '1px solid var(--color-card-border)' }}>{g.group}</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 'var(--space-2)' }}>
+        <div
+          key={g.group}
+          style={{
+            background: colors.whiteSurface,
+            border: `1px solid ${colors.cardBorder}`,
+            borderRadius: rounded.lg,
+            padding: 16,
+            boxShadow: '0 1px 4px rgba(33,20,20,0.06)',
+          }}
+        >
+          <h3 style={{ fontFamily: fonts.display, fontSize: '1rem', fontWeight: 700, color: colors.ledgerCharcoal, margin: '0 0 12px', paddingBottom: 8, borderBottom: `1px solid ${colors.cardBorder}` }}>
+            {g.group}
+          </h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
             {g.fields.map((f) => (
               <FieldRow key={f.key} field={f} onAccept={onAccept} onReject={onReject} onSuggest={onSuggest} onExplain={onExplain} onRevise={onRevise} />
             ))}
@@ -281,3 +404,4 @@ export function BuildCanvas({ fieldGroups, onAccept, onReject, onSuggest, onExpl
     </div>
   );
 }
+

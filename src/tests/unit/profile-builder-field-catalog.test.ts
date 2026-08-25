@@ -55,7 +55,7 @@ describe('CORE_FIELDS', () => {
 describe('STANDARD_CUSTOM_FIELDS', () => {
   it('includes expected custom fields', () => {
     const keys = STANDARD_CUSTOM_FIELDS.map((f) => f.key);
-    expect(keys).toContain('skuSelector');
+    expect(keys).not.toContain('skuSelector');
     expect(keys).toContain('ingredientsSelector');
     expect(keys).toContain('guaranteedAnalysisSelector');
     expect(keys).toContain('caloriesSelector');
@@ -74,8 +74,8 @@ describe('STANDARD_CUSTOM_FIELDS', () => {
     }
   });
 
-  it('has 11 standard custom fields', () => {
-    expect(STANDARD_CUSTOM_FIELDS).toHaveLength(11);
+  it('has 10 standard custom fields', () => {
+    expect(STANDARD_CUSTOM_FIELDS).toHaveLength(10);
   });
 
   it('categorizes nutrition fields correctly', () => {
@@ -105,7 +105,6 @@ describe('FIELD_GROUP_ORDER', () => {
       'description',
       'nutrition',
       'details',
-      'variants',
     ]);
   });
 });

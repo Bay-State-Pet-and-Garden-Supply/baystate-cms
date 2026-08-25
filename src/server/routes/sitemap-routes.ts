@@ -25,6 +25,7 @@ import {
 } from '../../onboarding/sitemap-health-evaluator';
 import { fetchAndParseSitemap } from '../../onboarding/sitemap-fetcher';
 import { findLocalBrandCandidates } from '../../onboarding/local-brand-url-finder';
+import { prewarmBrandDomain, syncAllBrandSitemaps } from '../../onboarding/sitemap-sync-service';
 import type {
   SitemapsOverviewResponse,
   SitemapDomainDetailResponse,
@@ -239,6 +240,53 @@ sitemapRoutes.get('/onboarding/sitemaps/:domain/urls', (c) => {
   };
 
   return c.json(response);
+});
+
+/**
+ * POST /api/onboarding/sitemaps/sync-all
+ * Triggers batch pre-warming / sitemap sync across all brand sites.
+ */
+sitemapRoutes.post('/onboarding/sitemaps/sync-all', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    concurrency?: number;
+    onlyStaleOrMissing?: boolean;
+    force?: boolean;
+  };
+
+  const result = await syncAllBrandSitemaps({
+    concurrency: body.concurrency,
+    onlyStaleOrMissing: body.onlyStaleOrMissing,
+    force: body.force,
+  });
+
+  return c.json({
+    ok: true,
+    ...result,
+  });
+});
+
+/**
+ * POST /api/onboarding/sitemaps/:domain/prewarm
+ * Pre-warms and enriches a specific domain's sitemap and catalog variants.
+ */
+sitemapRoutes.post('/onboarding/sitemaps/:domain/prewarm', async (c) => {
+  const domain = normalizeDomain(c.req.param('domain'));
+  const body = (await c.req.json().catch(() => ({}))) as {
+    includeShopifyCatalog?: boolean;
+  };
+
+  const result = await prewarmBrandDomain(domain, {
+    includeShopifyCatalog: body.includeShopifyCatalog,
+  });
+
+  const updatedSummary = getDomainSitemapHealth(domain);
+
+  return c.json({
+    ok: result.status === 'synced',
+    domain,
+    result,
+    summary: updatedSummary,
+  });
 });
 
 /**

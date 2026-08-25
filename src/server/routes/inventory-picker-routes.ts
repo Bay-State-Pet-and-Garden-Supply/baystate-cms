@@ -8,12 +8,7 @@ function isValidDomain(d: string): boolean {
 }
 
 function clusterOf(url: string): string {
-  try {
-    const u = new URL(url);
-    return templateAwarePrefix(u.pathname);
-  } catch {
-    return '';
-  }
+  return templateAwarePrefix(url);
 }
 
 export const inventoryPickerRoutes = new Hono();
@@ -30,10 +25,10 @@ inventoryPickerRoutes.get('/domains/:domain/inventory-picker', (c) => {
   const offset = (page - 1) * limit;
 
   const { urls, total } = findUrlsByDomain(domain, {
-    pageType: 'product',
+    pageType: 'all',
     activeOnly: true,
     search: query || undefined,
-    limit: limit + 100,
+    limit: 1000,
     offset: 0,
   });
 

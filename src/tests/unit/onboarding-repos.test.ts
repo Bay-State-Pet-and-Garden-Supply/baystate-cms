@@ -1259,4 +1259,32 @@ describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
     const orderedB = { ...distributor, acceptedEvidenceAttemptIds: ['b', 'a'] };
     expect(computeExtractionHash(orderedA as any)).toBe(computeExtractionHash(orderedB as any));
   });
+
+  it('computeExtractionHash ignores the observation-only shadowPackagingOcrData key (post-review fixup 5)', () => {
+    const base = {
+      id: 'h2', batchId: 'b1', upc: 'HASH-002', name: 'Hash Shadow', price: null, quantity: null,
+      brandHint: null, departmentHint: null, sourceUrl: null, expectedName: null,
+      coordinatedTitle: null, acceptedEvidenceAttemptIds: [] as string[], stage: 'extraction' as const,
+      stageStatus: 'pending' as const, status: 'imported' as const, errorMessage: null,
+      retryCount: 0, isDuplicate: false, existingSku: null, curationData: null,
+      rowNumber: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      extractionData: { title: 'Hash Product' },
+    };
+
+    // A shadow-mode packaging-OCR write adds ONLY the namespaced observation
+    // key (and bumps updated_at). The evidence identity must NOT move —
+    // identical extraction data ± shadowPackagingOcrData ⇒ SAME hash.
+    const withoutShadow = computeExtractionHash(base as any);
+    const withShadow = computeExtractionHash({
+      ...base,
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      extractionData: { title: 'Hash Product', shadowPackagingOcrData: { productName: 'Shadow Name' } },
+    } as any);
+    expect(withoutShadow).not.toBeNull();
+    expect(withShadow).toBe(withoutShadow);
+
+    // Sanity: a REAL evidence change still rebinds the hash.
+    const changed = computeExtractionHash({ ...base, extractionData: { title: 'Different Title' } } as any);
+    expect(changed).not.toBe(withoutShadow);
+  });
 });

@@ -47,7 +47,7 @@ export function AttentionRow({ workState, onResolve, resolving = false }: Attent
     >
       <div className="attn-row-top">
         <div className="attn-row-identity">
-          <div className="attn-row-name">{name}</div>
+          <div className="attn-row-name">{workState.curatedTitle || name}</div>
           <div className="attn-row-meta">
             <span>{upc}</span>
             {brand ? <span>{brand}</span> : null}

@@ -11,6 +11,7 @@ import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-wor
 import { promoteBatchItems } from '../../../onboarding-api';
 import { ExportActions } from './ExportActions';
 import { exportStatusPresentation } from './approved-logic';
+import './approved.css';
 
 interface ReadyToExportViewProps {
   batchId: string;
@@ -130,6 +131,15 @@ export function ReadyToExportView({ batchId }: ReadyToExportViewProps) {
     [bySection],
   );
 
+  const allApprovedSelected =
+    bySection.approved.length > 0 && bySection.approved.every(it => selectedIds.includes(it.itemId));
+  const toggleAllApproved = () =>
+    setSelectedIds(prev =>
+      allApprovedSelected
+        ? prev.filter(id => !bySection.approved.some(it => it.itemId === id))
+        : [...new Set([...prev, ...bySection.approved.map(it => it.itemId)])],
+    );
+
   if (loading) return <div className="ow-loading">Loading export status…</div>;
   if (error && total === 0) {
     return (
@@ -194,8 +204,11 @@ export function ReadyToExportView({ batchId }: ReadyToExportViewProps) {
               <ExportActions
                 primaryLabel={`Create export drafts (${selectedIds.length})`}
                 primaryDisabled={selectedIds.length === 0}
+                secondaryLabel={allApprovedSelected ? 'Deselect all' : `Select all (${items.length})`}
+                secondaryDisabled={items.length === 0}
                 busy={busy}
                 onPrimary={createDrafts}
+                onSecondary={toggleAllApproved}
                 hint={selectedIds.length === 0 ? 'Select approved products to create export drafts.' : undefined}
               />
             )}

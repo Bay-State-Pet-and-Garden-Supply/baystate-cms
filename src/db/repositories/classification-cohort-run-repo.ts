@@ -145,8 +145,10 @@ export function claimReadyCurationCohorts(
     // two claims from the same worker within one millisecond can never be
     // confused. Guards: the cohort must be `ready` AND have no current run
     // (duplicated outer guards mirror the claimItemsForProcessing idiom); the
-    // unique partial index idx_classification_cohort_runs_current is the DB
-    // backstop.
+    // owning batch must be active AND execution_state = 'running' — a paused
+    // batch never accumulates new lease rows (the dispatch-side gate in the
+    // worker covers already-claimed runs). The unique partial index
+    // idx_classification_cohort_runs_current is the DB backstop.
     const rows = db.query(
       `INSERT INTO classification_cohort_runs
         (id, workspace_id, cohort_id, candidate_membership_hash, status,
@@ -154,9 +156,12 @@ export function claimReadyCurationCohorts(
        SELECT lower(hex(randomblob(16))), c.workspace_id, c.id, c.membership_hash, 'freezing',
               ?, ?, ?, ?
        FROM curation_cohorts c
+       JOIN onboarding_batches b ON b.id = c.batch_id
        WHERE c.id IN (
          SELECT c2.id FROM curation_cohorts c2
+         JOIN onboarding_batches b2 ON b2.id = c2.batch_id
          WHERE c2.workspace_id = ? AND c2.status = 'ready'
+           AND b2.status = 'active' AND b2.execution_state = 'running'
            AND NOT EXISTS (
              SELECT 1 FROM classification_cohort_runs r
              WHERE r.cohort_id = c2.id AND r.status != 'superseded'
@@ -165,6 +170,7 @@ export function claimReadyCurationCohorts(
          LIMIT ?
        )
        AND c.status = 'ready'
+       AND b.status = 'active' AND b.execution_state = 'running'
        AND NOT EXISTS (
          SELECT 1 FROM classification_cohort_runs r
          WHERE r.cohort_id = c.id AND r.status != 'superseded'

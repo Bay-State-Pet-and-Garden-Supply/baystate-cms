@@ -166,8 +166,8 @@ function buildConsolidationPrompt(
   brandHint: string | null,
 ): string {
   const parts: string[] = [
-    `Product: ${itemName}`,
-    brandHint ? `Brand: ${brandHint}` : '',
+    `Product: ${itemName.slice(0, 200)}`,
+    brandHint ? `Brand: ${brandHint.slice(0, 100)}` : '',
     '',
     'Below are product descriptions from distributor sources. Synthesize a single accurate, natural description using only the facts provided.',
     'IMPORTANT: Do not invent any claims, specifications, or usage details that are not present in at least one source.',
@@ -176,9 +176,11 @@ function buildConsolidationPrompt(
     '',
   ];
 
-  for (let i = 0; i < descriptions.length; i++) {
-    parts.push(`--- Source ${i + 1}: ${descriptions[i].providerId} (confidence: ${descriptions[i].confidence}) ---`);
-    parts.push(descriptions[i].text);
+  const cappedDescriptions = descriptions.slice(0, 4);
+  for (let i = 0; i < cappedDescriptions.length; i++) {
+    const desc = cappedDescriptions[i];
+    parts.push(`--- Source ${i + 1}: ${desc.providerId} (confidence: ${desc.confidence}) ---`);
+    parts.push(desc.text.slice(0, 1500));
     parts.push('');
   }
 

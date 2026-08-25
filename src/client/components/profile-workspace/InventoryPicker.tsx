@@ -1,7 +1,8 @@
-// story: e07s02 + oracle picker S1 — General Store (Operate) — no Tailwind, inline styles + CSS variables
-import { useEffect, useState, useCallback } from 'react';
+// story: e07s02 + oracle picker S1 — General Store (Operate)
+import React, { useEffect, useState, useCallback } from 'react';
 import { templateAwarePrefix } from '../../../onboarding/template-clustering';
 import { getExtractorProfiles } from '../../onboarding-api';
+import { colors, fonts, rounded } from '../../theme';
 
 type PickerItem = { url: string; title: string; cluster: string; lastSeen: string };
 type SuiteRespLite = { suite: string[]; clusters?: Array<{ prefix: string; count: number }>; suggested?: string[] } | null;
@@ -83,7 +84,7 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [domain]);
-  // Default to stored pattern (e.g. /products) — picker should only show product URLs for testing
+
   useEffect(() => {
     if (!cluster) {
       if (storedPattern) { setCluster(storedPattern); return; }
@@ -104,14 +105,34 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
   }
 
   return (
-    <div style={{ background: 'var(--color-white-surface)', border: '1px solid var(--color-card-border)', borderRadius: 'var(--rounded-lg, 8px)', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, boxShadow: 'var(--shadow-sm)' }}>
+    <div
+      style={{
+        background: colors.whiteSurface,
+        border: `1px solid ${colors.cardBorder}`,
+        borderRadius: rounded.lg,
+        padding: 20,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        boxShadow: '0 1px 4px rgba(33,20,20,0.06)',
+      }}
+    >
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-        <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--color-ledger-charcoal)' }}>Test page picker</div>
-        <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--color-mulch-brown)' }}>{total.toLocaleString()} found</div>
+        <div>
+          <div style={{ fontFamily: fonts.body, fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: colors.mulchBrown }}>
+            Discovered Pages
+          </div>
+          <div style={{ fontFamily: fonts.display, fontSize: '1.125rem', fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 2 }}>
+            Test Page Picker
+          </div>
+        </div>
+        <div style={{ fontFamily: fonts.mono, fontSize: 12, color: colors.mulchBrown }}>
+          {total.toLocaleString()} pages found
+        </div>
       </div>
 
       {clusters.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
           {clusters.map((c) => {
             const active = cluster === c.prefix;
             return (
@@ -121,26 +142,41 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
                 onClick={() => setCluster(c.prefix)}
                 aria-pressed={active}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: 999,
-                  border: `1px solid ${active ? 'var(--color-uniform-green)' : 'var(--color-card-border)'}`,
-                  background: active ? 'var(--color-uniform-green)' : 'var(--color-white-surface)',
-                  color: active ? 'var(--color-feed-bag-cream)' : 'var(--color-ledger-charcoal)',
-                  fontFamily: 'var(--font-body)',
+                  padding: '5px 12px',
+                  borderRadius: rounded.full,
+                  border: `1px solid ${active ? colors.uniformGreen : colors.cardBorder}`,
+                  background: active ? colors.uniformGreen : colors.whiteSurface,
+                  color: active ? colors.feedBagCream : colors.ledgerCharcoal,
+                  fontFamily: fonts.body,
                   fontSize: 12,
                   fontWeight: 600,
                   cursor: 'pointer',
-                  boxShadow: active ? '0 1px 2px rgba(20,83,45,0.12)' : 'none',
-                  transition: 'all 200ms cubic-bezier(0.16,1,0.3,1)',
+                  boxShadow: active ? '0 1px 2px rgba(20,83,45,0.15)' : 'none',
+                  transition: 'all 150ms ease',
                 }}
               >
-                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{clusterLabel(c.prefix, c.count)}</span>
+                <span>{clusterLabel(c.prefix, c.count)}</span>
               </button>
             );
           })}
           {cluster && (
-            <button type="button" onClick={() => setCluster('')} style={{ padding: '6px 8px', background: 'none', border: 'none', color: 'var(--color-uniform-green)', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 600, cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: 4 }}>
-              Clear
+            <button
+              type="button"
+              onClick={() => setCluster('')}
+              style={{
+                padding: '4px 8px',
+                background: 'none',
+                border: 'none',
+                color: colors.uniformGreen,
+                fontFamily: fonts.body,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                textDecoration: 'underline',
+                textUnderlineOffset: 3,
+              }}
+            >
+              Clear filter
             </button>
           )}
         </div>
@@ -148,7 +184,9 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
 
       {suggested.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <span style={{ width: '100%', fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Suggested templates</span>
+          <span style={{ width: '100%', fontFamily: fonts.body, fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: colors.mulchBrown }}>
+            Suggested Templates
+          </span>
           {suggested.map((u) => {
             let label = u;
             try { label = new URL(u).pathname; } catch {}
@@ -163,19 +201,21 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
                   alignItems: 'center',
                   gap: 8,
                   padding: '8px 12px',
-                  borderRadius: 'var(--rounded-md, 6px)',
-                  border: '1px solid var(--color-card-border)',
-                  background: 'var(--color-white-surface)',
-                  boxShadow: 'var(--shadow-sm)',
+                  borderRadius: rounded.sm,
+                  border: `1px solid ${colors.cardBorder}`,
+                  background: colors.whiteSurface,
+                  boxShadow: '0 1px 2px rgba(33,20,20,0.05)',
                   cursor: 'pointer',
-                  transition: 'box-shadow 200ms, transform 200ms, border-color 200ms',
+                  transition: 'all 150ms ease',
                 }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-md)'; (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-sm)'; (e.currentTarget as HTMLElement).style.transform = 'translateY(0)'; }}
               >
-                <span style={{ width: 8, height: 8, borderRadius: 999, background: 'var(--color-corner-callout-gold, #F6DB12)', flexShrink: 0 }} aria-hidden />
-                <span style={{ maxWidth: '18ch', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 600, color: 'var(--color-ledger-charcoal)' }}>{label.slice(0, 28)}</span>
-                <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--color-mulch-brown)' }}>· verify & capture</span>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: colors.cornerCalloutGold, flexShrink: 0 }} aria-hidden />
+                <span style={{ maxWidth: '22ch', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: fonts.body, fontSize: 12, fontWeight: 600, color: colors.ledgerCharcoal }}>
+                  {label.slice(0, 32)}
+                </span>
+                <span style={{ fontFamily: fonts.body, fontSize: 11, color: colors.mulchBrown }}>
+                  · capture & verify
+                </span>
               </button>
             );
           })}
@@ -183,111 +223,211 @@ export function InventoryPicker({ domain, onPick, suiteResp }: Props): React.Rea
       )}
 
       {confirmed.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Confirmed</span>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontFamily: fonts.body, fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: colors.mulchBrown }}>
+            Confirmed Reps:
+          </span>
           {confirmed.slice(0, 6).map((u) => {
             let p = u;
             try { p = new URL(u).pathname; } catch {}
             return (
-              <span key={u} title={u} style={{ padding: '4px 10px', borderRadius: 999, background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', fontFamily: 'var(--font-body)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--color-ledger-charcoal)' }}>
-                {p.slice(0, 28)}
+              <span
+                key={u}
+                title={u}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: rounded.full,
+                  background: colors.feedBagCream,
+                  border: `1px solid ${colors.cardBorder}`,
+                  fontFamily: fonts.mono,
+                  fontSize: 11,
+                  color: colors.ledgerCharcoal,
+                }}
+              >
+                {p.slice(0, 24)}
               </span>
             );
           })}
-          {confirmed.length > 6 && <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--color-mulch-brown)' }}>+{confirmed.length - 6} more</span>}
+          {confirmed.length > 6 && <span style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.mulchBrown }}>+{confirmed.length - 6} more</span>}
         </div>
       )}
 
       {!showAll && (
-        <button type="button" onClick={() => setShowAll(true)} style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--rounded-md, 6px)', border: '1px dashed var(--color-card-border)', background: 'rgba(250,249,242,0.6)', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 600, color: 'var(--color-mulch-brown)', cursor: 'pointer' }}>
+        <button
+          type="button"
+          onClick={() => setShowAll(true)}
+          style={{
+            width: '100%',
+            padding: '10px 14px',
+            borderRadius: rounded.sm,
+            border: `1px dashed ${colors.cardBorder}`,
+            background: colors.feedBagCream,
+            fontFamily: fonts.body,
+            fontSize: 12,
+            fontWeight: 600,
+            color: colors.mulchBrown,
+            cursor: 'pointer',
+          }}
+        >
           Show all {total.toLocaleString()} pages — filtered to {cluster || '/products'} ({items.length} shown)
         </button>
       )}
+
       {showAll && (
         <>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Search filtered pages</span>
-            <button type="button" onClick={() => setShowAll(false)} style={{ background: 'none', border: 'none', color: 'var(--color-uniform-green)', fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }}>Collapse</button>
+            <span style={{ fontFamily: fonts.body, fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: colors.mulchBrown }}>
+              Search Filtered Pages
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowAll(false)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: colors.uniformGreen,
+                fontFamily: fonts.body,
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: 'pointer',
+                textDecoration: 'underline',
+              }}
+            >
+              Collapse
+            </button>
           </div>
-      <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-mulch-brown)' }}>Search filtered pages</span>
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search url, title, or /products path…"
-          style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--rounded-md, 6px)', border: '1px solid var(--color-card-border)', background: 'var(--color-white-surface)', fontFamily: 'var(--font-body)', fontSize: 14, outline: 'none' }}
-          onFocus={(e) => { (e.target as HTMLElement).style.borderColor = 'var(--color-uniform-green)'; (e.target as HTMLElement).style.boxShadow = '0 0 0 2px rgba(20,83,45,0.15)'; }}
-          onBlur={(e) => { (e.target as HTMLElement).style.borderColor = 'var(--color-card-border)'; (e.target as HTMLElement).style.boxShadow = 'none'; }}
-        />
-      </label>
 
-      <div style={{ maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, paddingRight: 4 }}>
-        {items.map((it) => (
-          <button
-            key={it.url}
-            type="button"
-            onClick={() => void handlePick(it.url)}
-            style={{
-              textAlign: 'left',
-              padding: '10px 12px',
-              borderRadius: 'var(--rounded-md, 6px)',
-              border: '1px solid var(--color-card-border)',
-              background: 'var(--color-white-surface)',
-              boxShadow: 'var(--shadow-sm)',
-              cursor: 'pointer',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 4,
-              transition: 'background 200ms, border-color 200ms',
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--color-feed-bag-cream)'; (e.currentTarget as HTMLElement).style.borderColor = 'rgba(20,83,45,0.3)'; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--color-white-surface)'; (e.currentTarget as HTMLElement).style.borderColor = 'var(--color-card-border)'; }}
-          >
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: 14, fontWeight: 600, lineHeight: 1.3, color: 'var(--color-ledger-charcoal)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.title || new URL(it.url).pathname}</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-              <span style={{ padding: '2px 8px', borderRadius: 999, background: 'var(--color-feed-bag-cream)', border: '1px solid var(--color-card-border)', fontFamily: 'var(--font-body)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--color-ledger-charcoal)' }}>{it.cluster}</span>
-              <span style={{ fontFamily: 'var(--font-body)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--color-mulch-brown)' }}>last checked {new Date(it.lastSeen).toLocaleDateString()}</span>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by URL path or page title…"
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: rounded.sm,
+                border: `1px solid ${colors.cardBorder}`,
+                background: colors.whiteSurface,
+                fontFamily: fonts.body,
+                fontSize: 13,
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+              onFocus={(e) => {
+                e.target.style.borderColor = colors.uniformGreen;
+                e.target.style.boxShadow = '0 0 0 2px rgba(20,83,45,0.12)';
+              }}
+              onBlur={(e) => {
+                e.target.style.borderColor = colors.cardBorder;
+                e.target.style.boxShadow = 'none';
+              }}
+            />
+          </label>
+
+          <div style={{ maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, paddingRight: 4 }}>
+            {items.map((it) => (
+              <button
+                key={it.url}
+                type="button"
+                onClick={() => void handlePick(it.url)}
+                style={{
+                  textAlign: 'left',
+                  padding: '10px 12px',
+                  borderRadius: rounded.sm,
+                  border: `1px solid ${colors.cardBorder}`,
+                  background: colors.whiteSurface,
+                  boxShadow: '0 1px 2px rgba(33,20,20,0.04)',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  transition: 'all 150ms ease',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = colors.feedBagCream;
+                  e.currentTarget.style.borderColor = colors.uniformGreen;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = colors.whiteSurface;
+                  e.currentTarget.style.borderColor = colors.cardBorder;
+                }}
+              >
+                <div style={{ fontFamily: fonts.body, fontSize: 13, fontWeight: 600, lineHeight: 1.3, color: colors.ledgerCharcoal, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {it.title || new URL(it.url).pathname}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  <span style={{ padding: '2px 7px', borderRadius: rounded.full, background: colors.feedBagCream, border: `1px solid ${colors.cardBorder}`, fontFamily: fonts.mono, fontSize: 10, color: colors.ledgerCharcoal }}>
+                    {it.cluster}
+                  </span>
+                  <span style={{ fontFamily: fonts.body, fontSize: 11, color: colors.mulchBrown }}>
+                    last checked {new Date(it.lastSeen).toLocaleDateString()}
+                  </span>
+                </div>
+                <div style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.mulchBrown, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {it.url}
+                </div>
+              </button>
+            ))}
+            {items.length === 0 && (
+              <div style={{ padding: 24, textAlign: 'center', borderRadius: rounded.sm, border: `1px dashed ${colors.cardBorder}`, background: colors.feedBagCream }}>
+                <div style={{ fontFamily: fonts.body, fontSize: 13, fontWeight: 600, color: colors.ledgerCharcoal }}>No pages found</div>
+                <div style={{ marginTop: 4, fontFamily: fonts.body, fontSize: 11, color: colors.mulchBrown }}>Try clearing filters or enter an ad hoc URL below.</div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: `1px solid ${colors.cardBorder}`, paddingTop: 8, fontFamily: fonts.mono, fontSize: 11, color: colors.mulchBrown }}>
+            <span>{total.toLocaleString()} total ({clusters.length} template clusters)</span>
+            <span>Page {page}</span>
+          </div>
+
+          {status && (
+            <div style={{ padding: '8px 12px', borderRadius: rounded.sm, background: colors.feedBagCream, border: `1px solid ${colors.cardBorder}`, fontFamily: fonts.body, fontSize: 12, fontWeight: 600, color: colors.uniformGreen }} role="status">
+              {status}
             </div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'rgba(107,58,24,0.7)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.url}</div>
-          </button>
-        ))}
-        {items.length === 0 && (
-          <div style={{ padding: '32px 12px', textAlign: 'center', borderRadius: 'var(--rounded-md, 6px)', border: '1px dashed var(--color-card-border)', background: 'rgba(250,249,242,0.6)' }}>
-            <div style={{ fontFamily: 'var(--font-body)', fontSize: 14, fontWeight: 600, color: 'var(--color-ledger-charcoal)' }}>No results</div>
-            <div style={{ marginTop: 4, fontFamily: 'var(--font-body)', fontSize: 12, color: 'var(--color-mulch-brown)' }}>Try a different term, clear the cluster filter, or use Advanced for an ad hoc URL.</div>
-          </div>
-        )}
-      </div>
+          )}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--color-card-border)', paddingTop: 8, fontFamily: 'var(--font-body)', fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--color-mulch-brown)' }}>
-        <span>{total.toLocaleString()} total · {clusters.length} templates</span><span>Page {page}</span>
-      </div>
-
-      {status && <div style={{ padding: '8px 12px', borderRadius: 'var(--rounded-md, 6px)', background: 'var(--color-feed-bag-cream)', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 600, color: 'var(--color-uniform-green)' }} role="status">{status}</div>}
-
-      <details style={{ borderRadius: 'var(--rounded-md, 6px)', border: '1px solid var(--color-card-border)', background: 'rgba(250,249,242,0.4)', padding: '8px 12px' }}>
-        <summary style={{ cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 700, color: 'var(--color-ledger-charcoal)', listStyle: 'none' }}>Advanced — Enter another URL <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: 'var(--color-mulch-brown)' }}>same-domain, verified, marked ad hoc</span></summary>
-        <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-          <input
-            value={advancedUrl}
-            onChange={(e) => setAdvancedUrl(e.target.value)}
-            placeholder="https://example.com/product/..."
-            style={{ flex: 1, padding: '8px 12px', borderRadius: 'var(--rounded-md, 6px)', border: '1px solid var(--color-card-border)', background: 'var(--color-white-surface)', fontFamily: 'var(--font-body)', fontSize: 14 }}
-          />
-          <button
-            type="button"
-            onClick={() => { if (!advancedUrl.startsWith('http')) { setStatus('URL must start with http'); return; } if (!sameDomain(advancedUrl)) { setStatus('Same-domain only — ad hoc URLs stay within this domain'); return; } void handlePick(advancedUrl); }}
-            style={{ padding: '8px 16px', borderRadius: 'var(--rounded-md, 6px)', border: 'none', background: 'var(--color-uniform-green)', color: 'var(--color-feed-bag-cream)', fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: 700, cursor: 'pointer', boxShadow: 'var(--shadow-sm)', transition: 'background 200ms, transform 200ms' }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--color-shadow-pine)'; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--color-uniform-green)'; }}
-          >
-            Use
-          </button>
-        </div>
-        <div style={{ marginTop: 8, fontFamily: 'var(--font-body)', fontSize: 11, lineHeight: 1.5, color: 'var(--color-mulch-brown)' }}>Ad hoc URLs are verified and captured like any template page, but are marked ad hoc — they don’t change your confirmed suite until you confirm them.</div>
-      </details>
+          <details style={{ borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, background: colors.feedBagCream, padding: '10px 14px' }}>
+            <summary style={{ cursor: 'pointer', fontFamily: fonts.body, fontSize: 12, fontWeight: 700, color: colors.ledgerCharcoal, listStyle: 'none' }}>
+              Advanced — Enter another URL <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: colors.mulchBrown }}>(same-domain verification)</span>
+            </summary>
+            <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+              <input
+                value={advancedUrl}
+                onChange={(e) => setAdvancedUrl(e.target.value)}
+                placeholder="https://example.com/products/specific-item"
+                style={{ flex: 1, padding: '7px 10px', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, background: colors.whiteSurface, fontFamily: fonts.mono, fontSize: 12 }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (!advancedUrl.startsWith('http')) { setStatus('URL must start with http'); return; }
+                  if (!sameDomain(advancedUrl)) { setStatus('Same-domain only — ad hoc URLs stay within this domain'); return; }
+                  void handlePick(advancedUrl);
+                }}
+                style={{
+                  padding: '7px 16px',
+                  borderRadius: rounded.sm,
+                  border: 'none',
+                  background: colors.uniformGreen,
+                  color: colors.feedBagCream,
+                  fontFamily: fonts.body,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  boxShadow: '0 1px 2px rgba(20,83,45,0.15)',
+                }}
+              >
+                Capture URL
+              </button>
+            </div>
+            <div style={{ marginTop: 6, fontFamily: fonts.body, fontSize: 11, color: colors.mulchBrown }}>
+              Ad hoc URLs are captured and tested on the fly without altering the confirmed suite until saved.
+            </div>
+          </details>
         </>
       )}
     </div>
   );
 }
+

@@ -1,0 +1,899 @@
+{
+  "schemaVersion": 1,
+  "name": "packaging-ocr-golden-v1",
+  "entries": [
+    {
+      "id": "b-adams-0",
+      "imageRef": "images/b-adams-0.jpg",
+      "expected": {
+        "productName": "Flea & Tick Foaming Shampoo & Wash",
+        "brand": "Adams",
+        "species": [
+          "cats",
+          "kittens"
+        ],
+        "upc": null,
+        "size": "10 FL OZ",
+        "weight": "296 mL",
+        "count": null,
+        "productForm": "foaming shampoo",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-badlands-1",
+      "imageRef": "images/b-badlands-1.jpg",
+      "expected": {
+        "productName": "Super Yak Chews",
+        "brand": "Badlands",
+        "species": [
+          "dog"
+        ],
+        "upc": "850035752869",
+        "size": null,
+        "weight": "5 oz | 141.75 g",
+        "count": "5 PK",
+        "productForm": "dog chews",
+        "flavorVariety": "Superfood Formula",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-baskerville-2",
+      "imageRef": "images/b-baskerville-2.jpg",
+      "expected": {
+        "productName": "Baskerville Dog Muzzle",
+        "brand": "Baskerville",
+        "species": [
+          "dog"
+        ],
+        "upc": "886284626200",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "muzzle",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-churu-3",
+      "imageRef": "images/b-churu-3.jpg",
+      "expected": {
+        "productName": "Churu Fun Bites",
+        "brand": "Churu",
+        "species": [],
+        "upc": "810100851484",
+        "size": "0.42oz (12g)",
+        "weight": "3.36oz (96g)",
+        "count": "96",
+        "productForm": "dog treat",
+        "flavorVariety": "Chicken Recipe wraps Chicken with Sweet Potato Recipe",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv1-fallback-unverified"
+    },
+    {
+      "id": "b-earth-animal-4",
+      "imageRef": "images/b-earth-animal-4.jpg",
+      "expected": {
+        "productName": "NO-HIDE FROM THE GRILL",
+        "brand": "Earth Animal",
+        "species": [
+          "dog"
+        ],
+        "upc": null,
+        "size": "small roll",
+        "weight": "1.2 OZ (34g)",
+        "count": null,
+        "productForm": "dog chew",
+        "flavorVariety": "BACON CHEESEBURGER FLAVOR",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-earthbath-5",
+      "imageRef": "images/b-earthbath-5.jpg",
+      "expected": {
+        "productName": "PAW WASH",
+        "brand": "Earthbath",
+        "species": [
+          "dog"
+        ],
+        "upc": "602644028244",
+        "size": "8 fl oz",
+        "weight": "237 ml",
+        "count": null,
+        "productForm": "foaming paw wash",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-esbilac-6",
+      "imageRef": "images/b-esbilac-6.jpg",
+      "expected": {
+        "productName": "puppy milk replacer",
+        "brand": "Esbilac",
+        "species": [
+          "puppy"
+        ],
+        "upc": "020279985006",
+        "size": "16 FL. OZ.",
+        "weight": "16 ONCES FLUIDES (473 mL)",
+        "count": null,
+        "productForm": "liquid",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-ethical-pet-7",
+      "imageRef": "images/b-ethical-pet-7.jpg",
+      "expected": {
+        "productName": "Tennis Ball Launcher",
+        "brand": "Ethical Pet",
+        "species": [
+          "dog"
+        ],
+        "upc": null,
+        "size": "medium",
+        "weight": null,
+        "count": null,
+        "productForm": "toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-fresh-news-8",
+      "imageRef": "images/b-fresh-news-8.jpg",
+      "expected": {
+        "productName": "Fresh News Recycled Paper Litter",
+        "brand": "Fresh News",
+        "species": [
+          "rabbit",
+          "ferret",
+          "mouse"
+        ],
+        "upc": "850357002420",
+        "size": "20 liters",
+        "weight": "1220 cu in",
+        "count": null,
+        "productForm": "litter",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-fresh-step-9",
+      "imageRef": "images/b-fresh-step-9.jpg",
+      "expected": {
+        "productName": "Fresh Step Odor Shield",
+        "brand": "Fresh Step",
+        "species": [
+          "cat"
+        ],
+        "upc": "044600316031",
+        "size": "VALUE SIZE",
+        "weight": "38 LB",
+        "count": "4 POUCHES",
+        "productForm": "clumping litter",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-fromm-10",
+      "imageRef": "images/b-fromm-10.jpg",
+      "expected": {
+        "productName": "Duck Stew",
+        "brand": "Fromm",
+        "species": [
+          "cat"
+        ],
+        "upc": null,
+        "size": null,
+        "weight": "3 oz (85 g)",
+        "count": null,
+        "productForm": "wet food",
+        "flavorVariety": "Duck Stew",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-greenies-11",
+      "imageRef": "images/b-greenies-11.jpg",
+      "expected": {
+        "productName": "OCCUPY TWISTS",
+        "brand": "Greenies",
+        "species": [
+          "dog"
+        ],
+        "upc": "642863140648",
+        "size": null,
+        "weight": null,
+        "count": "10 COUNT",
+        "productForm": "chew",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-harvest-lane-12",
+      "imageRef": "images/b-harvest-lane-12.jpg",
+      "expected": {
+        "productName": "Pet Grooming Comb",
+        "brand": "Harvest Lane",
+        "species": [
+          "cat",
+          "dog"
+        ],
+        "upc": "753677468146",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "grooming comb",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-inaba-13",
+      "imageRef": "images/b-inaba-13.jpg",
+      "expected": {
+        "productName": "Churu Entr\u00e9e",
+        "brand": "Inaba",
+        "species": [
+          "cat"
+        ],
+        "upc": null,
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "wet food",
+        "flavorVariety": "Chicken Recipe with Cheese",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-inaba-churu-14",
+      "imageRef": "images/b-inaba-churu-14.jpg",
+      "expected": {
+        "productName": "Churu Entr\u00e9e P\u00e2t\u00e9",
+        "brand": "Inaba Churu",
+        "species": [
+          "cat"
+        ],
+        "upc": "810100855819",
+        "size": null,
+        "weight": "1.23 oz (35 g)",
+        "count": "2",
+        "productForm": "wet food",
+        "flavorVariety": "Chicken Recipe with Tuna",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-instinct-15",
+      "imageRef": "images/b-instinct-15.jpg",
+      "expected": {
+        "productName": "Flaked Real Tuna Entr\u00e9e in Gravy",
+        "brand": "Instinct",
+        "species": [],
+        "upc": null,
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "cat food",
+        "flavorVariety": "tuna",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv1-fallback-unverified"
+    },
+    {
+      "id": "b-koha-16",
+      "imageRef": "images/b-koha-16.jpg",
+      "expected": {
+        "productName": "Pure Shreds",
+        "brand": "Koha",
+        "species": [
+          "dog"
+        ],
+        "upc": null,
+        "size": null,
+        "weight": "12.5 oz (355 g)",
+        "count": null,
+        "productForm": "wet food",
+        "flavorVariety": "Shredded Duck Entr\u00e9e",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-kong-17",
+      "imageRef": "images/b-kong-17.jpg",
+      "expected": {
+        "productName": "Plush Toy",
+        "brand": "Kong",
+        "species": [
+          "dog"
+        ],
+        "upc": "035585507101",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "Plush Toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "gtin-850067859833",
+      "imageRef": "images/gtin-850067859833.webp",
+      "expected": {
+        "productName": "Flyball",
+        "brand": "woof",
+        "species": [
+          "dog"
+        ],
+        "upc": "850067859833",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "plush toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "gtin-850067859604",
+      "imageRef": "images/gtin-850067859604.png",
+      "expected": {
+        "productName": "Poomergency",
+        "brand": "woof",
+        "species": [
+          "dog"
+        ],
+        "upc": "850067859604",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "backup bags",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "gtin-850067859444",
+      "imageRef": "images/gtin-850067859444.png",
+      "expected": {
+        "productName": null,
+        "brand": null,
+        "species": [
+          "cat"
+        ],
+        "upc": "850067859444",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "gtin-850067859598",
+      "imageRef": "images/gtin-850067859598.webp",
+      "expected": {
+        "productName": "Poomergency",
+        "brand": "woof",
+        "species": [
+          "dog"
+        ],
+        "upc": "850067859598",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "backup bags",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "hard-small-0",
+      "imageRef": "images/hard-small-0.jpg",
+      "expected": {
+        "productName": "Rolling Pin",
+        "brand": "Harvest Lane",
+        "species": [],
+        "upc": null,
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "tool",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "hard-small-1",
+      "imageRef": "images/hard-small-1.jpg",
+      "expected": {
+        "productName": "Rolling Pin",
+        "brand": "Harvest Lane",
+        "species": [],
+        "upc": "753677467866",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "tool",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "hard-small-2",
+      "imageRef": "images/hard-small-2.jpg",
+      "expected": {
+        "productName": null,
+        "brand": "Harvest Lane",
+        "species": [
+          "cat"
+        ],
+        "upc": "753677467682",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "cat toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "hard-small-3",
+      "imageRef": "images/hard-small-3.jpg",
+      "expected": {
+        "productName": null,
+        "brand": "Harvest Lane",
+        "species": [
+          "cat"
+        ],
+        "upc": null,
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "cat toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "hard-small-4",
+      "imageRef": "images/hard-small-4.jpg",
+      "expected": {
+        "productName": null,
+        "brand": "Harvest Lane",
+        "species": [
+          "cat"
+        ],
+        "upc": null,
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-kong-18",
+      "imageRef": "images/b-kong-18.jpg",
+      "expected": {
+        "productName": "KONG",
+        "brand": "Kong",
+        "species": [
+          "dog"
+        ],
+        "upc": "035585506760",
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-nylabone-19",
+      "imageRef": "images/b-nylabone-19.jpg",
+      "expected": {
+        "productName": "Nylabone Power Chew",
+        "brand": "Nylabone",
+        "species": [
+          "dog"
+        ],
+        "upc": null,
+        "size": "medium",
+        "weight": "up to 35 lbs",
+        "count": null,
+        "productForm": "chew toy",
+        "flavorVariety": "Big Roasted Chicken Flavor",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-earthbath-20",
+      "imageRef": "images/b-earthbath-20.jpg",
+      "expected": {
+        "productName": "Oatmeal & Aloe Conditioner",
+        "brand": "Earthbath",
+        "species": [
+          "dog",
+          "cat"
+        ],
+        "upc": "602644020811",
+        "size": "16 fl. oz",
+        "weight": "472 ml",
+        "count": null,
+        "productForm": "conditioner",
+        "flavorVariety": "Vanilla & Almond",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-kong-21",
+      "imageRef": "images/b-kong-21.jpg",
+      "expected": {
+        "productName": "KONG Comfort Squeaks",
+        "brand": "Kong",
+        "species": [
+          "dog"
+        ],
+        "upc": null,
+        "size": null,
+        "weight": null,
+        "count": null,
+        "productForm": "plush toy",
+        "flavorVariety": null,
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    },
+    {
+      "id": "b-instinct-22",
+      "imageRef": "images/b-instinct-22.jpg",
+      "expected": {
+        "productName": "FreshRaw Meals",
+        "brand": "Instinct",
+        "species": [
+          "dog"
+        ],
+        "upc": null,
+        "size": null,
+        "weight": "16oz",
+        "count": null,
+        "productForm": "wet food",
+        "flavorVariety": "CAGE-FREE TURKEY RECIPE",
+        "color": null,
+        "material": null,
+        "lifeStage": null,
+        "breedSize": null,
+        "healthConcernFunction": [],
+        "dietaryLabels": [],
+        "ingredients": [],
+        "ingredientKeywords": [],
+        "claims": [],
+        "visibleTextLines": []
+      },
+      "source": "workspace-library/model-draft-promptv2-unverified"
+    }
+  ]
+}

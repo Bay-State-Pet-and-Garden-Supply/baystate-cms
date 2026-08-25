@@ -19,7 +19,7 @@ export function ProcessingStatus({ item }: ProcessingStatusProps) {
     <li className="pw-row">
       <span className="pw-indicator" aria-hidden="true" />
       <div className="pw-identity">
-        <p className="pw-name" title={item.name}>{item.name}</p>
+        <p className="pw-name" title={item.curatedTitle || item.name}>{item.curatedTitle || item.name}</p>
         <div className="pw-meta">
           {item.upc ? <span className="pw-upc">{item.upc}</span> : null}
           {item.brand ? <span className="pw-brand">· {item.brand}</span> : null}

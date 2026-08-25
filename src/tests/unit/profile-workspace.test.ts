@@ -36,12 +36,10 @@ describe('profile workspace shell (e06s01)', () => {
     expect(src).toContain('encodeURIComponent');
   });
 
-  it('suite panel renders clusters, suggested reps, override and waiver (e07s02)', () => {
+  it('suite panel renders clusters, override and waiver (e07s02)', () => {
     const p = resolve(process.cwd(), 'src/client/components/profile-workspace/SuitePanel.tsx');
     const src = readFileSync(p, 'utf8');
     expect(src).toContain('Clusters');
-    expect(src).toContain('Suggested reps');
-    expect(src).toContain('Use suggested');
     expect(src).toContain('Merge');
     expect(src).toContain('Split');
     expect(src).toContain('Replace');

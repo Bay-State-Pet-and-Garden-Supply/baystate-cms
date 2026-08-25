@@ -261,6 +261,32 @@ describe('ShopSite XML Round-trip & Compatibility', () => {
       expect(res.xml).toContain('<FileName>custom-page-name.html</FileName>');
       expect(res.xml).toContain('<MoreInformationText><![CDATA[Custom detail text for more info.]]></MoreInformationText>');
     });
+
+    it('should keep descriptions stable across export/import cycles (name-in-ProductDescription convention)', () => {
+      const prod = createBaseProduct();
+      prod.core.description = 'Long-form catalog copy.';
+      const first = denormalizeProduct(prod);
+      // Upload shape: NAME in ProductDescription, descriptive copy in
+      // MoreInformationText with the More Info page flag enabled.
+      expect(first.xml).toContain(`<ProductDescription><![CDATA[${prod.core.name}]]></ProductDescription>`);
+      expect(first.xml).toContain('<MoreInformationText><![CDATA[Long-form catalog copy.]]></MoreInformationText>');
+      expect(first.xml).toContain('<DisplayMoreInformationPage>checked</DisplayMoreInformationPage>');
+      // Re-import must not mistake the echoed name for the description.
+      const reparsed = parseProductsXml(first.xml).products[0];
+      const { product: reimported } = normalizeProduct(reparsed, 'test-workspace');
+      expect(reimported.core.description).toBe('Long-form catalog copy.');
+      const second = denormalizeProduct(reimported);
+      expect(second.xml).toContain('<ProductDescription><![CDATA[Builtin Policy Test Product]]></ProductDescription>');
+      expect(second.xml).toContain('<MoreInformationText><![CDATA[Long-form catalog copy.]]></MoreInformationText>');
+      // Legacy exports store the description directly in ProductDescription.
+      const legacyXml = '<Product><SKU>L1</SKU><Name>Legacy Prod</Name>'
+        + '<ProductDescription><![CDATA[Legacy copy.]]></ProductDescription></Product>';
+      const { product: legacy } = normalizeProduct(parseProductsXml(legacyXml).products[0], 'test-workspace');
+      expect(legacy.core.description).toBe('Legacy copy.');
+      const legacyOut = denormalizeProduct(legacy);
+      expect(legacyOut.xml).toContain('<ProductDescription><![CDATA[Legacy Prod]]></ProductDescription>');
+      expect(legacyOut.xml).toContain('<MoreInformationText><![CDATA[Legacy copy.]]></MoreInformationText>');
+    });
   });
 });
 

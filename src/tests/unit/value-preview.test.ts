@@ -3,16 +3,18 @@ import { describe, it, expect } from 'vitest';
 import { rankCandidates, evaluateValuesInstant } from '../../client/components/profile-builder/hooks/useProfileBuilderController';
 
 describe('rankCandidates', () => {
-  it('ranks jsonld > css-stable > shopify > semantic > generic', () => {
+  it('ranks css-stable > shopify > semantic > generic (jsonld no longer a ranked candidate source)', () => {
     const capture = {
       dom: '<div data-testid="product"><h1 class="product-title">Hello</h1><script type="application/ld+json">{\"@type\":\"Product\",\"name\":\"Hello\"}</script></div><div id="shopify-section-1"></div>',
       html: '<div data-testid="product"><h1 class="product-title">Hello</h1><script type="application/ld+json">{\"@type\":\"Product\"}</script><div>cdn.shopify</div></div>',
     };
     const ranked = rankCandidates(capture, 'title');
     const sources = ranked.map(r => r.source);
-    expect(sources[0]).toBe('jsonld');
-    // css-stable should be second when present
-    expect(sources).toContain('css-stable');
+    // Profile-builder wave contract: css-stable wins when a stable attribute is
+    // present; jsonld paths are evaluated at value-extraction time, not ranked.
+    expect(sources[0]).toBe('css-stable');
+    expect(sources).not.toContain('jsonld');
+    expect(sources).toContain('shopify');
     expect(sources).toContain('generic');
     // scores descending
     for (let i = 1; i < ranked.length; i++) {
