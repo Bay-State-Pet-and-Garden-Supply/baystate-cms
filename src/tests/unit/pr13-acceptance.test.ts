@@ -100,12 +100,20 @@ let titleCallCount = 0;
 let pageCallCount = 0;
 let auditCallSeq = 0;
 
-const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme'];
+// Even-SKU members land on the generic 'Dog Food' category: the deterministic
+// P5 guards reject treat-only/brand-only primary pages for dry-food products,
+// and an abstained durable page decision can never pass the review gate.
+const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme', 'Dog Food'];
 
+// Lint-clean + family-consistent: NOT a punctuation/case echo of the raw names
+// (B1 spreadsheet_fallback_leak), carries the fixtures' brandHint 'Acme' exactly
+// once per title (T3), and uses R1-normalized weight forms ('5 lb.') so the
+// titles round-trip the lint unchanged — otherwise coordination deterministically
+// falls back, producing rows with NULL model_call_id.
 const CANNED_TITLES: Record<string, string> = {
-  '100000000001': 'Purina Pro Plan Dog Food Chicken 5 lb',
-  '100000000002': 'Purina Pro Plan Dog Food Beef 10 lb',
-  '100000000003': 'Purina Pro Plan Dog Food Salmon 5 lb',
+  '100000000001': 'Acme Purina Pro Plan Dog Food Chicken Recipe 5 lb.',
+  '100000000002': 'Acme Purina Pro Plan Dog Food Beef Recipe 10 lb.',
+  '100000000003': 'Acme Purina Pro Plan Dog Food Salmon Recipe 5 lb.',
 };
 
 function pageListFromPrompt(prompt: string): Array<{ id: string; name: string }> {
@@ -129,7 +137,7 @@ function cannedGroupResponse(prompt: string): string {
   const payload: Record<string, unknown> = {};
   for (const sku of skus) {
     const evenSku = Number(sku.slice(-2)) % 2 === 0;
-    const page = pages.find(page => page.name === (evenSku ? PAGE_NAMES[1] : PAGE_NAMES[0]));
+    const page = pages.find(page => page.name === (evenSku ? PAGE_NAMES[3] : PAGE_NAMES[0]));
     payload[sku] = page ? [{ pageId: page.id, pageName: page.name, confidence: 0.85 }] : [];
   }
   return JSON.stringify(payload);
@@ -421,6 +429,7 @@ function activateVerifiedPages(wsId: string): void {
   const pages = [
     { key: 'dog-food-dry', name: 'Dog Food Dry' },
     { key: 'dog-treats', name: 'Dog Treats' },
+    { key: 'dog-food', name: 'Dog Food' },
     { key: 'brand-acme', name: 'Brand - Acme' },
   ];
   // Reuse the pr12 harness's page activation: import + verify records.
@@ -609,7 +618,10 @@ describe('PR13 C5 — title authority scoping (issue #30, DECISION-C)', () => {
     expect(computeCohortTitleInputHash({
       run,
       projection,
-      titlePlanEntry: { ...(planEntry as NonNullable<typeof planEntry>), ruleVersion: 'cohort-title-consolidation-rules-v2' },
+      // RULE_VERSIONS.cohort_title_consolidation is currently '-rules-v2'
+      // (B1 family-title consistency bump) — override to v3 so the value
+      // genuinely differs from the frozen authority.
+      titlePlanEntry: { ...(planEntry as NonNullable<typeof planEntry>), ruleVersion: 'cohort-title-consolidation-rules-v3' },
       executionTypeAuthority,
     })).not.toBe(base);
   });

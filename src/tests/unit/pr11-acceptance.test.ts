@@ -77,7 +77,10 @@ import onboardingRoutes from '../../server/routes/onboarding-routes';
 
 let auditCallSeq = 0;
 
-const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme'];
+// Even-SKU members land on the generic 'Dog Food' category: the deterministic
+// P5 guards reject treat-only/brand-only primary pages for dry-food products,
+// and an abstained durable page decision can never pass the review gate.
+const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme', 'Dog Food'];
 
 function pageListFromPrompt(prompt: string): Array<{ id: string; name: string }> {
   const matches = [...prompt.matchAll(/\[ID:([^\]]+)\]\s+([^\n(]+)/g)];
@@ -96,7 +99,7 @@ function cannedGroupResponse(prompt: string): string {
   const payload: Record<string, unknown> = {};
   for (const sku of skus) {
     const evenSku = Number(sku.slice(-2)) % 2 === 0;
-    const page = findPage(pages, evenSku ? PAGE_NAMES[1] : PAGE_NAMES[0]);
+    const page = findPage(pages, evenSku ? PAGE_NAMES[3] : PAGE_NAMES[0]);
     payload[sku] = page ? [{ pageId: page.id, pageName: page.name, confidence: 0.85 }] : [];
   }
   return JSON.stringify(payload);
@@ -571,6 +574,7 @@ function activateVerifiedPages(wsId: string): void {
   const pages = [
     { key: 'dog-food-dry', name: 'Dog Food Dry' },
     { key: 'dog-treats', name: 'Dog Treats' },
+    { key: 'dog-food', name: 'Dog Food' },
     { key: 'brand-acme', name: 'Brand - Acme' },
   ];
   activatePageImportFromRecords({

@@ -89,7 +89,13 @@ import onboardingRoutes from '../../server/routes/onboarding-routes';
 
 let auditCallSeq = 0;
 
-const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme'];
+// NOTE: every page an SKU can land on must be a valid PRIMARY category for the
+// fixture's dry-food products. The deterministic category-correctness guards
+// (P5: food↔treat and wet↔dry exclusivity; brand landing pages cannot serve as
+// primary) turn incompatible assignments into durable reviewable abstentions,
+// which fail the review completion gate fail-closed. 'Dog Food' is the second
+// food-category primary used for even SKUs ("siblings differ by design").
+const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme', 'Dog Food'];
 
 function pageListFromPrompt(prompt: string): Array<{ id: string; name: string }> {
   const matches = [...prompt.matchAll(/\[ID:([^\]]+)\]\s+([^\n(]+)/g)];
@@ -101,14 +107,17 @@ function findPage(pages: Array<{ id: string; name: string }>, name: string) {
 }
 
 /** The group response: every SKU in the prompt assigned to a FROZEN page.
- *  Siblings differ by design (rule 7): the SKU VALUE decides the page. */
+ *  Siblings differ by design (rule 7): the SKU VALUE decides the page. Even
+ *  SKUs land on the generic 'Dog Food' category (never treat-only or brand-only
+ *  pages — the deterministic P5/category guards reject those for food products,
+ *  and an abstained durable page decision can never pass the review gate). */
 function cannedGroupResponse(prompt: string): string {
   const pages = pageListFromPrompt(prompt);
   const skus = [...prompt.matchAll(/^SKU (\d{10,})$/gm)].map(match => match[1]);
   const payload: Record<string, unknown> = {};
   for (const sku of skus) {
     const evenSku = Number(sku.slice(-2)) % 2 === 0;
-    const page = findPage(pages, evenSku ? PAGE_NAMES[1] : PAGE_NAMES[0]);
+    const page = findPage(pages, evenSku ? PAGE_NAMES[3] : PAGE_NAMES[0]);
     payload[sku] = page ? [{ pageId: page.id, pageName: page.name, confidence: 0.85 }] : [];
   }
   return JSON.stringify(payload);
@@ -406,6 +415,7 @@ const CONFLICTING_BRAND_EXTRACTIONS = {
 function activateVerifiedPages(wsId: string): void {
   const pages = [
     { key: 'dog-food-dry', name: 'Dog Food Dry' },
+    { key: 'dog-food', name: 'Dog Food' },
     { key: 'dog-treats', name: 'Dog Treats' },
     { key: 'brand-acme', name: 'Brand - Acme' },
   ];
