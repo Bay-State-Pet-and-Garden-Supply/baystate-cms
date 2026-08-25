@@ -118,11 +118,17 @@ let titleCallCount = 0;
 let auditedTitleCallCount = 0;
 let auditCallSeq = 0;
 
+// NOTE: canned titles must NOT be a punctuation/case-insensitive echo of the
+// item's raw spreadsheet name — the title-lint B1 rule (spreadsheet_fallback_leak)
+// blocks "llm" candidates that carry no information beyond rawTitle, which would
+// deterministically push coordination onto the fallback path. The fixtures'
+// default brandHint is 'Acme', so T3 family consistency requires the brand word
+// to appear exactly once per title; the "Recipe" suffix keeps them realistic.
 const CANNED_TITLES: Record<string, string> = {
-  '100000000001': 'Purina Pro Plan Dry Dog Food Chicken 5 lb',
-  '100000000002': 'Purina Pro Plan Dry Dog Food Beef 10 lb',
-  '100000000003': 'Purina Pro Plan Dry Dog Food Salmon 5 lb',
-  '100000000004': 'Purina Pro Plan Dry Dog Food Lamb 10 lb',
+  '100000000001': 'Acme Purina Pro Plan Dry Dog Food Chicken Recipe 5 lb.',
+  '100000000002': 'Acme Purina Pro Plan Dry Dog Food Beef Recipe 10 lb.',
+  '100000000003': 'Acme Purina Pro Plan Dry Dog Food Salmon Recipe 5 lb.',
+  '100000000004': 'Acme Purina Pro Plan Dry Dog Food Lamb Recipe 10 lb.',
 };
 
 function cannedTitleForUpc(upc: string): string {
