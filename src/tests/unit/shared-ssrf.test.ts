@@ -20,8 +20,21 @@ describe('shared ssrf classifier', () => {
     expect(classifyIp('fe80::1')).toBe('private');
   });
 
+  it('handles octal, hex, and integer IPv4 representations', () => {
+    // 127.0.0.1 variants
+    expect(classifyIp('0177.0.0.1')).toBe('private');
+    expect(classifyIp('0x7f000001')).toBe('private');
+    expect(classifyIp('2130706433')).toBe('private');
+    expect(classifyIp('127.1')).toBe('private');
+    // 10.0.0.1 variant
+    expect(classifyIp('012.0.0.1')).toBe('private');
+    // 169.254.169.254 integer variant (2852038142)
+    expect(classifyIp('2852038142')).toBe('link_local');
+  });
+
   it('handles ::ffff:-mapped IPv4', () => {
     expect(classifyIp('::ffff:127.0.0.1')).toBe('private');
+    expect(classifyIp('::ffff:0177.0.0.1')).toBe('private');
     expect(classifyIp('::ffff:192.168.0.5')).toBe('private');
     expect(classifyIp('::ffff:8.8.8.8')).toBe('public');
   });
@@ -40,7 +53,10 @@ describe('shared ssrf classifier', () => {
 
 describe('isPrivateOrLinkLocal', () => {
   it('blocks private and link-local, allows public', () => {
-    expect(isPrivateOrLinkLocal('127.0.0.1')).toBe(true);    expect(isPrivateOrLinkLocal('10.0.0.7')).toBe(true);
+    expect(isPrivateOrLinkLocal('127.0.0.1')).toBe(true);
+    expect(isPrivateOrLinkLocal('0177.0.0.1')).toBe(true);
+    expect(isPrivateOrLinkLocal('2130706433')).toBe(true);
+    expect(isPrivateOrLinkLocal('10.0.0.7')).toBe(true);
     expect(isPrivateOrLinkLocal('169.254.1.1')).toBe(true);
     expect(isPrivateOrLinkLocal('8.8.8.8')).toBe(false);
   });

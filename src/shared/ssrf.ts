@@ -17,10 +17,43 @@ const PRIVATE_IPV4 = [
   { ip: '100.64.0.0', bits: 10 }, // CGNAT
 ] as const;
 
+function parseIpv4Part(part: string): number | null {
+  if (!part) return null;
+  let val: number;
+  if (/^0x[0-9a-fA-F]+$/i.test(part)) {
+    val = parseInt(part, 16);
+  } else if (/^0[0-7]+$/.test(part)) {
+    val = parseInt(part, 8);
+  } else if (/^(0|[1-9][0-9]*)$/.test(part)) {
+    val = parseInt(part, 10);
+  } else {
+    return null;
+  }
+  if (!Number.isSafeInteger(val) || val < 0) return null;
+  return val;
+}
+
 function ipv4ToNumber(ip: string): number | null {
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return null;
-  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+  const parts = ip.split('.');
+  if (parts.length < 1 || parts.length > 4) return null;
+  const nums = parts.map(parseIpv4Part);
+  if (nums.some((n) => n === null)) return null;
+
+  const validNums = nums as number[];
+
+  if (parts.length === 1) {
+    return validNums[0] <= 0xffffffff ? validNums[0] >>> 0 : null;
+  }
+  if (parts.length === 2) {
+    if (validNums[0] > 255 || validNums[1] > 0xffffff) return null;
+    return ((validNums[0] << 24) | validNums[1]) >>> 0;
+  }
+  if (parts.length === 3) {
+    if (validNums[0] > 255 || validNums[1] > 255 || validNums[2] > 0xffff) return null;
+    return ((validNums[0] << 24) | (validNums[1] << 16) | validNums[2]) >>> 0;
+  }
+  if (validNums.some((n) => n > 255)) return null;
+  return ((validNums[0] << 24) | (validNums[1] << 16) | (validNums[2] << 8) | validNums[3]) >>> 0;
 }
 
 function ipv4InRange(ip: string, range: { ip: string; bits: number }): boolean {
@@ -28,7 +61,7 @@ function ipv4InRange(ip: string, range: { ip: string; bits: number }): boolean {
   const base = ipv4ToNumber(range.ip);
   if (value === null || base === null) return false;
   const mask = range.bits === 0 ? 0 : (~0 << (32 - range.bits)) >>> 0;
-  return (value & mask) === (base & mask);
+  return ((value & mask) >>> 0) === ((base & mask) >>> 0);
 }
 
 /** Classify a numeric IPv4/IPv6 address as private/link-local or public. */
