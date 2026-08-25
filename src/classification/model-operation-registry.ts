@@ -52,7 +52,6 @@ export const PROMPT_TEMPLATE_VERSIONS: Readonly<Record<ProtectedOperation, strin
   cohort_title_consolidation: 'cohort-title-consolidation-prompt-v1',
   distributor_copy_consolidation: 'distributor-copy-consolidation-prompt-v1',
   discovery_name_consolidation: 'discovery-name-consolidation-prompt-v1',
-  brand_inference: 'brand-inference-prompt-v1',
   sitemap_selection: 'sitemap-selection-prompt-v1',
   value_gap_resolution: 'value-gap-resolution-prompt-v1',
 };
@@ -73,7 +72,6 @@ export const RULE_VERSIONS: Readonly<Record<ProtectedOperation, string>> = {
   cohort_title_consolidation: 'cohort-title-consolidation-rules-v2', // B1 family-title consistency (T2-T7) + title-lint — FAMILY_TITLE_CONSISTENCY_VERSION v2
   distributor_copy_consolidation: 'distributor-copy-consolidation-rules-v1',
   discovery_name_consolidation: 'discovery-name-consolidation-rules-v1',
-  brand_inference: 'brand-inference-rules-v1',
   sitemap_selection: 'sitemap-selection-rules-v1',
   value_gap_resolution: 'value-gap-resolution-rules-v1',
 };
@@ -96,7 +94,6 @@ export const OPERATION_PARAMETERS: Readonly<
   cohort_title_consolidation: { temperature: 0.1, maxTokens: null },
   distributor_copy_consolidation: { temperature: 0.1, maxTokens: null },
   discovery_name_consolidation: { temperature: 0.1, maxTokens: null },
-  brand_inference: { temperature: 0.0, maxTokens: null },
   sitemap_selection: { temperature: 0.0, maxTokens: null },
   value_gap_resolution: { temperature: 0.0, maxTokens: null },
 };
@@ -117,7 +114,6 @@ export const OPERATION_TO_STAGE: Readonly<Record<ProtectedOperation, Classificat
   cohort_title_consolidation: 'name_consolidation',
   distributor_copy_consolidation: 'name_consolidation',
   discovery_name_consolidation: 'name_consolidation',
-  brand_inference: null,
   sitemap_selection: null,
   value_gap_resolution: 'value_gap_abstain',
 };

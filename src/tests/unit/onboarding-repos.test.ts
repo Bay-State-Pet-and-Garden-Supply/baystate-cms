@@ -448,12 +448,12 @@ describe('Onboarding Repositories CRUD', () => {
 
   it('should support api keys and brand sites CRUD operations', () => {
     // API Keys
-    upsertApiKey('serper', 'test-serper-key');
-    const keyRow = getApiKey('serper');
-    expect(keyRow?.api_key).toBe('test-serper-key');
+    upsertApiKey('openai', 'test-openai-key');
+    const keyRow = getApiKey('openai');
+    expect(keyRow?.api_key).toBe('test-openai-key');
 
     const keyList = listApiKeys();
-    expect(keyList.some(k => k.service === 'serper')).toBe(true);
+    expect(keyList.some(k => k.service === 'openai')).toBe(true);
 
     // Brand Sites
     upsertBrandSite('Nike', 'nike.com');

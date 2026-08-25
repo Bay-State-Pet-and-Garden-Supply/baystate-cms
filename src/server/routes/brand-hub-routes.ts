@@ -71,7 +71,7 @@ function buildSingleRow(
 ) {
   const counts = allCounts[domain] ?? { totalCount: 0, activeCount: 0, inactiveCount: 0, productCount: 0 };
   const latestRefresh = latestRuns[domain] ?? null;
-  const econ = economics[domain] ?? { totalLookups: 0, localHitCount: 0, paidSearchFallbackCount: 0, localHitRate: 0, serperCallsAvoided: 0 };
+  const econ = economics[domain] ?? { totalLookups: 0, localHitCount: 0, localHitRate: 0 };
   const dStatus = statusMap.get(domain) ?? null;
   const prof = profileMap.get(domain) ?? null;
   const brands = brandMap.get(domain) ?? [];

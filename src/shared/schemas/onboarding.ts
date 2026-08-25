@@ -976,7 +976,6 @@ export type ItemStatus = z.infer<typeof ItemStatusEnum>;
 // ─── API Key ────────────────────────────────────────────────────────────────────
 
 export const ApiKeyServiceEnum = z.enum([
-  'serper',
   'openai',
   'deepseek',
   'ollama',
@@ -1134,7 +1133,6 @@ export type OnboardingSource = z.infer<typeof OnboardingSourceSchema>;
 /** LLM tasks that can be routed through `llm_task_configs`. */
 export const LlmTaskEnum = z.enum([
   'product_name_consolidation',
-  'brand_inference',
   'profile_generation',
   'profile_revision',
   'product_curation',
@@ -1466,23 +1464,12 @@ export const DiscoveryRunStepEnum = z.enum([
   'preflight',              // validating brand/domain setup
   'sitemap_fetch',          // fetching/caching official sitemap
   'sitemap_match',          // matching sitemap URLs to product
-  'official_search',        // searching official domain via Serper
-  'identifier_search',      // bare identifier search for context
-  'name_consolidation',     // LLM name consolidation from search results
-  'name_search',            // consolidated-name Serper search
   'variant_resolution',     // resolving Shopify/product variants
   'page_verification',      // fetching and verifying page content
   'ranking',                // ranking and assigning recommendation tiers
   'applying_outcome',       // persisting final outcome to item
 ]);
 export type DiscoveryRunStep = z.infer<typeof DiscoveryRunStepEnum>;
-
-export const SearchScopeEnum = z.enum([
-  'official_only',   // only search official brand domains
-  'official_first',  // official domains first, unrestricted web fallback
-  'unrestricted',    // full web search
-]);
-export type SearchScope = z.infer<typeof SearchScopeEnum>;
 
 export const DiscoveryOutcomeEnum = z.enum([
   'auto_selected',             // system auto-confirmed a source
@@ -1524,7 +1511,6 @@ export type VerificationEvidence = z.infer<typeof VerificationEvidenceSchema>;
 
 export const DiscoveryRunRequestSchema = z.object({
   trigger: DiscoveryRunTriggerEnum,
-  scope: SearchScopeEnum.optional().default('official_first'),
   query: z.string().optional(),
   url: z.string().optional(),
   options: z.object({
@@ -1642,7 +1628,6 @@ export const DiscoveryConsoleDetailSchema = z.object({
 
 export const DiscoverySearchRequestSchema = z.object({
   query: z.string().min(1).max(200),
-  scope: SearchScopeEnum.optional().default('official_first'),
 });
 
 export const DiscoveryVerifyUrlRequestSchema = z.object({
@@ -1779,7 +1764,6 @@ export const DomainSitemapSummarySchema = z.object({
   lastRefreshRemovedCount: z.number().int(),
   localHitRate: z.number(),
   totalLookups: z.number().int(),
-  serperCallsAvoided: z.number().int(),
   brandAssociations: z.array(DomainDiagnosticsBrandAssociationSchema).optional().default(() => []),
   productUrlPattern: z.string().nullable().optional(),
 });
@@ -1797,7 +1781,6 @@ export const SitemapsOverviewResponseSchema = z.object({
     totalIndexedUrls: z.number().int(),
     totalProductUrls: z.number().int(),
     overallLocalHitRate: z.number(),
-    totalSerperCallsAvoided: z.number().int(),
   }),
   generatedAt: z.string(),
 });

@@ -1,41 +1,24 @@
 /**
- * Source discovery using Serper.dev Google Search API + brand-sitemap pass.
- * Finds product pages by UPC, prioritizing official brand pages.
+ * Source discovery over locally indexed official brand domains.
  *
- * Strategy (three parallel/converging passes):
- * 1. **Pass 1 — UPC search**: Bare UPC lookup to harvest initial context
- *    (retailer/marketplace listings) and to feed the LLM name-consolidation step.
- * 2. **Pass 2 — consolidated-name search**: After LLM/LCS consolidates a clean
- *    canonical product name, run *at least one* unrestricted Google search for
- *    that name to find the official brand/product page. Mapped brand-domain
- *    scoped searches are added as well-known signals when available.
- * 3. **Sitemap pass**: The brand domain's sitemap is fetched in parallel
- *    with Pass 1 (URLs only, no matching). Once Pass 1 + name consolidation
- *    complete, the matcher's three passes (UPC exact, product URL filter,
- *    token overlap + LLM selection) run against the cached sitemap URLs
- *    using the consolidated name. Sitemap candidates are merged with the
- *    Serper pool using the boost/penalty rules below; the result is sorted,
- *    capped to the top 10, and returned alongside the consolidated name.
+ * Brands and their official domains are configured ahead of time by the
+ * operator (`brand_sites`, Settings → Domain Configuration). There is NO
+ * external web-search/SERP dependence: discovery resolves candidates from
  *
- * Cross-source merge rules:
- *   - Sitemap URL already in Serper pool: confidence +0.15 (independent
- *     confirmation that this is the canonical product URL).
- *   - Serper candidate on the official brand domain whose URL is not in
- *     the sitemap set: confidence -0.2 (the sitemap is the most complete
- *     inventory of a brand's product URLs, so a brand-domain hit the
- *     sitemap doesn't know about is often a stale or off-domain listing).
+ *   1. **Step 0 — local brand URL index** (`brand_url_index`, populated by
+ *      sitemap sync / Shopify catalog ingest): exact UPC/SKU, token and
+ *      LLM-selected matches (`local-brand-url-finder.ts`). A high-confidence
+ *      match validated by HEAD/GET short-circuits everything else.
+ *   2. **Sitemap pass**: fetch (cache-first) the mapped domain's sitemap and
+ *      run the matcher's passes (UPC exact, product URL filter, token overlap
+ *      + LLM selection) against the indexed URLs.
  *
- * Sitemap errors NEVER throw. The function returns the Serper-only
- * results when the sitemap pass fails, with a logged warning, so the
- * operator can still review the discovery drawer.
+ * Items that match a distributor record never enter Discovery at all — the
+ * sourcing engine routes them straight to Extraction.
  */
 
-import { getApiKey } from '../db/repositories/api-key-repo';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import type { InsertSourceData } from '../db/repositories/onboarding-source-repo';
-import { consolidateProductName } from './llm-client';
-import { getDomainStatus } from '../db/repositories/domain-status-repo';
-import { getCachedSerperResults, insertSerperCache } from '../db/repositories/serper-cache-repo';
 import { getCachedSitemapUrls, insertSitemapCache } from '../db/repositories/sitemap-cache-repo';
 import { fetchAndParseSitemap } from './sitemap-fetcher';
 import { matchSitemapUrls, type SitemapMatchResult } from './sitemap-matcher';
@@ -43,37 +26,19 @@ import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { isKnownRetailerOrDistributorDomain } from './discovery/retailer-domain-list';
 import { scoreBrandDomainMatch } from './discovery/official-domain';
 import { resolveVariantsForCandidates } from './variant-url-resolver';
-import { isOfficialDomainMatch } from './domain-utils';
-import { inferBrandFromSearchResults, type BrandInferenceResult } from './brand-inferrer';
 import { findLocalBrandCandidates } from './local-brand-url-finder';
 import { getActiveUrlsForDomain } from '../db/repositories/brand-url-index-repo';
 import { recordDiscoveryEvent } from '../db/repositories/sitemap-telemetry-repo';
-import type { OnboardingSource } from '../shared/schemas/onboarding';
-
-interface SerperSearchResult {
-  title: string;
-  link: string;
-  snippet: string;
-  position: number;
-}
-
-interface SerperResponse {
-  organic: SerperSearchResult[];
-  searchParameters?: { q: string };
-}
 
 /** Minimal structural fetch signature — lets Product Intelligence inject the
  *  policy-gateway bound transport (P0-1); onboarding keeps the global fetch. */
 type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 /**
- * Discover candidate product page URLs using Serper.dev.
- *
- * Implements a two-pass strategy:
- * 1. General search on UPC to harvest canonical naming via LLM.
- * 2. **Mandatory** unrestricted search on the consolidated name so we always
- *    surface official/brand product pages. Optional mapped-brand-domain
- *    scoped searches and original-name fallbacks are layered on top.
+ * Discover candidate product page URLs from the brand's locally indexed
+ * official domain (brand_url_index + sitemap). Never throws for "missing
+ * search key" style setup — when no candidates can be produced the caller
+ * parks the item via its standard needs_input outcomes.
  */
 export async function discoverSources(
   upc: string,
@@ -82,31 +47,26 @@ export async function discoverSources(
   options?: {
     price?: number | null;
     existingExpectedName?: string | null;
-    existingUpcCandidates?: OnboardingSource[] | null;
     /**
      * P0-1 (round 3): injected transport so Product Intelligence can bind
-     * every HTTP call in the discovery chain (Serper, sitemap, variant-page
+     * every HTTP call in the discovery chain (sitemap, variant-page
      * fetches) to the policy gateway. The onboarding pipeline keeps the
      * default global fetch.
      */
     networkFetch?: NetworkFetch;
     /**
      * Frozen classification model-policy view (issue #17 item A). Protected
-     * brand-inference and name-consolidation calls route through it.
+     * LLM page-selection calls route through it.
      */
     modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null;
   }
 ): Promise<{
   candidates: InsertSourceData[];
   consolidatedName: string | null;
-  inferredBrand?: BrandInferenceResult | null;
   noDomainMapped?: boolean;
 }> {
-  const candidates: InsertSourceData[] = [];
-  const seenUrls = new Set<string>();
-
   // Retrieve pre-mapped brand domains from database
-  let activeBrandHint = brandHint;
+  const activeBrandHint = brandHint;
   const activeBrandDomains: string[] = [];
   if (activeBrandHint) {
     const knownSites = findBrandSites(activeBrandHint);
@@ -118,12 +78,25 @@ export async function discoverSources(
     }
   }
 
-  let primaryDomain: string | null = activeBrandDomains[0] ?? null;
+  const primaryDomain: string | null = activeBrandDomains[0] ?? null;
+
+  // A known brand with no official domain mapped halts discovery before any
+  // lookup: the operator must map a domain in Settings first (needs_input_setup).
+  if (activeBrandHint && activeBrandHint.trim() && activeBrandDomains.length === 0) {
+    console.log(`[SourceDiscovery] Brand "${activeBrandHint}" has no official domain configured. Halting discovery.`);
+    return {
+      candidates: [],
+      consolidatedName: options?.existingExpectedName ?? null,
+      noDomainMapped: true,
+    };
+  }
+
+  const candidates: InsertSourceData[] = [];
 
   // ── Step 0: Priority Local Brand URL Index Lookup ─────────────────────────
   // When a brand domain is mapped, attempt cheap local discovery first.
   // If a high-confidence match (confidence >= 0.85) is found and verified,
-  // we bypass external Serper paid search completely.
+  // we return it immediately without running the sitemap matcher.
   if (primaryDomain && activeBrandDomains.length > 0) {
     const activeUrls = getActiveUrlsForDomain(primaryDomain);
     if (activeUrls.length === 0) {
@@ -171,7 +144,7 @@ export async function discoverSources(
         }
 
         if (isValid) {
-          console.log(`[SourceDiscovery] ✓ Local match validated for ${topLocal.url}. Bypassing Serper paid search.`);
+          console.log(`[SourceDiscovery] ✓ Local match validated for ${topLocal.url}. Short-circuiting sitemap matching.`);
 
           const localCandidates: InsertSourceData[] = localMatches.map((m) => {
             const rankSignals = buildRankSignals(activeBrandHint, primaryDomain!);
@@ -191,21 +164,20 @@ export async function discoverSources(
               upc,
               domain: primaryDomain,
               satisfied_locally: 1,
-              paid_search_fallback: 0,
               candidate_url: topLocal.url,
               confidence: topLocal.confidence,
               source_method: topLocal.sourceMethod,
-              serper_calls_avoided: 2,
             });
           } catch { /* best effort */ }
 
           return {
             candidates: localCandidates,
-            consolidatedName: topLocal.title || name,
-            inferredBrand: null,
+            // Expected name comes from the imported spreadsheet row only;
+            // discovery never synthesizes or persists an expected name.
+            consolidatedName: options?.existingExpectedName ?? null,
           };
         } else {
-          console.log(`[SourceDiscovery] Local candidate ${topLocal.url} failed validation. Falling back to paid search.`);
+          console.log(`[SourceDiscovery] Local candidate ${topLocal.url} failed validation. Falling through to sitemap matching.`);
         }
       }
     } catch (err) {
@@ -213,140 +185,15 @@ export async function discoverSources(
     }
   }
 
-  // ── Fallback to External Serper Paid Search ───────────────────────────────
-  const apiKeyRow = getApiKey('serper');
-  if (!apiKeyRow) {
-    throw new Error('Serper.dev API key not configured. Go to Onboarding Settings to add it.');
-  }
+  // ── Sitemap pass ──────────────────────────────────────────────────────────
+  // Fetch (cache-first) the mapped domain's sitemap and run the three-pass
+  // matcher (UPC exact, product URL filter, token overlap + LLM selection)
+  // against the indexed URLs using the item's spreadsheet name. Sitemap
+  // failures NEVER throw — they surface as zero candidates.
+  const consolidatedName = options?.existingExpectedName ?? null;
 
-  let sitemapFetchPromise: Promise<SitemapFetched | null> = primaryDomain
-    ? fetchSitemapForDiscovery(primaryDomain, options?.networkFetch)
-    : Promise.resolve(null);
-
-  // ── Pass 1: Bare UPC search ───────────────────────────────────────────
-  // Gather initial context about the product from retailers and marketplaces.
-  let upcResults: SerperSearchResult[] = [];
-  if (options?.existingUpcCandidates && options.existingUpcCandidates.length > 0) {
-    console.log(`[SourceDiscovery] Resuming discovery: using ${options.existingUpcCandidates.length} cached UPC search candidates.`);
-    upcResults = options.existingUpcCandidates.map(c => ({
-      title: c.title || '',
-      snippet: c.snippet || '',
-      link: c.url,
-      position: 1,
-    }));
-  } else {
-    try {
-      upcResults = await searchSerper(apiKeyRow.api_key, upc, options?.networkFetch);
-    } catch (err) {
-      console.error(`[SourceDiscovery] Pass 1 UPC search failed:`, err);
-    }
-  }
-
-  // ── Brand Inference (when brandHint is missing) ───────────────────────
-  let inferredBrand: BrandInferenceResult | null = null;
-  if ((!activeBrandHint || !String(activeBrandHint).trim()) && upcResults.length > 0) {
-    console.log(`[SourceDiscovery] Brand hint missing for UPC ${upc}. Attempting to infer brand from search results...`);
-    inferredBrand = await inferBrandFromSearchResults(upc, upcResults.map(r => ({
-      title: r.title,
-      snippet: r.snippet,
-      link: r.link
-    })), options?.modelPolicy);
-    if (inferredBrand) {
-      console.log(`[SourceDiscovery] ✓ Inferred brand for UPC ${upc}: "${inferredBrand.brand}" with confidence ${inferredBrand.confidence.toFixed(2)} (source: ${inferredBrand.source})`);
-      activeBrandHint = inferredBrand.brand;
-
-      // An inferred domain is a run-local discovery hint, never a durable
-      // brand-site mapping. Candidates found through it still require normal
-      // human source review before the pipeline advances.
-      if (inferredBrand.inferredDomain) {
-        const inferredDomain = cleanDomainString(inferredBrand.inferredDomain);
-        if (inferredDomain && !activeBrandDomains.includes(inferredDomain)) {
-          activeBrandDomains.push(inferredDomain);
-          console.log(
-            `[SourceDiscovery] Using inferred domain "${inferredDomain}" for this discovery run only; no brand mapping was persisted.`,
-          );
-        }
-      }
-
-      // Existing reviewed brand mappings remain valid discovery inputs.
-      const knownSites = findBrandSites(activeBrandHint);
-      for (const site of knownSites) {
-        const bareDomain = cleanDomainString(site.domain);
-        if (bareDomain && !activeBrandDomains.includes(bareDomain)) {
-          activeBrandDomains.push(bareDomain);
-        }
-      }
-
-      // If we now have a domain, fetch sitemap in parallel
-      primaryDomain = activeBrandDomains[0] ?? null;
-      if (primaryDomain) {
-        sitemapFetchPromise = fetchSitemapForDiscovery(primaryDomain, options?.networkFetch);
-      }
-    } else {
-      console.log(`[SourceDiscovery] ✗ Could not infer brand for UPC ${upc}. Proceeding without brand.`);
-    }
-  }
-
-  // Process Pass 1 candidates (now that activeBrandHint and activeBrandDomains are finalized)
-  for (const result of upcResults) {
-    if (seenUrls.has(result.link)) continue;
-    seenUrls.add(result.link);
-
-    const resultDomain = extractDomain(result.link);
-    const domainStatus = getDomainStatus(resultDomain);
-    if (domainStatus && (domainStatus.status === 'blocked' || domainStatus.status === 'offline')) {
-      console.log(`[SourceDiscovery] Skipping candidate ${result.link} because domain ${resultDomain} is marked ${domainStatus.status}`);
-      continue;
-    }
-
-    const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
-
-    const rankSignals = buildRankSignals(activeBrandHint, resultDomain);
-    candidates.push({
-      url: result.link,
-      title: result.title,
-      snippet: result.snippet,
-      domain: resultDomain,
-      confidence,
-      sourceMethod: 'serper_upc',
-      ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
-    });
-  }
-
-  // If a brand is assigned (either originally or inferred) but has no domain site mapped
-  // in the database, we halt discovery. This prevents wasting search credits and holds
-  // the item until the operator configures a domain.
-  if (activeBrandHint && activeBrandHint.trim() && activeBrandDomains.length === 0) {
-    console.log(`[SourceDiscovery] Brand "${activeBrandHint}" has no official domain configured. Halting discovery before Pass 2.`);
-    return {
-      candidates,
-      consolidatedName: null,
-      inferredBrand: inferredBrand || null,
-      noDomainMapped: true,
-    };
-  }
-
-  let consolidatedName = options?.existingExpectedName ?? null;
-  if (!consolidatedName) {
-    consolidatedName = await consolidateProductName(
-      upc,
-      upcResults.map(r => ({ title: r.title, snippet: r.snippet })),
-      name,
-      activeBrandHint,
-      options?.modelPolicy,
-    );
-  }
-
-  // ── Sitemap pass (deferred matching) ──────────────────────────────────
-  // The fetch kicked off in parallel with Pass 1 above is (almost
-  // certainly) resolved by now. Run the matcher with the consolidated
-  // name so the operator gets the strongest possible signal. Sitemap
-  // failures are logged and never thrown — we always continue with
-  // the Serper-only results.
-  let sitemapCandidates: InsertSourceData[] = [];
   if (primaryDomain) {
-    const settled = await Promise.allSettled([sitemapFetchPromise]);
-    const prepared = settled[0].status === 'fulfilled' ? settled[0].value : null;
+    const prepared = await fetchSitemapForDiscovery(primaryDomain, options?.networkFetch);
     if (prepared && prepared.urls.length > 0) {
       try {
         const matches = await matchSitemapUrls(
@@ -358,129 +205,21 @@ export async function discoverSources(
           prepared.productUrlPattern,
           options?.modelPolicy,
         );
-        sitemapCandidates = matches.map(convertSitemapMatchToCandidate);
+        for (const match of matches) {
+          candidates.push(convertSitemapMatchToCandidate(match));
+        }
       } catch (err) {
         console.warn(
           `[SourceDiscovery] Sitemap matching failed for ${primaryDomain}:`,
           err,
         );
       }
-    } else if (settled[0].status === 'rejected') {
-      console.warn(
-        `[SourceDiscovery] Sitemap fetch rejected for ${primaryDomain}:`,
-        settled[0].reason,
-      );
     }
   }
 
-  // Determine if sitemap produced a high-confidence match (confidence >= 0.85).
-  // If so, we bypass Pass 2 follow-up Serper searches, saving search credits!
-  const hasHighConfidenceSitemapMatch = sitemapCandidates.some(c => c.confidence >= 0.85);
-
-  if (hasHighConfidenceSitemapMatch) {
-    console.log(`[SourceDiscovery] ✓ High confidence sitemap match found (confidence >= 0.85). Skipping Pass 2 Google Searches.`);
-  } else {
-    // ── Pass 2: Consolidated-name search ──────────────────────────────────
-    // Consolidate search titles using LLM (or LCS fallback), then run an
-    // **unconditional** unrestricted Google search on the consolidated name.
-    // Mapped brand-domain searches and original-name fallbacks are layered
-    // on top — but the consolidated-name search fires regardless of how
-    // many UPC candidates we already collected.
-    const searchName = consolidatedName || name;
-    // Clean the search name so the LLM-returned phrase works inside a query
-    // (e.g. strip stray double quotes that some models include).
-    const cleanSearchName = searchName ? searchName.replace(/"/g, '').trim() : '';
-    const searchNameChanged = !!(name && cleanSearchName && cleanSearchName.toLowerCase() !== name.toLowerCase());
-
-    if (cleanSearchName && cleanSearchName.length > 3) {
-      // Query descriptors: `mandatory` queries are NOT skipped by the 15-candidate
-      // pre-query cap so the operator always gets a Pass 2 chance at the
-      // official product page.
-      type Pass2Query = { query: string; mandatory?: boolean };
-      const secondPassQueries: Pass2Query[] = [];
-      const seenSecondPass = new Set<string>();
-      const addSecondPassQuery = (query: string, mandatory = false) => {
-        const normalized = query.trim();
-        if (!normalized) return;
-        if (seenSecondPass.has(normalized)) return;
-        seenSecondPass.add(normalized);
-        secondPassQueries.push({ query: normalized, mandatory });
-      };
-
-      // Mandatory unrestricted consolidated-name search — always fires when
-      // we have a usable name. This is the search the operator relies on for
-      // finding the official brand/product page even when brand sites are
-      // not pre-mapped or the UPC pass already returned 10 retailer results.
-      addSecondPassQuery(`${cleanSearchName} product page`, true);
-
-      // Prioritize searching the consolidated product name on mapped brand
-      // domains (best signal for official pages).
-      for (const domain of activeBrandDomains.slice(0, 2)) {
-        addSecondPassQuery(`${cleanSearchName} site:${domain}`);
-        // Fallback: Search using the original spreadsheet name to bypass bad
-        // UPC-based LLM name consolidations.
-        if (searchNameChanged) {
-          addSecondPassQuery(`${name} site:${domain}`);
-        }
-      }
-
-      // Low-candidate fallback: if Pass 1 produced almost nothing, also
-      // search the original spreadsheet name in case the LLM consolidation
-      // drifted from the real product.
-      if (candidates.length < 5 && searchNameChanged) {
-        addSecondPassQuery(`${name} product page`);
-      }
-
-      // Execute follow-up queries. Mandatory queries ignore the 15-candidate
-      // pre-query cap; non-mandatory ones still respect it.
-      for (const q of secondPassQueries) {
-        if (!q.mandatory && candidates.length >= 15) break;
-
-        console.log(`[SourceDiscovery] Pass 2 search for UPC ${upc}: "${q.query}"`);
-
-        try {
-          // Sleep slightly to avoid Serper rate-limiting
-          await new Promise(r => setTimeout(r, 200));
-
-          const results = await searchSerper(apiKeyRow.api_key, q.query, options?.networkFetch);
-          for (const result of results) {
-            if (seenUrls.has(result.link)) continue;
-            seenUrls.add(result.link);
-
-            const resultDomain = extractDomain(result.link);
-            const domainStatus = getDomainStatus(resultDomain);
-            if (domainStatus && (domainStatus.status === 'blocked' || domainStatus.status === 'offline')) {
-              console.log(`[SourceDiscovery] Skipping candidate ${result.link} because domain ${resultDomain} is marked ${domainStatus.status}`);
-              continue;
-            }
-
-            const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
-
-            const rankSignals = buildRankSignals(activeBrandHint, resultDomain);
-            candidates.push({
-              url: result.link,
-              title: result.title,
-              snippet: result.snippet,
-              domain: resultDomain,
-              confidence,
-              sourceMethod: 'serper_name',
-              ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
-            });
-          }
-        } catch (err) {
-          console.error(`[SourceDiscovery] Pass 2 query failed (${q.query}):`, err);
-        }
-      }
-    }
-  }
-
-  // Merge sitemap candidates with the Serper pool, applying the
-  // cross-source boost/penalty rules before we sort and cap.
-  const merged = mergeSitemapAndSerperCandidates(candidates, sitemapCandidates, primaryDomain);
-
-  // Run variant resolution on top candidates
+  // Run variant resolution on the candidates before ranking.
   const variantResolved = await resolveVariantsForCandidates({
-    candidates: merged,
+    candidates,
     upc,
     rawName: name,
     expectedName: consolidatedName || name,
@@ -488,31 +227,17 @@ export async function discoverSources(
     brandDomains: activeBrandDomains,
     price: options?.price,
     // P0-1 (round 3): the variant resolver's page fetches ride the same
-    // injected transport as the Serper + sitemap calls above.
+    // injected transport as the sitemap calls above.
     fetchFn: options?.networkFetch,
   });
 
-  // Sort by confidence descending
-  variantResolved.sort((a, b) => b.confidence - a.confidence);
-
-  // Cap to the top 10 — but guarantee that at least one `serper_name`
-  // AND at least one `sitemap_name`/`sitemap_upc` candidate survive
-  // the slice whenever any are available, so the discovery drawer
-  // shows results from every discovery method that produced a hit.
-  // Sitemap candidates that the cross-source boost pushed above 1.0
-  // are clamped back into [0, 1] here.
+  // Sort by confidence descending and cap to the top 10.
   const topCandidates = selectTopCandidates(variantResolved, 10).map(c => ({
     ...c,
     confidence: Math.max(0, Math.min(1, c.confidence))
   }));
 
   // ── Log meaningful discovery results ──────────────────────────────────
-  if (consolidatedName) {
-    console.log(`[SourceDiscovery] Consolidated name for UPC ${upc}: "${consolidatedName}"`);
-  } else {
-    console.log(`[SourceDiscovery] No consolidated name for UPC ${upc} (LLM unavailable or no results)`);
-  }
-
   if (topCandidates.length > 0) {
     const top = topCandidates[0];
     console.log(`[SourceDiscovery] Found ${topCandidates.length} source candidates for UPC ${upc}. Top result: ${top.url} (confidence: ${(top.confidence * 100).toFixed(0)}%, domain: ${top.domain})`);
@@ -524,7 +249,7 @@ export async function discoverSources(
       console.log(`[SourceDiscovery] Runner-up sources for UPC ${upc}:\n${runnersUp.join('\n')}`);
     }
   } else {
-    console.log(`[SourceDiscovery] No matching source URLs found for UPC ${upc}. Search name used: "${consolidatedName || name}"`);
+    console.log(`[SourceDiscovery] No matching source URLs found for UPC ${upc}. Search name used: "${name}"`);
   }
 
   try {
@@ -532,74 +257,19 @@ export async function discoverSources(
       upc,
       domain: primaryDomain,
       satisfied_locally: 0,
-      paid_search_fallback: 1,
       candidate_url: topCandidates[0]?.url || null,
       confidence: topCandidates[0]?.confidence || null,
-      source_method: topCandidates[0]?.sourceMethod || 'serper_upc',
-      serper_calls_avoided: hasHighConfidenceSitemapMatch ? 1 : 0,
+      source_method: topCandidates[0]?.sourceMethod || null,
     });
   } catch { /* best effort */ }
 
   return {
     candidates: topCandidates,
-    consolidatedName: consolidatedName || null,
-    inferredBrand: inferredBrand || null
+    consolidatedName,
   };
 }
 
-// ─── Serper API ───────────────────────────────────────────────────────────────
-
-/**
- * Execute a Serper.dev search query.
- */
-async function searchSerper(apiKey: string, query: string, networkFetch?: NetworkFetch): Promise<SerperSearchResult[]> {
-  const cached = getCachedSerperResults(query);
-  if (cached) {
-    console.log(`[SourceDiscovery] Using cached Serper results for query: "${query}"`);
-    return cached;
-  }
-
-  // P0-1 (round 3): the real Serper HTTP rides the injected transport when
-  // provided (PI callers bind it to the policy gateway); the onboarding
-  // pipeline keeps the default global fetch.
-  const response = await (networkFetch ?? fetch)('https://google.serper.dev/search', {
-    method: 'POST',
-    headers: {
-      'X-API-KEY': apiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      q: query,
-      num: 10,
-    }),
-    signal: AbortSignal.timeout(15000),
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Serper API error ${response.status}: ${body}`);
-  }
-
-  const data = (await response.json()) as SerperResponse;
-  const results = data.organic ?? [];
-  insertSerperCache(query, results);
-  return results;
-}
-
-// ─── Scoring ──────────────────────────────────────────────────────────────────
-
-/**
- * Score a search result for relevance as a product page.
- * Returns 0.0–1.0.
- *
- * Scoring priorities:
- * - Known brand domains get the highest boost (official brand pages are preferred)
- * - Brand name in domain is a strong signal
- * - UPC in content is the next strongest signal
- * - Product URL path patterns are a moderate signal
- * - Marketplaces are lightly penalized (valid fallback but not preferred)
- * - Social media, review, and irrelevant sites are heavily penalized
- */
+// ─── Ranking-signal metadata ─────────────────────────────────────────────────
 
 /**
  * Rank-signal metadata for a candidate (epic #46 follow-up, phase 6):
@@ -619,165 +289,6 @@ function buildRankSignals(
       knownRetailerDomain,
     },
   };
-}
-
-// fallow-ignore-next-line unused-export
-export function scoreResult(
-  result: SerperSearchResult,
-  upc: string,
-  name: string,
-  brandHint: string | null | undefined,
-  domain: string,
-  knownBrandDomains: string[],
-): number {
-  let score = 0.2; // base score for being a search result
-
-  const url = result.link.toLowerCase();
-  const snippet = (result.snippet ?? '').toLowerCase();
-  const title = (result.title ?? '').toLowerCase();
-
-  // ── Positive signals ──────────────────────────────────────────────────
-
-  // Domain is a known brand site (strict exact-or-subdomain match —
-  // one domain matching policy shared with the auto-selection logic).
-  if (knownBrandDomains.some(d => isOfficialDomainMatch(domain, d))) {
-    score += 0.35;
-  }
-
-  // Brand name appears in domain (e.g., "nylabone" in "nylabone.com",
-  // or "woof" in "mywoof.com"). Check that any domain segment contains
-  // the brand slug as a substring. The loose check is acceptable here
-  // because SERP ranking is pre-verification — the page verifier and
-  // auto-selection policy later use strict isOfficialDomainMatch for
-  // the actual gating decision. False positives like "notmywoof.com"
-  // matching brand "woof" are scored low by other signals.
-  if (brandHint) {
-    const brandSlug = brandHint.toLowerCase().replace(/\s+/g, '');
-    const normalizedDomain = domain.toLowerCase().replace(/^www\./, '');
-    const segments = normalizedDomain.split('.');
-    if (segments.some(s => s.includes(brandSlug))) {
-      score += 0.15;
-    }
-  }
-
-  // Epic #46 follow-up (GPT plan phase 6): official-domain-aware ranking.
-  // A strong brand↔domain match earns an extra bias; known retailer or
-  // distributor domains are demoted (never discarded). Both signals are
-  // recorded so the candidate's rank is explainable.
-  const brandDomainMatch = scoreBrandDomainMatch(brandHint, domain);
-  if (brandDomainMatch >= 0.5) {
-    score += 0.1;
-  }
-  const retailerDomain = isKnownRetailerOrDistributorDomain(domain);
-  if (retailerDomain) {
-    score -= 0.2;
-  }
-
-  // UPC appears in snippet or title: strong relevance signal
-  if (snippet.includes(upc) || title.includes(upc)) {
-    score += 0.15;
-  }
-
-  // UPC appears in the URL itself
-  if (url.includes(upc)) {
-    score += 0.05;
-  }
-
-  // Determine product and listing/CMS patterns
-  const hasProductIndicator = /\/(products?|p|item|details?|dp|gp|buy)\//i.test(url);
-  const isListingPage = /\/(collections?|category|categories|product-category|brands?|tags?|search)\//i.test(url) && !hasProductIndicator;
-  const isCmsOrBlogPage = /\/(blogs?|articles?|pages)\//i.test(url) && !hasProductIndicator;
-
-  // URL contains product path patterns (e.g., /products/, /product/, /p/, /shop/)
-  if (hasProductIndicator || /\/shop\//i.test(url)) {
-    score += 0.1;
-  }
-
-  // Penalize listing/category pages to avoid selecting them over specific products
-  if (isListingPage) {
-    score -= 0.35;
-  }
-
-  // Penalize general blog or CMS landing pages
-  if (isCmsOrBlogPage) {
-    score -= 0.25;
-  }
-
-  // Penalize support/help/docs subdomains (not standard e-commerce shop pages)
-  const isSupportOrHelpDomain = /^(support|help|docs|faq|kb|service|info|blog|developer|api|mail|admin|portal|shop-help|connect|careers|about)\./i.test(domain);
-  if (isSupportOrHelpDomain) {
-    score -= 0.5;
-  }
-
-  // Advanced product name word matching (filtering out variant terms for base matching)
-  const VARIANT_KEYWORDS = new Set([
-    'small', 'medium', 'large', 'mini', 'giant', 'toy', 'sm', 'md', 'lg', 'xl', 'xxl', 'xs', 'size',
-    'red', 'blue', 'green', 'yellow', 'orange', 'pink', 'purple', 'black', 'white', 'grey', 'gray', 'brown', 'lavender', 'teal', 'gold', 'silver',
-    'pack', 'pk', 'count', 'ct', 'pcs', 'piece', 'pieces', 'bag', 'box', 'can', 'oz', 'lbs', 'lb'
-  ]);
-
-  const allNameWords = name.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-  const baseNameWords = allNameWords.filter(w => !VARIANT_KEYWORDS.has(w));
-  const titleWords = title.toLowerCase().split(/[^\w]+/).filter(w => w.length > 3);
-
-  const wordsToMatch = baseNameWords.length > 0 ? baseNameWords : allNameWords;
-
-  // 1. Base Matches (with bidirectional substring matching for concatenated words)
-  let baseMatches = 0;
-  for (const nw of wordsToMatch) {
-    if (title.includes(nw) || titleWords.some(tw => nw.includes(tw))) {
-      baseMatches++;
-    }
-  }
-
-  // 2. Variant Matches (tie-breaker)
-  let variantMatches = 0;
-  const variantWords = allNameWords.filter(w => VARIANT_KEYWORDS.has(w));
-  for (const vw of variantWords) {
-    if (title.includes(vw) || titleWords.some(tw => vw.includes(tw)) || url.includes(vw)) {
-      variantMatches++;
-    }
-  }
-
-  const baseOverlap = wordsToMatch.length > 0 ? baseMatches / wordsToMatch.length : 0;
-  const variantOverlap = variantWords.length > 0 ? variantMatches / variantWords.length : 0;
-
-  // Add overlap weights: 0.25 max for base matching + 0.05 max for variant tie-breakers
-  score += 0.25 * baseOverlap + 0.05 * variantOverlap;
-
-  // ADR 0017: the pet-word domain bonus was removed — retailer-sounding
-  // domains (farmtopaw.ca, woofmeownh.com) must never be rewarded for
-  // sounding pet-like. Retailer/distributor demotion is handled by
-  // isKnownRetailerOrDistributorDomain below (ranking bias, never discard).
-
-  // ── Negative signals ──────────────────────────────────────────────────
-
-  // Penalize large marketplaces (useful fallback but not preferred over brand/retailer pages)
-  if (/amazon\.com|ebay\.com|walmart\.com|target\.com|alibaba\.com|aliexpress\.com|temu\.com/.test(domain)) {
-    score -= 0.1;
-  }
-
-  // Penalize social media sites (Facebook/Instagram noise from test data)
-  if (/facebook\.com|instagram\.com|twitter\.com|x\.com|tiktok\.com|pinterest\.com|reddit\.com/.test(domain)) {
-    score -= 0.25;
-  }
-
-  // Penalize review/comparison/coupon sites
-  if (/review|compare|versus|bestbuy\.com|pricewatch|coupon|deal/.test(domain)) {
-    score -= 0.1;
-  }
-
-  // Penalize non-product content indicators in title
-  if (/clearance|haul|sale|coupon|unboxing|review/i.test(title) && !/product|shop|buy/i.test(title)) {
-    score -= 0.1;
-  }
-
-  // Heavily penalize irrelevant domains (random e-commerce noise for some UPCs)
-  if (/newegg\.com|zoro\.com|instacart\.com|issuu\.com|mercadolibre/.test(domain)) {
-    score -= 0.3;
-  }
-
-  return Math.max(0, score);
 }
 
 // ─── Sitemap discovery helpers ────────────────────────────────────────────────
@@ -806,10 +317,7 @@ interface SitemapFetched {
  *
  * Never throws — any error (cache miss without a network, profile
  * lookup failure, fetch error, cache write failure) is logged as a
- * warning and surfaces as a `null` return value. This is what makes
- * the parallel `discoverSources` integration safe: the returned
- * promise always resolves, so `Promise.allSettled` is only used
- * defensively at the call site.
+ * warning and surfaces as a `null` return value.
  */
 async function fetchSitemapForDiscovery(
   domain: string,
@@ -859,63 +367,12 @@ async function fetchSitemapForDiscovery(
 }
 
 /**
- * High-level sitemap discovery pass: fetch the domain's sitemap and
- * run the three-pass matcher against the item's name + UPC.
- *
- * Used as the integration point in `discoverSources`; returns
- * `InsertSourceData[]` shaped the same way as the Serper candidates
- * so downstream merging is uniform. Returns `[]` on any error so
- * sitemap failures never break the Serper-driven pipeline.
- *
- * Note: this function is intentionally defined as a public entry
- * point for callers (e.g. tests, future bulk-sitemap tooling) that
- * want the full fetch+match in one call. The inline integration in
- * `discoverSources` deliberately uses the lower-level
- * `fetchSitemapForDiscovery` + `matchSitemapUrls` helpers so the
- * network fetch can run in parallel with Pass 1 and the matching can
- * be deferred until the consolidated name is available.
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-async function discoverFromSitemap(
-  domain: string,
-  itemName: string,
-  consolidatedName: string | null,
-  upc: string,
-): Promise<InsertSourceData[]> {
-  const prepared = await fetchSitemapForDiscovery(domain);
-  if (!prepared || prepared.urls.length === 0) {
-    return [];
-  }
-
-  let matches: SitemapMatchResult[];
-  try {
-    matches = await matchSitemapUrls(
-      prepared.urls,
-      itemName,
-      consolidatedName,
-      upc,
-      domain,
-      prepared.productUrlPattern,
-    );
-  } catch (err) {
-    console.warn(
-      `[SourceDiscovery] Sitemap matching failed for ${domain}:`,
-      err,
-    );
-    return [];
-  }
-
-  return matches.map(convertSitemapMatchToCandidate);
-}
-
-/**
  * Convert a single `SitemapMatchResult` from the matcher into the
- * generic `InsertSourceData` shape used by the Serper pipeline. The
+ * generic `InsertSourceData` shape used by the pipeline. The
  * snippet is a short, human-readable label that records *how* the
  * URL was selected so the discovery drawer can show why a sitemap
- * URL is being surfaced alongside the Serper hits. Title is null
- * because the sitemap only carries URLs — the extraction stage is
- * what produces a title.
+ * URL is being surfaced. Title is null because the sitemap only
+ * carries URLs — the extraction stage is what produces a title.
  */
 function convertSitemapMatchToCandidate(
   match: SitemapMatchResult,
@@ -944,185 +401,19 @@ function sitemapSnippetFor(matchType: string): string {
   }
 }
 
-/**
- * Merge sitemap candidates with the Serper pool, applying the
- * cross-source boost/penalty rules:
- *
- *   - Sitemap URL already in Serper pool: keep the sitemap candidate
- *     with confidence +0.15 (an independent signal that this is the
- *     canonical product URL).
- *   - Sitemap URL not in Serper pool: add as a new candidate.
- *   - Serper candidate on the official brand domain whose URL is not
- *     in the sitemap set: confidence -0.2. The sitemap is the most
- *     complete inventory of a brand's product URLs, so a brand-domain
- *     hit that the sitemap doesn't know about is often a stale,
- *     discontinued, or off-domain listing.
- *
- * Returns a single list with no duplicate URLs. The merge preserves
- * the original order of the sitemap candidates so the LLM-pick
- * (always first in the matcher's output) is surfaced in slot 0.
- */
-function mergeSitemapAndSerperCandidates(
-  serperCandidates: InsertSourceData[],
-  sitemapCandidates: InsertSourceData[],
-  primaryBrandDomain: string | null,
-): InsertSourceData[] {
-  if (sitemapCandidates.length === 0) {
-    return serperCandidates;
-  }
-
-  const sitemapUrlSet = new Set<string>(
-    sitemapCandidates.map(c => normalizeUrlForMerge(c.url)),
-  );
-
-  const result: InsertSourceData[] = [];
-  const emitted = new Set<string>();
-
-  for (const sc of sitemapCandidates) {
-    const norm = normalizeUrlForMerge(sc.url);
-    if (emitted.has(norm)) continue;
-    const inSerperPool = serperCandidates.some(
-      c => normalizeUrlForMerge(c.url) === norm,
-    );
-    result.push(
-      inSerperPool
-        ? { ...sc, confidence: clamp01(sc.confidence + 0.15) }
-        : sc,
-    );
-    emitted.add(norm);
-  }
-
-  for (const sc of serperCandidates) {
-    const norm = normalizeUrlForMerge(sc.url);
-    if (emitted.has(norm)) continue;
-    const penalized =
-      primaryBrandDomain !== null &&
-      (sc.domain ?? '').toLowerCase() === primaryBrandDomain.toLowerCase() &&
-      !sitemapUrlSet.has(norm);
-    result.push(
-      penalized
-        ? { ...sc, confidence: clamp01(sc.confidence - 0.2) }
-        : sc,
-    );
-    emitted.add(norm);
-  }
-
-  return result;
-}
-
-/**
- * Normalize a URL for set membership during the sitemap/Serper merge.
- * Comparison is case-insensitive and tolerant of trailing slashes so
- * `https://shop.com/p/foo` and `https://shop.com/p/foo/` count as the
- * same URL. The scheme/host/path-suffix structure is preserved.
- */
-function normalizeUrlForMerge(url: string): string {
-  return url.toLowerCase().replace(/\/+$/, '');
-}
-
-function clamp01(value: number): number {
-  if (Number.isNaN(value)) return 0;
-  if (value < 0) return 0;
-  if (value > 1) return 1;
-  return value;
-}
-
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 /**
- * Pick the top N candidates by confidence, but ensure at least one
- * candidate from each *priority group* survives the slice when any
- * exist. The groups are:
- *
- *   - `serper_name`           — the consolidated-name Google search.
- *   - `sitemap_name` / `sitemap_upc` — the sitemap matcher results.
- *
- * Without this guarantee, a 10-strong Pass 1 set of retailer pages
- * can crowd out the one or two official product pages returned by
- * the name search or the sitemap, which means the operator never
- * sees that source's output in the discovery drawer.
- *
- * When a swap is required, the lowest-confidence *selected* candidate
- * from outside the protected set is replaced with the highest-
- * confidence *unselected* candidate from the priority group. The
- * protected set is the union of all priority methods, so a swap in
- * one group cannot undo a swap in another group.
+ * Pick the top N candidates by confidence (plain descending sort).
  */
-function selectTopCandidates<T extends { sourceMethod?: string; confidence: number }>(
+function selectTopCandidates<T extends { confidence: number }>(
   candidates: T[],
   limit: number,
 ): T[] {
   if (candidates.length <= limit) return [...candidates];
-
-  // Indexes grouped by method to avoid mutating the input.
-  const byMethod = new Map<string, number[]>();
-  candidates.forEach((c, i) => {
-    const key = c.sourceMethod ?? 'unknown';
-    const arr = byMethod.get(key) ?? [];
-    arr.push(i);
-    byMethod.set(key, arr);
-  });
-
-  // Default behavior: take the top `limit` by confidence.
-  let top = candidates
-    .map((c, i) => ({ c, i }))
-    .sort((a, b) => b.c.confidence - a.c.confidence)
-    .slice(0, limit)
-    .map(x => x.i);
-
-  // Priority groups: at least one candidate from each group must
-  // survive when any exist. Methods in PROTECTED_METHODS cannot be
-  // evicted by a swap (so swaps in different groups don't fight).
-  const PRIORITY_GROUPS: ReadonlyArray<ReadonlyArray<string>> = [
-    ['serper_name'],
-    ['sitemap_name', 'sitemap_upc'],
-  ];
-  const PROTECTED_METHODS = new Set<string>(PRIORITY_GROUPS.flat());
-
-  for (const group of PRIORITY_GROUPS) {
-    const selectedSet = new Set(top);
-    const isInGroup = (m: number): boolean =>
-      group.includes(candidates[m]?.sourceMethod ?? '');
-    const selectedGroupCount = top.filter(isInGroup).length;
-    const anyGroupAvailable = group.some(method =>
-      (byMethod.get(method) ?? []).some(m => !selectedSet.has(m)),
-    );
-    if (selectedGroupCount > 0 || !anyGroupAvailable) {
-      // The slice already includes a candidate from this group, or
-      // no candidate exists to rescue.
-      continue;
-    }
-
-    // Find the highest-confidence unselected candidate from this group.
-    const unselectedGroupIndexes = group.flatMap(method =>
-      (byMethod.get(method) ?? []).filter(m => !selectedSet.has(m)),
-    );
-    const bestGroup = unselectedGroupIndexes
-      .map(m => ({ m, c: candidates[m].confidence }))
-      .sort((a, b) => b.c - a.c)[0]?.m;
-    if (bestGroup === undefined) {
-      continue;
-    }
-
-    // Evict the lowest-confidence selected *non-protected* candidate.
-    const evictableIndexes = top.filter(
-      m => !PROTECTED_METHODS.has(candidates[m]?.sourceMethod ?? ''),
-    );
-    const victim = evictableIndexes
-      .map(m => ({ m, c: candidates[m].confidence }))
-      .sort((a, b) => a.c - b.c)[0]?.m;
-    if (victim === undefined) {
-      continue;
-    }
-
-    top = top.slice();
-    const victimPos = top.indexOf(victim);
-    top[victimPos] = bestGroup;
-    // Re-sort by confidence desc to keep the array ordered.
-    top.sort((a, b) => candidates[b].confidence - candidates[a].confidence);
-  }
-
-  return top.map(i => candidates[i]);
+  return [...candidates]
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, limit);
 }
 
 /**

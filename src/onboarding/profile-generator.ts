@@ -1234,8 +1234,7 @@ export interface ProfileGenerationTriggerInput {
  *     the validated title).
  *  5. There is a concrete improvement target: a missing description.
  *     Price-only and brand-only missing cases are explicitly excluded
- *     — manufacturer pages frequently omit prices and that is
- *     handled by `supplementPrice` in the integration.
+ *     — manufacturer pages frequently omit prices.
  *  6. The extraction confidence is above `MIN_TRIGGER_CONFIDENCE`.
  */
 // fallow-ignore-next-line unused-export

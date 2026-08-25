@@ -145,15 +145,6 @@ export function SitemapHealthView({ onEditProfile }: SitemapHealthViewProps = {}
               {(data.totals.overallLocalHitRate * 100).toFixed(0)}%
             </div>
           </div>
-
-          <div style={{ background: '#ffffff', padding: '14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase' }}>
-              Serper Calls Avoided
-            </div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#16a34a', marginTop: '4px' }}>
-              {data.totals.totalSerperCallsAvoided}
-            </div>
-          </div>
         </div>
       )}
 
@@ -381,14 +372,9 @@ export function SitemapHealthView({ onEditProfile }: SitemapHealthViewProps = {}
 
                     <td style={{ padding: '12px 16px' }}>
                       {dom.totalLookups > 0 ? (
-                        <div>
-                          <span style={{ fontWeight: 600, color: '#0f172a' }}>
-                            {(dom.localHitRate * 100).toFixed(0)}%
-                          </span>
-                          <div style={{ fontSize: '0.75rem', color: '#16a34a' }}>
-                            {dom.serperCallsAvoided} saved
-                          </div>
-                        </div>
+                        <span style={{ fontWeight: 600, color: '#0f172a' }}>
+                          {(dom.localHitRate * 100).toFixed(0)}%
+                        </span>
                       ) : (
                         <span style={{ color: '#94a3b8' }}>—</span>
                       )}

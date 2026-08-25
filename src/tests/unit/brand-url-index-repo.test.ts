@@ -295,11 +295,9 @@ describe('Brand URL Index & Sitemap Telemetry Repositories', () => {
         upc: '012345678901',
         domain: 'brand1.com',
         satisfied_locally: 1,
-        paid_search_fallback: 0,
         candidate_url: 'https://brand1.com/product/1',
         confidence: 0.95,
         source_method: 'local_upc',
-        serper_calls_avoided: 2,
       });
 
       // Event 2: Satisfied locally
@@ -308,32 +306,26 @@ describe('Brand URL Index & Sitemap Telemetry Repositories', () => {
         upc: '012345678902',
         domain: 'brand1.com',
         satisfied_locally: 1,
-        paid_search_fallback: 0,
         candidate_url: 'https://brand1.com/product/2',
         confidence: 0.90,
         source_method: 'local_token_match',
-        serper_calls_avoided: 2,
       });
 
-      // Event 3: Paid search fallback
+      // Event 3: Not satisfied locally (sitemap-only candidates)
       recordDiscoveryEvent({
         item_id: 'item_3',
         upc: '012345678903',
         domain: 'brand1.com',
         satisfied_locally: 0,
-        paid_search_fallback: 1,
         candidate_url: 'https://brand1.com/product/3',
         confidence: 0.80,
-        source_method: 'serper_upc',
-        serper_calls_avoided: 0,
+        source_method: 'sitemap_token_overlap',
       });
 
       const economics = getDiscoveryEconomics('brand1.com', 30);
       expect(economics.totalLookups).toBe(3);
       expect(economics.localHitCount).toBe(2);
-      expect(economics.paidSearchFallbackCount).toBe(1);
       expect(economics.localHitRate).toBeCloseTo(2 / 3, 2);
-      expect(economics.serperCallsAvoided).toBe(4);
     });
   });
 

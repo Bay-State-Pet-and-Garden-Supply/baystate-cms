@@ -1,5 +1,4 @@
 import { describe, test, expect } from 'vitest';
-import { scoreBrandInference } from '../../ai/evals/brand-scorer';
 import { scoreTitleConsolidation } from '../../ai/evals/title-scorer';
 import { scoreProfileGeneration } from '../../ai/evals/profile-scorer';
 import { scoreVlmOcr } from '../../ai/evals/vlm-scorer';
@@ -8,27 +7,6 @@ import { computeEvalRunResult } from '../../benchmarks/benchmark-runner';
 import { compareModelRuns, formatComparisonMarkdown } from '../../benchmarks/model-comparison';
 
 describe('Benchmark Lifecycle & Task Evaluators (PR 4)', () => {
-  describe('Brand Scorer', () => {
-    test('computes brand inference accuracy and false positive rate', () => {
-      const cases = [
-        { id: '1', searchTitle: 'Acme Dog Toy', expectedBrand: 'Acme' },
-        { id: '2', searchTitle: 'Purina Chow 20lb', expectedBrand: 'Purina' },
-        { id: '3', searchTitle: 'Generic Dog Leash', expectedBrand: '' },
-      ];
-
-      const predictions = [
-        { caseId: '1', predictedBrand: 'Acme', validJson: true },
-        { caseId: '2', predictedBrand: 'WrongBrand', validJson: true },
-        { caseId: '3', predictedBrand: 'InventedBrand', validJson: true },
-      ];
-
-      const res = scoreBrandInference(cases, predictions);
-      expect(res.exactMatches).toBe(1);
-      expect(res.exactMatchAccuracy).toBe(0.3333);
-      expect(res.falsePositives).toBe(1);
-    });
-  });
-
   describe('Title Scorer', () => {
     test('computes title consolidation token preservation rate', () => {
       const cases = [

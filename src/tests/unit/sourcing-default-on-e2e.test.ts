@@ -344,21 +344,21 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
 
     const attempts = getCurrentGenerationAttempts(item.id);
     expect(attempts.length).toBeGreaterThan(0);
-    // Zero authoritative writes.
+    // Zero authoritative writes. Discovery settles completed offline (no
+    // brand domain indexed → needs_input_no_candidates).
     const after = findItemById(item.id);
     expect(after?.sourcingDecision).toBeNull();
     expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expect(after?.stageStatus).toBe('completed');
     expect(getAcceptedAttemptIdsForItem(item.id)).toEqual([]);
     expect(getDb().query('SELECT COUNT(*) as c FROM onboarding_evidence_conflicts WHERE item_id = ?').get(item.id)).toMatchObject({ c: 0 });
     expect(extractionCount(item.id)).toBe(0);
 
     // Repeat polling is generation-idempotent: a second observation cycle
     // reuses the existing generation (no new rows) and adds no attempts.
-    // NOTE: discovery in this offline env has no serper key, so each poll's
-    // discovery leg errors and escalates its retry counter — the item may
-    // eventually land discovery/failed. Observe isolation is asserted on the
-    // FIRST poll; idempotency is asserted by row counts across both polls.
+    // NOTE: discovery runs entirely against local brand-domain indexes, so
+    // offline it completes deterministically (needs_input_no_candidates) and
+    // the item settles at discovery/completed after the first poll.
     const attemptsBeforeRepeat = getCurrentGenerationAttempts(item.id).length;
     await settle(fixtureWorker(workspaceId, tempDir));
     expect(attemptsBeforeRepeat).toBe(getCurrentGenerationAttempts(item.id).length);

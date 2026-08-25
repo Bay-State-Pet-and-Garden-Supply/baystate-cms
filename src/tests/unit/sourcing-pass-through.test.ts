@@ -185,11 +185,12 @@ describe('Sourcing worker pass-through (ADR 0014 flag-gated leg)', () => {
     const worker = new OnboardingWorker(workspaceId, tempDir);
     await worker.poll();
 
-    // Discovery leg claimed the item (retry bookkeeping incremented even
-    // though the no-Serper-key discovery attempt fails back to pending).
+    // Discovery leg claimed the item and completed deterministically offline:
+    // the brand has no mapped official domain, so discovery parks it at
+    // needs_input_setup (stage stays discovery, status completed).
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
-    expect(after?.retryCount).toBeGreaterThan(0);
+    expect(after?.stageStatus).toBe('completed');
   });
 
   test('emits EXACTLY ONE terminal event per outcome (completed, never a duplicate failed)', async () => {

@@ -220,7 +220,7 @@ describe('SQLite Migration', () => {
       'field_registry', 'change_sets', 'change_set_items', 'validation_results',
       'sync_jobs', 'sync_job_events', 'remote_drift', 'audit_log',
       'product_types', 'product_type_fields', 'page_index', 'product_pages',
-      'extractor_profiles', 'domain_status', 'serper_cache', 'sitemap_cache',
+      'extractor_profiles', 'domain_status', 'sitemap_cache',
       'profile_generations', 'profile_generation_revisions',
       'profile_generation_validation_results', 'profile_generation_field_decisions',
       'llm_task_configs',
@@ -232,6 +232,12 @@ describe('SQLite Migration', () => {
       ).get(table);
       expect(row).toBeTruthy();
     }
+
+    // SERP retirement: the legacy serper_cache table must NOT be recreated.
+    const dropped = db3.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name = 'serper_cache'",
+    ).get();
+    expect(dropped).toBeFalsy();
   });
 
   it('should create all classification tables', () => {

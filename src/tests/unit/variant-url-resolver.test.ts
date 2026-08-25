@@ -168,7 +168,7 @@ describe('resolveVariantsForCandidates integration', () => {
         title: 'HonestChew Antler',
         domain: 'honestchew.com',
         confidence: 0.9,
-        sourceMethod: 'serper_name',
+        sourceMethod: 'sitemap_token_overlap',
       },
     ];
 
@@ -201,7 +201,7 @@ describe('resolveVariantsForCandidates integration', () => {
         title: 'HonestChew Antler',
         domain: 'honestchew.com',
         confidence: 0.9,
-        sourceMethod: 'serper_name',
+        sourceMethod: 'sitemap_token_overlap',
       },
     ];
 

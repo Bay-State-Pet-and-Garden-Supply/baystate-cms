@@ -26,19 +26,15 @@ export interface SitemapDiscoveryEvent {
   domain: string | null;
   created_at: string;
   satisfied_locally: number;
-  paid_search_fallback: number;
   candidate_url: string | null;
   confidence: number | null;
   source_method: string | null;
-  serper_calls_avoided: number;
 }
 
 export interface DiscoveryEconomics {
   totalLookups: number;
   localHitCount: number;
-  paidSearchFallbackCount: number;
   localHitRate: number;
-  serperCallsAvoided: number;
 }
 
 /**
@@ -131,8 +127,6 @@ export type SitemapDiscoveryEventInput = Partial<
   Pick<SitemapDiscoveryEvent, 'item_id' | 'upc' | 'domain' | 'candidate_url' | 'confidence' | 'source_method' | 'created_at'>
 > & {
   satisfied_locally: number;
-  paid_search_fallback: number;
-  serper_calls_avoided?: number;
 };
 
 /**
@@ -149,8 +143,8 @@ export function recordDiscoveryEvent(
   db.prepare(`
     INSERT INTO sitemap_discovery_events (
       id, item_id, upc, domain, created_at, satisfied_locally,
-      paid_search_fallback, candidate_url, confidence, source_method, serper_calls_avoided
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      candidate_url, confidence, source_method
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     event.item_id || null,
@@ -158,11 +152,9 @@ export function recordDiscoveryEvent(
     normDomain,
     nowIso,
     event.satisfied_locally ? 1 : 0,
-    event.paid_search_fallback ? 1 : 0,
     event.candidate_url || null,
     event.confidence ?? null,
     event.source_method || null,
-    event.serper_calls_avoided || 0,
   );
 
   return {
@@ -172,11 +164,9 @@ export function recordDiscoveryEvent(
     domain: normDomain,
     created_at: nowIso,
     satisfied_locally: event.satisfied_locally ? 1 : 0,
-    paid_search_fallback: event.paid_search_fallback ? 1 : 0,
     candidate_url: event.candidate_url || null,
     confidence: event.confidence ?? null,
     source_method: event.source_method || null,
-    serper_calls_avoided: event.serper_calls_avoided || 0,
   };
 }
 
@@ -193,9 +183,7 @@ export function getDiscoveryEconomics(
   let query = `
     SELECT
       COUNT(*) as totalLookups,
-      SUM(CASE WHEN satisfied_locally = 1 THEN 1 ELSE 0 END) as localHitCount,
-      SUM(CASE WHEN paid_search_fallback = 1 THEN 1 ELSE 0 END) as paidSearchFallbackCount,
-      SUM(serper_calls_avoided) as serperCallsAvoided
+      SUM(CASE WHEN satisfied_locally = 1 THEN 1 ELSE 0 END) as localHitCount
     FROM sitemap_discovery_events
     WHERE created_at >= ?
   `;
@@ -209,22 +197,16 @@ export function getDiscoveryEconomics(
   const row = db.query(query).get(...params) as {
     totalLookups: number;
     localHitCount: number | null;
-    paidSearchFallbackCount: number | null;
-    serperCallsAvoided: number | null;
   };
 
   const totalLookups = row?.totalLookups ?? 0;
   const localHitCount = row?.localHitCount ?? 0;
-  const paidSearchFallbackCount = row?.paidSearchFallbackCount ?? 0;
-  const serperCallsAvoided = row?.serperCallsAvoided ?? 0;
   const localHitRate = totalLookups > 0 ? localHitCount / totalLookups : 0;
 
   return {
     totalLookups,
     localHitCount,
-    paidSearchFallbackCount,
     localHitRate,
-    serperCallsAvoided,
   };
 }
 
@@ -242,9 +224,7 @@ export function getAllDomainDiscoveryEconomics(
       SELECT
         domain,
         COUNT(*) as totalLookups,
-        SUM(CASE WHEN satisfied_locally = 1 THEN 1 ELSE 0 END) as localHitCount,
-        SUM(CASE WHEN paid_search_fallback = 1 THEN 1 ELSE 0 END) as paidSearchFallbackCount,
-        SUM(serper_calls_avoided) as serperCallsAvoided
+        SUM(CASE WHEN satisfied_locally = 1 THEN 1 ELSE 0 END) as localHitCount
       FROM sitemap_discovery_events
       WHERE created_at >= ? AND domain IS NOT NULL
       GROUP BY domain
@@ -253,24 +233,18 @@ export function getAllDomainDiscoveryEconomics(
     domain: string;
     totalLookups: number;
     localHitCount: number | null;
-    paidSearchFallbackCount: number | null;
-    serperCallsAvoided: number | null;
   }>;
 
   const result: Record<string, DiscoveryEconomics> = {};
   for (const r of rows) {
     const totalLookups = r.totalLookups;
     const localHitCount = r.localHitCount ?? 0;
-    const paidSearchFallbackCount = r.paidSearchFallbackCount ?? 0;
-    const serperCallsAvoided = r.serperCallsAvoided ?? 0;
     const localHitRate = totalLookups > 0 ? localHitCount / totalLookups : 0;
 
     result[r.domain] = {
       totalLookups,
       localHitCount,
-      paidSearchFallbackCount,
       localHitRate,
-      serperCallsAvoided,
     };
   }
   return result;

@@ -39,9 +39,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   const [_loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Discovery-owned API key state (AI provider configuration lives in Store Settings).
-  const [serperKey, setSerperKey] = useState('');
-
   // Manager-selected curation classification targets.
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [curationTargetsDraft, setCurationTargetsDraft] = useState<CurationTargetConfig[]>([]);
@@ -110,15 +107,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
     setLoading(true);
     setError('');
     try {
-      const keysRes = await getApiKeys();
-
-      setKeys(keysRes.keys);
-
       void loadCurationTargets();
-
-      // Only discovery-owned credentials are edited in onboarding settings.
-      const serper = keysRes.keys.find(k => k.service === 'serper');
-      if (serper) setSerperKey(serper.apiKey);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -136,32 +125,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   }, []);
 
   // ─── Handlers ──────────────────────────────────────────────────────────
-
-  const handleSaveApiKey = async (service: string, keyVal: string, base?: string, model?: string) => {
-    if (!keyVal || keyVal.startsWith('••••')) {
-      alert('Please enter a valid API key (the current value appears to be masked).');
-      return;
-    }
-    setError('');
-    try {
-      await updateApiKey(service, keyVal, base || null, model || null);
-      fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleDeleteApiKey = async (service: string) => {
-    if (!confirm(`Are you sure you want to delete API settings for ${service}?`)) return;
-    setError('');
-    try {
-      await deleteApiKey(service);
-      alert(`API Settings for ${service} cleared.`);
-      fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
 
   const [syncingPages, setSyncingPages] = useState(false);
 
@@ -188,8 +151,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   };
 
   // ─── Shared styles ──────────────────────────────────────────────────────
-
-  const savedKey = (service: string) => keys.find(k => k.service === service);
 
   const styles: Record<string, React.CSSProperties> = {
     container: { padding: 24 },
@@ -273,33 +234,10 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       {/* ─── SOURCE DISCOVERY ─── */}
       <div style={styles.section}>
         <h2 style={styles.sectionTitle}>Source Discovery</h2>
-        <div style={styles.formGroup}>
-          <label style={styles.label}>Serper.dev API Key (Google Search API)</label>
-          <input
-            style={styles.input}
-            type="password"
-            placeholder="Enter Serper.dev API key"
-            value={serperKey.startsWith('••••') ? '' : serperKey}
-            onChange={(e) => setSerperKey(e.target.value)}
-          />
-          {savedKey('serper') && (
-            <p style={styles.savedHint}>✓ API key configured: {savedKey('serper')?.apiKey}</p>
-          )}
-        </div>
-        <div style={styles.buttonRow}>
-          <button
-            style={styles.primaryBtn}
-            onClick={() => handleSaveApiKey('serper', serperKey)}
-          >
-            Save Serper Key
-          </button>
-          <button
-            style={styles.deleteBtn}
-            onClick={() => handleDeleteApiKey('serper')}
-          >
-            Delete Key
-          </button>
-        </div>
+        <p style={styles.savedHint}>
+          Discovery runs entirely against locally indexed official brand domains — no external search API keys are required.
+          Configure brand → domain mappings in Domain Configuration and sync their sitemaps from Sitemap Health.
+        </p>
       </div>
       </div>
 

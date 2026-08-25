@@ -34,7 +34,6 @@ export interface DomainSitemapHealthSummary {
   lastRefreshRemovedCount: number;
   localHitRate: number;
   totalLookups: number;
-  serperCallsAvoided: number;
 }
 
 /**
@@ -105,10 +104,10 @@ export function evaluateDomainSitemapHealth(
     }
   }
 
-  // Check discovery fallback rate
+  // Check low local hit rate (discovery rarely resolved from the index)
   if (economics.totalLookups >= 5 && counts.productCount > 30) {
     if (economics.localHitRate < 0.3) {
-      attentionReasons.push('high_paid_search_fallback');
+      attentionReasons.push('low_local_hit_rate');
     }
   }
 
@@ -132,7 +131,6 @@ export function evaluateDomainSitemapHealth(
     lastRefreshRemovedCount: latestRefresh?.inactivated_count || 0,
     localHitRate: Math.round(economics.localHitRate * 100) / 100,
     totalLookups: economics.totalLookups,
-    serperCallsAvoided: economics.serperCallsAvoided,
   };
 }
 

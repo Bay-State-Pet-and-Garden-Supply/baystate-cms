@@ -50,7 +50,6 @@ describe('brand hub view-model — profile presence/completeness', () => {
     lastRefreshRemovedCount: 0,
     localHitRate: 0.8,
     totalLookups: 10,
-    serperCallsAvoided: 20,
   } as DomainSitemapHealthSummary;
 
   function profile(overrides: Partial<ExtractorProfile> = {}): ExtractorProfile {

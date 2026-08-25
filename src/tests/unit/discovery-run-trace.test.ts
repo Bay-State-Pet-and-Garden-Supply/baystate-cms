@@ -41,7 +41,6 @@ import type { VerificationResult } from '../../onboarding/page-verifier';
 let discoverImpl: ((upc: string, name: string, brandHint?: string | null) => Promise<{
   candidates: InsertSourceData[];
   consolidatedName: string | null;
-  inferredBrand?: { brand: string } | null;
   noDomainMapped?: boolean;
 }>) | null = null;
 let verifyImpl: ((candidates: InsertSourceData[]) => Promise<VerificationResult[]>) | null = null;
@@ -51,7 +50,7 @@ const CANDIDATE: InsertSourceData = {
   title: 'Brand Product',
   confidence: 0.95,
   domain: 'brand.example.com',
-  sourceMethod: 'serper_upc',
+  sourceMethod: 'sitemap_upc',
 };
 
 const STRONG_SIGNALS: VerificationResult['signals'] = {
@@ -154,7 +153,6 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
     discoverImpl = async () => ({
       candidates: [CANDIDATE],
       consolidatedName: 'Brand Product',
-      inferredBrand: null,
       noDomainMapped: false,
     });
     verifyImpl = async (candidates: InsertSourceData[]) => candidates.map(strongVerification);
@@ -189,7 +187,6 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
     discoverImpl = async () => ({
       candidates: [CANDIDATE],
       consolidatedName: 'Retailer Item',
-      inferredBrand: null,
       noDomainMapped: false,
     });
     verifyImpl = async (candidates: InsertSourceData[]) => candidates.map(weakVerification);
@@ -213,7 +210,6 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
     discoverImpl = async () => ({
       candidates: [CANDIDATE],
       consolidatedName: null,
-      inferredBrand: null,
       noDomainMapped: true,
     });
 
@@ -229,7 +225,7 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
   test('discovery failure records a failed run with the error', async () => {
     const [item] = insertItems(batchId, [{ upc: 'UPC-4', name: 'Broken Item', rowNumber: 1, stage: 'discovery' }], 'discovery', 1);
     discoverImpl = async () => {
-      throw new Error('Serper.dev API key not configured');
+      throw new Error('simulated discovery failure');
     };
 
     await runWorkerOnce();
@@ -238,7 +234,7 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
     expect(run).not.toBeNull();
     expect(run!.status).toBe('failed');
     expect(run!.outcome).toBe('failed');
-    expect(run!.outcome_message).toContain('Serper.dev API key');
+    expect(run!.outcome_message).toContain('simulated discovery failure');
 
     // Retry path still active for the item (first failure → back to pending).
     const after = findItemById(item.id)!;
@@ -269,7 +265,6 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
     discoverImpl = async () => ({
       candidates: [CANDIDATE],
       consolidatedName: 'Retry Item',
-      inferredBrand: null,
       noDomainMapped: false,
     });
     verifyImpl = async (candidates: InsertSourceData[]) => candidates.map(strongVerification);
@@ -304,7 +299,6 @@ describe('discovery run traceability (epic #46 follow-up)', () => {
     discoverImpl = async () => ({
       candidates: [CANDIDATE],
       consolidatedName: null,
-      inferredBrand: null,
       noDomainMapped: false,
     });
     verifyImpl = async (candidates: InsertSourceData[]) => candidates.map(strongVerification);

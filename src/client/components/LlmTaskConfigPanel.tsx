@@ -35,7 +35,6 @@ const REQUIRED_TASKS: ReadonlyArray<LlmTask> = ['profile_generation', 'profile_r
 
 const TASK_LABELS: Record<LlmTask, string> = {
   product_name_consolidation: 'Product name consolidation',
-  brand_inference: 'Brand inference (from search results)',
   profile_generation: 'Profile generation (AI selector proposal)',
   profile_revision: 'Profile revision (AI selector revision)',
   product_curation: 'Product curation',
@@ -49,8 +48,7 @@ const TASK_LABELS: Record<LlmTask, string> = {
 };
 
 const TASK_HINTS: Record<LlmTask, string> = {
-  product_name_consolidation: 'Used by `consolidateProductName()` to canonicalize a raw catalog name. May fall back to the LCS algorithm when not configured.',
-  brand_inference: 'Used by the brand inferrer to determine the product brand from UPC search results.',
+  product_name_consolidation: 'Used by the sitemap matcher to select the correct indexed product page. May fall back to token overlap when not configured.',
   profile_generation: 'Generates a fresh selector profile from the minimized DOM. Fails closed when not configured.',
   profile_revision: 'Revises a selector profile from structured store-manager feedback. Fails closed when not configured.',
   product_curation: 'Curates product metadata (titles, packaging alignment). Governed by the workspace classification model policy (Settings → Classification); deterministic fallback when disabled.',
@@ -68,7 +66,6 @@ const TASK_GROUPS: Array<{ label: string; tasks: LlmTask[] }> = [
     label: 'Onboarding & Curation',
     tasks: [
       'product_name_consolidation',
-      'brand_inference',
       'product_curation',
       'category_page_assignment',
       'category_classification',
@@ -226,7 +223,6 @@ interface LlmTaskConfigRowProps {
 import { getModelCapabilities, getModelProfile } from '../../ai/model-registry';
 
 const RECOMMENDED_MODELS: Record<string, { provider: LlmProvider; model: string; label: string }> = {
-  brand_inference: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
   product_name_consolidation: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
   product_field_refactor: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
   store_manager_assistant: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },

@@ -300,8 +300,6 @@ export function defaultProtectedOperationForTask(task: LlmTask): ProtectedOperat
       return 'attribute_ranking';
     case 'category_page_assignment':
       return 'page_assignment';
-    case 'brand_inference':
-      return 'brand_inference';
     case 'product_name_consolidation':
       return 'discovery_name_consolidation';
     // Policy-governed task names: both are governed by the workspace

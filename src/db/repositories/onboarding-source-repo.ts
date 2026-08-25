@@ -223,7 +223,7 @@ export function insertSources(itemId: string, sources: InsertSourceData[]): Onbo
         source.snippet ?? null,
         source.domain ?? null,
         source.confidence,
-        source.sourceMethod ?? 'serper',
+        source.sourceMethod ?? 'unknown',
         source.metadataJson ?? null,
         now,
       );
@@ -236,7 +236,7 @@ export function insertSources(itemId: string, sources: InsertSourceData[]): Onbo
         domain: source.domain ?? null,
         confidence: source.confidence,
         isSelected: false,
-        sourceMethod: source.sourceMethod ?? 'serper',
+        sourceMethod: source.sourceMethod ?? 'unknown',
         metadataJson: source.metadataJson ?? null,
         reviewStatus: 'pending',
         createdAt: now,

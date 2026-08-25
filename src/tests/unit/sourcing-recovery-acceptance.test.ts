@@ -95,20 +95,18 @@ function fixtureWorker(workspaceId: string, workspacePath: string): OnboardingWo
 /**
  * The worker fires item promises without awaiting them, and the SAME poll
  * legitimately continues an item that just advanced (sourcing → discovery):
- * the discovery stage claims it and runs the discovery leg. In these tests
- * no Serper key exists, so the discovery leg fails deterministically and its
- * first-failure path sets the item back to `pending`. Poll + drain cycles
- * settle every promise so the terminal state is EXACTLY discovery/pending
- * (the in_progress window is transient and drained away).
+ * the discovery stage claims it and runs the discovery leg. Discovery runs
+ * entirely against local brand-domain indexes, so offline it completes
+ * deterministically (needs_input_no_candidates) without any external search
+ * key. Poll + drain cycles settle every promise so the terminal state is a
+ * settled discovery/completed (the in_progress window is transient).
  * (requeueStaleInProgressItems runs at worker start(), not per poll — this
  * suite never relies on it.)
  */
 async function settle(worker: OnboardingWorker): Promise<void> {
-  // EXACTLY ONE poll + drain: a second poll would re-claim the item and
-  // escalate the discovery retry counter (eventually 'failed'). After one
-  // cycle the sourcing outcome is terminal and the same-poll discovery
-  // continuation either left the item pending (skip via the running guard)
-  // or failed once and reset it to pending (first-failure path).
+  // EXACTLY ONE poll + drain: after one cycle the sourcing outcome is
+  // terminal and the same-poll discovery continuation has settled the item
+  // at its deterministic discovery outcome.
   await worker.poll();
   await worker.drain();
 }
@@ -206,9 +204,11 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
     );
     await settle(countingWorker);
 
+    // Discovery completes deterministically offline: no brand domain mapped
+    // or indexed → needs_input_no_candidates.
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expect(after?.stageStatus).toBe('completed');
     // The sentinel proves zero sourcing claims: still sourcing/pending.
     const sentinel = findItemById(stranded.id);
     expect(sentinel?.stage).toBe('sourcing');
@@ -230,7 +230,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
 
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expect(after?.stageStatus).toBe('completed');
     expect(after?.sourcingDecision?.route).toBe('fallback_to_discovery');
     expect(after?.sourcingDecision?.origin).toBe('automatic_policy');
     expect(after?.sourcingDecision?.warnings).toContain('No enabled distributor connections');
@@ -265,7 +265,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
 
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expect(after?.stageStatus).toBe('completed');
     expect(after?.sourcingDecision?.route).toBe('evidence_to_discovery');
     expect(after?.sourcingDecision?.warnings?.some((w) => w.includes('auto-resolved'))).toBe(true);
   });
@@ -328,7 +328,7 @@ describe('Sourcing V2 recovery end-to-end acceptance (M7)', () => {
 
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
-    expect(after?.stageStatus).toBe('pending');
+    expect(after?.stageStatus).toBe('completed');
     expect(after?.sourcingDecision?.route).toBe('evidence_to_discovery');
   });
 

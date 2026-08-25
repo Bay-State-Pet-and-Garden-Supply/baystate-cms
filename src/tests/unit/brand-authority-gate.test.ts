@@ -1,17 +1,12 @@
 /**
- * ADR 0017 (Phase 1) — brand authority gate + provisional brand→domain mapping.
+ * ADR 0017 — brand authority gate.
  *
- * Proves the two new discovery invariants:
- * 1. Commitment 1: `persistProvisionalInferredDomain` writes a high-confidence
- *    inferred brand→domain into `brand_sites` (never overwriting an
- *    operator-maintained mapping) so subsequent discovery runs for the same
- *    brand are guided (`site:` scoping + sitemap).
- * 2. Commitment 2: `passesAuthorityGate` (+ worker flow) — auto-accept as the
- *    selected official source requires the candidate's domain to be a mapped
- *    official brand domain (strict exact-or-subdomain). Unknown or unmapped
- *    brands ALWAYS route to manual review even when page-verification identity
- *    proof is strong, and a provisional mapping created by the same run grants
- *    no auto-accept authority in that run.
+ * Proves the discovery invariant: `passesAuthorityGate` (+ worker flow) —
+ * auto-accept as the selected official source requires the candidate's domain
+ * to be a mapped official brand domain (strict exact-or-subdomain). Unknown or
+ * unmapped brands ALWAYS route to manual review even when page-verification
+ * identity proof is strong. Brands and their official domains are configured
+ * ahead of time by the operator (brand_sites); discovery never infers them.
  *
  * Offline-only: `discoverSources` + `verifyTopCandidates` are injected through
  * the worker's deps seam (same convention as discovery-run-trace.test.ts). No
@@ -30,21 +25,17 @@ import { getLatestDiscoveryRunForItem } from '../../db/repositories/onboarding-s
 import { upsertBrandSite, findBrandSites, insertBrandSiteIfAbsent } from '../../db/repositories/brand-site-repo';
 import {
   OnboardingWorker,
-  persistProvisionalInferredDomain,
   passesAuthorityGate,
-  PROVISIONAL_BRAND_SITE_MIN_CONFIDENCE,
 } from '../../onboarding/job-queue';
 import type { Workspace } from '../../shared/types';
 import type { InsertSourceData } from '../../db/repositories/onboarding-source-repo';
 import type { VerificationResult } from '../../onboarding/page-verifier';
-import type { BrandInferenceResult } from '../../onboarding/brand-inferrer';
 
 // ─── Deferred discovery/verification impls (deps seam) ───────────────────────
 
 let discoverImpl: ((upc: string, name: string, brandHint?: string | null) => Promise<{
   candidates: InsertSourceData[];
   consolidatedName: string | null;
-  inferredBrand?: BrandInferenceResult | null;
   noDomainMapped?: boolean;
 }>) | null = null;
 let verifyImpl: ((candidates: InsertSourceData[]) => Promise<VerificationResult[]>) | null = null;
@@ -54,7 +45,7 @@ const OFFICIAL_CANDIDATE: InsertSourceData = {
   title: 'Brand Product',
   confidence: 0.95,
   domain: 'brand.example.com',
-  sourceMethod: 'serper_name',
+  sourceMethod: 'sitemap_upc',
 };
 
 const RETAILER_CANDIDATE: InsertSourceData = {
@@ -62,7 +53,7 @@ const RETAILER_CANDIDATE: InsertSourceData = {
   title: 'Brand Product at Retailer',
   confidence: 0.9,
   domain: 'farmtopaw.ca',
-  sourceMethod: 'serper_name',
+  sourceMethod: 'sitemap_token_overlap',
 };
 
 const STRONG_SIGNALS: VerificationResult['signals'] = {
@@ -94,20 +85,18 @@ function strongVerification(candidate: InsertSourceData, domainOfficial = true):
 
 function makeDiscover(
   candidates: InsertSourceData[],
-  inferredBrand?: BrandInferenceResult | null,
   noDomainMapped = false,
 ): NonNullable<typeof discoverImpl> {
   return async () => ({
     candidates,
     consolidatedName: 'Brand Product',
-    inferredBrand: inferredBrand ?? null,
     noDomainMapped,
   });
 }
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
-describe('brand authority gate + provisional mapping (ADR 0017 phase 1)', () => {
+describe('brand authority gate (ADR 0017)', () => {
   let tempDir: string;
   let workspaceId: string;
   let wsPath: string;
@@ -175,63 +164,7 @@ describe('brand authority gate + provisional mapping (ADR 0017 phase 1)', () => 
     return item;
   }
 
-  // ─── Commitment 1: provisional mapping persistence (pure) ──────────────
-
-  test('persistProvisionalInferredDomain creates a mapping for a high-confidence inferred domain', () => {
-    const created = persistProvisionalInferredDomain({
-      brand: 'Butchers',
-      confidence: 0.85,
-      source: 'llm',
-      inferredDomain: 'https://www.butcherspetcare.com/products/',
-    });
-    expect(created).not.toBeNull();
-    expect(created!.brandName).toBe('butchers');
-    expect(created!.domain).toBe('butcherspetcare.com'); // scheme/www/path stripped
-
-    const rows = findBrandSites('butchers');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].domain).toBe('butcherspetcare.com');
-  });
-
-  test('persistProvisionalInferredDomain requires confidence >= threshold', () => {
-    expect(PROVISIONAL_BRAND_SITE_MIN_CONFIDENCE).toBe(0.8);
-    const created = persistProvisionalInferredDomain({
-      brand: 'Butchers',
-      confidence: 0.7, // passes the inference gate (0.7) but not the persist gate (0.8)
-      source: 'llm',
-      inferredDomain: 'https://www.butcherspetcare.com/',
-    });
-    expect(created).toBeNull();
-    expect(findBrandSites('butchers')).toHaveLength(0);
-  });
-
-  test('persistProvisionalInferredDomain skips when no inferred domain', () => {
-    const created = persistProvisionalInferredDomain({
-      brand: 'Butchers',
-      confidence: 0.9,
-      source: 'heuristic',
-      inferredDomain: null,
-    });
-    expect(created).toBeNull();
-    expect(findBrandSites('butchers')).toHaveLength(0);
-  });
-
-  test('persistProvisionalInferredDomain never overwrites an operator mapping', () => {
-    upsertBrandSite('Butchers', 'butcherspetcare.com');
-    const created = persistProvisionalInferredDomain({
-      brand: 'Butchers',
-      confidence: 0.95,
-      source: 'llm',
-      inferredDomain: 'https://butcherspetcare.com/',
-    });
-    expect(created).toBeNull();
-
-    const rows = findBrandSites('butchers');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].domain).toBe('butcherspetcare.com');
-  });
-
-  // ─── Commitment 2: authority-gate predicate (pure) ──────────────────────
+  // ─── Authority-gate predicate (pure) ──────────────────────────────
 
   test('passesAuthorityGate rejects unknown or unmapped brands', () => {
     expect(passesAuthorityGate(null, ['brand.example.com'], 'brand.example.com')).toBe(false);
@@ -309,57 +242,7 @@ describe('brand authority gate + provisional mapping (ADR 0017 phase 1)', () => 
     expect(after.sourceUrl).toBe(OFFICIAL_CANDIDATE.url);
   });
 
-  // ─── Worker flow: provisional mapping persists but never auto-accepts ──
-
-  test('high-confidence inferred domain persists a mapping but requires manual review in the same run', async () => {
-    const item = insertDiscoveryItem({ upc: 'UPC-E', name: 'Inferred Product' });
-    const inferredBrand: BrandInferenceResult = {
-      brand: 'InferredBrand',
-      confidence: 0.85,
-      source: 'llm',
-      inferredDomain: 'https://inferredbrand.example.com/',
-    };
-    discoverImpl = makeDiscover(
-      [{ ...OFFICIAL_CANDIDATE, url: 'https://inferredbrand.example.com/product/x', domain: 'inferredbrand.example.com' }],
-      inferredBrand,
-    );
-    verifyImpl = async (candidates: InsertSourceData[]) =>
-      candidates.map(c => strongVerification(c, true));
-
-    await runWorkerOnce();
-
-    // The provisional mapping IS persisted for the next run…
-    const rows = findBrandSites('inferredbrand');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].domain).toBe('inferredbrand.example.com');
-
-    // …the item's brand hint is updated…
-    const after = findItemById(item.id)!;
-    expect(after.brandHint).toBe('InferredBrand');
-
-    // …but this run does NOT auto-accept: the provisional mapping grants no
-    // authority in the same run — the source URL is held for manual review.
-    const run = getLatestDiscoveryRunForItem(item.id);
-    expect(run).not.toBeNull();
-    expect(run!.outcome).toBe('needs_input_candidates');
-    expect(run!.outcome_message).toContain('provisional inference mapping');
-    expect(after.sourceUrl).toBeNull();
-  });
-
-  test('persistProvisionalInferredDomain never maps a known retailer/distributor domain', () => {
-    // farmtopaw.ca is on the ADR 0017 denylist seed — the observed BUTCHERS
-    // failure mode was a retailer page persisted as the brand's official
-    // domain. A retailer domain must never become an authority mapping, even
-    // provisionally and even at high confidence.
-    const created = persistProvisionalInferredDomain({
-      brand: 'Butchers',
-      confidence: 0.95,
-      source: 'llm',
-      inferredDomain: 'https://farmtopaw.ca/products/',
-    });
-    expect(created).toBeNull();
-    expect(findBrandSites('butchers')).toHaveLength(0);
-  });
+  // ─── Worker flow: authority gate blocks off-domain auto-accept ─────────
 
   test('passesAuthorityGate: multi-domain brands accept subdomains, reject lookalikes', () => {
     const officialDomains = ['brand.com', 'brand.co.uk'];

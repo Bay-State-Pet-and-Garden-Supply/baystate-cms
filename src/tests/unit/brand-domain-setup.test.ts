@@ -15,11 +15,11 @@
  *   workspace ownership (404 cross-workspace) and re-queue EVERY item in the
  *   brand's blocker group on success.
  *
- * Offline-only: no Serper key exists in the test DB, so the background
- * worker's discovery attempt after re-queue fails fast and deterministically
- * — the re-queue contract asserted here (stage stays discovery, flat status
- * 'imported', stage_status pending-or-claimed) is written synchronously by
- * the routes.
+ * Offline-only: discovery runs entirely against local brand-domain indexes,
+ * so any background worker attempt settles deterministically without external
+ * search keys — the re-queue contract asserted here (stage stays discovery,
+ * flat status 'imported', stage_status pending-or-claimed) is written
+ * synchronously by the routes.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import fs from 'node:fs';

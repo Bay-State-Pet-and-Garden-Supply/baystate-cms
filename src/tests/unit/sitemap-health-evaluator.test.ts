@@ -29,7 +29,7 @@ describe('Sitemap Health Evaluator', () => {
         http_status: 200,
       },
       [],
-      { totalLookups: 10, localHitCount: 8, paidSearchFallbackCount: 2, localHitRate: 0.8, serperCallsAvoided: 16 },
+      { totalLookups: 10, localHitCount: 8, localHitRate: 0.8 },
       null,
       pinnedNow,
     );
@@ -64,7 +64,7 @@ describe('Sitemap Health Evaluator', () => {
         http_status: 200,
       },
       [],
-      { totalLookups: 0, localHitCount: 0, paidSearchFallbackCount: 0, localHitRate: 0, serperCallsAvoided: 0 },
+      { totalLookups: 0, localHitCount: 0, localHitRate: 0 },
       null,
       pinnedNow,
     );
@@ -95,7 +95,7 @@ describe('Sitemap Health Evaluator', () => {
         http_status: 403,
       },
       [],
-      { totalLookups: 0, localHitCount: 0, paidSearchFallbackCount: 0, localHitRate: 0, serperCallsAvoided: 0 },
+      { totalLookups: 0, localHitCount: 0, localHitRate: 0 },
       null,
       pinnedNow,
     );
@@ -145,7 +145,7 @@ describe('Sitemap Health Evaluator', () => {
       { totalCount: 100, activeCount: 20, inactiveCount: 80, productCount: 18 },
       currentRun,
       [currentRun, previousRun],
-      { totalLookups: 5, localHitCount: 4, paidSearchFallbackCount: 1, localHitRate: 0.8, serperCallsAvoided: 8 },
+      { totalLookups: 5, localHitCount: 4, localHitRate: 0.8 },
       null,
       pinnedNow,
     );

@@ -217,8 +217,7 @@ export async function extractViaHttpDetailed(
 
 /**
  * Fast-path HTTP extraction using Cheerio. Thin wrapper over
- * `extractViaHttpDetailed` that returns only the merged data — preserves
- * the public API expected by existing callers (notably `supplementPrice`).
+ * `extractViaHttpDetailed` that returns only the merged data.
  */
 async function extractViaHttp(
   url: string,

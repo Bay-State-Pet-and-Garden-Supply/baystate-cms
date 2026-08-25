@@ -238,13 +238,12 @@ export function groupAttentionItems(items: OnboardingWorkState[]): AttentionGrou
 
 /** Human label for a discovery source method (panel removed with the retired review drawer). */
 export function candidateMethodLabel(method: string | null | undefined): string {
+  // Legacy SERP-era rows keep their historical provenance readable even
+  // though the pipeline no longer produces these methods.
+  if (method && method.startsWith('serper_')) return 'Legacy web search';
   switch (method) {
     case 'shopify_variant':
       return 'Variant match';
-    case 'serper_name':
-      return 'Name search';
-    case 'serper_upc':
-      return 'UPC search';
     case 'sitemap':
       return 'Sitemap match';
     case 'manual':

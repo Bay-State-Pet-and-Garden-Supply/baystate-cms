@@ -1004,17 +1004,28 @@ export function runMigrations(): void {
   }
 
 
-  // Ensure serper_cache table exists
+  // SERP retirement: the serper_cache table (and all external paid-search
+  // dependence) has been removed from the pipeline. Drop any legacy table.
   try {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS serper_cache (
-        query TEXT PRIMARY KEY,
-        results_json TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-    `);
+    db.exec('DROP TABLE IF EXISTS serper_cache;');
   } catch (e) {
-    console.error('Failed to create serper_cache table:', e);
+    console.error('Failed to drop legacy serper_cache table:', e);
+  }
+
+  // SERP retirement: sitemap_discovery_events no longer records paid-search
+  // economics. Drop the retired columns when present (historical rows keep
+  // their source_method strings for audit readability).
+  try {
+    const eventsCols = db.query("PRAGMA table_info(sitemap_discovery_events)").all() as Array<{ name: string }>;
+    const colNames = new Set(eventsCols.map((c) => c.name));
+    if (colNames.has('paid_search_fallback')) {
+      db.exec('ALTER TABLE sitemap_discovery_events DROP COLUMN paid_search_fallback;');
+    }
+    if (colNames.has('serper_calls_avoided')) {
+      db.exec('ALTER TABLE sitemap_discovery_events DROP COLUMN serper_calls_avoided;');
+    }
+  } catch (e) {
+    console.error('Failed to drop retired sitemap_discovery_events columns:', e);
   }
 
   // Ensure sitemap_cache table exists. Caches the list of URLs discovered in
@@ -4700,11 +4711,9 @@ export function runMigrations(): void {
           domain TEXT,
           created_at TEXT NOT NULL,
           satisfied_locally INTEGER NOT NULL,
-          paid_search_fallback INTEGER NOT NULL,
           candidate_url TEXT,
           confidence REAL,
-          source_method TEXT,
-          serper_calls_avoided INTEGER NOT NULL DEFAULT 0
+          source_method TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_sitemap_discovery_events_domain_created
