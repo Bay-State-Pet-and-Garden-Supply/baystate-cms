@@ -46,7 +46,6 @@ export async function discoverSources(
   brandHint?: string | null,
   options?: {
     price?: number | null;
-    existingExpectedName?: string | null;
     /**
      * P0-1 (round 3): injected transport so Product Intelligence can bind
      * every HTTP call in the discovery chain (sitemap, variant-page
@@ -78,36 +77,38 @@ export async function discoverSources(
     }
   }
 
-  const primaryDomain: string | null = activeBrandDomains[0] ?? null;
-
   // A known brand with no official domain mapped halts discovery before any
   // lookup: the operator must map a domain in Settings first (needs_input_setup).
   if (activeBrandHint && activeBrandHint.trim() && activeBrandDomains.length === 0) {
     console.log(`[SourceDiscovery] Brand "${activeBrandHint}" has no official domain configured. Halting discovery.`);
     return {
       candidates: [],
-      consolidatedName: options?.existingExpectedName ?? null,
+      consolidatedName: null,
       noDomainMapped: true,
     };
   }
 
   const candidates: InsertSourceData[] = [];
 
-  // ── Step 0: Priority Local Brand URL Index Lookup ─────────────────────────
-  // When a brand domain is mapped, attempt cheap local discovery first.
-  // If a high-confidence match (confidence >= 0.85) is found and verified,
-  // we return it immediately without running the sitemap matcher.
-  if (primaryDomain && activeBrandDomains.length > 0) {
-    const activeUrls = getActiveUrlsForDomain(primaryDomain);
+  // ── Step 0: Priority Local Brand URL Index Lookup ────────────────────────
+  // For EVERY operator-configured official domain of the brand (a brand may
+  // legitimately own several), attempt cheap local discovery against its
+  // indexed URLs in configuration order; the first validated high-confidence
+  // match (confidence >= 0.85) short-circuits the sitemap matcher below.
+  // Validation failures fall through to the next domain, ultimately to the
+  // full sitemap pass.
+  for (const brandDomain of activeBrandDomains) {
+    const activeUrls = getActiveUrlsForDomain(brandDomain);
     if (activeUrls.length === 0) {
       try {
-        await fetchSitemapForDiscovery(primaryDomain, options?.networkFetch);
+        await fetchSitemapForDiscovery(brandDomain, options?.networkFetch);
       } catch { /* best effort */ }
     }
 
+    let localMatches: Awaited<ReturnType<typeof findLocalBrandCandidates>>;
     try {
-      const localMatches = await findLocalBrandCandidates(
-        primaryDomain,
+      localMatches = await findLocalBrandCandidates(
+        brandDomain,
         {
           upc,
           name,
@@ -116,104 +117,117 @@ export async function discoverSources(
         },
         { modelPolicy: options?.modelPolicy }
       );
-
-      const topLocal = localMatches[0];
-      if (topLocal && topLocal.confidence >= 0.85) {
-        console.log(`[SourceDiscovery] ✓ High-confidence local sitemap match for UPC ${upc} on ${primaryDomain} (${topLocal.url}, confidence: ${topLocal.confidence.toFixed(2)}). Validating URL...`);
-
-        let isValid = true;
-        const fetchFn = options?.networkFetch || fetch;
-        try {
-          const checkRes = await fetchFn(topLocal.url, {
-            method: 'HEAD',
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            signal: AbortSignal.timeout(6000),
-          });
-          if (!checkRes.ok && checkRes.status !== 405) {
-            const getRes = await fetchFn(topLocal.url, {
-              method: 'GET',
-              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-              signal: AbortSignal.timeout(6000),
-            });
-            if (!getRes.ok) isValid = false;
-          }
-        } catch {
-          if (topLocal.matchType !== 'upc_exact') {
-            isValid = false;
-          }
-        }
-
-        if (isValid) {
-          console.log(`[SourceDiscovery] ✓ Local match validated for ${topLocal.url}. Short-circuiting sitemap matching.`);
-
-          const localCandidates: InsertSourceData[] = localMatches.map((m) => {
-            const rankSignals = buildRankSignals(activeBrandHint, primaryDomain!);
-            return {
-              url: m.url,
-              title: m.title || null,
-              snippet: sitemapSnippetFor(m.matchType),
-              domain: primaryDomain!,
-              confidence: m.confidence,
-              sourceMethod: m.sourceMethod as InsertSourceData['sourceMethod'],
-              ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
-            };
-          });
-
-          try {
-            recordDiscoveryEvent({
-              upc,
-              domain: primaryDomain,
-              satisfied_locally: 1,
-              candidate_url: topLocal.url,
-              confidence: topLocal.confidence,
-              source_method: topLocal.sourceMethod,
-            });
-          } catch { /* best effort */ }
-
-          return {
-            candidates: localCandidates,
-            // Expected name comes from the imported spreadsheet row only;
-            // discovery never synthesizes or persists an expected name.
-            consolidatedName: options?.existingExpectedName ?? null,
-          };
-        } else {
-          console.log(`[SourceDiscovery] Local candidate ${topLocal.url} failed validation. Falling through to sitemap matching.`);
-        }
-      }
     } catch (err) {
-      console.warn(`[SourceDiscovery] Local candidate search failed for ${primaryDomain}:`, err);
+      console.warn(`[SourceDiscovery] Local candidate search failed for ${brandDomain}:`, err);
+      continue;
     }
+
+    const topLocal = localMatches[0];
+    if (!topLocal || topLocal.confidence < 0.85) continue;
+
+    console.log(`[SourceDiscovery] \u2713 High-confidence local sitemap match for UPC ${upc} on ${brandDomain} (${topLocal.url}, confidence: ${topLocal.confidence.toFixed(2)}). Validating URL...`);
+
+    let isValid = true;
+    const fetchFn = options?.networkFetch || fetch;
+    try {
+      const checkRes = await fetchFn(topLocal.url, {
+        method: 'HEAD',
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!checkRes.ok && checkRes.status !== 405) {
+        const getRes = await fetchFn(topLocal.url, {
+          method: 'GET',
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+          signal: AbortSignal.timeout(6000),
+        });
+        if (!getRes.ok) isValid = false;
+      }
+    } catch {
+      if (topLocal.matchType !== 'upc_exact') {
+        isValid = false;
+      }
+    }
+
+    if (!isValid) {
+      console.log(`[SourceDiscovery] Local candidate ${topLocal.url} failed validation. Falling through to sitemap matching.`);
+      continue;
+    }
+
+    console.log(`[SourceDiscovery] \u2713 Local match validated for ${topLocal.url}. Short-circuiting sitemap matching.`);
+
+    const localCandidates: InsertSourceData[] = localMatches.map((m) => {
+      const rankSignals = buildRankSignals(activeBrandHint, brandDomain);
+      return {
+        url: m.url,
+        title: m.title || null,
+        snippet: sitemapSnippetFor(m.matchType),
+        domain: brandDomain,
+        confidence: m.confidence,
+        sourceMethod: m.sourceMethod as InsertSourceData['sourceMethod'],
+        ...(rankSignals ? { metadataJson: JSON.stringify(rankSignals) } : {}),
+      };
+    });
+
+    try {
+      recordDiscoveryEvent({
+        upc,
+        domain: brandDomain,
+        satisfied_locally: 1,
+        candidate_url: topLocal.url,
+        confidence: topLocal.confidence,
+        source_method: topLocal.sourceMethod,
+      });
+    } catch { /* best effort */ }
+
+    return {
+      candidates: localCandidates,
+      // Expected name comes from the imported spreadsheet row only;
+      // discovery never synthesizes or persists an expected name.
+      consolidatedName: null,
+    };
   }
 
-  // ── Sitemap pass ──────────────────────────────────────────────────────────
-  // Fetch (cache-first) the mapped domain's sitemap and run the three-pass
-  // matcher (UPC exact, product URL filter, token overlap + LLM selection)
-  // against the indexed URLs using the item's spreadsheet name. Sitemap
-  // failures NEVER throw — they surface as zero candidates.
-  const consolidatedName = options?.existingExpectedName ?? null;
+  // ── Sitemap pass ──────────────────────────────────────────────────────
+  // Fetch (cache-first) EVERY mapped official domain's sitemap and run the
+  // three-pass matcher (UPC exact, product URL filter, token overlap + LLM
+  // selection) against the indexed URLs using the item's spreadsheet name.
+  // Candidates from all domains are merged and deduplicated by URL.
+  // Sitemap failures NEVER throw — they surface as zero candidates for that
+  // domain only.
+  const consolidatedName: string | null = null;
 
-  if (primaryDomain) {
-    const prepared = await fetchSitemapForDiscovery(primaryDomain, options?.networkFetch);
-    if (prepared && prepared.urls.length > 0) {
-      try {
-        const matches = await matchSitemapUrls(
-          prepared.urls,
-          name,
-          consolidatedName,
-          upc,
-          primaryDomain,
-          prepared.productUrlPattern,
-          options?.modelPolicy,
-        );
-        for (const match of matches) {
-          candidates.push(convertSitemapMatchToCandidate(match));
-        }
-      } catch (err) {
-        console.warn(
-          `[SourceDiscovery] Sitemap matching failed for ${primaryDomain}:`,
-          err,
-        );
+  const seenCandidateUrls = new Set<string>();
+  for (const brandDomain of activeBrandDomains) {
+    let prepared: Awaited<ReturnType<typeof fetchSitemapForDiscovery>>;
+    try {
+      prepared = await fetchSitemapForDiscovery(brandDomain, options?.networkFetch);
+    } catch (err) {
+      console.warn(`[SourceDiscovery] Sitemap fetch failed for ${brandDomain}:`, err);
+      continue;
+    }
+    if (!prepared || prepared.urls.length === 0) continue;
+    try {
+      const matches = await matchSitemapUrls(
+        prepared.urls,
+        name,
+        consolidatedName,
+        upc,
+        brandDomain,
+        prepared.productUrlPattern,
+        options?.modelPolicy,
+      );
+      for (const match of matches) {
+        const candidate = convertSitemapMatchToCandidate(match);
+        if (seenCandidateUrls.has(candidate.url)) continue;
+        seenCandidateUrls.add(candidate.url);
+        candidates.push(candidate);
       }
+    } catch (err) {
+      console.warn(
+        `[SourceDiscovery] Sitemap matching failed for ${brandDomain}:`,
+        err,
+      );
     }
   }
 
@@ -255,7 +269,7 @@ export async function discoverSources(
   try {
     recordDiscoveryEvent({
       upc,
-      domain: primaryDomain,
+      domain: topCandidates[0]?.domain ?? activeBrandDomains[0] ?? null,
       satisfied_locally: 0,
       candidate_url: topCandidates[0]?.url || null,
       confidence: topCandidates[0]?.confidence || null,

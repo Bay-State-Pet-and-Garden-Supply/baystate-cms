@@ -104,4 +104,39 @@ describe('Source Discovery - Local Brand URL Index Priority', () => {
     const economics = getDiscoveryEconomics('kongcompany.com');
     expect(economics.localHitCount).toBe(1);
   });
+
+  it('searches EVERY configured official domain of a brand, not just the first', async () => {
+    // A brand may legitimately own several official domains. The product
+    // lives only on the SECOND configured domain — discovery must still
+    // find it instead of parking at needs_input_no_candidates.
+    upsertBrandSite('TwoDomain', 'first-domain.com');
+    upsertBrandSite('TwoDomain', 'second-domain.com');
+
+    reconcileSitemapUrls(
+      'second-domain.com',
+      [{ url: 'https://second-domain.com/shop/two-domain-toy-012345678903' }],
+      'https://second-domain.com/sitemap.xml',
+    );
+    // first-domain.com deliberately gets an EMPTY index — nothing to find.
+    reconcileSitemapUrls('first-domain.com', [], 'https://first-domain.com/sitemap.xml');
+
+    const mockFetch = async (input: RequestInfo | URL | string) => {
+      if (String(input).includes('second-domain.com')) {
+        return new Response('<html><title>Two Domain Toy</title></html>', { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+
+    const result = await discoverSources(
+      '012345678903',
+      'TwoDomain Toy Large',
+      'TwoDomain',
+      { networkFetch: mockFetch as any },
+    );
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0].url).toBe('https://second-domain.com/shop/two-domain-toy-012345678903');
+    expect(result.candidates[0].domain).toBe('second-domain.com');
+    expect(result.candidates[0].sourceMethod).toBe('local_upc');
+  });
 });

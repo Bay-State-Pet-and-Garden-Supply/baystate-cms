@@ -1226,7 +1226,6 @@ export class OnboardingWorker {
       const discover = this.deps?.discoverSources ?? discoverSources;
       const discovery = await discover(item.upc, item.name, item.brandHint, {
         price: item.price ? parseFloat(item.price) : null,
-        existingExpectedName: item.expectedName,
         modelPolicy: policySnapshot.state === 'configured' ? policySnapshot.view : null,
       });
       const sources = discovery.candidates;
@@ -1319,7 +1318,9 @@ export class OnboardingWorker {
         const verificationResults: VerificationResult[] = sources.length > 0
           ? await verify(sources, {
               upc: item.upc,
-              expectedName: consolidatedName || item.name,
+              // Expected identity is the imported spreadsheet name only —
+              // legacy SERP-era expected_name values never steer verification.
+              expectedName: item.name,
               brandHint: activeBrandHint,
               price: item.price ? parseFloat(item.price) : null,
               officialDomains,
@@ -1476,6 +1477,12 @@ export class OnboardingWorker {
           })),
         });
       } else {
+        // Audit-trace accuracy: when official domains were configured, the
+        // sitemap fetch/match pass DID run — record it before parking the run
+        // so the trace doesn't overstate an early 'preflight' exit.
+        if (officialDomains.length > 0) {
+          updateDiscoveryRunStep(discoveryRunId, 'sitemap_fetch');
+        }
         completeDiscoveryRun(discoveryRunId, 'needs_input_no_candidates', 'No matching product pages found');
         updateItemStageStatus(item.id, 'completed', 'No matching product pages found');
         onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {

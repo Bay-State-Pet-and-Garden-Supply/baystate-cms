@@ -17,6 +17,7 @@ import {
 import { getAcceptedAttemptIdsForItem } from '../../db/repositories/onboarding-acceptance-repo';
 import { createDistributor, createConnection } from '../../db/repositories/distributor-repo';
 import { OnboardingWorker } from '../../onboarding/job-queue';
+import { getLatestDiscoveryRunForItem } from '../../db/repositories/onboarding-source-repo';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { overrideSourcingFlags, resetSourcingFlagsOverride } from '../../onboarding/flags';
 import { SOURCING_ENTRY_POLICY_VERSION } from '../../onboarding/sourcing/entry-policy';
@@ -191,6 +192,16 @@ describe('Sourcing worker pass-through (ADR 0014 flag-gated leg)', () => {
     const after = findItemById(item.id);
     expect(after?.stage).toBe('discovery');
     expect(after?.stageStatus).toBe('completed');
+
+    // The hold is specifically the missing-domain setup hold — not the
+    // generic no-candidates outcome — and nothing was persisted as a source.
+    const run = getLatestDiscoveryRunForItem(item.id);
+    expect(run?.outcome).toBe('needs_input_setup');
+    expect(run?.outcome_message ?? '').toContain('official domain');
+    const sourceRows = getDb()
+      .query('SELECT COUNT(*) AS c FROM onboarding_sources WHERE item_id = ?')
+      .get(item.id) as { c: number };
+    expect(sourceRows.c).toBe(0);
   });
 
   test('emits EXACTLY ONE terminal event per outcome (completed, never a duplicate failed)', async () => {
