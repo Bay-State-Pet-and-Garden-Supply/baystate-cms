@@ -34,6 +34,7 @@ import { profileBuilderGenerateDraftRoutes } from './routes/profile-builder-gene
 import { profileMatrixRoutes } from './routes/profile-matrix-routes';
 import releaseRoutes from './routes/release-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
+import { safeTimingEqual } from '../shared/timing-safe';
 
 const app = new Hono();
 
@@ -48,7 +49,7 @@ if (apiToken) {
       return;
     }
     const auth = c.req.header('Authorization') ?? '';
-    if (auth !== `Bearer ${apiToken}`) {
+    if (!safeTimingEqual(auth, `Bearer ${apiToken}`)) {
       return c.json({ error: 'Unauthorized. Provide a valid API token via Authorization: Bearer header.' }, 401);
     }
     await next();
