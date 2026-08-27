@@ -1,6 +1,6 @@
 // story: e35s10 — single source for onboarding settings tab shell (Brands merge)
 // story: e08s03 — tab labels finalized: Brands = Strategy Hub, Sitemaps = raw inventory, Distributors = Connections infra
-export type OnboardingSettingsTabId = 'general' | 'curation' | 'profiles' | 'sitemaps' | 'distributors' | 'brands';
+export type OnboardingSettingsTabId = 'curation' | 'profiles' | 'sitemaps' | 'distributors' | 'brands';
 
 export interface OnboardingSettingsTabDef {
   id: OnboardingSettingsTabId;
@@ -8,7 +8,6 @@ export interface OnboardingSettingsTabDef {
 }
 
 export const ONBOARDING_SETTINGS_TABS: readonly OnboardingSettingsTabDef[] = [
-  { id: 'general', label: 'General' },
   { id: 'curation', label: 'Curation' },
   { id: 'brands', label: 'Brands & Sourcing Strategy Hub' },
   { id: 'sitemaps', label: 'Sitemaps & Brand URL Index' },
@@ -24,12 +23,12 @@ export function isOnboardingSettingsTabId(value: string): value is OnboardingSet
 }
 
 export function resolveOnboardingSettingsTab(input: string | null | undefined): OnboardingSettingsTabId {
-  if (!input) return 'general';
+  if (!input) return 'curation';
   const trimmed = input.trim();
-  if (!trimmed) return 'general';
+  if (!trimmed) return 'curation';
   if (LEGACY_TO_BRANDS[trimmed]) return LEGACY_TO_BRANDS[trimmed];
   if (isOnboardingSettingsTabId(trimmed)) return trimmed as OnboardingSettingsTabId;
-  return 'general';
+  return 'curation';
 }
 
 export function primaryOnboardingSettingsTabs(): readonly OnboardingSettingsTabDef[] {

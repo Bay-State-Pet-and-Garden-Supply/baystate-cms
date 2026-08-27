@@ -49,7 +49,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   const [inspectedCatalogField, setInspectedCatalogField] = useState<string | null>(null);
 
   // Worker health & profile builder overlay state
-  const [workerHealth, setWorkerHealth] = useState<WorkerHealthResponse | null>(null);
+  const [_workerHealth, setWorkerHealth] = useState<WorkerHealthResponse | null>(null);
   const [workspaceDomain, setWorkspaceDomain] = useState<string | null>(null);
 
   const navigateToProfileWorkspace = (domain: string) => {
@@ -62,7 +62,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
   };
 
   const [localDomain, setLocalDomain] = useState('');
-  const [settingsTab, setSettingsTab] = useState<OnboardingSettingsTab>(resolveOnboardingSettingsTab(initialTab ?? 'general'));
+  const [settingsTab, setSettingsTab] = useState<OnboardingSettingsTab>(resolveOnboardingSettingsTab(initialTab));
   const [sourcingEngineEnabled, setSourcingEngineEnabled] = useState(false);
 
   useEffect(() => {
@@ -188,7 +188,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
     <div style={styles.container}>
       <ViewHeader
         title="Onboarding Pipeline Settings"
-        description="Configure discovery sources, curation targets, and site extractor profiles."
+        description="Configure curation targets, brand sourcing strategies, sitemaps, and distributors."
         actions={<button style={styles.backBtn} onClick={onBack}>← Back to Batches</button>}
       />
 
@@ -224,16 +224,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
             {tab.label}
           </button>
         ))}
-      </div>
-      <div style={{ display: settingsTab === 'general' ? 'block' : 'none' }}>
-      {/* ─── SOURCE DISCOVERY ─── */}
-      <div style={styles.section}>
-        <h2 style={styles.sectionTitle}>Source Discovery</h2>
-        <p style={styles.savedHint}>
-          Discovery runs entirely against locally indexed official brand domains — no external search API keys are required.
-          Configure brand → domain mappings in Domain Configuration and sync their sitemaps from Sitemap Health.
-        </p>
-      </div>
       </div>
 
       <div style={{ display: settingsTab === 'curation' ? 'block' : 'none' }}>

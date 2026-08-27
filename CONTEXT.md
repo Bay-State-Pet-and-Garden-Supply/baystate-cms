@@ -36,6 +36,18 @@ _Avoid_: Secondary type, category, facet
 The reviewed absence of a Primary Product Type for a product.
 _Avoid_: Product failure, forced type
 
+**Assistant**:
+A bounded, schema-validated LLM capability that fills or proposes pipeline outputs by selecting from constrained options (configured enums, existing page identities) and abstaining with a coded reason when it cannot comply. Assistants execute inside frozen cohort windows with audited provenance. _Avoid_: Agent, specialist, bot, autonomous pipeline
+
+**Catalog Adjudication Assistant**:
+The Curation-stage Assistant that selects Primary Product Type and Category Page assignments from currently-configured store values only, abstaining to blank-plus-reason when constraints cannot be satisfied. _Avoid_: Classifier agent, auto-classifier, AI curator
+
+**Assistant Authority Gate**:
+The measured condition (Wilson lower-bound precision over operator-reviewed history) an Assistant must satisfy before its output may advance items without per-item review. Until met, Assistant output is propose-only and every item passes the Review drawer. _Avoid_: Trust score, autopilot mode, confidence auto-advance
+
+**Coded Abstention**:
+An Assistant declining to produce a value, recorded as an empty field plus a machine-readable reason surfaced in the review drawer. _Avoid_: Silent skip, low-confidence guess, fallback value
+
 **Product SKU**:
 A store-facing product identifier used as the onboarding key.
 _Avoid_: Product identity, product family, variant group

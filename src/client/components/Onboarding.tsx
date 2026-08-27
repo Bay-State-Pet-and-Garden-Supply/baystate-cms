@@ -23,6 +23,7 @@ import { normalizeBrandHubDomain } from '../../onboarding/brand-hub/normalizeDom
 import { formatCount, totalItemCount } from './onboarding/batch-workspace-logic';
 import { matchExistingBrand } from '../../shared/brand-matcher';
 import { getOnboardingFeatureFlags } from '../onboarding-feature-flags';
+import { resolveOnboardingSettingsTab } from './onboarding-settings/tabRegistry';
 export function Onboarding() {
   const [showSettings, setShowSettings] = useState(false);
 
@@ -36,7 +37,9 @@ export function Onboarding() {
   // full-page navigations, so a fresh mount always sees the param.
   const settingsDeepLinkTab = (() => {
     const tab = new URLSearchParams(window.location.search).get('settingsTab');
-    return tab === 'general' || tab === 'llm' || tab === 'curation' || tab === 'profiles' ? tab : null;
+    if (tab === 'llm') return 'llm';
+    if (!tab) return null;
+    return resolveOnboardingSettingsTab(tab);
   })();
   useEffect(() => {
     if (settingsDeepLinkTab === 'llm') {

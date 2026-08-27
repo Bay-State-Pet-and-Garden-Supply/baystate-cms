@@ -925,15 +925,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
 
   return (
     <div className="rv-workspace" ref={workspaceRef}>
-      <FilterBar
-        filters={filters}
-        onChange={setFilters}
-        facets={facets}
-        progress={progress}
-        total={total}
-        shownCount={loadedCount}
-      />
-
       {actionError && (
         <div role="alert" className="rv-error-banner">
           {actionError}
@@ -942,6 +933,14 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
 
       <div className="rv-body">
         <div className="rv-queue-pane">
+          <QueueHeader
+            filters={filters}
+            onChange={setFilters}
+            facets={facets}
+            progress={progress}
+            total={total}
+            shownCount={loadedCount}
+          />
           {(selectedIds.length > 0 || filters.sourceType === 'distributor_record') && (
             <div className="rv-bulk-bar" role="region" aria-label="Bulk review">
               <button
@@ -1161,9 +1160,9 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   );
 }
 
-// ─── Filter bar + progress ----------------------------------------------------
+// ─── Queue header + progress --------------------------------------------------
 
-function FilterBar({
+function QueueHeader({
   filters,
   onChange,
   facets,
@@ -1181,19 +1180,21 @@ function FilterBar({
   const pct = progress.total > 0 ? Math.round((progress.reviewedCount / progress.total) * 100) : 0;
 
   return (
-    <div className="rv-header">
-      <div className="rv-progress" role="status" aria-label="Review progress">
-        <span className="rv-progress-main">{formatReviewProgress(progress)}</span>
-        <span className="rv-progress-sub">
-          {progress.remaining} remaining
-          {total > shownCount ? ` · showing first ${shownCount}` : ''}
-        </span>
-        <span className="rv-progress-track" aria-hidden="true">
-          <span className="rv-progress-fill" style={{ transform: `scaleX(${pct / 100})` }} />
-        </span>
-      </div>
+    <div className="rv-queue-header">
+      <div className="rv-queue-header-top">
+        <div className="rv-progress" role="status" aria-label="Review progress">
+          <span className="rv-progress-main">{formatReviewProgress(progress)}</span>
+          <span className="rv-progress-sub">
+            {progress.remaining} remaining
+            {total > shownCount ? ` · showing ${shownCount}` : ''}
+          </span>
+        </div>
 
-      <FilterControls filters={filters} onChange={onChange} facets={facets} />
+        <FilterControls filters={filters} onChange={onChange} facets={facets} />
+      </div>
+      <div className="rv-progress-track" aria-hidden="true">
+        <div className="rv-progress-fill" style={{ transform: `scaleX(${pct / 100})` }} />
+      </div>
     </div>
   );
 }

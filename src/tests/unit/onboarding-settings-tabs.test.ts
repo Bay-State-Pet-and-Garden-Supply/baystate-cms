@@ -12,12 +12,13 @@ describe('onboarding settings tab registry (e35s10)', () => {
     const ids = ONBOARDING_SETTINGS_TABS.map((t: any) => t.id);
     expect(ids).toContain('brands');
     expect(ids).toContain('sitemaps');
+    expect(ids).not.toContain('general');
     // profiles still aliases to brands; sitemaps is now distinct primary
     expect(resolveOnboardingSettingsTab('profiles')).toBe('brands');
     expect(resolveOnboardingSettingsTab('sitemaps')).toBe('sitemaps');
     expect(resolveOnboardingSettingsTab('brands')).toBe('brands');
-    // non-legacy passthrough
-    expect(resolveOnboardingSettingsTab('general')).toBe('general');
+    // general defaults to curation; distributors passthrough
+    expect(resolveOnboardingSettingsTab('general')).toBe('curation');
     expect(resolveOnboardingSettingsTab('distributors')).toBe('distributors');
   });
 
