@@ -9,6 +9,7 @@
  */
 
 import type { IncomingMessage } from 'node:http';
+import { timingSafeCompare } from '../shared/timing-safe';
 
 function getToken(): string | null {
   const token = process.env.BAYSTATE_CMS_WORKER_TOKEN;
@@ -44,7 +45,7 @@ export function checkAuth(req: IncomingMessage): AuthResult {
 
   const providedToken = authHeader.slice('Bearer '.length).trim();
 
-  if (providedToken !== token) {
+  if (!timingSafeCompare(providedToken, token)) {
     return { authorized: false, message: 'Invalid bearer token' };
   }
 
