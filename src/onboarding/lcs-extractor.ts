@@ -105,7 +105,13 @@ export function extractConsensusName(
   if (cleaned.length < 2) return null;
 
   // Find pairwise LCS across all title pairs
+  // Performance optimization:
+  // Track best consensus key in a single pass while counting candidate frequencies,
+  // avoiding intermediate array allocation (`[...candidates.entries()]`) and O(K log K) sorting.
   const candidates: Map<string, number> = new Map();
+  let bestKey: string | null = null;
+  let maxCount = 0;
+  let maxLen = 0;
 
   for (let i = 0; i < cleaned.length; i++) {
     for (let j = i + 1; j < cleaned.length; j++) {
@@ -113,20 +119,23 @@ export function extractConsensusName(
       if (lcs.length >= minLength) {
         // Normalize for counting (lowercase)
         const key = lcs.toLowerCase();
-        candidates.set(key, (candidates.get(key) ?? 0) + 1);
+        const count = (candidates.get(key) ?? 0) + 1;
+        candidates.set(key, count);
+
+        const len = key.length;
+        if (
+          count > maxCount ||
+          (count === maxCount && (bestKey === null || len > maxLen))
+        ) {
+          maxCount = count;
+          maxLen = len;
+          bestKey = key;
+        }
       }
     }
   }
 
-  if (candidates.size === 0) return null;
-
-  // Sort by frequency (descending), then by length (descending)
-  const sorted = [...candidates.entries()].sort((a, b) => {
-    if (b[1] !== a[1]) return b[1] - a[1];
-    return b[0].length - a[0].length;
-  });
-
-  const bestKey = sorted[0][0];
+  if (bestKey === null) return null;
 
   // Find the original-cased version from cleaned titles
   for (const title of cleaned) {
