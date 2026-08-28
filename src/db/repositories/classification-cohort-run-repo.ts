@@ -853,10 +853,11 @@ export function writeCohortBrandSemanticUpdates(
       );
     }
     const updatedAt = now();
+    const updateStmt = db.query(
+      'UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?',
+    );
     for (const update of updates) {
-      db.query(
-        'UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?',
-      ).run(update.curationDataJson, updatedAt, update.itemId);
+      updateStmt.run(update.curationDataJson, updatedAt, update.itemId);
     }
   })();
 }
