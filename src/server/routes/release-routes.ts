@@ -14,6 +14,7 @@ import {
   ReleaseValidationError,
 } from '../../classification/release-validation';
 import { V4_TAXONOMY_REVISION } from '../../classification/release-compiler';
+import { timingSafeCompare } from '../../shared/timing-safe';
 
 /**
  * Taxonomy release status + sanctioned activation (P4 — plan section B.P4.3).
@@ -187,7 +188,7 @@ admin.post('/settings/taxonomy-release/pin', async (c) => {
   // Gate 2: API token re-check (defense in depth; global middleware may change).
   const expectedToken = process.env.BAYSTATE_CMS_API_TOKEN;
   const provided = c.req.header('Authorization') ?? '';
-  if (!expectedToken || provided !== `Bearer ${expectedToken}`) {
+  if (!expectedToken || !timingSafeCompare(provided, `Bearer ${expectedToken}`)) {
     return c.json({ error: 'Unauthorized. Provide a valid API token via Authorization: Bearer header.', code: 'invalid_api_token' }, 401);
   }
 
