@@ -11,8 +11,12 @@ export function errorHandler(err: Error, c: Context) {
     );
   }
 
+  // Do not leak internal error details (e.g. database errors, stack traces) in production
+  const isDev = process.env.NODE_ENV === 'development';
+  const errorMessage = isDev && err.message ? err.message : 'Internal server error';
+
   return c.json(
-    { error: err.message || 'Internal server error', status: 500 },
+    { error: errorMessage, status: 500 },
     500,
   );
 }

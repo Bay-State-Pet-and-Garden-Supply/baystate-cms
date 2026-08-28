@@ -316,7 +316,8 @@ describe('CentralPetConnector — live-shaped markup (captured 2026-08-15, inlin
       void opts;
       return { ok: true, html: LIVE_PDP, finalUrl: url };
     };
-    const result = await new CentralPetConnector({ fetchPage }).lookupByGtin(makeRequest('035585775210'));
+    const connector = new CentralPetConnector({ fetchPage, now: () => '2026-08-15T00:00:00.000Z' });
+    const result = await connector.lookupByGtin(makeRequest('035585775210'));
     expect(result.outcome).toBe('found');
     if (result.outcome !== 'found') return;
     const { record } = result;
