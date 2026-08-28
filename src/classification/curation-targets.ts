@@ -158,21 +158,6 @@ export function hasExplicitCurationTargets(config: ClassificationConfig): boolea
   return (config.curationTargets ?? []).length > 0;
 }
 
-// fallow-ignore-next-line unused-export — used by tests
-export function findCurationTargetForAttribute(
-  config: ClassificationConfig,
-  attributeId: string,
-  mappings: AttributeMappingConfig[] = config.attributeMappings,
-): CurationTargetConfig | null {
-  const targets = getExplicitCurationTargets(config).filter(target => target.kind === 'product_field');
-  const direct = targets.find(target => target.attributeId === attributeId);
-  if (direct) return direct;
-
-  const mapping = mappings.find(m => m.attributeId === attributeId);
-  if (!mapping) return null;
-  return targets.find(target => target.catalogField === mapping.catalogField) ?? null;
-}
-
 export function resolveAttributeAllowedValues(
   config: ClassificationConfig,
   attribute: ProductAttributeConfig,
