@@ -585,6 +585,7 @@ export function loadActiveClassificationConfigBundleV2(
  * Current legacy runtime API. V1 remains explicit transitional compatibility;
  * v2 is refused here so native safety/provenance/ML/serialization semantics
  * cannot be silently adapted away before Milestones 4–5.
+ * Deletable after last v1/v3 workspace migration; see docs/audits/gen1-retirement-record.md.
  */
 export function loadClassificationConfig(workspacePath: string): ClassificationConfig {
   const manifest = readManifest(workspacePath);
@@ -616,16 +617,7 @@ function readActiveRevisionPin(workspacePath: string): string | null {
   return readWorkspaceState(workspacePath)?.activeTaxonomyRevision ?? null;
 }
 
-/**
- * P4 (plan B.P4.1): compile the pinned bay-state-v4 release into the runtime
- * authority shape. Fail closed on ANY release validation failure.
- *
- * Store-local vocabulary overlay: immutable releases deliberately exclude the
- * reviewed brand list (brands are workspace/store-local, not taxonomy). The
- * workspace's legacy bundle brands — if present — are overlaid AFTER hashing
- * so `bundleHash` stays pure-taxonomy while snapshot brand evidence keeps v3
- * parity. Everything else comes exclusively from the release.
- */
+/** Compile the pinned bay-state-v4 release into the runtime authority. Fail closed on validation failure. Brands overlay after hashing so bundleHash stays pure-taxonomy. */
 function loadV4PinnedAuthority(workspacePath: string, pinnedRevision: string): RuntimeConfigAuthority {
   const bundle = loadTaxonomyReleaseV4('bay-state-v4'); // resolves inside src/classification/releases
   const compiled = compileTaxonomyReleaseV4(bundle);
@@ -648,11 +640,7 @@ function loadV4PinnedAuthority(workspacePath: string, pinnedRevision: string): R
   return { kind: 'v2', bundle: Object.freeze({ ...compiled, brands }) };
 }
 
-/**
- * P4 (plan B.P4.4): when the shadow flag is on and the pin is NOT bay-state-v4,
- * observe the config-level V4 delta WITHOUT changing the returned authority.
- * Observer failures never propagate.
- */
+/** Observe V4 delta when shadow flag is on and pin is not bay-state-v4. Never alters authority; failures swallowed. */
 function observeV4ShadowIfEnabled(
   workspacePath: string,
   pinnedRevision: string | null,
@@ -687,18 +675,7 @@ export type RuntimeConfigAuthority =
   | { kind: 'v2'; bundle: ClassificationConfigBundleV2 };
 
 /**
- * Load the authoritative runtime configuration. Active v2 loading requires a
- * verified activation context (catalog fields + catalog-evidence verifier);
- * without one it fails closed. V1 remains the transitional fallback when no
- * v2 activation exists.
- *
- * P4 pin-aware selection (plan B.P4.1):
- * - pin = `bay-state-v4` → the validated release is compiled into the runtime
- *   authority (release-compiler); the activation context is not required for
- *   this path because the release itself is the fail-closed gate.
- * - pin absent or `bay-state-v3` → byte-identical HEAD behavior (workspace
- *   bundle / default migration path; golden-pinned by tests).
- * - any other pin value → fail closed (`unknown_taxonomy_revision`).
+ * Load the authoritative runtime configuration. Pin == v4 → compiled release; else legacy bundle. Shadow observes when enabled.
  */
 export function loadRuntimeConfigAuthority(
   workspacePath: string,

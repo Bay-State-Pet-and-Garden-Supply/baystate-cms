@@ -36,21 +36,7 @@ import {
 } from './cohort-curator';
 import type { CohortShadowObservation } from './cohort-curator';
 
-/** Most frequent value (used for the shadow observation's aggregate type). */
-function modeOf(values: string[]): string | null {
-  if (values.length === 0) return null;
-  const counts = new Map<string, number>();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  let best: string | null = null;
-  let bestCount = 0;
-  for (const [value, count] of counts) {
-    if (count > bestCount) {
-      best = value;
-      bestCount = count;
-    }
-  }
-  return best;
-}
+
 import { getCohortCurationFlags } from '../classification/flags';
 import type { CohortCurationFlags } from '../classification/flags';
 import {
@@ -68,7 +54,7 @@ import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from 
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
-import type { OnboardingSource, PipelineStage } from '../shared/schemas/onboarding';
+import type { OnboardingItem, OnboardingSource, PipelineStage } from '../shared/schemas/onboarding';
 import { getSourcingFlags } from './flags';
 import { normalizeGtin } from './sourcing/contracts';
 import { listCurrentGenerationConflictsForItem } from '../db/repositories/onboarding-conflict-repo';
@@ -114,18 +100,9 @@ function buildAutoStages(): PipelineStage[] {
     : ['curation', 'extraction', 'discovery'];
 }
 
-// ─── Cohort-centric Curation V2 (issue #30, PR3 M3) ───────────────────────────
+// ─── Cohort-centric Curation V2 — see src/classification/flags.ts for rollout semantics ─────────────────
 
-/**
- * Flag OFF (default): Curation is per-item, byte-identical to today.
- * Flag ON + shadowOnly: observe-only — the legacy per-item path stays in
- * place and NOTHING claims cohorts (PI shadow precedent: runs may execute,
- * results are never promoted — here: no claiming in shadow).
- * Flag ON + !shadowOnly: Curation is cohort-claimed EXCLUSIVELY — `poll()`
- * never calls `claimItemsForProcessing('curation', ...)`; ownership flows
- * reclaim → reconcile-drift-before-claimable → claimReadyCurationCohorts →
- * freeze → processCohort (implementation-plan section A, D8/D9).
- */
+/** Cohort curation active when flag ON and not shadow-only. See src/classification/flags.ts. */
 function isCohortCurationActive(flags: CohortCurationFlags): boolean {
   return flags.cohortCurationV2Enabled && !flags.cohortShadowOnly;
 }
@@ -659,7 +636,15 @@ export class OnboardingWorker {
     // expose a single aggregate id; the mode is faithful for the observation).
     const executionTypeId =
       observation.outcome === 'coherent' || observation.outcome === 'coherent_with_abstentions'
-        ? modeOf(nonNullTypes)
+        ? (() => {
+            if (nonNullTypes.length === 0) return null;
+            const counts = new Map<string, number>();
+            for (const v of nonNullTypes) counts.set(v, (counts.get(v) ?? 0) + 1);
+            let best: string | null = null;
+            let bestCount = 0;
+            for (const [v, c] of counts) if (c > bestCount) { best = v; bestCount = c; }
+            return best;
+          })()
         : null;
     insertCohortShadowObservationIfChanged({
       workspaceId: this.workspaceId,
@@ -717,7 +702,7 @@ export class OnboardingWorker {
    * is recovered by a later reclaim once its lease expires.
    */
   private async processCohortRun(run: CohortRun): Promise<void> {
-    console.log(`[OnboardingWorker] Processing cohort run ${run.id} (cohort ${run.cohortId}, status=${run.status})`);
+    if (process.env.BAYSTATE_CMS_DEBUG_WORKER) console.debug(`[OnboardingWorker] Processing cohort run ${run.id} (cohort ${run.cohortId}, status=${run.status})`);
     try {
       let current = run;
       if (current.status === 'freezing') {
@@ -737,7 +722,7 @@ export class OnboardingWorker {
   }
 
   private async processItem(item: any, stage: PipelineStage): Promise<void> {
-    console.log(`[OnboardingWorker] Processing ${item.name} (${item.upc}) in stage: ${stage} (claimed by ${this.workerId})`);
+    if (process.env.BAYSTATE_CMS_DEBUG_WORKER) console.debug(`[OnboardingWorker] Processing ${item.name} (${item.upc}) in stage: ${stage} (claimed by ${this.workerId})`);
 
     onboardingEvents.emitItemStatus(item.batchId, item.id, 'in_progress', { stage });
 
@@ -786,7 +771,7 @@ export class OnboardingWorker {
    * existing attempts are reconciled (cache-before-lookup semantics).
    */
   private async processSourcing(item: any): Promise<void> {
-    console.log(`[OnboardingWorker] Sourcing for ${item.name} (${item.upc})`);
+    if (process.env.BAYSTATE_CMS_DEBUG_WORKER) console.debug(`[OnboardingWorker] Sourcing for ${item.name} (${item.upc})`);
 
     let generation: ReturnType<typeof getCurrentSourcingGeneration> | null = null;
     let decidedAt: string;
@@ -1189,7 +1174,7 @@ export class OnboardingWorker {
 
 
   private async processDiscovery(item: any): Promise<void> {
-    console.log(`[OnboardingWorker] Discovery for ${item.name} (${item.upc})`);
+    if (process.env.BAYSTATE_CMS_DEBUG_WORKER) console.debug(`[OnboardingWorker] Discovery for ${item.name} (${item.upc})`);
 
     // Observe mode (Amendment A, MC): shadow distributor data collection for
     // current-policy imports. Observation NEVER writes conflicts/acceptances/
@@ -1724,7 +1709,7 @@ export class OnboardingWorker {
     let siblingGroup: ReturnType<typeof determineProductGroup> | null = null;
     try {
       const batchItems = listItemsByBatch(item.batchId);
-      siblingGroup = determineProductGroup(item as any, batchItems as any);
+      siblingGroup = determineProductGroup(item as OnboardingItem, batchItems);
       if (siblingGroup) {
         console.log(`[OnboardingWorker] Sibling context for ${item.upc}: group "${siblingGroup.groupId}", ${siblingGroup.siblingNames.length} sibling(s)`);
       }
@@ -1734,7 +1719,7 @@ export class OnboardingWorker {
 
     // Pass sibling context through to the pipeline as read-only input.
     // product-curator.ts checks this first and falls back to its own internal query.
-    (item as any).siblingGroup = siblingGroup;
+    (item as OnboardingItem & { siblingGroup?: typeof siblingGroup }).siblingGroup = siblingGroup;
 
     try {
       const curationData = await curateItemWithPipeline(item, this.workspacePath, this.workspaceId);

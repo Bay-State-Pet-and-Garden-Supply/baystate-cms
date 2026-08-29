@@ -107,7 +107,8 @@ interface FingerprintInput {
 }
 
 // ─── Cache ─────────────────────────────────────────────────────────────────────
-
+// LEGACY/SHADOW ONLY — active cohort mode uses classification_cohort_outputs (ADR 0013 PR6/PR7). Do not use in cohortMode.
+/* istanbul ignore next — legacy path */
 const cohortCache = new Map<string, Promise<Map<string, CoordinatedTitle>>>();
 
 function containsControlCharacters(value: string): boolean {

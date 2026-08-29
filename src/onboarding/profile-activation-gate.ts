@@ -68,7 +68,8 @@ export function evaluateGate(input: GateInput): GateResult {
   const failing = input.requiredResults.filter(r => !r.success);
   if (failing.length > 0) {
     const f = failing[0];
-    return { allowed: false, blockReason: `${f.field} failed on 1 of ${input.requiredResults.length}`, reviseAction: `Revise ${f.field} selector`, reason: `${f.field} failed expected=${(f as any).expected ?? ''} actual=${(f as any).extracted ?? ''} provenance=${(f as any).provenance ?? ''} artifact=${(f as any).artifactHash ?? ''}` };
+    const r = f as Record<string, unknown> & { field: string; expected?: unknown; extracted?: unknown; provenance?: unknown; artifactHash?: unknown };
+    return { allowed: false, blockReason: `${r.field} failed on 1 of ${input.requiredResults.length}`, reviseAction: `Revise ${r.field} selector`, reason: `${r.field} failed expected=${String(r.expected ?? '')} actual=${String(r.extracted ?? '')} provenance=${String(r.provenance ?? '')} artifact=${String(r.artifactHash ?? '')}` };
   }
 
   if (input.confirmedCount < 3 && !input.waiver) {

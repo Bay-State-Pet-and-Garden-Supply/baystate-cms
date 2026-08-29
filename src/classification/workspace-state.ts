@@ -1,21 +1,23 @@
 /**
- * Workspace classification state (P3 — release-aware loading).
+ * Workspace classification state (P3 — release-aware loading, P4 taxonomy v4).
  *
  * The workspace pins the immutable taxonomy release it runs on via
  * `store/classification/state.json`:
  *
  * ```json
  * {
- *   "activeTaxonomyRevision": "bay-state-v3",
- *   "updatedAt": "2026-08-16T12:00:00.000Z"
+ *   "activeTaxonomyRevision": "bay-state-v4",
+ *   "updatedAt": "2026-08-24T21:26:52.200Z"
  * }
  * ```
  *
  * The pin is the ONLY release-reference the workspace owns. Immutable release
  * definitions live under `src/classification/releases/<revision>/` and are
  * resolved + hard-validated by `release-validation.ts`. Workspaces WITHOUT a
- * pin are pre-migration: the loader MIGRATES them to `bay-state-v3` (see
- * `migrateWorkspaceToRelease`) unless a legacy v2 workspace bundle exists.
+ * pin are pre-migration and migrate to `DEFAULT_TAXONOMY_REVISION` (`bay-state-v3`)
+ * unless a legacy v2 bundle exists — latest is `bay-state-v4` via explicit
+ * `writeWorkspaceState(...,'bay-state-v4')` (P4). Bumping the default requires
+ * a migration.
  *
  * This module owns read/write of the pin. It is deliberately dependency-free
  * (only node fs/path + the shared zod schema) so config-loader can import it

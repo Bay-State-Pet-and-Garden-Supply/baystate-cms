@@ -57,7 +57,7 @@ import { listDistinctProductPageNames } from '../db/repositories/page-repo';
 import { packagingOcrStage } from '../classification/stages/packaging-ocr-stage';
 import { getOcrStageFlags } from '../classification/ocr-stage-flags';
 import type { ProductLineItemSnapshot, StageDefinition, PipelineRunResult, ClassificationStageName } from '../classification/types';
-import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
+import type { OnboardingItem, CurationData, ExtractionData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
 import { buildFrozenItem } from './cohort-curator';
@@ -194,7 +194,7 @@ export async function curateItemWithPipeline(
     // null; NO live `...ext` spread).
     item = buildFrozenItem(preparedCohort!.memberProjection, item);
   }
-  const ext = item.extractionData || ({} as any);
+  const ext = (item.extractionData ?? {}) as ExtractionData & Record<string, unknown>;
 
   // ADR 0014 / PI-6: distributor images are DISPLAY-ONLY. The non-cohort
   // distributor image backfill (previously copied identityJson.images into
@@ -233,7 +233,7 @@ export async function curateItemWithPipeline(
         liveDistributorProvenance.evidenceHash.length > 0 &&
         liveDistributorProvenance.evidenceHash === decisionEvidenceHash));
 
-  console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
+  if (process.env.BAYSTATE_CMS_DEBUG_WORKER) console.debug(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
 
   let configSnapshotRef: {
     id: string;
@@ -423,7 +423,7 @@ export async function curateItemWithPipeline(
     // post-freeze mutation of a sibling's extraction_data_json/name/brand_hint
     // is never visible to title/page coordination.
     let productLineGroup: ReturnType<typeof determineProductGroup> | null = null;
-    const attachedBatchItems = (item as any).batchItems as OnboardingItem[] | undefined;
+    const attachedBatchItems = (item as OnboardingItem & { batchItems?: OnboardingItem[] }).batchItems;
     let batchItemsForCoordination: OnboardingItem[] = [];
 
     if (cohortMode) {
@@ -454,7 +454,7 @@ export async function curateItemWithPipeline(
       }
       batchItemsForCoordination = frozenCtx.frozenBatchItems ?? [];
     } else {
-      productLineGroup = (item as any).siblingGroup ?? null;
+      productLineGroup = (item as OnboardingItem & { siblingGroup?: ReturnType<typeof determineProductGroup> }).siblingGroup ?? null;
       if (!productLineGroup) {
         try {
           const db = getDb();
@@ -495,7 +495,7 @@ export async function curateItemWithPipeline(
             existingSku: null,
             extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
             curationData: null,
-            status: 'active' as any,
+            status: 'imported' as const,
             errorMessage: null,
             retryCount: 0,
             createdAt: '',
@@ -836,11 +836,9 @@ export async function curateItemWithPipeline(
     });
     const suggestedProductType = typeSelection.proposal?.targetId ?? null;
 
-    // PR3 hardening (Commit B / R2): the live product_pages fallback is a
-    // post-freeze semantic read — cohort mode uses ONLY the frozen
-    // verifiedPageIds (above), never the mutable page_index.
-    // e09 B2 P12: legacy name-only hard-coded fallback is gated through
-    // category-page-correctness — unverified or semantically incompatible pages abstain (needs_input).
+    // LEGACY fallback — active cohort mode skips this; kept for flag-OFF compatibility only.
+    // Validated via category-page-correctness — unverified/incompatible pages abstain.
+    // See Deslop H1: gate explicitly behind !cohortMode (== cohortCurationV2Enabled===false).
     if (!cohortMode && suggestedPages.length === 0 && (suggestedProductType || item.name)) {
       try {
         const text = `${suggestedProductType || ''} ${item.name}`.toLowerCase();

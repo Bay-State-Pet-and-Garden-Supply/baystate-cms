@@ -1,46 +1,7 @@
 /**
- * bay-state-v4 Release Compiler (P4 — plan section B.P4.1).
- *
- * PURE, DETERMINISTIC compiler from a validated v4 taxonomy release bundle to
- * the runtime ClassificationConfigBundleV2 shape consumed by every pipeline
- * stage. Same bundle bytes ⇒ byte-identical compiled config ⇒ identical
- * `bundleHash` inputs (pinned by src/tests/unit/release-compiler.test.ts):
- * no wall-clock time, no DB reads, no environment reads.
- *
- * Projection decisions (plan B.P4.1 / B.P4.2):
- * - Hierarchy classifiable nodes become Product Types (`id`, `label`,
- *   `facetProfileId` → `attributeProfileId`, `legacyTypeIds` →
- *   `oldIdAliases`). Departments are NOT emitted as types (classifiable=false
- *   nodes are never product types).
- * - The 9 SHARED facet profiles expand into ONE AttributeProfileConfig per
- *   classifiable node (`profile-<nodeId>`) because the runtime contract is
- *   exactly one profile per Product Type (config-validation uniqueness rule;
- *   authoritative resolution direction: type.attributeProfileId → profile.id,
- *   see effective-curation-type.ts). Each expanded profile keeps the shared
- *   facet behavior verbatim and records the source v3 profiles in
- *   `oldIdAliases`.
- * - Attributes and export mappings pass through verbatim (sorted for stable
- *   ordering). The canonical-category-id / canonical-breadcrumb compiled-
- *   projection attributes are included so PF13/PF14 serialization works once
- *   a value exists; nothing here GUESSES one (see
- *   `resolveCanonicalPageProjections`).
- * - Curation targets are derived deterministically from the mapped attributes:
- *   `primary-product-type`, one product_field target per exported attribute
- *   EXCLUDING the two compiled-projection attributes (they are computed, not
- *   human-curated), and `store-pages`. This mirrors the bay-state seed
- *   conventions (optionSource/required/labels) with sortOrder assigned in
- *   catalog-field order starting at 10.
- * - Brands are intentionally NOT part of an immutable taxonomy release
- *   (store-local vocabulary). The pin-aware loader overlays the workspace's
- *   reviewed brand list after compilation; the compiled bundleHash therefore
- *   stays pure-taxonomy.
- * - Model/data-sharing policies take the conservative schema defaults
- *   (local-only); releases do not carry store model routing.
- *
- * Advisory metadata (recorded into run snapshots via the config JSON):
- * `taxonomyRevision` and `pageAssignmentPolicyAdvisory`. The page-assignment
- * policy is ADVISORY ONLY in P4 — promoting its rules into prompts requires a
- * versioned prompt bump (out of scope, plan B.P4.2).
+ * bay-state-v4 Release Compiler — deterministic bundle → ClassificationConfigBundleV2.
+ * Pure, no I/O, byte-identical output for identical input.
+ * See docs/plans/classification-v4-activation-and-settings-revamp-plan.md (B.P4.1/B.P4.2) for projection rules.
  */
 
 import {
@@ -281,7 +242,6 @@ export function compileTaxonomyReleaseV4(bundle: TaxonomyReleaseBundleV4): Compi
   }) as CompiledReleaseBundle;
 }
 
-// ─── Canonical page-projection resolution (B.P4.2) ───────────────────────────
 /** Shallow structural copy that preserves the exact v2 attribute shape. */
 function structuredCopyAttribute(attribute: ProductAttributeConfigV2): ProductAttributeConfigV2 {
   return {

@@ -808,7 +808,7 @@ async function extractCustomSelectors(
           if (el) cFields[fieldName] = el.textContent?.trim() || '';
         } catch { /* skip bad selectors */ }
       }
-      if (Object.keys(cFields).length > 0) (data as any).customFields = cFields;
+      if (Object.keys(cFields).length > 0) (data as Record<string, unknown> & { customFields?: Record<string,string> }).customFields = cFields;
     }
     if (prof.imagesSelector) {
       const parseSrcsetCandidates = (srcset: string | null | undefined): string[] => {
@@ -1332,8 +1332,8 @@ function mergeExtractionLayers(
   // Transfer custom fields from profile selector extraction
   let customFields: Record<string, string> = {};
   if (raw.custom && typeof raw.custom === 'object' && 'customFields' in raw.custom) {
-    const cf = (raw.custom as any).customFields;
-    if (cf && typeof cf === 'object') customFields = cf;
+    const cf = (raw.custom as Record<string, unknown> & { customFields?: unknown }).customFields;
+    if (cf && typeof cf === 'object') customFields = cf as Record<string, string>;
   }
 
   return ExtractionDataSchema.parse({

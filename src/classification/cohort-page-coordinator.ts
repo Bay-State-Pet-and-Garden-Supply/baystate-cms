@@ -466,6 +466,8 @@ export async function coordinateCohortPagesCore(
   return result;
 }
 
+// LEGACY/SHADOW ONLY — active cohort mode uses classification_cohort_outputs (ADR 0013 PR6/PR7).
+/* istanbul ignore next — legacy path */
 export function coordinateCohortPagesOnce(
   params: CohortPageCoordinationParams,
 ): Promise<Map<string, CohortPageMemberResult>> {
