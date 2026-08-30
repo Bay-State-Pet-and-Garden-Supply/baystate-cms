@@ -63,7 +63,7 @@ function ipv4ToNumber(ip: string): number | null {
  */
 const PRECOMPILED_PRIVATE_RANGES = PRIVATE_IPV4.map((range) => {
   const base = ipv4ToNumber(range.ip)!;
-  const mask = range.bits === 0 ? 0 : (~0 << (32 - range.bits)) >>> 0;
+  const mask = range.bits > 0 ? (~0 << (32 - range.bits)) >>> 0 : 0;
   const maskedBase = (base & mask) >>> 0;
   const isLinkLocal = range.ip.startsWith('169.254') || range.ip === '0.0.0.0';
   return {
