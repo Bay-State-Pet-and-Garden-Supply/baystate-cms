@@ -48,6 +48,9 @@ describe('boundedFetchJson (ADR 0014 network bounds)', () => {
   test('caller cancellation yields cancelled (not timeout)', async () => {
     const controller = new AbortController();
     const fetchImpl = async (_url: string, init: RequestInit) => {
+      if (init.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
       await new Promise((_resolve, reject) => {
         init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
       });
@@ -62,6 +65,9 @@ describe('boundedFetchJson (ADR 0014 network bounds)', () => {
 
   test('deadline expiry yields timeout', async () => {
     const fetchImpl = async (_url: string, init: RequestInit) => {
+      if (init.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
       await new Promise((_resolve, reject) => {
         init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
       });
@@ -72,7 +78,7 @@ describe('boundedFetchJson (ADR 0014 network bounds)', () => {
         `${ORIGIN}/x`,
         ORIGIN,
         {},
-        { fetchImpl: fetchImpl as unknown as typeof fetch, deadlineAt: new Date(Date.now() + 10).toISOString() },
+        { fetchImpl: fetchImpl as unknown as typeof fetch, deadlineAt: new Date(Date.now() + 50).toISOString() },
       ),
     ).rejects.toMatchObject({ code: 'timeout' });
   });
