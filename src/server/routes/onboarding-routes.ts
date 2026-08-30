@@ -208,6 +208,7 @@ import {
   getReviewState,
 } from '../../db/repositories/onboarding-review-repo';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
+import { isPrivateOrLinkLocal } from '../../shared/ssrf';
 import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
 import {
@@ -3373,14 +3374,11 @@ route.post('/onboarding/settings/profile-tooling/fetch-html', async (c) => {
       return c.json({ ok: false, error: 'Only http and https protocols are allowed' }, 400);
     }
     const hostname = parsedUrl.hostname;
+    // Security: Validate host/IP against private and link-local ranges using canonical SSRF helper.
+    // Handles octal (0177.0.0.1), hex (0x7f000001), decimal integer (2130706433), IPv6, and localhost.
     if (
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname === '0.0.0.0' ||
-      hostname.startsWith('10.') ||
-      hostname.startsWith('192.168.') ||
-      hostname.startsWith('172.') ||
-      hostname === '[::1]'
+      hostname.toLowerCase() === 'localhost' ||
+      isPrivateOrLinkLocal(hostname)
     ) {
       return c.json({ ok: false, error: 'URL points to a private network address' }, 400);
     }
