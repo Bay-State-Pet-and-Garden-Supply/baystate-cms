@@ -10,4 +10,8 @@
 **Learning:** Standard string comparisons leak secret prefixes via microsecond response time differences.
 **Prevention:** Always use SHA-256 fixed-length hashing and `crypto.timingSafeEqual` (via `timingSafeCompare`) for secret/token verification.
 
+## 2025-05-20 - URL-Normalized IPv6-Mapped IPv4 SSRF Bypass
+**Vulnerability:** The WHATWG `URL` parser automatically standardizes IPv6-mapped IPv4 hostnames like `[::ffff:127.0.0.1]` into hex word representation `[::ffff:7f00:1]`. Slicing off `::ffff:` resulted in `7f00:1`, which failed standard IPv4 decimal checks and returned `unknown` in `classifyIp()`, bypassing SSRF validation.
+**Learning:** Standard WHATWG URL parsers reformat IPv6-mapped IPv4 addresses to hexadecimal word pairs (`::ffff:7f00:1`). SSRF checks that expect dotted-decimal IPv4 suffixes after `::ffff:` fail on normalized URL hostnames.
+**Prevention:** Convert hexadecimal 16-bit word pairs following `::ffff:` into canonical dotted-decimal IPv4 octets before evaluating against private CIDR blocks.
 

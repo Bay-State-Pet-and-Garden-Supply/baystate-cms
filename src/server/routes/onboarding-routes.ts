@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { isPrivateOrLinkLocal } from '../../shared/ssrf';
 import { getLocalRuntimeStatus } from '../../ai/local-runtime-coordinator';
 import { OLLAMA_VLM_SERVICE_NAME, DEFAULT_LOCAL_VISION_MODEL } from '../../ai/vision-model-defaults';
 import { streamSSE } from 'hono/streaming';
@@ -3406,16 +3407,8 @@ route.post('/onboarding/settings/profile-tooling/fetch-html', async (c) => {
     if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
       return c.json({ ok: false, error: 'Only http and https protocols are allowed' }, 400);
     }
-    const hostname = parsedUrl.hostname;
-    if (
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname === '0.0.0.0' ||
-      hostname.startsWith('10.') ||
-      hostname.startsWith('192.168.') ||
-      hostname.startsWith('172.') ||
-      hostname === '[::1]'
-    ) {
+    const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, '');
+    if (hostname === 'localhost' || isPrivateOrLinkLocal(hostname)) {
       return c.json({ ok: false, error: 'URL points to a private network address' }, 400);
     }
   } catch {

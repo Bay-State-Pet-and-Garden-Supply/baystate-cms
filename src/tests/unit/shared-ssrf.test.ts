@@ -34,6 +34,7 @@ describe('shared ssrf classifier', () => {
 
   it('handles ::ffff:-mapped IPv4', () => {
     expect(classifyIp('::ffff:127.0.0.1')).toBe('private');
+    expect(classifyIp('::ffff:7f00:1')).toBe('private');
     expect(classifyIp('::ffff:0177.0.0.1')).toBe('private');
     expect(classifyIp('::ffff:192.168.0.5')).toBe('private');
     expect(classifyIp('::ffff:8.8.8.8')).toBe('public');
