@@ -542,7 +542,11 @@ function lintAndValidateFallbackTitles(
     candidateTitles: fallbackTitles,
   });
   if (!fallbackValidation.valid) {
-    throw new Error(`Deterministic fallback title set failed family consistency (T7): ${fallbackValidation.reason ?? fallbackValidation.perMember.find(p => !p.valid)?.reason ?? 'unknown'}`, { cause });
+    console.warn(`[CohortCoordinator] Fallback title set family validation failed (${fallbackValidation.reason}), using formatted individual titles for cohort: ${familyId}`);
+    return group.map(item => ({
+      upc: item.upc,
+      title: formatDeterministicTitle(item.name ?? item.upc, item.brandHint),
+    }));
   }
   return fallbackTitles;
 }

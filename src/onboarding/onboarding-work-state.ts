@@ -30,6 +30,7 @@ import { listChangeSetStatusBySkus } from '../db/repositories/change-set-repo';
 import { convertToLbs } from '../shared/weight-converter';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 import type { CurationCohortView } from '../shared/schemas/cohorts';
+import { getDb } from '../db/connection';
 import {
   type WorkStateCategory,
   type WorkActivity,
@@ -39,6 +40,11 @@ import {
   type OnboardingWorkState,
   type BatchWorkState,
   type WorkStateCounts,
+  type FindingCode,
+  type SuggestedAction,
+  type FindingDetail,
+  FindingCodeEnum,
+  SuggestedActionEnum,
   EMPTY_WORK_STATE_COUNTS,
 } from '../shared/schemas/onboarding-work-state';
 
@@ -65,6 +71,40 @@ export interface WorkStateContext {
   cohortByItem: Map<string, FamilyCohortState>;
   changeSetStatusBySku: Map<string, string>;
   candidateCountByItem: Map<string, number>;
+  variantResolutionByItem: Map<string, { id: string; status: string; candidates: unknown[]; identityMatrixHash: string; platform: string }>;
+}
+
+function loadVariantResolutionByItem(itemIds: string[]): Map<string, { id: string; status: string; candidates: unknown[]; identityMatrixHash: string; platform: string }> {
+  if (itemIds.length === 0) return new Map();
+  try {
+    const db = getDb();
+    const placeholders = itemIds.map(() => '?').join(',');
+    const rows = db
+      .prepare(`SELECT * FROM onboarding_variant_resolutions WHERE onboarding_item_id IN (${placeholders}) AND superseded_at IS NULL`)
+      .all(...itemIds) as Array<{
+      id: string;
+      onboarding_item_id: string;
+      status: string;
+      candidates_json: string;
+      identity_matrix_hash: string;
+      platform: string;
+    }>;
+    const map = new Map<string, { id: string; status: string; candidates: unknown[]; identityMatrixHash: string; platform: string }>();
+    for (const r of rows) {
+      let candidates: unknown[] = [];
+      try { candidates = JSON.parse(r.candidates_json); } catch { candidates = []; }
+      map.set(r.onboarding_item_id, {
+        id: r.id,
+        status: r.status,
+        candidates,
+        identityMatrixHash: r.identity_matrix_hash,
+        platform: r.platform,
+      });
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
 }
 
 export interface WorkStateFilters {
@@ -141,7 +181,8 @@ export function buildBatchWorkStateContext(batchId: string, items: OnboardingIte
       candidateCountByItem.set(item.id, listSourcesByItem(item.id).length);
     }
   }
-  return { reviewStates, cohortByItem, changeSetStatusBySku, candidateCountByItem };
+  const variantResolutionByItem = loadVariantResolutionByItem(items.map(i => i.id));
+  return { reviewStates, cohortByItem, changeSetStatusBySku, candidateCountByItem, variantResolutionByItem };
 }
 
 // ─── Derivation helpers ────────────────────────────────────────────────────────
@@ -172,6 +213,206 @@ interface DerivationInput {
   detail?: string | null;
   attentionReason?: AttentionReason | null;
   attentionAction?: AttentionAction | null;
+  findingCode?: FindingCode | null;
+  findingSummary?: string | null;
+  conflictingValues?: string[] | null;
+  suggestedAction?: SuggestedAction | null;
+  findingDetails?: FindingDetail[] | null;
+  variantResolution?: { id: string; status: string; candidates: unknown[]; identityMatrixHash: string; platform: string } | null;
+}
+
+/** Map a semantic finding code to the granular curation sub-activity it blocks. */
+function curationSubActivityForFindingCode(code: string | undefined | null): WorkActivity | null {
+  switch (code) {
+    case 'family_product_type':
+      return 'cohort_freezing';
+    case 'family_brand':
+      return 'semantic_validation';
+    case 'coordinated_title':
+      return 'title_coordination';
+    case 'coordinated_page':
+    case 'coordinated_page_name_mismatch':
+      return 'page_coordination';
+    case 'member_attribute_applicability':
+    case 'member_cardinality':
+      return 'attribute_curation';
+    default:
+      return null;
+  }
+}
+
+/** Map a persisted classification stage name to the granular WorkActivity for observability. */
+function stageNameToWorkActivity(stageName: string): WorkActivity | null {
+  switch (stageName) {
+    case 'packaging_ocr':
+      return 'packaging_ocr';
+    case 'evidence_extraction':
+      return 'cohort_freezing';
+    case 'name_consolidation':
+      return 'title_coordination';
+    case 'category_page_proposals':
+      return 'page_coordination';
+    case 'attribute_applicability':
+    case 'product_attribute_proposals':
+      return 'attribute_curation';
+    case 'primary_product_type_proposal':
+      return 'cohort_freezing';
+    default:
+      return null;
+  }
+}
+
+/** Derive the most specific curation sub-activity for a curation-stage item. */
+function deriveCurationSubActivity(item: OnboardingItem): WorkActivity {
+  const curData = item.curationData as Record<string, unknown> | null;
+  const sv = curData?.semanticValidation as { status?: string; findings?: unknown } | undefined;
+  if (sv?.status === 'blocked' && Array.isArray(sv.findings) && sv.findings.length > 0) {
+    const first = sv.findings[0] as Record<string, unknown> | null;
+    const firstCode = first && typeof first === 'object' && typeof (first as Record<string, unknown>).code === 'string' ? (first as Record<string, unknown>).code as string : null;
+    const mapped = curationSubActivityForFindingCode(firstCode);
+    if (mapped) return mapped;
+  }
+  // Live run stage projection: check cohort run and classification stage results for
+  // in-progress curation sub-stage. This is the authoritative source for active work.
+  try {
+    // 1) Cohort run lease state: freezing/running cohorts are in cohort_freezing
+    const cohortRunRow = getDb()
+      .query("SELECT status FROM classification_cohort_runs WHERE cohort_id IN (SELECT cohort_id FROM curation_cohort_members WHERE onboarding_item_id = ?) AND status IN ('freezing','running') LIMIT 1")
+      .get(item.id) as { status: string } | undefined;
+    if (cohortRunRow) {
+      if (cohortRunRow.status === 'freezing') return 'cohort_freezing';
+      // running cohort → look at child classification run stage
+    }
+    // 2) Per-item classification run stages (authoritative granular stage)
+    const curRunId = (curData as Record<string, unknown> | null)?.classificationRunId;
+    const runId = typeof curRunId === 'string' && curRunId.length > 0 ? curRunId : null;
+    const lookupId = runId ?? getDb().query(
+      "SELECT id FROM classification_runs WHERE onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1"
+    ).get(item.id) as { id: string } | undefined;
+    const effectiveRunId = runId ?? (lookupId && typeof (lookupId as unknown as string) === 'string' ? (lookupId as unknown as string) : (lookupId as { id: string } | undefined)?.id ?? null);
+    if (effectiveRunId) {
+      const stageRows = getDb()
+        .query("SELECT stage_name, status FROM classification_stage_results WHERE run_id = ? ORDER BY started_at ASC")
+        .all(effectiveRunId) as Array<{ stage_name: string; status: string }>;
+      // Prefer a stage currently running
+      for (const r of stageRows) {
+        if (r.status === 'running') {
+          const mapped = stageNameToWorkActivity(r.stage_name);
+          if (mapped) return mapped;
+        }
+      }
+      // Otherwise the first pending stage after last succeeded
+      let lastSucceededIdx = -1;
+      for (let i = 0; i < stageRows.length; i++) {
+        if (stageRows[i].status === 'succeeded' || stageRows[i].status === 'abstained') lastSucceededIdx = i;
+        else break;
+      }
+      const nextPending = stageRows[lastSucceededIdx + 1];
+      if (nextPending && nextPending.status === 'pending') {
+        const mapped = stageNameToWorkActivity(nextPending.stage_name);
+        if (mapped) return mapped;
+      }
+      // Fallback: last running-pending heuristic not matched, check for any pending
+      for (const r of stageRows) {
+        if (r.status === 'pending') {
+          const mapped = stageNameToWorkActivity(r.stage_name);
+          if (mapped) return mapped;
+        }
+      }
+    }
+  } catch {
+    // Projection must never throw; fall through to curation
+  }
+  return 'curation';
+}
+
+function safeFindingCode(value: unknown): FindingCode | null {
+  if (typeof value !== 'string') return null;
+  const parsed = FindingCodeEnum.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function safeSuggestedAction(value: unknown): SuggestedAction | null {
+  if (typeof value !== 'string') return null;
+  const parsed = SuggestedActionEnum.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function extractFindingDetails(curationData: Record<string, unknown> | null): {
+  findingCode: FindingCode | null;
+  findingSummary: string | null;
+  conflictingValues: string[] | null;
+  suggestedAction: SuggestedAction | null;
+  findingDetails: FindingDetail[] | null;
+} {
+  const svRaw = (curationData as Record<string, unknown> | null)?.semanticValidation;
+  if (!svRaw || typeof svRaw !== 'object' || Array.isArray(svRaw)) {
+    return { findingCode: null, findingSummary: null, conflictingValues: null, suggestedAction: null, findingDetails: null };
+  }
+  const sv = svRaw as { status?: unknown; findings?: unknown };
+  if (!Array.isArray(sv.findings) || sv.findings.length === 0) {
+    return { findingCode: null, findingSummary: null, conflictingValues: null, suggestedAction: null, findingDetails: null };
+  }
+  // Guard each entry: must be non-null object
+  const validFindings = sv.findings.filter((f): f is Record<string, unknown> => f !== null && typeof f === 'object' && !Array.isArray(f));
+  if (validFindings.length === 0) {
+    return { findingCode: null, findingSummary: null, conflictingValues: null, suggestedAction: null, findingDetails: null };
+  }
+  const first = validFindings[0];
+  const findingCode = safeFindingCode(first.code);
+  const findingSummary = typeof first.message === 'string' ? first.message : null;
+  const conflictingValues = Array.isArray(first.conflictingValues)
+    ? (first.conflictingValues as unknown[]).filter((v): v is string => typeof v === 'string')
+    : null;
+  const suggestedAction = safeSuggestedAction(first.suggestedAction);
+  // Fallback summary: use stored message even when code fails enum validation
+  const fallbackSummary = findingSummary ?? (typeof first.message === 'string' ? first.message : null);
+  const findingDetails: FindingDetail[] = validFindings
+    .filter(f => typeof f.code === 'string' && typeof f.message === 'string' && safeFindingCode(f.code) !== null)
+    .map(f => ({
+      code: safeFindingCode(f.code) as FindingCode,
+      memberSku: typeof f.memberSku === 'string' ? f.memberSku : '',
+      message: f.message as string,
+      conflictingValues: Array.isArray(f.conflictingValues)
+        ? (f.conflictingValues as unknown[]).filter((v): v is string => typeof v === 'string')
+        : null,
+      suggestedAction: safeSuggestedAction(f.suggestedAction),
+    }));
+  return {
+    findingCode,
+    findingSummary: findingSummary ?? fallbackSummary,
+    conflictingValues: conflictingValues && conflictingValues.length > 0 ? conflictingValues : null,
+    suggestedAction,
+    findingDetails: findingDetails.length > 0 ? findingDetails : null,
+  };
+}
+
+/** Centralized semantic-block projection. Returns needs_attention input when blocked, else null. */
+function semanticBlockedInput(item: OnboardingItem): DerivationInput | null {
+  const sv = (item.curationData as Record<string, unknown> | null)?.semanticValidation as { status?: unknown; findings?: unknown } | undefined;
+  if (!sv || sv.status !== 'blocked') return null;
+  const curData = item.curationData as Record<string, unknown> | null;
+  const extracted = extractFindingDetails(curData);
+  const findings = Array.isArray((sv as Record<string, unknown>).findings) ? (sv as Record<string, unknown>).findings as unknown[] : [];
+  const firstMessage =
+    extracted.findingSummary ??
+    (findings.length > 0 && findings[0] !== null && typeof findings[0] === 'object' && typeof (findings[0] as Record<string, unknown>).message === 'string'
+      ? ((findings[0] as Record<string, unknown>).message as string)
+      : 'A hard cohort semantic validation finding blocks this item.');
+  const granularActivity = deriveCurationSubActivity(item);
+  return {
+    category: 'needs_attention',
+    activity: granularActivity !== 'curation' ? granularActivity : null,
+    label: 'Curation blocked by semantic validation',
+    detail: firstMessage,
+    attentionReason: 'semantic_validation_blocked',
+    attentionAction: 'resolve_semantic_conflict',
+    findingCode: extracted.findingCode,
+    findingSummary: extracted.findingSummary ?? firstMessage,
+    conflictingValues: extracted.conflictingValues,
+    suggestedAction: extracted.suggestedAction,
+    findingDetails: extracted.findingDetails,
+  };
 }
 
 function build(
@@ -237,6 +478,11 @@ function build(
     detail: input.detail ?? null,
     attentionReason: input.attentionReason ?? null,
     attentionAction: input.attentionAction ?? null,
+    findingCode: input.findingCode ?? null,
+    findingSummary: input.findingSummary ?? null,
+    conflictingValues: input.conflictingValues ?? null,
+    suggestedAction: input.suggestedAction ?? null,
+    findingDetails: input.findingDetails ?? null,
     family: cohort
       ? {
           cohortId: cohort.cohortId,
@@ -250,6 +496,7 @@ function build(
     reviewState: deriveReviewState(item, row),
     stage: item.stage,
     stageStatus: item.stageStatus,
+    variantResolution: (input as any).variantResolution ?? null,
     upc: item.upc,
     name: item.name,
     brand: item.brandHint ?? (typeof extData?.brand === 'string' ? extData.brand : null),
@@ -313,6 +560,38 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
     );
   }
 
+  // Centralized semantic-block projection: curation AND review rows with a
+  // persisted blocked semantic validation surface as needs_attention BEFORE
+  // any ready_for_review inference. Promotion does not re-project semantic
+  // blocks (those rows advance beyond curation only after the block clears).
+  const semanticBlock = semanticBlockedInput(item);
+  if (semanticBlock && (item.stage === 'curation' || item.stage === 'review')) {
+    return build(item, row, cohort, semanticBlock);
+  }
+
+  // ── Variant resolution choose_variant projection (M6) ─────────────────
+  // When a current unresolved variant matrix exists and item is parked for input, surface choose_variant
+  const variantRes = ctx.variantResolutionByItem?.get(item.id);
+  if (
+    variantRes &&
+    (variantRes.status === 'ambiguous' || variantRes.status === 'no_match' || variantRes.status === 'stale') &&
+    (item.stage === 'discovery' || item.stage === 'extraction') &&
+    item.stageStatus === 'needs_input'
+  ) {
+    const { getEffectiveVariantResolutionMode } = require('./variant-flags');
+    if (getEffectiveVariantResolutionMode() === 'active') {
+      return build(item, row, cohort, {
+        category: 'needs_attention',
+        activity: null,
+        label: 'Choose product variant',
+        detail: 'Multiple variants detected — choose the exact variant.',
+        attentionReason: 'choose_variant',
+        attentionAction: 'choose_variant',
+        variantResolution: variantRes as any,
+      });
+    }
+  }
+
   switch (item.stage) {
     case 'promotion': {
       if (item.stageStatus === 'completed') {
@@ -366,53 +645,36 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
 
     case 'curation': {
       if (item.stageStatus === 'completed') {
-        // Epic #46 review remediation (fix 2): a `curation / completed` item
-        // whose semantic validation is BLOCKED is NOT ready for review — the
-        // automation side refuses to advance it (auto-advance guard) and the
-        // review-completion gate refuses it. Projecting it as ready_for_review
-        // would create two contradictory authorities and a dead end in the
-        // Review queue. It surfaces as Needs Attention with the first finding.
-        const semanticValidation = item.curationData?.semanticValidation;
-        if (semanticValidation?.status === 'blocked') {
-          const firstMessage =
-            Array.isArray(semanticValidation.findings) &&
-            semanticValidation.findings.length > 0 &&
-            typeof semanticValidation.findings[0]?.message === 'string'
-              ? (semanticValidation.findings[0]!.message as string)
-              : 'A hard cohort semantic validation finding blocks this item.';
-          return attention(
-            'semantic_validation_blocked',
-            'resolve_semantic_conflict',
-            'Curation blocked by semantic validation',
-            firstMessage,
-          );
-        }
+        // Semantic blocks are already handled by the centralized check above;
+        // this branch is reached only for non-blocked completed curation.
         return build(item, row, cohort, { category: 'ready_for_review', activity: 'review', label: 'Ready for review' });
       }
       if (item.stageStatus === 'failed') {
         return attention('processing_failed', 'retry_processing', 'Curation failed');
       }
       // pending / in_progress → family barrier or cohort/legacy curation.
+      const granularActivity = deriveCurationSubActivity(item);
+      const activityForProcessing = granularActivity !== 'curation' ? granularActivity : 'curation';
       if (cohort) {
         if (cohort.cohortState === 'ready' || cohort.cohortStatus === 'ready') {
-          return build(item, row, cohort, { category: 'processing', activity: 'curation', label: 'Curating product family' });
+          return build(item, row, cohort, { category: 'processing', activity: activityForProcessing, label: 'Curating product family' });
         }
         if (cohort.cohortState === 'blocked') {
           return build(item, row, cohort, {
             category: 'waiting_on_family',
-            activity: 'curation',
+            activity: activityForProcessing,
             label: 'Family blocked',
             detail: cohort.blockedReason,
           });
         }
         return build(item, row, cohort, {
           category: 'waiting_on_family',
-          activity: 'curation',
+          activity: activityForProcessing,
           label: 'Family not ready yet',
           detail: cohort.blockedReason ?? `Waiting on ${cohort.waitingOnItemIds.length} sibling${cohort.waitingOnItemIds.length === 1 ? '' : 's'}`,
         });
       }
-      return build(item, row, cohort, { category: 'processing', activity: 'curation', label: 'Curating product' });
+      return build(item, row, cohort, { category: 'processing', activity: activityForProcessing, label: 'Curating product' });
     }
 
     case 'extraction': {
@@ -606,6 +868,7 @@ export function getItemWorkState(itemId: string): OnboardingWorkState | undefine
     candidateCountByItem: item.stage === 'discovery'
       ? new Map([[item.id, listSourcesByItem(item.id).length]])
       : new Map(),
+    variantResolutionByItem: loadVariantResolutionByItem([item.id]),
   };
   return deriveItemWorkState(item, ctx);
 }

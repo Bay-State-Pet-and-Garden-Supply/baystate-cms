@@ -29,6 +29,8 @@ import { resolveVariantsForCandidates } from './variant-url-resolver';
 import { findLocalBrandCandidates } from './local-brand-url-finder';
 import { getActiveUrlsForDomain } from '../db/repositories/brand-url-index-repo';
 import { recordDiscoveryEvent } from '../db/repositories/sitemap-telemetry-repo';
+import { deriveVariantTokens } from './variant-resolver';
+import { productUrlIdentityKey, hasVariantParam } from './product-url-identity';
 
 /** Minimal structural fetch signature — lets Product Intelligence inject the
  *  policy-gateway bound transport (P0-1); onboarding keeps the global fetch. */
@@ -40,6 +42,16 @@ type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promi
  * search key" style setup — when no candidates can be produced the caller
  * parks the item via its standard needs_input outcomes.
  */
+export interface DiscoveryVariantResolution {
+  status: string;
+  selectedKey: string | null;
+  candidatesCount: number;
+  overflow: boolean;
+  warnings: string[];
+  identityHash: string | null;
+  matrixCandidates?: import('../shared/schemas/variant-resolution').NormalizedVariantCandidate[];
+}
+
 export async function discoverSources(
   upc: string,
   name: string,
@@ -63,6 +75,7 @@ export async function discoverSources(
   candidates: InsertSourceData[];
   consolidatedName: string | null;
   noDomainMapped?: boolean;
+  variantResolution?: DiscoveryVariantResolution | null;
 }> {
   // Retrieve pre-mapped brand domains from database
   const activeBrandHint = brandHint;
@@ -180,11 +193,54 @@ export async function discoverSources(
       });
     } catch { /* best effort */ }
 
+    // Route local high-confidence candidates through bounded variant resolver
+    // so variantResolution is reported even on short-circuit. Preserves
+    // high-confidence short-circuit semantics — no sitemap fetch, just variant
+    // deep-link resolution. Observe vs active handling is delegated to resolver.
+    const variantTokensForLocal = deriveVariantTokens(name, brandHint ?? null);
+    let localVariantResolution: DiscoveryVariantResolution | null = null;
+    let resolvedLocalCandidates = localCandidates;
+    try {
+      const vr = await resolveVariantsForCandidates({
+        candidates: localCandidates,
+        upc,
+        rawName: name,
+        expectedName: name,
+        brandHint: activeBrandHint ?? null,
+        brandDomains: activeBrandDomains,
+        price: options?.price,
+        fetchFn: options?.networkFetch ?? fetch,
+        variantTokens: variantTokensForLocal.length > 0 ? variantTokensForLocal : undefined,
+      });
+      // In observe mode resolver does not mutate URLs; in active it may synthesize deep links.
+      // Keep short-circuit: cap to top 10 similarly to sitemap path, but do not re-run sitemap matcher.
+      resolvedLocalCandidates = vr.candidates.length > 0 ? vr.candidates : localCandidates;
+      if (vr.resolution) {
+        localVariantResolution = {
+          status: vr.resolution.status,
+          selectedKey: vr.resolution.selectedKey,
+          candidatesCount: vr.resolution.candidatesCount,
+          overflow: vr.resolution.overflow,
+          warnings: vr.resolution.warnings,
+          identityHash: vr.resolution.identityHash,
+          matrixCandidates: (vr.resolution as any).matrixCandidates,
+        };
+      }
+      // Cap to top 10 to preserve ranking semantics
+      resolvedLocalCandidates = resolvedLocalCandidates
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, 10)
+        .map(c => ({ ...c, confidence: Math.max(0, Math.min(1, c.confidence)) }));
+    } catch (e) {
+      console.warn(`[SourceDiscovery] Local variant resolution failed for ${brandDomain}:`, e);
+    }
+
     return {
-      candidates: localCandidates,
+      candidates: resolvedLocalCandidates,
       // Expected name comes from the imported spreadsheet row only;
       // discovery never synthesizes or persists an expected name.
       consolidatedName: null,
+      variantResolution: localVariantResolution,
     };
   }
 
@@ -198,6 +254,8 @@ export async function discoverSources(
   const consolidatedName: string | null = null;
 
   const seenCandidateUrls = new Set<string>();
+  // Derive deterministic variant tokens for SitemapLlmContext and variant resolution
+  const variantTokensForDiscovery = deriveVariantTokens(name, brandHint ?? null);
   for (const brandDomain of activeBrandDomains) {
     let prepared: Awaited<ReturnType<typeof fetchSitemapForDiscovery>>;
     try {
@@ -216,11 +274,15 @@ export async function discoverSources(
         brandDomain,
         prepared.productUrlPattern,
         options?.modelPolicy,
+        variantTokensForDiscovery.length > 0 ? variantTokensForDiscovery : undefined,
       );
       for (const match of matches) {
         const candidate = convertSitemapMatchToCandidate(match);
-        if (seenCandidateUrls.has(candidate.url)) continue;
-        seenCandidateUrls.add(candidate.url);
+        // Identity-key dedupe: variant deep links distinct, tracking-only collapse — case-sensitive sku preservation
+        let identityKey: string;
+        try { identityKey = productUrlIdentityKey(candidate.url); } catch { identityKey = candidate.url.toLowerCase(); }
+        if (seenCandidateUrls.has(identityKey)) continue;
+        seenCandidateUrls.add(identityKey);
         candidates.push(candidate);
       }
     } catch (err) {
@@ -231,8 +293,8 @@ export async function discoverSources(
     }
   }
 
-  // Run variant resolution on the candidates before ranking.
-  const variantResolved = await resolveVariantsForCandidates({
+  // Run variant resolution on the candidates before ranking — structured result with resolution summary.
+  const variantResult = await resolveVariantsForCandidates({
     candidates,
     upc,
     rawName: name,
@@ -240,10 +302,19 @@ export async function discoverSources(
     brandHint: activeBrandHint ?? null,
     brandDomains: activeBrandDomains,
     price: options?.price,
-    // P0-1 (round 3): the variant resolver's page fetches ride the same
-    // injected transport as the sitemap calls above.
-    fetchFn: options?.networkFetch,
+    fetchFn: options?.networkFetch ?? fetch,
+    variantTokens: variantTokensForDiscovery.length > 0 ? variantTokensForDiscovery : undefined,
   });
+  const variantResolved = variantResult.candidates;
+  const variantResolution: DiscoveryVariantResolution | null = variantResult.resolution ? {
+    status: variantResult.resolution.status,
+    selectedKey: variantResult.resolution.selectedKey,
+    candidatesCount: variantResult.resolution.candidatesCount,
+    overflow: variantResult.resolution.overflow,
+    warnings: variantResult.resolution.warnings,
+    identityHash: variantResult.resolution.identityHash,
+    matrixCandidates: (variantResult.resolution as any).matrixCandidates,
+  } : null;
 
   // Sort by confidence descending and cap to the top 10.
   const topCandidates = selectTopCandidates(variantResolved, 10).map(c => ({
@@ -280,6 +351,7 @@ export async function discoverSources(
   return {
     candidates: topCandidates,
     consolidatedName,
+    variantResolution,
   };
 }
 
@@ -353,7 +425,11 @@ async function fetchSitemapForDiscovery(
     const productUrlPattern = profile?.sitemapProductUrlPattern ?? null;
     // P0-1 (round 3): thread the injected transport into the sitemap fetcher
     // (it already accepts fetchFn); default = global fetch for onboarding.
-    const result = await fetchAndParseSitemap(domain, productUrlPattern, networkFetch);
+    // When injected, disable Camoufox rendered fallback so policy gateway
+    // is not bypassed — injected callers must fail closed on block.
+    const result = await fetchAndParseSitemap(domain, productUrlPattern, networkFetch ?? fetch, {
+      allowRenderedFallback: !networkFetch,
+    });
     if (result.urls.length > 0) {
       try {
         insertSitemapCache(domain, result.urls, result.sourceUrl);

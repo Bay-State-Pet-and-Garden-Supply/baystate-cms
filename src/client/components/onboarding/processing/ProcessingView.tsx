@@ -13,6 +13,7 @@ import type { BatchWorkState, OnboardingWorkState } from '../../../../shared/sch
 import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { groupByActivity } from './processing-logic';
 import { ProcessingList } from './ProcessingList';
+import { FamilyInspectorDrawer } from '../families/FamilyInspectorDrawer';
 import './processing.css';
 
 const PAGE_SIZE = 100;
@@ -28,6 +29,7 @@ export function ProcessingView({ batchId }: ProcessingViewProps) {
   const [total, setTotal] = useState(0);
   const [state, setState] = useState<LoadState>('loading');
   const [error, setError] = useState<string | null>(null);
+  const [familyCohortId, setFamilyCohortId] = useState<string | null>(null);
   const offsetRef = useRef(0);
   const loadedRef = useRef(false);
 
@@ -88,7 +90,10 @@ export function ProcessingView({ batchId }: ProcessingViewProps) {
 
   return (
     <div>
-      <ProcessingList groups={groupByActivity(items)} />
+      <ProcessingList groups={groupByActivity(items)} onViewFamily={setFamilyCohortId} />
+      {familyCohortId ? (
+        <FamilyInspectorDrawer cohortId={familyCohortId} batchId={batchId} onClose={() => setFamilyCohortId(null)} />
+      ) : null}
       {hasMore ? (
         <button
           type="button"

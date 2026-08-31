@@ -1,0 +1,21 @@
+{
+  "title": "The BetterBone Hard Beef",
+  "vendor": "BetterBone",
+  "handle": "the-betterbone-beef",
+  "variants": [
+    { "id": 4123456001, "title": "Small / Beef / Hard", "option1": "Small", "option2": "Beef", "option3": "Hard", "sku": "BB-HB-SM-001", "barcode": "810001234501", "price": 1999, "available": true, "featured_image": { "src": "https://betterbone.com/cdn/small.jpg", "variant_ids": [4123456001] } },
+    { "id": 4123456002, "title": "Large / Beef / Hard", "option1": "Large", "option2": "Beef", "option3": "Hard", "sku": "BB-HB-LG-001", "barcode": "810001234502", "price": 2999, "available": true, "featured_image": { "src": "https://betterbone.com/cdn/large.jpg", "variant_ids": [4123456002] } },
+    { "id": 4123456003, "title": "Mini / Beef / Hard", "option1": "Mini", "option2": "Beef", "option3": "Hard", "sku": "BB-HB-MINI-001", "barcode": "810001234503", "price": 1499, "available": true, "featured_image": { "src": "https://betterbone.com/cdn/mini.jpg", "variant_ids": [4123456003] } }
+  ],
+  "images": [
+    { "src": "https://betterbone.com/cdn/small.jpg", "variant_ids": [4123456001] },
+    { "src": "https://betterbone.com/cdn/large.jpg", "variant_ids": [4123456002] },
+    { "src": "https://betterbone.com/cdn/mini.jpg", "variant_ids": [4123456003] },
+    { "src": "https://betterbone.com/cdn/gallery.jpg", "variant_ids": [] }
+  ],
+  "options": [
+    { "name": "Size", "values": ["Small", "Large", "Mini"] },
+    { "name": "Flavor", "values": ["Beef"] },
+    { "name": "Density", "values": ["Hard"] }
+  ]
+}

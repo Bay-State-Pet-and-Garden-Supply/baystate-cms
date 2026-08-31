@@ -10,8 +10,22 @@ import type {
   AttentionAction,
   AttentionReason,
   OnboardingWorkState,
+  WorkActivity,
 } from '../../../../shared/schemas/onboarding-work-state';
 import type { DomainDiagnosticsEntry, OnboardingSource } from '../../../../shared/schemas/onboarding';
+import {
+  ACTIVITY_BADGE_LABELS,
+  ACTIVITY_BADGE_TOOLTIPS,
+  getActivityBadgeLabel as getProcessingBadgeLabel,
+  getActivityBadgeTooltip as getProcessingBadgeTooltip,
+} from '../processing/processing-logic';
+
+// Re-export granular activity badge helpers so both Processing and Attention
+// surfaces share one canonical vocabulary (single source of truth in processing-logic).
+export { ACTIVITY_BADGE_LABELS, ACTIVITY_BADGE_TOOLTIPS };
+export const getActivityBadgeLabel = getProcessingBadgeLabel;
+export const getActivityBadgeTooltip = getProcessingBadgeTooltip;
+export type { WorkActivity };
 
 // ─── Attention group metadata (display order) ──────────────────────────────────
 
@@ -27,6 +41,7 @@ export const ATTENTION_GROUP_ORDER: ReadonlyArray<AttentionGroupMeta> = [
   { reason: 'verify_official_url', label: 'Verify official product page', chipLabel: 'Verify page' },
   { reason: 'no_official_url', label: 'Official product page not found', chipLabel: 'No page found' },
   { reason: 'choose_official_url', label: 'Choose the correct product page', chipLabel: 'Choose page' },
+  { reason: 'choose_variant', label: 'Choose product variant', chipLabel: 'Choose variant' },
   { reason: 'extractor_profile_required', label: 'Extractor setup required', chipLabel: 'Set up extractor' },
   { reason: 'extraction_profile_failed', label: 'Extraction / profile failure', chipLabel: 'Extraction failed' },
   { reason: 'source_conflict', label: 'Distributor match conflict', chipLabel: 'Conflict' },
@@ -51,6 +66,7 @@ export const ATTENTION_ACTION_LABELS: Record<AttentionAction, string> = {
   assign_brand: 'Assign brand',
   verify_official_url: 'Confirm the page',
   choose_official_url: 'Choose a page',
+  choose_variant: 'Choose product variant',
   setup_extractor_profile: 'Set up extraction',
   retry_extraction: 'Retry extraction',
   resolve_source_conflict: 'Resolve conflict',
@@ -81,6 +97,8 @@ export function getAttentionActions(
       return ['verify_official_url'];
     case 'choose_official_url':
       return ['choose_official_url'];
+    case 'choose_variant':
+      return ['choose_variant'];
     case 'extractor_profile_required':
       return ['setup_extractor_profile'];
     case 'extraction_profile_failed':
@@ -109,6 +127,8 @@ export function getAttentionActionConsequence(action: AttentionAction | null | u
       return 'Confirm the page and extraction resumes automatically.';
     case 'choose_official_url':
       return 'Pick the right page and extraction resumes automatically.';
+    case 'choose_variant':
+      return 'Pick the exact variant and extraction resumes automatically.';
     case 'resolve_source_conflict':
       return 'Choose the correct value and sourcing continues automatically.';
     case 'retry_processing':
@@ -141,6 +161,8 @@ export function getAttentionConsequence(
       return 'Provide the official product page URL to continue to extraction.';
     case 'choose_official_url':
       return 'Pick the right candidate (or enter the official URL) and extraction resumes automatically.';
+    case 'choose_variant':
+      return 'Pick the exact variant from the detected matrix and extraction resumes automatically.';
     case 'extractor_profile_required':
       return 'Set up an extractor for this domain and blocked products resume automatically.';
     case 'extraction_profile_failed':

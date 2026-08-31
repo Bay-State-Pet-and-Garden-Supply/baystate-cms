@@ -9,6 +9,7 @@ import {
   ClassificationProposalDecisionSchema,
   ClassificationHistoryEventSchema,
 } from './classification';
+import { VariantSelectionReceiptSchema } from './variant-resolution';
 
 // ─── Column Mapping ────────────────────────────────────────────────────────────
 
@@ -356,6 +357,10 @@ export const ExtractionDataSchema = z.object({
   packagingOcrData: PackagingOcrDataSchema.nullable().default(null),
   /** Detailed outcome status and provenance of the OCR extraction attempt */
   ocrOutcome: OcrAttemptOutcomeSchema.nullable().optional().default(null),
+  /** Variant selection receipt when extraction required variant resolution (Issue #90 M4, optional, backward-compatible). */
+  selectedVariant: VariantSelectionReceiptSchema.nullable().optional(),
+  /** Typed variant identifiers/attributes provenance when variant-selected materialization applied. */
+  variantProvenance: z.record(z.string(), z.string()).optional(),
   customFields: z.record(z.string(), z.string()).default(() => ({})),
   /**
    * Evidence imported from Product Intelligence Agent Lab runs (PI-8). An
@@ -680,6 +685,8 @@ export const CohortSemanticValidationSchema = z.object({
     ]),
     memberSku: z.string(),
     message: z.string(),
+    conflictingValues: z.array(z.string()).nullable().optional().default(null),
+    suggestedAction: z.enum(['accept_majority', 'choose_canonical_brand', 'split_cohort', 're_run_curation']).nullable().optional().default(null),
   })),
 });
 
@@ -1011,6 +1018,22 @@ export type VariantSelectionStrategy = z.infer<typeof VariantSelectionStrategySc
  * for repo-level compatibility.
  */
 export type VariantSelectionStrategyRecord = Record<string, unknown> | null;
+
+export const StrictVariantSelectionStrategySchema = z.object({
+  axes: z.array(z.object({
+    axis: z.string().min(1).max(64),
+    selector: z.string().min(1).max(500),
+    optionType: z.enum(['dropdown', 'button_group', 'radio']),
+    optionValueSelector: z.string().max(500).optional(),
+    optionTextAttribute: z.string().max(64).optional(),
+    settledSelector: z.string().max(500).optional(),
+    settledAttribute: z.string().max(64).optional(),
+    timeoutMs: z.number().int().min(100).max(10000).optional(),
+  })).max(8),
+  timeoutMs: z.number().int().min(100).max(10000).optional().default(3000),
+});
+export type StrictVariantSelectionStrategy = z.infer<typeof StrictVariantSelectionStrategySchema>;
+// Legacy loose shape still accepted for reads (back-compat with existing profiles) — ExtractorProfile keeps loose record to avoid breaking existing validation
 
 export const ExtractorProfileSchema = z.object({
   id: z.string(),

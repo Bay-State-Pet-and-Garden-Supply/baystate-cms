@@ -74,16 +74,17 @@ function resolvePrimaryImage(detail: ItemDetailResponse | null): string | null {
   const designated = typeof reviewed?.primaryImage === 'string' && reviewed.primaryImage.trim() !== ''
     ? reviewed.primaryImage.trim()
     : null;
+  const designatedUsable = designated !== null && !suppressed.has(designated);
+  if (designatedUsable) return designated;
+
   if (detail?.item.sourceType === 'distributor_record') {
     const approved = (extraction?.distributorImageApprovals ?? [])
       .map((a) => a.imageUrl)
       .filter((u): u is string => typeof u === 'string' && u.length > 0 && !suppressed.has(u));
-    return (designated && approved.includes(designated) ? designated : approved[0]) ?? null;
+    return approved[0] ?? null;
   }
   // Suppression wins over both designation and the extraction fallback:
   // a hidden image must surface as missing_primary_image, never silently ship.
-  const designatedUsable = designated !== null && !suppressed.has(designated);
-  if (designatedUsable) return designated;
   const extractionPrimary = trimOrNull(extraction?.primaryImage);
   if (extractionPrimary && !suppressed.has(extractionPrimary)) return extractionPrimary;
   return null;

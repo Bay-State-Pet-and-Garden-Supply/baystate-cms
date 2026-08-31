@@ -153,7 +153,7 @@ function ensureSeededDefaults(): void {
         id, catalog_primary_connection_id, catalog_primary_model_id,
         catalog_fallback_connection_id, catalog_fallback_model_id,
         text_data_sharing, image_data_sharing, created_at, updated_at
-      ) VALUES ('current', 'local-ollama', '${DEFAULT_LOCAL_VISION_MODEL}', NULL, NULL, 'this_device_only', 'this_device_only', ?, ?)
+      ) VALUES ('current', 'openai-cloud', 'gpt-4o-mini', NULL, NULL, 'this_device_only', 'this_device_only', ?, ?)
     `).run(now, now);
   }
 }

@@ -1,0 +1,15 @@
+<!doctype html><html><head>
+<script type="application/ld+json">{
+  "@context":"https://schema.org",
+  "@type":"ProductGroup",
+  "name":"Test Product Group",
+  "brand":{"@type":"Brand","name":"TestBrand"},
+  "variesBy":["https://schema.org/size","https://schema.org/color"],
+  "productGroupID":"PG-001",
+  "hasVariant":[
+    {"@type":"Product","name":"Test Product Small Red","sku":"TP-SM-RED-001","gtin12":"810001234510","image":"https://example.com/small-red.jpg","offers":{"@type":"Offer","price":"19.99","priceCurrency":"USD","availability":"https://schema.org/InStock","url":"https://example.com/products/test?variant=1"},"additionalProperty":[{"@type":"PropertyValue","name":"Size","value":"Small"},{"@type":"PropertyValue","name":"Color","value":"Red"}],"weight":{"@type":"QuantitativeValue","value":"100","unitCode":"GRM"}},
+    {"@type":"Product","name":"Test Product Large Blue","sku":"TP-LG-BLU-001","gtin12":"810001234511","image":"https://example.com/large-blue.jpg","offers":{"@type":"Offer","price":"29.99","priceCurrency":"USD","availability":"https://schema.org/InStock","url":"https://example.com/products/test?variant=2"},"additionalProperty":[{"@type":"PropertyValue","name":"Size","value":"Large"},{"@type":"PropertyValue","name":"Color","value":"Blue"}]},
+    {"@type":"Product","name":"Test Product Mini Green","sku":"TP-MINI-GRN-001","gtin12":"810001234512","image":"https://example.com/mini-green.jpg","offers":{"@type":"Offer","price":"14.99","priceCurrency":"USD","availability":"https://schema.org/InStock","url":"https://example.com/products/test?variant=3"},"additionalProperty":[{"@type":"PropertyValue","name":"Size","value":"Mini"},{"@type":"PropertyValue","name":"Color","value":"Green"}]}
+  ]
+}</script>
+</head><body><h1>Test Product Group</h1></body></html>

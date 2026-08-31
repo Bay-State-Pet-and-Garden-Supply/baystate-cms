@@ -647,6 +647,10 @@ _Avoid_: Product family, variant group, inherited product data
 A reviewed deterministic method for selecting the Source-Page Variant that corresponds to one imported Product SKU.
 _Avoid_: LLM guess, visual hunch, best-effort variant
 
+**Variant Resolution (Issue #90)**:
+Deterministic pre-extraction capability that parses Shopify/JSON-LD/Woo/BigCommerce/Magento variant matrices already in fetched HTML or one same-origin Shopify `GET /products/<handle>.js` via injected `safeProfileFetch` (ADR 0031 additive-only), normalizes to `NormalizedVariantCandidate` (parser version, canonical parent/identity hash), matches by precedence `unique GTIN → trusted SKU/MPN → complete exact option tuple → threshold+margin ranked` (duplicate GTIN never alone, exact axis-mapped options, substring prohibited), synthesizes `?variant=` deep links per candidate, persists `onboarding_variant_resolutions` (`resolved|ambiguous|no_match|unsupported|too_many_variants|selected|stale`, server-derived `identityMatrixHash` stale check), gates Extraction on `selectedVariantLinkage` (ambiguous writes no extraction, projects `attentionReason/action=choose_variant`), and surfaces a **Choose Variant** operator decision (server derives deep link/payload, idempotent `select-variant` with `{resolutionId,identityMatrixHash,variantKey}`) before re-queueing Extraction; flags `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=off|observe|active` (default off, re-read per call) and `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false|true` (default-off, worker-only exact per-axis click/select with post-action verification) per `docs/plans/issue-90-implementation-plan.md` and `docs/runbooks/variant-resolution-rollout.md`.
+_Avoid_: LLM variant guess, client-trusted URL/payload, default-on browser interaction
+
 **Profile Health**:
 The reviewed readiness of a Domain Extractor Profile, including product identity, description, image, and relevant variant evidence, to support automated Extraction for a domain.
 _Avoid_: Profile exists, latest generation status, domain uptime

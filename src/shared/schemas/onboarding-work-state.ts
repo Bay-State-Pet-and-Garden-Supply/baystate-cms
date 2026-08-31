@@ -55,12 +55,54 @@ export const WorkActivityEnum = z.enum([
   'official_url_verification',
   'extraction',
   'curation',
+  // Granular curation sub-stages (Task 1): refinement of 'curation' for
+  // pipeline observability. Backward-compatible — 'curation' remains the
+  // fallback when no sub-stage can be determined.
+  'packaging_ocr',
+  'cohort_freezing',
+  'title_coordination',
+  'page_coordination',
+  'attribute_curation',
+  'semantic_validation',
   'review',
   'approval',
   'export',
 ]);
 
 export type WorkActivity = z.infer<typeof WorkActivityEnum>;
+
+// ─── Semantic finding observability (Task 1) ──────────────────────────────────
+
+export const FindingCodeEnum = z.enum([
+  'family_product_type',
+  'family_brand',
+  'coordinated_title',
+  'coordinated_page',
+  'coordinated_page_name_mismatch',
+  'member_attribute_applicability',
+  'member_cardinality',
+]);
+
+export type FindingCode = z.infer<typeof FindingCodeEnum>;
+
+export const SuggestedActionEnum = z.enum([
+  'accept_majority',
+  'choose_canonical_brand',
+  'split_cohort',
+  're_run_curation',
+]);
+
+export type SuggestedAction = z.infer<typeof SuggestedActionEnum>;
+
+export const FindingDetailSchema = z.object({
+  code: FindingCodeEnum,
+  memberSku: z.string(),
+  message: z.string(),
+  conflictingValues: z.array(z.string()).nullable().default(null),
+  suggestedAction: SuggestedActionEnum.nullable().default(null),
+});
+
+export type FindingDetail = z.infer<typeof FindingDetailSchema>;
 
 // ─── Attention reasons / actions ───────────────────────────────────────────────
 
@@ -70,6 +112,7 @@ export const AttentionReasonEnum = z.enum([
   'verify_official_url',
   'no_official_url',
   'choose_official_url',
+  'choose_variant',
   'extractor_profile_required',
   'extraction_profile_failed',
   'source_conflict',
@@ -84,6 +127,7 @@ export const AttentionActionEnum = z.enum([
   'assign_brand',
   'verify_official_url',
   'choose_official_url',
+  'choose_variant',
   'setup_extractor_profile',
   'retry_extraction',
   'resolve_source_conflict',
@@ -139,6 +183,24 @@ export const OnboardingWorkStateSchema = z.object({
   attentionReason: AttentionReasonEnum.nullable().default(null),
   /** Present ONLY for needs_attention items: the operator action that resolves it. */
   attentionAction: AttentionActionEnum.nullable().default(null),
+  /** Optional client-safe variant resolution summary for choose_variant */
+  variantResolution: z
+    .object({
+      id: z.string(),
+      status: z.string(),
+      candidates: z.array(z.any()),
+      identityMatrixHash: z.string(),
+      platform: z.string(),
+    })
+    .nullable()
+    .optional()
+    .default(null),
+  /** Structured semantic finding (populated when attentionReason is semantic_validation_blocked). */
+  findingCode: FindingCodeEnum.nullable().default(null),
+  findingSummary: z.string().nullable().default(null),
+  conflictingValues: z.array(z.string()).nullable().default(null),
+  suggestedAction: SuggestedActionEnum.nullable().default(null),
+  findingDetails: z.array(FindingDetailSchema).nullable().default(null),
   /** Canonical cohort readiness when the item belongs to a candidate family. */
   family: OnboardingFamilyStateSchema.nullable().default(null),
   /** Durable review/approval state. */

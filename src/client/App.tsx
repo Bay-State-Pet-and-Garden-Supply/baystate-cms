@@ -184,12 +184,22 @@ function App() {
     // forces a specific tab.
     if (newView === 'settings') {
       const settingsTab = url.searchParams.get('tab');
-      const validSettingsTabs = ['ai', 'catalog', 'ai-tasks', 'types', 'mappings-health'];
+      const validSettingsTabs = ['ai', 'catalog', 'types', 'mappings-health'];
       if (!validSettingsTabs.includes(settingsTab ?? '')) {
+        url.searchParams.delete('tab');
+      }
+    } else if (newView === 'onboarding') {
+      const onboardingTab = url.searchParams.get('tab');
+      const validOnboardingTabs = ['needs_attention', 'processing', 'waiting_on_family', 'review', 'approved'];
+      if (!validOnboardingTabs.includes(onboardingTab ?? '')) {
         url.searchParams.delete('tab');
       }
     } else {
       url.searchParams.delete('tab');
+    }
+    if (newView !== 'onboarding') {
+      url.searchParams.delete('batch');
+      url.searchParams.delete('board');
     }
     if (newView === 'setup') {
       url.searchParams.delete('view');

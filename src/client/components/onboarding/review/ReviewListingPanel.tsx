@@ -114,6 +114,8 @@ export function ReviewListingPanel({
         push(approved.primary);
         for (const url of approved.additional) push(url);
       }
+      for (const url of priorMedia?.orderedAdditional ?? []) push(url);
+      if (priorMedia?.primaryImage) push(priorMedia.primaryImage);
     } else {
       push(ext?.primaryImage);
       for (const url of ext?.additionalImages ?? []) push(url);
@@ -134,12 +136,12 @@ export function ReviewListingPanel({
     const savedOrder = (priorMedia?.orderedAdditional ?? []).filter(
       (u): u is string => !suppressed.includes(u) && baseImages.includes(u),
     );
-    const rest = baseImages.filter((u) => !suppressed.includes(u) && !savedOrder.includes(u));
-    const ordered = [...savedOrder, ...rest];
     const designated =
       typeof priorMedia?.primaryImage === 'string' && priorMedia.primaryImage.trim() !== ''
         ? priorMedia.primaryImage
         : null;
+    const rest = baseImages.filter((u) => !suppressed.includes(u) && !savedOrder.includes(u) && u !== designated);
+    const ordered = [...(designated && !suppressed.includes(designated) ? [designated] : []), ...savedOrder, ...rest];
     return {
       primary: designated && ordered.includes(designated) ? designated : (ordered[0] ?? null),
       ordered,
@@ -150,6 +152,8 @@ export function ReviewListingPanel({
   const [mediaPick, setMediaPick] = useState(initialMedia);
   const [mediaDirty, setMediaDirty] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [newImageUrl, setNewImageUrl] = useState('');
+  const [newImageError, setNewImageError] = useState<string | null>(null);
 
   // Adopt freshly loaded/saved server state unless the reviewer has unsaved edits.
   const lastInitRef = useRef(initialMedia);
@@ -167,14 +171,57 @@ export function ReviewListingPanel({
     setMediaDirty(true);
   };
   const pickMediaPrimary = (url: string) => updateMedia({ primary: url });
-  const suppressMedia = (url: string) =>
+  const suppressMedia = (url: string) => {
+    const nextOrdered = mediaPick.ordered.filter(u => u !== url);
+    const nextPrimary = mediaPick.primary === url ? (nextOrdered[0] ?? null) : mediaPick.primary;
     updateMedia({
-      ordered: mediaPick.ordered.filter(u => u !== url),
+      ordered: nextOrdered,
       suppressed: [...mediaPick.suppressed, url],
-      ...(mediaPick.primary === url ? { primary: null } : {}),
+      primary: nextPrimary,
     });
+    if (selectedImage === url) {
+      setSelectedImage(nextPrimary);
+    }
+  };
   const restoreMedia = (url: string) =>
     updateMedia({ suppressed: mediaPick.suppressed.filter(u => u !== url), ordered: [...mediaPick.ordered, url] });
+  const handleAddImage = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setNewImageError(null);
+    const trimmed = newImageUrl.trim();
+    if (!trimmed) {
+      setNewImageError('Please enter an image URL.');
+      return;
+    }
+    try {
+      const parsed = new URL(trimmed);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        setNewImageError('URL must start with http:// or https://');
+        return;
+      }
+    } catch {
+      setNewImageError('Please enter a valid URL.');
+      return;
+    }
+
+    if (mediaPick.ordered.includes(trimmed) || mediaPick.primary === trimmed) {
+      setNewImageError('This image URL is already in the list.');
+      return;
+    }
+
+    const nextSuppressed = mediaPick.suppressed.filter(u => u !== trimmed);
+    const nextOrdered = [...mediaPick.ordered, trimmed];
+    const nextPrimary = mediaPick.primary ? mediaPick.primary : trimmed;
+
+    updateMedia({
+      ordered: nextOrdered,
+      suppressed: nextSuppressed,
+      primary: nextPrimary,
+    });
+    setSelectedImage(trimmed);
+    setNewImageUrl('');
+    setNewImageError(null);
+  };
   const moveMedia = (url: string, delta: -1 | 1) => {
     const idx = mediaPick.ordered.indexOf(url);
     const target = idx + delta;
@@ -303,7 +350,7 @@ export function ReviewListingPanel({
               </div>
             )}
 
-            {allImages.length > 1 && (
+            {(allImages.length > 1 || (interactiveMedia && allImages.length > 0)) && (
               <div className="rv-listing-media-carousel" role="tablist" aria-label="Product image thumbnails">
                 {allImages.map((url, idx) => (
                   <div key={`${url}-${idx}`} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -323,32 +370,78 @@ export function ReviewListingPanel({
                             Set primary
                           </button>
                         )}
-                        <button
-                          type="button"
-                          className="rv-mini-btn"
-                          onClick={() => moveMedia(url, -1)}
-                          disabled={savingMedia || idx === 0}
-                          aria-label={`Move image ${idx + 1} earlier`}
-                        >
-                          ←
-                        </button>
-                        <button
-                          type="button"
-                          className="rv-mini-btn"
-                          onClick={() => moveMedia(url, 1)}
-                          disabled={savingMedia || idx === allImages.length - 1}
-                          aria-label={`Move image ${idx + 1} later`}
-                        >
-                          →
-                        </button>
-                        <button type="button" className="rv-mini-btn" onClick={() => suppressMedia(url)} disabled={savingMedia}>
-                          Hide
-                        </button>
+                        {allImages.length > 1 && (
+                          <>
+                            <button
+                              type="button"
+                              className="rv-mini-btn"
+                              onClick={() => moveMedia(url, -1)}
+                              disabled={savingMedia || idx === 0}
+                              aria-label={`Move image ${idx + 1} earlier`}
+                            >
+                              ←
+                            </button>
+                            <button
+                              type="button"
+                              className="rv-mini-btn"
+                              onClick={() => moveMedia(url, 1)}
+                              disabled={savingMedia || idx === allImages.length - 1}
+                              aria-label={`Move image ${idx + 1} later`}
+                            >
+                              →
+                            </button>
+                          </>
+                        )}
+                        {url !== displayPrimary && (
+                          <button type="button" className="rv-mini-btn" onClick={() => suppressMedia(url)} disabled={savingMedia}>
+                            Hide
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
                 ))}
               </div>
+            )}
+
+            {/* Add Image URL form */}
+            {interactiveMedia && (
+              <form
+                noValidate
+                onSubmit={handleAddImage}
+                style={{ marginTop: '0.375rem', display: 'flex', flexDirection: 'column', gap: 4 }}
+                aria-label="Add image URL form"
+              >
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <input
+                    type="url"
+                    className="rv-input"
+                    style={{ flex: 1, minHeight: 26, fontSize: '0.75rem', padding: '2px 6px' }}
+                    placeholder="Add image URL (https://...)"
+                    aria-label="Add image URL"
+                    value={newImageUrl}
+                    onChange={e => {
+                      setNewImageUrl(e.target.value);
+                      if (newImageError) setNewImageError(null);
+                    }}
+                    disabled={savingMedia}
+                  />
+                  <button
+                    type="submit"
+                    className="rv-mini-btn"
+                    style={{ minHeight: 26, padding: '2px 8px', whiteSpace: 'nowrap' }}
+                    disabled={savingMedia || !newImageUrl.trim()}
+                    aria-label="Add Image"
+                  >
+                    Add Image
+                  </button>
+                </div>
+                {newImageError && (
+                  <span role="alert" style={{ color: 'var(--color-danger, #b00)', fontSize: '0.75rem' }}>
+                    {newImageError}
+                  </span>
+                )}
+              </form>
             )}
 
             {activeImage && (
@@ -400,6 +493,8 @@ export function ReviewListingPanel({
                       setMediaPick(initialMedia);
                       setMediaDirty(false);
                       setMediaError(null);
+                      setNewImageUrl('');
+                      setNewImageError(null);
                     }}
                     disabled={savingMedia}
                   >

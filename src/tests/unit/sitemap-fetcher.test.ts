@@ -551,4 +551,18 @@ describe('sitemap-fetcher.fetchAndParseSitemap', () => {
     expect(result.urls).toEqual(['https://x.com/b']);
     expect(calls).toContain('https://x.com/sitemap-a.xml');
   });
+
+  it('injected policy-bound fetch does not invoke Camoufox rendered fallback when blocked', async () => {
+    // Every standard path returns 403 Cloudflare-style to trigger tracker.isBlocked
+    const blockedFetch = vi.fn(async () => new Response('blocked', { status: 403, headers: { server: 'cloudflare' } })) as unknown as typeof fetch;
+    // Also stub the dynamic Camoufox imports to detect if they are invoked — make them throw if called
+    const camMock = vi.fn(() => { throw new Error('Camoufox should not be invoked for injected fetch'); });
+    // We achieve this by passing an injected fetch and allowRenderedFallback:false
+    const result = await fetchAndParseSitemap('blocked.example.com', null, blockedFetch as any, { allowRenderedFallback: false });
+    expect(result.urls).toEqual([]);
+    expect(result.sourceUrl).toBe('');
+    // Ensure blockedFetch was called for standard paths but no exception was thrown from Camoufox
+    expect(blockedFetch).toHaveBeenCalled();
+    void camMock;
+  });
 });

@@ -49,11 +49,17 @@ function makeItem(
     family: null,
     attentionReason: null,
     attentionAction: null,
+    findingCode: null,
+    findingSummary: null,
+    conflictingValues: null,
+    suggestedAction: null,
+    findingDetails: null,
     detail: null,
     curatedTitle: null,
     imageUrl: null,
     description: null,
     weight: null,
+    variantResolution: null,
     ...overrides,
   };
 }

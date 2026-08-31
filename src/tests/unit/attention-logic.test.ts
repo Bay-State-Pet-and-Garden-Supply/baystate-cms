@@ -36,6 +36,11 @@ function makeWorkState(
     detail: null,
     attentionReason,
     attentionAction: attentionReason === 'processing_failed' ? 'retry_processing' : 'verify_official_url',
+    findingCode: null,
+    findingSummary: null,
+    conflictingValues: null,
+    suggestedAction: null,
+    findingDetails: null,
     family: null,
     reviewState: 'not_ready',
     stage: 'discovery',
@@ -49,6 +54,7 @@ function makeWorkState(
     imageUrl: null,
     description: null,
     weight: null,
+    variantResolution: null,
   };
 }
 
@@ -105,6 +111,7 @@ describe('groupAttentionItems', () => {
       'verify_official_url',
       'no_official_url',
       'choose_official_url',
+      'choose_variant',
       'extractor_profile_required',
       'extraction_profile_failed',
       'source_conflict',
@@ -121,6 +128,7 @@ describe('labels', () => {
     expect(getAttentionGroupLabel('verify_official_url')).toBe('Verify official product page');
     expect(getAttentionGroupLabel('no_official_url')).toBe('Official product page not found');
     expect(getAttentionGroupLabel('choose_official_url')).toBe('Choose the correct product page');
+    expect(getAttentionGroupLabel('choose_variant')).toBe('Choose product variant');
     expect(getAttentionGroupLabel('extractor_profile_required')).toBe('Extractor setup required');
     expect(getAttentionGroupLabel('extraction_profile_failed')).toBe('Extraction / profile failure');
     expect(getAttentionGroupLabel('source_conflict')).toBe('Distributor match conflict');
@@ -133,6 +141,7 @@ describe('labels', () => {
     expect(getAttentionActionLabel('assign_brand')).toBe('Assign brand');
     expect(getAttentionActionLabel('verify_official_url')).toBe('Confirm the page');
     expect(getAttentionActionLabel('choose_official_url')).toBe('Choose a page');
+    expect(getAttentionActionLabel('choose_variant')).toBe('Choose product variant');
     expect(getAttentionActionLabel('setup_extractor_profile')).toBe('Set up extraction');
     expect(getAttentionActionLabel('retry_extraction')).toBe('Retry extraction');
     expect(getAttentionActionLabel('resolve_source_conflict')).toBe('Resolve conflict');
@@ -154,6 +163,7 @@ describe('getAttentionConsequence', () => {
     expect(getAttentionConsequence('verify_official_url')).toContain('extraction resumes automatically');
     expect(getAttentionConsequence('no_official_url')).toContain('official product page URL');
     expect(getAttentionConsequence('choose_official_url')).toContain('extraction resumes automatically');
+    expect(getAttentionConsequence('choose_variant')).toContain('extraction resumes automatically');
     expect(getAttentionConsequence('extractor_profile_required')).toContain('blocked products resume automatically');
     expect(getAttentionConsequence('extraction_profile_failed')).toContain('released together');
     expect(getAttentionConsequence('source_conflict')).toContain('sourcing continues automatically');

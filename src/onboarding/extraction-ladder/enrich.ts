@@ -109,7 +109,7 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
     const existing = new Set(
       [data.primaryImage, ...data.additionalImages]
         .filter((u): u is string => !!u)
-        .map((u) => normalizeForDedupe(u)),
+        .map((u) => normalizeImageForDedupe(u)),
     );
     for (const candidate of candidates) {
       if (data.additionalImages.length >= MAX_ADDITIONAL_IMAGES) return;
@@ -122,8 +122,8 @@ export async function applyLadderEnrichment(options: LadderEnrichmentOptions): P
         continue;
       }
       if (!absolute.startsWith('http')) continue;
-      if (existing.has(normalizeForDedupe(absolute))) continue;
-      existing.add(normalizeForDedupe(absolute));
+      if (existing.has(normalizeImageForDedupe(absolute))) continue;
+      existing.add(normalizeImageForDedupe(absolute));
       data.additionalImages.push(absolute);
       if (data.fieldProvenance.additionalImages === undefined) {
         data.fieldProvenance.additionalImages = sourcePath;
@@ -273,7 +273,11 @@ function countVariants(variants: unknown): number | undefined {
   return Array.isArray(variants) ? variants.filter((v) => !!v && typeof v === 'object').length : undefined;
 }
 
-/** Loose URL dedupe key: lowercase, strip protocol + query + fragment. */
-function normalizeForDedupe(url: string): string {
+/** Loose URL dedupe key: lowercase, strip protocol + query + fragment. Image-only — do not reuse for product URL identity. */
+function normalizeImageForDedupe(url: string): string {
   return url.toLowerCase().replace(/^https?:\/\//, '').split(/[?#]/)[0];
+}
+/** @deprecated use normalizeImageForDedupe — kept for backwards compat */
+function normalizeForDedupe(url: string): string {
+  return normalizeImageForDedupe(url);
 }

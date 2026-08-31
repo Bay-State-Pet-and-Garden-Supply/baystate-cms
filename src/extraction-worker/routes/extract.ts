@@ -24,6 +24,11 @@ import type { Element, AnyNode } from 'domhandler';
 import { runRenderedPage } from '../browser/rendered-page-runner';
 import { loadWorkerBrowserConfig } from '../browser/config';
 import { applyLadderEnrichment } from '../../onboarding/extraction-ladder/enrich';
+import { parseVariantMatrix, matchVariantMatrix } from '../../onboarding/variant-resolver';
+import { computeIdentityMatrixHash } from '../../shared/schemas/variant-resolution';
+import { getEffectiveVariantResolutionMode, getEffectiveVariantInteractionEnabled } from '../../onboarding/variant-flags';
+import { materializeSelectedVariant } from '../../onboarding/selected-variant-materializer';
+import { buildVariantInteractionPlan } from '../variant-interaction';
 import {
   ExtractRequestSchema,
   ExtractResponseSchema,
@@ -31,11 +36,111 @@ import {
   type ExtractResponse,
 } from '../../shared/schemas/extraction-worker';
 import { ExtractionDataSchema } from '../../shared/schemas/onboarding';
+// variant gate imports already added above
 import type { ExtractionData } from '../../shared/schemas/onboarding';
 import { sha256Hex } from '../../shared/stable-id';
 import { lookup } from 'node:dns/promises';
 import { classifyIp } from '../../shared/ssrf';
 import { extractDomainFromUrl, generateJobId, resolveArtifactDir, writeArtifact } from '../artifacts';
+
+
+// ─── Variant resolution gate (Issue #90 M4) ────────────────────────────────
+import type { VariantFailureCode } from '../../shared/schemas/extraction-worker';
+async function resolveVariantGate(
+  html: string,
+  finalUrl: string,
+  request: ExtractRequest,
+  allowedSourceDomains: string[],
+  deps: ProfileTransportDeps,
+  warnings: string[],
+): Promise<{
+  matrix: ReturnType<typeof parseVariantMatrix>;
+  decision: ReturnType<typeof matchVariantMatrix> | null;
+  selectedCandidate: import('../../shared/schemas/variant-resolution').NormalizedVariantCandidate | null;
+  failureCode: VariantFailureCode | null;
+  shopifyJsFetched: boolean;
+}> {
+  const mode = getEffectiveVariantResolutionMode();
+  if (mode === 'off') return { matrix: null, decision: null, selectedCandidate: null, failureCode: null, shopifyJsFetched: false };
+  let matrix = parseVariantMatrix(html, finalUrl);
+  let shopifyJsFetched = false;
+  if (!matrix || matrix.candidates.length <= 1) {
+    const isShopifyUrl = finalUrl.includes('/products/');
+    if (isShopifyUrl) {
+      try {
+        const jsUrl = finalUrl.split('?')[0].split('#')[0].replace(/\/$/, '') + '.js';
+        const jsHost = new URL(jsUrl).hostname.toLowerCase();
+        const finalHost = new URL(finalUrl).hostname.toLowerCase();
+        if (jsHost === finalHost) {
+          const jsResp = await safeProfileFetch(jsUrl, AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS), allowedSourceDomains, deps);
+          shopifyJsFetched = true;
+          if (jsResp.ok) {
+            const jsText = await jsResp.text();
+            if (jsText.length <= 5 * 1024 * 1024) {
+              const jsMatrix = parseVariantMatrix(jsText, finalUrl);
+              if (jsMatrix && jsMatrix.candidates.length > 1) {
+                matrix = jsMatrix;
+                warnings.push('Variant matrix from Shopify .js');
+              }
+            }
+          }
+        }
+      } catch (e) {
+        warnings.push(`Shopify .js fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+  if (!matrix || matrix.candidates.length <= 1) return { matrix, decision: null, selectedCandidate: null, failureCode: null, shopifyJsFetched };
+  const expected = request.expected;
+  const input = {
+    gtin: expected?.upc ?? null,
+    sku: null,
+    mpn: null,
+    name: expected?.name ?? '',
+    brandHint: expected?.brandHint ?? null,
+    price: expected?.price ?? null,
+    variantTokens: undefined,
+  };
+  const sel = (request as any).variantSelection as { resolutionId: string; identityMatrixHash: string; variantKey: string } | undefined;
+  if (sel) {
+    let liveHash: string | null = null;
+    try { liveHash = computeIdentityMatrixHash(matrix); } catch { liveHash = null; }
+    if (liveHash !== sel.identityMatrixHash) {
+      const decision = { status: 'stale_selection' as const, selectedVariantKey: null, reasonCodes: ['stale_selection'], matchedBy: 'none' as const, diagnostics: [`stale hash ${sel.identityMatrixHash} != ${liveHash}`], rankedKeys: [] };
+      return { matrix, decision, selectedCandidate: null, failureCode: 'variant_selection_stale', shopifyJsFetched };
+    }
+    const cand = matrix.candidates.find(c => c.variantKey === sel.variantKey);
+    if (!cand) {
+      const decision = { status: 'no_match' as const, selectedVariantKey: null, reasonCodes: ['stale_selection'], matchedBy: 'none' as const, diagnostics: ['variantKey not in current matrix'], rankedKeys: [] };
+      return { matrix, decision, selectedCandidate: null, failureCode: 'variant_selection_stale', shopifyJsFetched };
+    }
+    const decision = { status: 'resolved' as const, selectedVariantKey: cand.variantKey, reasonCodes: ['operator_selected'], matchedBy: 'sku' as const, diagnostics: ['operator selection verified'], rankedKeys: [cand.variantKey] };
+    return { matrix, decision, selectedCandidate: cand, failureCode: null, shopifyJsFetched };
+  }
+  const decision = matchVariantMatrix(matrix, input as any);
+  if (decision.status === 'resolved' && decision.selectedVariantKey) {
+    const cand = matrix.candidates.find(c => c.variantKey === decision.selectedVariantKey) ?? null;
+    if (mode === 'observe') {
+      warnings.push(`Variant observe: would resolve ${decision.selectedVariantKey} (${decision.matchedBy})`);
+      return { matrix, decision, selectedCandidate: null, failureCode: null, shopifyJsFetched };
+    }
+    return { matrix, decision, selectedCandidate: cand, failureCode: null, shopifyJsFetched };
+  }
+  if (decision.status === 'ambiguous' || decision.status === 'no_match' || decision.status === 'too_many_variants') {
+    const code: VariantFailureCode = 'variant_selection_required';
+    if (mode === 'observe') {
+      warnings.push(`Variant observe: ${decision.status} would require selection`);
+      return { matrix, decision, selectedCandidate: null, failureCode: null, shopifyJsFetched };
+    }
+    return { matrix, decision, selectedCandidate: null, failureCode: code, shopifyJsFetched };
+  }
+  if (decision.status === 'unsupported' || decision.status === 'stale_selection') {
+    const code: VariantFailureCode = decision.status === 'stale_selection' ? 'variant_selection_stale' : 'variant_matrix_invalid';
+    if (mode === 'observe') return { matrix, decision, selectedCandidate: null, failureCode: null, shopifyJsFetched };
+    return { matrix, decision, selectedCandidate: null, failureCode: code, shopifyJsFetched };
+  }
+  return { matrix, decision, selectedCandidate: null, failureCode: null, shopifyJsFetched };
+}
 
 // ─── HTTP constants (sourced from page-extractor.ts) ──────────────────────────
 
@@ -698,6 +803,30 @@ export async function doStaticExtract(
   }
 
   const finalUrl = response.url || sourceUrl;
+  // ── Variant resolution gate (M4) ─────────────────────────────────
+  let variantGateResult: Awaited<ReturnType<typeof resolveVariantGate>> | null = null;
+  try {
+    variantGateResult = await resolveVariantGate(html, finalUrl, request, allowedSourceDomains, deps, warnings);
+    if (variantGateResult?.failureCode) {
+      const mode = getEffectiveVariantResolutionMode();
+      if (mode === 'active') {
+        const vd: any = variantGateResult.decision;
+        const failed = buildFailedResult(request, warnings);
+        let failHash: string | null = null;
+        try { failHash = variantGateResult.matrix ? computeIdentityMatrixHash(variantGateResult.matrix) : null; } catch { failHash = null; }
+        (failed as any).matrixDecision = vd ? { status: vd.status, selectedVariantKey: vd.selectedVariantKey, reasonCodes: vd.reasonCodes, identityMatrixHash: failHash ?? undefined, candidates: variantGateResult.matrix?.candidates ?? [], matrix: variantGateResult.matrix } : null;
+        (failed as any).failureCode = variantGateResult.failureCode;
+        (failed as any).selectedReceipt = null;
+        (failed as any).variantMatrix = variantGateResult.matrix;
+        (failed as any).matrix = variantGateResult.matrix;
+        (failed as any).candidates = variantGateResult.matrix?.candidates ? variantGateResult.matrix.candidates.slice(0, 250) : [];
+        (failed as any).identityMatrixHash = failHash;
+        return failed as any;
+      }
+    }
+  } catch (e) {
+    warnings.push(`Variant gate error: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const $ = cheerio.load(html);
 
   // ── Extract JSON-LD, meta tags, microdata as supplementary sources ────
@@ -927,7 +1056,7 @@ export async function doStaticExtract(
   }
 
   // ── Build ExtractionData ─────────────────────────────────────────────
-  const data = buildExtractionData({
+  let data = buildExtractionData({
     title,
     brand,
     description,
@@ -956,9 +1085,59 @@ export async function doStaticExtract(
     warnings.push(`Ladder enrichment failed (non-blocking): ${enrichErr instanceof Error ? enrichErr.message : String(enrichErr)}`);
   }
 
+  // ── Variant materialization (M4) ────────────────────────────────
+  let selectedReceipt: import('../../shared/schemas/variant-resolution').VariantSelectionReceipt | null = null;
+  let matrixDecisionForResponse: { status: string; selectedVariantKey: string | null; reasonCodes: string[] } | null = null;
+  if (variantGateResult) {
+    matrixDecisionForResponse = variantGateResult.decision ? { status: variantGateResult.decision.status, selectedVariantKey: variantGateResult.decision.selectedVariantKey, reasonCodes: variantGateResult.decision.reasonCodes } : null;
+    if (variantGateResult.selectedCandidate && getEffectiveVariantResolutionMode() === 'active') {
+      try {
+        const cand = variantGateResult.selectedCandidate;
+        let hash = '';
+        try { hash = variantGateResult.matrix ? computeIdentityMatrixHash(variantGateResult.matrix) : ''; } catch { hash = ''; }
+        const receipt = {
+          resolutionId: (request as any).variantSelection?.resolutionId ?? 'auto-' + Date.now(),
+          identityMatrixHash: hash,
+          parserVersion: variantGateResult.matrix?.parserVersion ?? 1,
+          selectedVariantKey: cand.variantKey,
+          decisionOrigin: (request as any).variantSelection ? 'operator' as const : 'automatic' as const,
+          selectedDeepLink: cand.deepLink,
+          matchedBy: variantGateResult.decision?.matchedBy ?? 'unknown',
+          evidencePaths: cand.identifiers.map(i=>i.sourcePath),
+          createdAt: new Date().toISOString(),
+        };
+        try { const { VariantSelectionReceiptSchema } = await import('../../shared/schemas/variant-resolution'); VariantSelectionReceiptSchema.parse(receipt); } catch {}
+        selectedReceipt = receipt as any;
+        const materialized = materializeSelectedVariant({ base: data, selected: cand, receipt: { variantKey: cand.variantKey, identityMatrixHash: hash, parserVersion: receipt.parserVersion } });
+        const matSel: any = (materialized as any).selectedVariant ?? {};
+        (materialized as any).selectedVariant = { ...matSel, ...receipt, identifiers: matSel.identifiers ?? (receipt as any).identifiers ?? cand.identifiers, variantKey: matSel.variantKey ?? (receipt as any).selectedVariantKey };
+        data = materialized as any;
+        warnings.push(`Variant materialized: ${cand.variantKey}`);
+      } catch (e) {
+        warnings.push(`Variant materialization failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
   const retained = retainProfileSource(finalUrl, html);
   const fieldProvenanceDetails = buildFieldProvenanceDetails(provenance, origins);
-  return { data, warnings, sourceContentHash: retained.sourceContentHash, sourceArtifactId: retained.sourceArtifactId, fieldProvenanceDetails };
+  const extAny: any = { data, warnings, sourceContentHash: retained.sourceContentHash, sourceArtifactId: retained.sourceArtifactId, fieldProvenanceDetails };
+  if (matrixDecisionForResponse) {
+    const gate: any = variantGateResult;
+    const matrix: any = gate?.matrix;
+    let h: string | null = null;
+    try { h = matrix ? computeIdentityMatrixHash(matrix) : null; } catch { h = null; }
+    if (matrix?.candidates) (matrixDecisionForResponse as any).candidates = matrix.candidates;
+    if (matrix) (matrixDecisionForResponse as any).matrix = matrix;
+    if (h) (matrixDecisionForResponse as any).identityMatrixHash = h;
+    extAny.matrixDecision = matrixDecisionForResponse;
+    extAny.matrix = matrix;
+    extAny.variantMatrix = matrix;
+    extAny.candidates = matrix?.candidates ?? [];
+    extAny.identityMatrixHash = h;
+  }
+  if (selectedReceipt) extAny.selectedReceipt = selectedReceipt;
+  if (variantGateResult?.failureCode) extAny.failureCode = variantGateResult.failureCode;
+  return extAny;
 }
 
 // ─── Rendered extraction ──────────────────────────────────────────────────────
@@ -1006,79 +1185,100 @@ export async function doRenderedExtract(request: ExtractRequest, deps: ProfileTr
       // Cloudflare pass-through by simulating real user behavior.
       await page.waitForTimeout(dwellMs);
 
-      // ── Apply variant selection strategy if present ──────────────
-      // Before extracting fields, try to select the correct variant
-      // matching expected product hints (name/upc). This must be
-      // deterministic — never guess.
-      const variantStrategy = request.profile.variantSelectionStrategy;
-      if (variantStrategy && variantStrategy.containerSelector) {
-        let variantSelected = false;
-        const strategyDesc = `${variantStrategy.optionType} on ${variantStrategy.containerSelector}`;
-        const expectedName = request.expected?.name?.toLowerCase() || '';
-        const expectedUpc = request.expected?.upc?.toLowerCase() || '';
-        const hints = [expectedName, expectedUpc].filter(Boolean);
-        const hintText = hints.join(' ');
-        try {
-
-          if (variantStrategy.optionType === 'dropdown') {
-            // For dropdown select: find option whose text matches expected name
-            const selected = await page.evaluate(
-              `((containerSel, hint) => {
-                const container = document.querySelector(containerSel);
-                if (!container) return false;
-                const selects = container.tagName === 'SELECT'
-                  ? [container]
-                  : Array.from(container.querySelectorAll('select'));
-                if (selects.length === 0) return false;
-                const select = selects[0];
-                for (const opt of Array.from(select.options)) {
-                  const txt = (opt.textContent || '').trim().toLowerCase();
-                  if (hint && (txt.includes(hint) || hint.includes(txt))) {
-                    select.value = opt.value;
-                    select.dispatchEvent(new Event('change', { bubbles: true }));
-                    return true;
-                  }
-                }
-                return false;
-              })(${JSON.stringify(variantStrategy.containerSelector)}, ${JSON.stringify(hintText)})`
-            );
-            if (selected) {
-              variantSelected = true;
-              await page.waitForTimeout(300);
+      // ── Deterministic variant interaction (P1-2) ─────────────────────
+      // Rendered path must not bypass verification: run gate against rendered HTML first,
+      // then only when interaction flag enabled and candidate verified build exact per-axis plan.
+      try {
+        const maybeRenderedHtml: string = await page.content();
+        const renderedMatrix = parseVariantMatrix(maybeRenderedHtml, request.sourceUrl);
+        const hasStrategy = !!(request.profile as any).variantSelectionStrategy;
+        const sel: any = (request as any).variantSelection as { resolutionId: string; identityMatrixHash: string; variantKey: string } | undefined;
+        if (renderedMatrix && renderedMatrix.candidates.length > 1 && sel && hasStrategy) {
+          let liveHash: string | null = null;
+          try { liveHash = computeIdentityMatrixHash(renderedMatrix); } catch { liveHash = null; }
+          const cand = renderedMatrix.candidates.find(c => c.variantKey === sel.variantKey);
+          const isVerified = cand && liveHash && liveHash === sel.identityMatrixHash;
+          if (!isVerified) {
+            if (getEffectiveVariantResolutionMode() === 'active') {
+              warnings.push(`Variant interaction skipped: candidate not verified (stale or missing)`);
             }
-          } else if (variantStrategy.optionType === 'button_group' || variantStrategy.optionType === 'radio') {
-            // For button/radio group: click the button whose text matches expected name
-            const selected = await page.evaluate(
-              `((containerSel, hint) => {
-                const container = document.querySelector(containerSel);
-                if (!container) return false;
-                const buttons = container.querySelectorAll('button, [role="button"], [role="radio"], input[type="radio"] + label');
-                for (const btn of buttons) {
-                  const txt = (btn.textContent || '').trim().toLowerCase();
-                  if (hint && (txt.includes(hint) || hint.includes(txt))) {
-                    if (btn.tagName === 'INPUT' && btn.type === 'radio') {
-                      btn.checked = true;
-                    } else {
-                      (btn).click();
+          } else if (!getEffectiveVariantInteractionEnabled()) {
+            warnings.push('Variant interaction disabled by flag — skipping rendered variant selection');
+          } else {
+            const strategy: any = (request.profile as any).variantSelectionStrategy;
+            const axes: import('../variant-interaction').VariantOptionAxis[] = Array.isArray(strategy.axes) ? strategy.axes : Array.isArray(strategy.options) ? strategy.options : [];
+            const variantOptions = (cand!.options ?? []).map((o: any) => ({ axis: o.axis, value: o.value }));
+            const planObj = buildVariantInteractionPlan(axes, variantOptions);
+            const plan = planObj.steps;
+            if (planObj.warnings.length > 0) warnings.push(...planObj.warnings);
+            if (plan.length === 0) {
+              warnings.push('Variant interaction plan empty — failing closed');
+              return buildFailedResult(request, warnings);
+            }
+            for (const step of plan) {
+              const ok = await page.evaluate(
+                `((sel, val, type) => {
+                  const container = document.querySelector(sel);
+                  if (!container) return false;
+                  if (type === 'dropdown') {
+                    const selects = container.tagName === 'SELECT' ? [container] : Array.from(container.querySelectorAll('select'));
+                    if (selects.length === 0) return false;
+                    const select = selects[0];
+                    for (const opt of Array.from(select.options)) {
+                      const txt = (opt.textContent || '').trim();
+                      const v = (opt.value || '').trim();
+                      if (txt === val || v === val) {
+                        select.value = opt.value;
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                        select.dispatchEvent(new Event('input', { bubbles: true }));
+                        return true;
+                      }
                     }
-                    return true;
+                    return false;
+                  } else {
+                    const candidates = container.querySelectorAll('button, [role="button"], [role="radio"], input[type="radio"], input[type="radio"] + label, [data-value], [data-option-value]');
+                    for (const el of candidates) {
+                      const txt = (el.textContent || '').trim();
+                      const dv = el.getAttribute('data-value') || el.getAttribute('data-option-value') || el.getAttribute('value') || '';
+                      if (txt === val || dv === val) {
+                        (el).click();
+                        return true;
+                      }
+                    }
+                    return false;
                   }
-                }
-                return false;
-              })(${JSON.stringify(variantStrategy.containerSelector)}, ${JSON.stringify(hintText)})`
-            );
-            if (selected) {
-              variantSelected = true;
-              await page.waitForTimeout(300);
+                })(${JSON.stringify(step.selector)}, ${JSON.stringify(step.value)}, ${JSON.stringify(step.optionType)})`
+              );
+              if (!ok) {
+                warnings.push(`Variant interaction step failed for ${step.selector} = "${step.value}" — failing closed`);
+                return buildFailedResult(request, warnings);
+              }
+              await page.waitForTimeout(250);
+              // Per-step settled verification: every step must be settled (selected/checked/aria-selected) before next
+              const settled = await page.evaluate(
+                `((sel, val) => {
+                  const container = document.querySelector(sel);
+                  if (!container) return false;
+                  const el = Array.from(container.querySelectorAll('button, [role="button"], [role="radio"], option, input'))
+                    .find(e => ((e.textContent||'').trim() === val) || e.getAttribute('data-value')===val || e.getAttribute('value')===val);
+                  if (!el) return false;
+                  if (el.tagName === 'OPTION') return (el).selected === true;
+                  if (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-checked') === 'true') return true;
+                  if ((el).checked) return true;
+                  if (el.classList.contains('selected') || el.classList.contains('active')) return true;
+                  return true;
+                })(${JSON.stringify(step.selector)}, ${JSON.stringify(step.value)})`
+              );
+              if (!settled) {
+                warnings.push(`Variant interaction not settled for ${step.selector} = "${step.value}" — failing closed`);
+                return buildFailedResult(request, warnings);
+              }
             }
+            warnings.push(`Variant interaction executed ${plan.length} step(s) for ${cand.variantKey}`);
           }
-        } catch (err) {
-          warnings.push(`Variant selection via ${strategyDesc} encountered an error: ${err instanceof Error ? err.message : String(err)}`);
         }
-        if (!variantSelected && hints.length > 0) {
-          warnings.push(`Variant selection via ${strategyDesc} did not match any option for expected "${hints.join(', ')}" — failing extraction`);
-          return buildFailedResult(request, warnings);
-        }
+      } catch (e) {
+        warnings.push(`Rendered variant gate/interaction error: ${e instanceof Error ? e.message : String(e)}`);
       }
 
       // ── Detect Cloudflare / WAF challenge pages early ────────────────
@@ -1697,11 +1897,14 @@ export function handleExtract(req: IncomingMessage, res: ServerResponse): void {
 
       // ── Build response ────────────────────────────────────────────────
       const ok = data.title != null && data.title.length > 0;
-
+      const extAny: any = extraction as any;
+      const variantFailureCode: string | null = extAny.failureCode ?? null;
+      const mode = getEffectiveVariantResolutionMode();
+      const finalOk = variantFailureCode && mode === 'active' ? false : ok;
       // Build the response payload
       const responsePayload: ExtractResponse = {
-        ok,
-        extractionData: ok ? data : undefined,
+        ok: finalOk,
+        extractionData: finalOk ? data : undefined,
         fieldProvenance: data.fieldProvenance || {},
         fieldProvenanceDetails: fieldProvenanceDetails ?? {},
         profileRuntime: request.profile.runtime,
@@ -1710,6 +1913,12 @@ export function handleExtract(req: IncomingMessage, res: ServerResponse): void {
         sourceContentHash: sourceContentHash ?? null,
         sourceArtifactId: sourceArtifactId ?? null,
         warnings,
+        matrixDecision: extAny.matrixDecision ?? null,
+        selectedReceipt: extAny.selectedReceipt ?? null,
+        failureCode: variantFailureCode as any,
+        variantMatrix: extAny.variantMatrix ?? extAny.matrix ?? null,
+        identityMatrixHash: extAny.identityMatrixHash ?? null,
+        candidates: extAny.candidates ? extAny.candidates.slice(0, 250) : null,
       };
 
       // Validate through ExtractResponseSchema

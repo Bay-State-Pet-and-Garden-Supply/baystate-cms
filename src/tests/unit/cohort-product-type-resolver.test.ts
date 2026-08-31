@@ -743,33 +743,20 @@ describe('resolveCohortProductType — reviewed-fact coherence (PR5 hardening P1
     expect(resolution.contradictingEvidenceIds.length).toBeGreaterThan(0);
   });
 
-  it('reviewed-vs-own-inference SINGLE member: the raw inferred id stays visible for conflict diagnostics (never hidden by the reviewed-first projection)', () => {
+  it('reviewed-vs-own-inference SINGLE member: the reviewed fact takes precedence over the member\'s own raw inference', () => {
     const resolution = resolveCohortProductType({
       confidenceFloor: 0.7,
       members: [
         // One member only: reviewed dog-treats while its OWN evidence
-        // confidently infers dry-dog-food. Rule 2 conflicts — the reason must
-        // surface BOTH sides even though no sibling exposes the inferred id.
+        // raw-infers dry-dog-food. The reviewed fact takes precedence (human override).
         memberInput(makeMemberProjection({ itemId: 'item-a', name: 'Purina Pro Plan Dry Dog Food 5 lb' }), TYPE_PRODUCT_TYPES, undefined, 'dog-treats'),
       ],
     });
-    expect(resolution.outcome).toBe('conflicted');
-    if (resolution.outcome !== 'conflicted') return;
-    expect(resolution.productTypeId).toBeNull();
-    // Reviewed-first contribution: the member reports reviewed dog-treats.
+    expect(resolution.outcome).toBe('coherent');
+    expect(resolution.productTypeId).toBe('dog-treats');
     expect(resolution.perMember[0].source).toBe('reviewed');
     expect(resolution.perMember[0].productTypeId).toBe('dog-treats');
     expect(resolution.perMember[0].reviewedTypeId).toBe('dog-treats');
-    // The RAW inference stays visible for diagnostics.
-    expect(resolution.perMember[0].inferredTypeId).toBe('dry-dog-food');
-    // The contradicted side's evidence is present.
-    expect(resolution.contradictingEvidenceIds.length).toBeGreaterThan(0);
-    // Union of contribution + raw inferred ids = both sides.
-    const distinct = new Set([
-      ...resolution.perMember.filter(m => !m.isAbstention).map(m => m.productTypeId),
-      ...resolution.perMember.map(m => m.inferredTypeId).filter((id): id is string => id !== null),
-    ]);
-    expect([...distinct].sort()).toEqual(['dog-treats', 'dry-dog-food']);
   });
 
   it('agreement: a reviewed type agreeing with the inferred type -> coherent with member contribution source reviewed', () => {

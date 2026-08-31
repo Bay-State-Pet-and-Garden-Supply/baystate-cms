@@ -60,7 +60,10 @@ export function Onboarding() {
   const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
   const [batches, setBatches] = useState<OnboardingBatch[]>([]);
   const [batchCounts, setBatchCounts] = useState<Record<string, WorkStateCounts>>({});
-  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const initialBatchId = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search).get('batch')
+    : null;
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(initialBatchId);
   const [selectedBatch, setSelectedBatch] = useState<OnboardingBatch | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -135,12 +138,7 @@ export function Onboarding() {
     }
   };
 
-  useEffect(() => {
-    fetchBatchesList();
-    loadBrandSites();
-  }, []);
-
-  const handleSelectBatch = async (batchId: string) => {
+  const handleSelectBatch = async (batchId: string, replaceHistory = false) => {
     setLoading(true);
     setError('');
     setSelectedBatchId(batchId);
@@ -148,16 +146,62 @@ export function Onboarding() {
       const batchRes = await getBatch(batchId);
       setSelectedBatch(batchRes.batch);
       await loadBrandSites();
+      const url = new URL(window.location.href);
+      url.searchParams.set('view', 'onboarding');
+      url.searchParams.set('batch', batchId);
+      if (replaceHistory) {
+        window.history.replaceState({ view: 'onboarding', batch: batchId }, '', url.toString());
+      } else {
+        window.history.pushState({ view: 'onboarding', batch: batchId }, '', url.toString());
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setSelectedBatchId(null);
+      setSelectedBatch(null);
+      const cleanUrl = new URL(window.location.href);
+      cleanUrl.searchParams.delete('batch');
+      cleanUrl.searchParams.delete('tab');
+      cleanUrl.searchParams.delete('board');
+      window.history.replaceState({ view: 'onboarding' }, '', cleanUrl.toString());
     } finally {
       setLoading(false);
     }
   };
 
+  useEffect(() => {
+    fetchBatchesList();
+    loadBrandSites();
+    if (initialBatchId) {
+      void handleSelectBatch(initialBatchId, true);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const urlBatchId = params.get('batch');
+      if (urlBatchId !== selectedBatchId) {
+        if (urlBatchId) {
+          void handleSelectBatch(urlBatchId, true);
+        } else {
+          setSelectedBatchId(null);
+          setSelectedBatch(null);
+          void fetchBatchesList();
+        }
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [selectedBatchId]);
+
   const handleBackToBatches = () => {
     setSelectedBatchId(null);
     setSelectedBatch(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('batch');
+    url.searchParams.delete('tab');
+    url.searchParams.delete('board');
+    window.history.pushState({ view: 'onboarding' }, '', url.toString());
     fetchBatchesList();
   };
 
@@ -166,6 +210,15 @@ export function Onboarding() {
     if (!confirm('Are you sure you want to delete this batch and all its items?')) return;
     try {
       await deleteBatch(id);
+      if (selectedBatchId === id) {
+        setSelectedBatchId(null);
+        setSelectedBatch(null);
+        const url = new URL(window.location.href);
+        url.searchParams.delete('batch');
+        url.searchParams.delete('tab');
+        url.searchParams.delete('board');
+        window.history.replaceState({ view: 'onboarding' }, '', url.toString());
+      }
       fetchBatchesList();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -982,6 +1035,31 @@ export function Onboarding() {
         )}
       </>
     );
+  }
+
+  // Loading or failed state when a batch ID is selected
+  if (selectedBatchId && !selectedBatch) {
+    if (loading) {
+      return (
+        <div style={{ padding: 40, textAlign: 'center', color: colors.ledgerCharcoal }}>
+          <span className="spinner" style={{ width: 24, height: 24, marginBottom: 12 }} />
+          <div>Loading batch...</div>
+        </div>
+      );
+    }
+    if (error) {
+      return (
+        <div style={styles.container}>
+          <div style={{ color: '#dc2626', background: '#fef2f2', padding: 16, borderRadius: 8, marginBottom: 20 }}>
+            <strong>Error loading batch:</strong> {error}
+          </div>
+          <button style={styles.secondaryBtn} onClick={handleBackToBatches}>
+            ← Back to Batches
+          </button>
+        </div>
+      );
+    }
+    return null;
   }
 
   // No batch selected or batch not loaded

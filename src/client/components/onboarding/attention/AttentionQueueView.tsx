@@ -13,6 +13,7 @@ import { BrandAssignmentPanel } from './BrandAssignmentPanel';
 import { DomainBlockerPanel } from './DomainBlockerPanel';
 import { BrandDomainSetupPanel } from './BrandDomainSetupPanel';
 import { groupAttentionItems, getAttentionGroupChip } from './attention-logic';
+import { FamilyInspectorDrawer } from '../families/FamilyInspectorDrawer';
 import './attention.css';
 
 const PAGE_SIZE = 50;
@@ -33,6 +34,7 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
   const [error, setError] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<FilterKey>('all');
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [familyCohortId, setFamilyCohortId] = useState<string | null>(null);
 
   const mounted = useRef(true);
   const offsetRef = useRef(0);
@@ -187,8 +189,11 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
               <AttentionRow
                 key={ws.itemId}
                 workState={ws}
+                batchId={batchId}
                 onResolve={handleResolve}
                 resolving={resolvingId === ws.itemId}
+                onViewFamily={setFamilyCohortId}
+                onActionComplete={refresh}
               />
             ))}
           </section>
@@ -210,6 +215,9 @@ export function AttentionQueueView({ batchId, onOpenItem }: AttentionQueueViewPr
         <div className="attn-error" role="alert">
           Refresh failed: {error}
         </div>
+      ) : null}
+      {familyCohortId ? (
+        <FamilyInspectorDrawer cohortId={familyCohortId} batchId={batchId} onClose={() => setFamilyCohortId(null)} />
       ) : null}
     </div>
   );

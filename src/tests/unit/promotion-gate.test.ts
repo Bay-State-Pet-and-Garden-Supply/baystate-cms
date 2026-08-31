@@ -148,7 +148,7 @@ function curationData(overrides: Partial<CurationData> = {}): CurationData {
 function blockedSemanticValidation(message: string): CurationData['semanticValidation'] {
   return {
     status: 'blocked',
-    findings: [{ code: 'family_brand', memberSku: 'SKU-1', message }],
+    findings: [{ code: 'family_brand', memberSku: 'SKU-1', message, conflictingValues: null, suggestedAction: null }],
   };
 }
 

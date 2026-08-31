@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { listFieldRegistry, updateFieldRegistryEntry, getConnection, saveConnection, testConnection } from '../api';
 import { ViewHeader } from './common/ViewHeader';
 import { AiComputePanel } from './AiComputePanel';
-import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
 import { CatalogFieldsView } from './catalog-workbench/CatalogFieldsView';
 import { TypesAttributesView } from './catalog-workbench/TypesAttributesView';
 import { MappingsView } from './catalog-workbench/MappingsView';
@@ -24,11 +23,10 @@ import { colors } from '../theme';
  * AI compute routing).
  */
 
-type SettingsTab = 'general' | 'ai-tasks' | 'ai' | 'catalog' | 'types' | 'mappings-health' | 'taxonomy-release';
+type SettingsTab = 'general' | 'ai' | 'catalog' | 'types' | 'mappings-health' | 'taxonomy-release';
 
 const SETTINGS_TABS: readonly SettingsTabDef[] = [
   { id: 'general', label: 'General' },
-  { id: 'ai-tasks', label: 'AI Tasks' },
   { id: 'ai', label: 'AI Routes' },
   { id: 'catalog', label: 'Catalog Fields' },
   { id: 'types', label: 'Types & Attributes' },
@@ -223,11 +221,6 @@ export function Settings({ onSelectProduct }: SettingsProps) {
           </button>
         </div>
       </div>
-      </SettingsTabPanel>
-
-      {/* AI Tasks Section — per-task model routing (orphaned panel mounted, P1) */}
-      <SettingsTabPanel tabId="ai-tasks" active={settingsTab}>
-        <LlmTaskConfigPanel />
       </SettingsTabPanel>
 
       {/* AI Routes Section — canonical global AI infrastructure surface */}

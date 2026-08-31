@@ -1,0 +1,14 @@
+{
+  "title": "Duplicate GTIN Product",
+  "vendor": "TestBrand",
+  "handle": "duplicate-gtin",
+  "variants": [
+    { "id": 5000000001, "title": "Small / Beef", "option1": "Small", "option2": "Beef", "sku": "DUP-SM-001", "barcode": "810001234550", "price": 1999, "available": true, "featured_image": { "src": "https://example.com/small.jpg", "variant_ids": [5000000001] } },
+    { "id": 5000000002, "title": "Large / Beef", "option1": "Large", "option2": "Beef", "sku": "DUP-LG-001", "barcode": "810001234550", "price": 2999, "available": true, "featured_image": { "src": "https://example.com/large.jpg", "variant_ids": [5000000002] } }
+  ],
+  "images": [
+    { "src": "https://example.com/small.jpg", "variant_ids": [5000000001] },
+    { "src": "https://example.com/large.jpg", "variant_ids": [5000000002] }
+  ],
+  "options": [{ "name": "Size", "values": ["Small", "Large"] }]
+}

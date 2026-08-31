@@ -23,7 +23,9 @@ import {
 } from '../db/repositories/onboarding-source-repo';
 import { verifyTopCandidates, type VerificationResult } from './page-verifier';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
-import { extractProductData } from './page-extractor';
+import { extractProductData, VariantExtractionError } from './page-extractor';
+import { createVariantResolutionRepo } from '../db/repositories/onboarding-variant-resolution-repo';
+import { getEffectiveVariantResolutionMode } from './variant-flags';
 import { enrichUrlMetadata } from '../db/repositories/brand-url-index-repo';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItemWithPipeline } from './product-curator';
@@ -46,7 +48,7 @@ import {
   supersedeCohortRun,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
-import { getCohortById, listCohortsByWorkspace, listWaitingCohortMemberIdsByWorkspace, insertCohortShadowObservationIfChanged } from '../db/repositories/curation-cohort-repo';
+import { getCohortById, getCohortMembers, listCohortsByWorkspace, listWaitingCohortMemberIdsByWorkspace, insertCohortShadowObservationIfChanged } from '../db/repositories/curation-cohort-repo';
 import { findBatchById } from '../db/repositories/onboarding-batch-repo';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import { determineProductGroup } from './product-line-grouper';
@@ -566,6 +568,15 @@ export class OnboardingWorker {
   private reconcileDriftedTerminalRuns(): void {
     const readyCohorts = listCohortsByWorkspace(this.workspaceId).filter(c => c.status === 'ready');
     for (const cohort of readyCohorts) {
+      const members = getCohortMembers(cohort.id);
+      const items = listItemsByBatch(cohort.batchId);
+      const itemMap = new Map(items.map(i => [i.id, i]));
+      const allPastCuration = members.length > 0 && members.every(m => {
+        const it = itemMap.get(m.onboardingItemId);
+        return it && (it.stage === 'review' || it.stage === 'promotion');
+      });
+      if (allPastCuration) continue;
+
       const current = getCurrentCohortRun(cohort.id);
       if (!current || !COHORT_RUN_TERMINAL.has(current.status)) continue;
       // Cancelled ⇒ retryable: supersede so the claim slot reopens. This never
@@ -1252,6 +1263,90 @@ export class OnboardingWorker {
         return;
       }
 
+      // ── Variant resolution durable state for Choose Variant (M1/P1) ──
+      // When resolver reports ambiguous/no_match/stale/too_many in active mode, park for operator choice
+      const variantResolutionForDiscovery = (discovery as any).variantResolution as { status: string; selectedKey: string | null; candidatesCount: number; overflow: boolean; warnings: string[]; identityHash: string | null; matrixCandidates?: import('../shared/schemas/variant-resolution').NormalizedVariantCandidate[] } | null | undefined;
+      if (
+        variantResolutionForDiscovery &&
+        ['ambiguous', 'no_match', 'stale', 'stale_selection', 'too_many_variants', 'unsupported'].includes(variantResolutionForDiscovery.status) &&
+        getEffectiveVariantResolutionMode() === 'active'
+      ) {
+        try {
+          const db = getDb();
+          const repo = createVariantResolutionRepo(db);
+          const cur = repo.getCurrentForItem(item.id);
+          if (cur) repo.supersedeCurrent(item.id, new Date().toISOString());
+          const now = new Date().toISOString();
+          const hash = variantResolutionForDiscovery.identityHash && /^[a-f0-9]{64}$/.test(variantResolutionForDiscovery.identityHash)
+            ? variantResolutionForDiscovery.identityHash
+            : 'f'.repeat(64);
+          // Persist candidates: prefer canonical matrix candidates with real variantKey/identifiers (P1-1) so Choose Variant selection's variantKey matches live canonical lookup at extract.ts 103-117; fallback to minimal placeholder only when matrix unavailable
+          const rawMatrixCandidates = (variantResolutionForDiscovery as any)?.matrixCandidates as import('../shared/schemas/variant-resolution').NormalizedVariantCandidate[] | undefined;
+          const candidatesForRow = rawMatrixCandidates && rawMatrixCandidates.length > 0
+            ? rawMatrixCandidates.slice(0, 250).map((c) => ({
+                variantKey: c.variantKey,
+                platformId: c.platformId,
+                title: c.title,
+                identifiers: c.identifiers,
+                options: c.options,
+                available: c.available,
+                price: c.price,
+                currency: c.currency,
+                weight: c.weight,
+                dimensions: c.dimensions,
+                images: c.images,
+                deepLink: c.deepLink,
+                sourcePaths: c.sourcePaths,
+              }))
+            : sources.length > 0
+              ? sources.slice(0, 250).map((s, idx) => ({
+                  variantKey: `variant-${idx}`,
+                  platformId: null,
+                  title: s.title || s.url,
+                  identifiers: [],
+                  options: [],
+                  available: true,
+                  price: null,
+                  currency: null,
+                  weight: null,
+                  dimensions: null,
+                  images: [],
+                  deepLink: s.url,
+                  sourcePaths: {},
+                }))
+              : [];
+          const canonicalParentKey = sources[0]?.url ?? item.sourceUrl ?? `discovery:${item.id}`;
+          repo.create({
+            id: `vr-disc-${item.id}-${Date.now()}`,
+            onboarding_item_id: item.id,
+            source_url: sources[0]?.url ?? canonicalParentKey,
+            canonical_parent_key: canonicalParentKey,
+            platform: 'shopify',
+            parser_version: 1,
+            identity_matrix_hash: hash,
+            source_content_hash: null,
+            status: variantResolutionForDiscovery.status === 'stale' || variantResolutionForDiscovery.status === 'stale_selection' ? 'stale' : (variantResolutionForDiscovery.status as any),
+            reason_codes_json: JSON.stringify(variantResolutionForDiscovery.warnings?.length ? variantResolutionForDiscovery.warnings : [variantResolutionForDiscovery.status]),
+            candidates_json: JSON.stringify(candidatesForRow),
+            automatic_variant_key: null,
+            selected_variant_key: null,
+            decision_origin: null,
+            decided_at: null,
+            superseded_at: null,
+            created_at: now,
+            updated_at: now,
+          });
+        } catch (e) {
+          console.warn('[OnboardingWorker] Failed to persist variant resolution for Discovery ambiguous', e);
+        }
+        deleteSourcesByItem(item.id);
+        if (sources.length > 0) insertSources(item.id, sources);
+        if (discoveryRunId) completeDiscoveryRun(discoveryRunId, 'needs_input_ambiguous', `Variant resolution ${variantResolutionForDiscovery.status} — needs operator choice`);
+        updateItemStageStatus(item.id, 'needs_input', `variant:${variantResolutionForDiscovery.status}: multiple variants require operator choice`);
+        onboardingEvents.emitItemStatus(item.batchId, item.id, 'needs_input', { stage: 'discovery', variantResolution: variantResolutionForDiscovery });
+        return;
+      }
+
       // ── Sitemap signals ──────────────────────────────────────────────
       // Sitemap candidates come from the brand's own sitemap (sourceMethod
       // starting with 'sitemap_'). Used by the auto-selection policy below
@@ -1546,17 +1641,69 @@ export class OnboardingWorker {
       }
 
       try {
+        // ── Variant selection forwarding (M4) ───────────────────────
+        let variantSelection: { resolutionId: string; identityMatrixHash: string; variantKey: string } | undefined;
+        try {
+          if (getEffectiveVariantResolutionMode() !== 'off' && item.sourceType !== 'distributor_record') {
+            const db = getDb();
+            const repo = createVariantResolutionRepo(db);
+            const cur = repo.getCurrentForItem(item.id);
+            if (cur && cur.selected_variant_key && cur.identity_matrix_hash) {
+              // Verify not superseded/stale (getCurrent ensures current) and status is selected/resolved
+              variantSelection = {
+                resolutionId: cur.id,
+                identityMatrixHash: cur.identity_matrix_hash,
+                variantKey: cur.selected_variant_key,
+              };
+            }
+          }
+        } catch { /* best effort — no variant forwarding */ }
         const extractedData = await extractProductData(item.sourceUrl, {
           name: item.expectedName || item.name,
           brandHint: item.brandHint,
           price: item.price,
           // ADR-0031: enables real identity classification in ladder enrichment.
           gtin: item.upc || undefined,
-        });
+          variantSelection,
+        } as any);
 
         if (item.brandHint && !extractedData.brand) extractedData.brand = item.brandHint;
         if (item.price && !extractedData.price) extractedData.price = item.price;
 
+        // variant success persistence (M4) — if extraction carried receipt, ensure resolution row exists
+        try {
+          const sel: any = (extractedData as any).selectedVariant;
+          const selKey = sel?.selectedVariantKey ?? sel?.variantKey;
+          if (sel && sel.identityMatrixHash && selKey && getEffectiveVariantResolutionMode() === 'active') {
+            const db = getDb();
+            const repo = createVariantResolutionRepo(db);
+            const cur = repo.getCurrentForItem(item.id);
+            if (!cur || cur.identity_matrix_hash !== sel.identityMatrixHash || cur.selected_variant_key !== selKey) {
+              const now = new Date().toISOString();
+              if (cur) repo.supersedeCurrent(item.id, now);
+              repo.create({
+                id: sel.resolutionId ?? sel.selectedVariantKey ?? `vr-auto-${item.id}-${Date.now()}`,
+                onboarding_item_id: item.id,
+                source_url: sel.selectedDeepLink ?? sel.deepLink ?? item.sourceUrl,
+                canonical_parent_key: item.sourceUrl,
+                platform: (sel as any).platform ?? 'unknown',
+                parser_version: sel.parserVersion ?? 1,
+                identity_matrix_hash: sel.identityMatrixHash,
+                source_content_hash: null,
+                status: 'selected',
+                reason_codes_json: JSON.stringify(['auto_resolved']),
+                candidates_json: JSON.stringify((sel as any).candidates ?? (sel as any).identifiers ?? []),
+                automatic_variant_key: selKey,
+                selected_variant_key: selKey,
+                decision_origin: sel.decisionOrigin ?? 'automatic',
+                decided_at: now,
+                superseded_at: null,
+                created_at: now,
+                updated_at: now,
+              });
+            }
+          }
+        } catch {}
         insertExtraction({
           itemId: item.id,
           sourceUrl: item.sourceUrl,
@@ -1607,6 +1754,66 @@ export class OnboardingWorker {
           console.warn(`[OnboardingWorker] Candidate cohort refresh failed for batch ${item.batchId} (non-blocking):`, err);
         }
       } catch (err) {
+        // Variant gate fails closed — do not consume retry budget, set needs_input (M4)
+        const isVariantGate = err instanceof VariantExtractionError;
+        if (isVariantGate) {
+          const code = (err as any).failureCode as string;
+          // Persist/refresh variant resolution evidence with canonical matrix + real hash so operator can select (P0)
+          try {
+            if (getEffectiveVariantResolutionMode() === 'active' && item.sourceType !== 'distributor_record') {
+              const db = getDb();
+              const repo = createVariantResolutionRepo(db);
+              const cur = repo.getCurrentForItem(item.id);
+              const md: any = (err as any).matrixDecision;
+              const matrix: any = (err as any).matrix ?? md?.matrix ?? null;
+              const hash: string | null = (err as any).identityMatrixHash ?? md?.identityMatrixHash ?? matrix?.identityMatrixHash ?? null;
+              const candidates: any[] = (err as any).candidates ?? md?.candidates ?? matrix?.candidates ?? [];
+              const platform: string = matrix?.platform ?? md?.platform ?? 'unknown';
+              const parserVersion: number = matrix?.parserVersion ?? md?.parserVersion ?? 1;
+              const realHash = hash && /^[a-f0-9]{64}$/.test(hash) ? hash : null;
+              // Reject missing evidence instead of fabricating synthetic hashes (f*64/0*64).
+              // Require valid 64hex hash and bounded non-empty candidates for durable evidence.
+              const boundedCandidates = Array.isArray(candidates) ? candidates.slice(0, 250) : [];
+              if (!realHash || boundedCandidates.length === 0) {
+                console.warn(`[OnboardingWorker] Variant gate ${code} for ${item.id} missing valid matrix evidence (hash=${hash}, candidates=${boundedCandidates.length}) — not persisting synthetic resolution`);
+              } else {
+                const shouldCreate = !cur || cur.identity_matrix_hash !== realHash;
+                if (shouldCreate) {
+                  const now = new Date().toISOString();
+                  if (cur) repo.supersedeCurrent(item.id, now);
+                  repo.create({
+                    id: md?.resolutionId ?? `vr-${item.id}-${Date.now()}`,
+                    onboarding_item_id: item.id,
+                    source_url: matrix?.sourceFinalUrl ?? item.sourceUrl,
+                    canonical_parent_key: matrix?.canonicalParentUrl ?? item.sourceUrl,
+                    platform,
+                    parser_version: parserVersion,
+                    identity_matrix_hash: realHash,
+                    source_content_hash: matrix?.sourceContentHash ?? null,
+                    status: code === 'variant_selection_required' ? 'ambiguous' : code === 'variant_selection_stale' ? 'stale' : 'unsupported',
+                    reason_codes_json: JSON.stringify(md?.reasonCodes ?? [code]),
+                    candidates_json: JSON.stringify(boundedCandidates),
+                    automatic_variant_key: null,
+                    selected_variant_key: null,
+                    decision_origin: null,
+                    decided_at: null,
+                    superseded_at: null,
+                    created_at: now,
+                    updated_at: now,
+                  });
+                }
+              }
+            }
+          } catch {}
+          console.warn(`[OnboardingWorker] Variant gate ${code} for ${item.id} — parking as needs_input`);
+          updateItemStageStatus(item.id, 'needs_input', `variant:${code}:${String(err)}`);
+          onboardingEvents.emitItemStatus(item.batchId, item.id, 'needs_input', {
+            stage: 'extraction',
+            error: `variant:${code}`,
+            variantFailureCode: code,
+          });
+          return;
+        }
         console.error(`[OnboardingWorker] Extraction error for ${item.id}:`, err);
         const retry = incrementRetryCount(item.id);
         if (retry < 2) {

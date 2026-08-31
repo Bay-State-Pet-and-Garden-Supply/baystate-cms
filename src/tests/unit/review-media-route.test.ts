@@ -146,7 +146,7 @@ describe('PUT /onboarding/items/:id/media — candidate-set union validation', (
     expect(state.reviewInvalidationReason).toBe('consequential_edit');
   });
 
-  it('rejects foreign URLs with 400 and persists nothing', async () => {
+  it('accepts reviewer-added image URLs and persists them', async () => {
     const batchId = createBatch({ workspaceId, name: 'media-2', fileName: 't.csv', totalItems: 0 }).id;
     const id = createItem(batchId, {
       upc: 'M2',
@@ -154,13 +154,49 @@ describe('PUT /onboarding/items/:id/media — candidate-set union validation', (
     });
 
     const res = await putMedia(id, {
-      primaryImage: mediaUrl('evil'),
+      primaryImage: 'https://images.example/custom-added.jpg',
+      orderedAdditional: [mediaUrl('a'), 'https://cdn.example/extra.png'],
+      suppressed: [],
+    });
+    expect(res.status).toBe(200);
+    expect(reviewedMediaOf(id)).toEqual({
+      primaryImage: 'https://images.example/custom-added.jpg',
+      orderedAdditional: [mediaUrl('a'), 'https://cdn.example/extra.png'],
+      suppressed: [],
+    });
+  });
+
+  it('rejects invalid URL protocols with 400 and persists nothing', async () => {
+    const batchId = createBatch({ workspaceId, name: 'media-2-proto', fileName: 't.csv', totalItems: 0 }).id;
+    const id = createItem(batchId, {
+      upc: 'M2P',
+      extractionData: { primaryImage: mediaUrl('a'), additionalImages: [] },
+    });
+
+    const res = await putMedia(id, {
+      primaryImage: 'ftp://files.example/image.jpg',
       orderedAdditional: [],
       suppressed: [],
     });
     expect(res.status).toBe(400);
-    const payload = (await res.json()) as { urls?: string[] };
-    expect(payload.urls).toEqual([mediaUrl('evil')]);
+    const payload = (await res.json()) as { error?: string };
+    expect(payload.error).toContain('protocol');
+    expect(reviewedMediaOf(id)).toBeNull();
+  });
+
+  it('rejects malformed URLs with 400 and persists nothing', async () => {
+    const batchId = createBatch({ workspaceId, name: 'media-2-mal', fileName: 't.csv', totalItems: 0 }).id;
+    const id = createItem(batchId, {
+      upc: 'M2M',
+      extractionData: { primaryImage: mediaUrl('a'), additionalImages: [] },
+    });
+
+    const res = await putMedia(id, {
+      primaryImage: 'not-a-valid-url',
+      orderedAdditional: [],
+      suppressed: [],
+    });
+    expect(res.status).toBe(400);
     expect(reviewedMediaOf(id)).toBeNull();
   });
 
@@ -184,7 +220,7 @@ describe('PUT /onboarding/items/:id/media — candidate-set union validation', (
       .query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?')
       .run(JSON.stringify({ primaryImage: mediaUrl('a'), additionalImages: [] }), id);
 
-    // Save 2: referencing b must still validate via the persisted-entry union…
+    // Save 2: referencing b must still validate…
     const second = await putMedia(id, {
       primaryImage: mediaUrl('a'),
       orderedAdditional: [mediaUrl('b')],
@@ -196,14 +232,6 @@ describe('PUT /onboarding/items/:id/media — candidate-set union validation', (
       orderedAdditional: [mediaUrl('b')],
       suppressed: [],
     });
-
-    // …but a URL that was NEVER part of any candidate set stays rejected.
-    const third = await putMedia(id, {
-      primaryImage: mediaUrl('never-seen'),
-      orderedAdditional: [],
-      suppressed: [],
-    });
-    expect(third.status).toBe(400);
   });
 
   it('malformed payloads are rejected without mutation', async () => {
@@ -250,7 +278,7 @@ describe('PUT /onboarding/items/:id/media — candidate-set union validation', (
   });
 });
 
-describe('PUT /onboarding/items/:id/media — distributor constraints', () => {
+describe('PUT /onboarding/items/:id/media — distributor records', () => {
   function distributorItem(batchId: string, upc: string): string {
     return createItem(batchId, {
       upc,
@@ -265,53 +293,21 @@ describe('PUT /onboarding/items/:id/media — distributor constraints', () => {
     });
   }
 
-  it('accepts selections drawn from approved display images only', async () => {
+  it('accepts selections with approved and reviewer-added image URLs', async () => {
     const batchId = createBatch({ workspaceId, name: 'media-d1', fileName: 't.csv', totalItems: 0 }).id;
     const id = distributorItem(batchId, 'D1');
 
     const res = await putMedia(id, {
-      primaryImage: mediaUrl('d2'),
+      primaryImage: 'https://images.example/dist-new.jpg',
       orderedAdditional: [mediaUrl('d1')],
       suppressed: [],
     });
     expect(res.status).toBe(200);
     expect(reviewedMediaOf(id)).toEqual({
-      primaryImage: mediaUrl('d2'),
+      primaryImage: 'https://images.example/dist-new.jpg',
       orderedAdditional: [mediaUrl('d1')],
       suppressed: [],
     });
-  });
-
-  it('rejects unapproved/raw candidate URLs server-side', async () => {
-    const batchId = createBatch({ workspaceId, name: 'media-d2', fileName: 't.csv', totalItems: 0 }).id;
-    const id = distributorItem(batchId, 'D2');
-
-    const res = await putMedia(id, {
-      primaryImage: mediaUrl('raw-unapproved'),
-      orderedAdditional: [],
-      suppressed: [],
-    });
-    expect(res.status).toBe(400);
-    // For distributor rows the candidate universe IS the approved set, so a
-    // raw URL trips the union guard first; the explicit approved-only check
-    // stays as defense-in-depth behind it.
-    const payload = (await res.json()) as { error?: string };
-    expect(
-      payload.error?.includes('candidate set') || payload.error?.includes('approved'),
-    ).toBe(true);
-    expect(reviewedMediaOf(id)).toBeNull();
-  });
-
-  it('rejects suppression of non-approved URLs for distributor rows too', async () => {
-    const batchId = createBatch({ workspaceId, name: 'media-d3', fileName: 't.csv', totalItems: 0 }).id;
-    const id = distributorItem(batchId, 'D3');
-
-    const res = await putMedia(id, {
-      primaryImage: mediaUrl('d1'),
-      orderedAdditional: [],
-      suppressed: [mediaUrl('not-approved')],
-    });
-    expect(res.status).toBe(400);
   });
 
   it('404s items outside the active workspace', async () => {

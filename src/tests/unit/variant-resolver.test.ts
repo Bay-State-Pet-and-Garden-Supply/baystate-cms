@@ -252,3 +252,46 @@ describe('resolveVariantUrl integration', () => {
     expect(result.ambiguous).toBe(true);
   });
 });
+
+describe('AC-6 fixture coverage — canonical adapters against committed fixtures', () => {
+  const fixturesDir = 'src/tests/fixtures/variants';
+  it('parses all 8 committed variant fixtures via canonical adapters', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { parseVariantMatrix, parseJsonLdMatrix, parseShopifyMatrix, parseWooMatrix, parseBigCommerceMatrix, parseMagentoMatrix } = await import('../../onboarding/variant-resolver');
+    const cases: Array<[string,string]> = [
+      ['betterbone-shopify-product.json','shopify'],
+      ['betterbone-product-page.html','shopify'],
+      ['jsonld-product-group.html','jsonld'],
+      ['woocommerce-product-variations.html','woocommerce'],
+      ['bigcommerce-embedded-matrix.html','bigcommerce'],
+      ['magento-swatch-config.html','magento'],
+      ['large-image-map-shopify-product.json','shopify'],
+      ['duplicate-gtin-shopify-product.json','shopify'],
+    ];
+    for (const [file, platform] of cases) {
+      const p = path.join(fixturesDir, file);
+      if (!fs.existsSync(p)) throw new Error('missing fixture '+p);
+      const raw = fs.readFileSync(p,'utf8');
+      const via = parseVariantMatrix(raw, 'https://example.com/products/test');
+      expect(via).not.toBeNull();
+      if (file === 'betterbone-shopify-product.json') { expect(via!.candidates.length).toBe(3); expect(new Set(via!.candidates.map(c=>c.deepLink)).size).toBe(3); }
+      if (file === 'jsonld-product-group.html') expect(via!.candidates.length).toBe(3);
+      if (file === 'woocommerce-product-variations.html') expect(via!.candidates.length).toBe(2);
+      if (file === 'large-image-map-shopify-product.json') { const urls = via!.candidates.flatMap(c=>c.images.map(i=>i.url)); expect(urls.some(u=>u.includes('width=600'))).toBe(true); }
+      if (platform==='shopify' && raw.trim().startsWith('{')) { const m=parseShopifyMatrix(raw,'https://example.com/products/test'); expect(m).not.toBeNull(); }
+      if (platform==='jsonld') { const m=parseJsonLdMatrix(raw,'https://example.com/products/test'); expect(m).not.toBeNull(); }
+      if (platform==='woocommerce') { const m=parseWooMatrix(raw,'https://example.com/products/test'); expect(m).not.toBeNull(); }
+      if (platform==='bigcommerce') { const m=parseBigCommerceMatrix(raw,'https://example.com/products/test'); expect(m).not.toBeNull(); }
+      if (platform==='magento' && raw.includes('jsonConfig')) { const m=parseMagentoMatrix(raw,'https://example.com/products/test'); expect(m).not.toBeNull(); }
+    }
+    // option-swatches.html exercised via interaction (no substring)
+    const swatchPath = path.join(fixturesDir, 'option-swatches.html');
+    const swHtml = fs.readFileSync(swatchPath,'utf8');
+    expect(swHtml).toContain('Small Breed');
+    const { buildVariantInteractionPlan } = await import('../../extraction-worker/variant-interaction');
+    const axes = [{ axis: 'Size', selector: '#size', optionType: 'button_group' as const }, { axis: 'Flavor', selector: '#flavor', optionType: 'button_group' as const }];
+    const plan = buildVariantInteractionPlan(axes, [{ axis: 'Size', value: 'Small' }, { axis: 'Flavor', value: 'Beef' }]);
+    expect(plan.steps.find(s=>s.axis==='Size')?.value).toBe('Small');
+  });
+});

@@ -481,10 +481,14 @@ export interface SemanticValidationPayload {
   findings: Array<{ code: string; memberSku: string; message: string }>;
 }
 
+export interface VariantResolutionClientView {
+  id: string; status: string; candidates: Array<{ variantKey: string; title: string; sku?: string | null; gtin?: string | null; price?: string | null; available: boolean; image?: string | null; options?: Array<{axis:string;value:string}>; deepLink: string }>; identityMatrixHash: string; platform: string; selectedVariantKey?: string | null; decisionOrigin?: string | null;
+}
 export interface ItemDetailResponse {
   item: OnboardingItem;
   sources: OnboardingSource[];
   extraction: ExtractionData | null;
+  variantResolution?: VariantResolutionClientView | null;
   evidenceAttempts?: DistributorEvidenceAttemptView[];
   /** Sourcing generations for the item (ADR 0014 audit view). */
   generations?: SourcingGenerationView[];
@@ -558,6 +562,9 @@ export async function selectSource(itemId: string, sourceId: string): Promise<{ 
     method: 'POST',
     body: JSON.stringify({ sourceId }),
   });
+}
+export async function selectVariant(itemId: string, req: { resolutionId: string; identityMatrixHash: string; variantKey: string }): Promise<{ success: boolean; sourceUrl?: string }> {
+  return request<{ success: boolean; sourceUrl?: string }>(`/items/${itemId}/select-variant`, { method: 'POST', body: JSON.stringify(req) });
 }
 
 export async function setItemUrl(itemId: string, url: string): Promise<{ success: boolean }> {

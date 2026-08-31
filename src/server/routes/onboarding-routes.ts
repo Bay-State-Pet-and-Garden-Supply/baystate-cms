@@ -1895,6 +1895,16 @@ route.get('/onboarding/items/:id', async (c) => {
     }
   })();
 
+  // M6: latest variant resolution (client-safe)
+  let variantResolution: unknown = null;
+  try {
+    const { getDb } = await import('../../db/connection');
+    const db = getDb();
+    const row = db.prepare('SELECT * FROM onboarding_variant_resolutions WHERE onboarding_item_id = ? AND superseded_at IS NULL ORDER BY updated_at DESC LIMIT 1').get(itemId) as any;
+    if (row) {
+      variantResolution = { id: row.id, status: row.status, candidates: JSON.parse(row.candidates_json), identityMatrixHash: row.identity_matrix_hash, platform: row.platform, selectedVariantKey: row.selected_variant_key ?? null, decisionOrigin: row.decision_origin ?? null };
+    }
+  } catch {}
   return c.json({
     item: hydratedItem,
     sources,
@@ -1905,6 +1915,7 @@ route.get('/onboarding/items/:id', async (c) => {
     consistencyWarnings,
     semanticValidation: semanticSurface.mode === 'active' ? semanticSurface.semanticValidation : undefined,
     sourcingQualificationView,
+    ...(variantResolution ? { variantResolution } : {}),
     ...(completeness ? { completeness } : {}),
   });
 });
@@ -2143,56 +2154,25 @@ route.put('/onboarding/items/:id/media', async (c) => {
   const ownershipError = itemWorkspaceError(c, item);
   if (ownershipError) return ownershipError;
 
-  const extractionData = (item.extractionData ?? {}) as {
-    primaryImage?: unknown;
-    additionalImages?: unknown;
-    distributorImageApprovals?: Array<{ imageUrl?: unknown }> | null;
-  };
-  const isDistributorSource = item.sourceType === 'distributor_record';
-  const approvedDistributorUrls = (extractionData.distributorImageApprovals ?? [])
-    .map((a) => a.imageUrl)
-    .filter((u): u is string => typeof u === 'string' && u.length > 0);
-
-  // Candidate universe = extraction candidates ∪ previously persisted entries
-  // (OVERWRITE consequence: earlier selections stay valid across saves).
-  const prior = (item.curationData as { reviewedMedia?: { primaryImage?: string | null; orderedAdditional?: string[]; suppressed?: string[] } | null } | null | undefined)?.reviewedMedia ?? null;
-  const universe = new Set<string>();
-  if (!isDistributorSource) {
-    if (typeof extractionData.primaryImage === 'string' && extractionData.primaryImage.length > 0) {
-      universe.add(extractionData.primaryImage);
-    }
-    for (const url of ((extractionData.additionalImages as unknown) as string[] | null | undefined) ?? []) {
-      if (typeof url === 'string' && url.length > 0) universe.add(url);
-    }
-  } else {
-    for (const url of approvedDistributorUrls) universe.add(url);
-  }
-  if (prior?.primaryImage) universe.add(prior.primaryImage);
-  for (const url of prior?.orderedAdditional ?? []) universe.add(url);
-  for (const url of prior?.suppressed ?? []) universe.add(url);
 
   const requested = [
     ...(selection.primaryImage ? [selection.primaryImage] : []),
     ...selection.orderedAdditional,
     ...selection.suppressed,
   ];
-  const foreign = requested.filter((url) => !universe.has(url));
-  if (foreign.length > 0) {
-    return c.json(
-      { error: 'Media selection contains URLs outside the item candidate set.', urls: foreign },
-      400,
-    );
-  }
 
-  // Distributor constraint: selection draws ONLY from the approved set. The
-  // universe above already equals it for distributor rows, but keep this
-  // explicit guard so a future universe widening cannot silently relax it.
-  if (isDistributorSource) {
-    const approvedSet = new Set(approvedDistributorUrls);
-    const unapproved = requested.filter((url) => !approvedSet.has(url));
-    if (unapproved.length > 0) {
+  for (const u of requested) {
+    try {
+      const parsed = new URL(u);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return c.json(
+          { error: 'Media selection contains invalid URL protocol. Only HTTP and HTTPS URLs are supported.', urls: [u] },
+          400,
+        );
+      }
+    } catch {
       return c.json(
-        { error: 'Distributor media selection is limited to approved display images.', urls: unapproved },
+        { error: 'Media selection contains malformed URL.', urls: [u] },
         400,
       );
     }
@@ -2420,6 +2400,18 @@ route.post('/onboarding/items/:id/select-source', async (c) => {
   const ownershipError = itemWorkspaceError(c, item);
   if (ownershipError) return ownershipError;
 
+  // M6 hardening: if unresolved variant matrix present, require select-variant
+  try {
+    const { getEffectiveVariantResolutionMode } = await import('../../onboarding/variant-flags');
+    if (getEffectiveVariantResolutionMode() === 'active') {
+      const { getDb } = await import('../../db/connection');
+      const db = getDb();
+      const res = db.prepare('SELECT status FROM onboarding_variant_resolutions WHERE onboarding_item_id = ? AND superseded_at IS NULL LIMIT 1').get(itemId) as any;
+      if (res && (res.status === 'ambiguous' || res.status === 'no_match' || res.status === 'stale')) {
+        return c.json({ error: 'Unresolved variant matrix — use select-variant' }, 409);
+      }
+    }
+  } catch {}
   const sources = listSourcesByItem(itemId);
   const selected = sources.find(s => s.id === sourceId);
   if (!selected) {
@@ -2430,6 +2422,48 @@ route.post('/onboarding/items/:id/select-source', async (c) => {
   setDiscoverySourceUrl(itemId, selected.url);
 
   return c.json({ success: true });
+});
+
+/**
+ * POST /api/onboarding/items/:id/select-variant
+ * M6: durable Choose Variant — server-derived, stale-safe
+ */
+route.post('/onboarding/items/:id/select-variant', async (c) => {
+  const itemId = c.req.param('id');
+  const item = findItemById(itemId);
+  if (!item) return c.json({ error: 'Item not found' }, 404);
+  const ownershipError = itemWorkspaceError(c, item as any);
+  if (ownershipError) return ownershipError;
+  // mode active check
+  const { getEffectiveVariantResolutionMode } = await import('../../onboarding/variant-flags');
+  if (getEffectiveVariantResolutionMode() !== 'active') {
+    return c.json({ error: 'Variant resolution not active' }, 409);
+  }
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+  const { VariantSelectionRequestSchema } = await import('../../shared/schemas/variant-resolution');
+  const parsed = VariantSelectionRequestSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'Invalid request', details: parsed.error.flatten() }, 400);
+  const { getDb } = await import('../../db/connection');
+  const { selectVariantService } = await import('../../onboarding/variant-selection-service');
+  const db = getDb();
+  try {
+    const result = selectVariantService(db, { itemId, resolutionId: parsed.data.resolutionId, identityMatrixHash: parsed.data.identityMatrixHash, variantKey: parsed.data.variantKey });
+    // Requeue extraction — reset to extraction/pending and poll worker
+    const workspace = findWorkspace();
+    if (workspace) {
+      try {
+        db.prepare('UPDATE onboarding_items SET stage = ?, stage_status = ?, retry_count = 0, error_message = NULL, updated_at = ? WHERE id = ?').run('extraction', 'pending', new Date().toISOString(), itemId);
+        const { OnboardingWorker } = await import('../../onboarding/job-queue');
+        const worker = new (OnboardingWorker as any)(workspace.id, workspace.workspacePath);
+        try { worker.poll(); } catch {}
+      } catch {}
+    }
+    return c.json({ success: true, sourceUrl: result.sourceUrl });
+  } catch (e: any) {
+    const code = e?.code === 404 ? 404 : e?.code === 409 ? 409 : e?.code === 400 ? 400 : 500;
+    return c.json({ error: e?.message ?? 'Variant selection failed' }, code as any);
+  }
 });
 
 /**

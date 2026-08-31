@@ -159,7 +159,7 @@ export async function fetchAndParseSitemap(
   domain: string,
   productUrlPattern?: string | null,
   fetchFn: NetworkFetch = fetch,
-  options?: { persistIndex?: boolean },
+  options?: { persistIndex?: boolean; allowRenderedFallback?: boolean },
 ): Promise<SitemapFetchResult> {
   const origin = normalizeOrigin(domain);
   const normDomain = normalizeDomain(domain);
@@ -175,6 +175,10 @@ export async function fetchAndParseSitemap(
 
   const pattern = compilePattern(productUrlPattern);
   const shouldPersist = options?.persistIndex !== false;
+  // When a policy-bound injected transport is supplied, do not launch
+  // Camoufox rendered fallback — it would bypass the policy gateway.
+  // Default: allow rendered fallback only when using the global fetch.
+  const allowRenderedFallback = options?.allowRenderedFallback ?? (fetchFn === (fetch as unknown as NetworkFetch));
 
   let matchedResult: { entries: SitemapUrlEntry[]; sourceUrl: string } | null = null;
   const tracker: FetchAttemptTracker = {
@@ -221,7 +225,7 @@ export async function fetchAndParseSitemap(
   }
 
   // ── Step 4: Camoufox anti-detect browser fallback (if bot-blocked) ────
-  if (!matchedResult && tracker.isBlocked) {
+  if (!matchedResult && tracker.isBlocked && allowRenderedFallback) {
     console.log(
       `[SitemapFetcher] Standard HTTP fetch blocked by bot protection for ${origin}; attempting Camoufox rendered fallback...`,
     );
@@ -651,11 +655,23 @@ function extractAllUrlEntries(body: string): SitemapUrlEntry[] {
 
 /**
  * Deduplicate URL entries while preserving first-encountered order and latest lastmod.
+ * Uses product URL identity key so tracking-only duplicates collapse while
+ * variant-distinct URLs (?variant=, ?variation_id=, ?sku=, attribute_*) remain distinct.
  */
 function dedupeEntries(entries: SitemapUrlEntry[]): SitemapUrlEntry[] {
+  // Lazy import to avoid circular deps at module load; fallback to lowerCase on error.
+  let identityKey: (u: string) => string;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('./product-url-identity') as typeof import('./product-url-identity');
+    identityKey = mod.productUrlIdentityKey;
+  } catch {
+    identityKey = (u: string) => u.toLowerCase();
+  }
   const seen = new Map<string, SitemapUrlEntry>();
   for (const entry of entries) {
-    const key = entry.url.toLowerCase();
+    let key: string;
+    try { key = identityKey(entry.url); } catch { key = entry.url.toLowerCase(); }
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, entry);

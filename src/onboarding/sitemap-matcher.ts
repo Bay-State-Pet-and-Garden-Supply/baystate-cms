@@ -102,6 +102,7 @@ export async function matchSitemapUrls(
   domain: string,
   productUrlPattern?: string | null,
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  variantTokens?: string[],
 ): Promise<SitemapMatchResult[]> {
   const results: SitemapMatchResult[] = [];
 
@@ -182,10 +183,12 @@ export async function matchSitemapUrls(
   // Try LLM selection first (when 2+ candidates and an LLM is configured).
   // Build rich context from the available product info so the LLM can make
   // a more informed decision and reject non-product pages.
+  const effectiveVariantTokens = (variantTokens && variantTokens.length > 0) ? variantTokens : deriveVariantTokensForMatcher(matchName, domain);
   const llmContext: SitemapLlmContext = {
     itemName,
     upc,
     candidateOverlaps: new Map(scored.map(c => [c.url, c.overlap.ratio])),
+    variantTokens: effectiveVariantTokens,
   };
   const selectedUrl = await selectWithLlm(scored.map(c => c.url), matchName, llmContext, modelPolicy);
 
@@ -541,4 +544,17 @@ function clamp01(value: number): number {
   if (value < 0) return 0;
   if (value > 1) return 1;
   return value;
+}
+
+/** Derive deterministic variant tokens for SitemapLlmContext without widening scope. */
+function deriveVariantTokensForMatcher(matchName: string, _domain: string): string[] | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('./variant-resolver') as typeof import('./variant-resolver');
+    if (typeof mod.deriveVariantTokens === 'function') {
+      const toks = mod.deriveVariantTokens(matchName, null);
+      return toks.length > 0 ? toks.slice(0, 8) : undefined;
+    }
+  } catch { /* ignore */ }
+  return undefined;
 }

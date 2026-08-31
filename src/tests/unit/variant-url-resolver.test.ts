@@ -3,17 +3,23 @@ import {
   scoreShopifyVariant,
   resolveVariantsFromHtml,
   resolveVariantsForCandidates,
+  __resetVariantDomainRateStateForTests,
+  __getVariantDomainRateStateForTests,
 } from '../../onboarding/variant-url-resolver';
+import { overrideVariantFlags, resetVariantFlagsOverride } from '../../onboarding/variant-flags';
 import type { InsertSourceData } from '../../db/repositories/onboarding-source-repo';
 
 let originalFetch: typeof fetch;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
+  overrideVariantFlags({ mode: 'active' });
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  resetVariantFlagsOverride();
+  __resetVariantDomainRateStateForTests();
   vi.restoreAllMocks();
 });
 
@@ -172,13 +178,14 @@ describe('resolveVariantsForCandidates integration', () => {
       },
     ];
 
-    const result = await resolveVariantsForCandidates({
+    const { candidates: result, resolution } = await resolveVariantsForCandidates({
       candidates,
       upc: '',
       rawName: 'HonestChew Antler Green Small',
       expectedName: 'HonestChew Antler',
       brandHint: 'HonestChew',
       brandDomains: ['honestchew.com'],
+      fetchFn: globalThis.fetch as any,
     });
 
     expect(result.length).toBe(1);
@@ -186,6 +193,8 @@ describe('resolveVariantsForCandidates integration', () => {
     expect(result[0].title).toBe('HonestChew Antler - Green / Small');
     expect(result[0].sourceMethod).toBe('shopify_variant');
     expect(result[0].metadataJson).toBeDefined();
+    expect(resolution.status).toBe('resolved');
+    expect(resolution.selectedKey).toBeDefined();
 
     const meta = JSON.parse(result[0].metadataJson!);
     expect(meta.variantResolution.status).toBe('resolved');
@@ -205,22 +214,98 @@ describe('resolveVariantsForCandidates integration', () => {
       },
     ];
 
-    const result = await resolveVariantsForCandidates({
+    const { candidates: result, resolution } = await resolveVariantsForCandidates({
       candidates,
       upc: '',
       rawName: 'HonestChew Antler Lavender',
       expectedName: 'HonestChew Antler',
       brandHint: 'HonestChew',
       brandDomains: ['honestchew.com'],
+      fetchFn: globalThis.fetch as any,
     });
 
     // It should expand into all Shopify variants as candidates
     expect(result.length).toBe(3);
     expect(result[0].url).toContain('?variant=');
     expect(result[0].sourceMethod).toBe('shopify_variant');
+    expect(resolution.status).toBe('ambiguous');
+    expect(resolution.candidatesCount).toBe(3);
 
     const meta = JSON.parse(result[0].metadataJson!);
     expect(meta.variantResolution.status).toBe('ambiguous');
     expect(meta.variantResolution.baseUrl).toBe('https://honestchew.com/products/antler');
+  });
+
+  it('malformed URL not fetch-eligible even when domain field spoofed', async () => {
+    const fetchSpy = vi.fn(async () => new Response(SHOPIFY_HTML_VARIANTS, { status: 200, headers: { 'content-type': 'text/html' } })) as any;
+    const candidates: InsertSourceData[] = [
+      { url: ':::not a url:::', title: null, domain: 'honestchew.com', confidence: 0.99, sourceMethod: 'sitemap_name' as const },
+    ];
+    await resolveVariantsForCandidates({ candidates, upc: '111111111111', rawName: 'HonestChew Antler Lavender Small', expectedName: 'HonestChew Antler', brandHint: 'HonestChew', brandDomains: ['honestchew.com'], fetchFn: fetchSpy });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('overflow true when matrix warnings include too_many_variants even though candidates capped to 250', async () => {
+    // Build a payload with 300 variants to trigger truncation + warnings
+    const manyVariants = Array.from({ length: 300 }, (_, i) => ({ id: 5000000 + i, title: `Variant ${i}`, option1: `Opt${i}`, sku: `SKU-${i}`, barcode: String(810000000000 + i), price: 1000, available: true }));
+    const payload = { id: 1, title: 'Big', options: [{ name: 'Option' }], variants: manyVariants, images: [] };
+    const html = `<html><head><script>window.productJSON=${JSON.stringify(payload)};</script></head><body></body></html>`;
+    const fetchSpy = vi.fn(async () => new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })) as any;
+    const candidates: InsertSourceData[] = [{ url: 'https://honestchew.com/products/big', title: null, domain: 'honestchew.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const }];
+    const { resolution } = await resolveVariantsForCandidates({ candidates, upc: '810000000001', rawName: 'HonestChew Antler', expectedName: 'HonestChew Antler', brandHint: 'HonestChew', brandDomains: ['honestchew.com'], fetchFn: fetchSpy });
+    expect(resolution.overflow).toBe(true);
+    expect(resolution.warnings.some(w => w.includes('too_many'))).toBe(true);
+  });
+
+  it('throttles 429 Retry-After per domain and skips second fetch within retry window', async () => {
+    __resetVariantDomainRateStateForTests();
+    const fetchSpy = vi.fn(async () => new Response('Too Many Requests', { status: 429, headers: { 'retry-after': '60' } })) as any;
+    const candidates: InsertSourceData[] = [
+      { url: 'https://honestchew.com/products/antler', title: null, domain: 'honestchew.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const },
+    ];
+    const opts = { candidates, upc: '111111111111', rawName: 'HonestChew Antler Lavender Small', expectedName: 'HonestChew Antler', brandHint: 'HonestChew', brandDomains: ['honestchew.com'], fetchFn: fetchSpy };
+    const first = await resolveVariantsForCandidates(opts);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(first.resolution.status === 'no_variants' || first.resolution.status === 'ambiguous' || first.resolution.status === 'resolved').toBe(true);
+    const state = __getVariantDomainRateStateForTests('honestchew.com');
+    expect(state).not.toBeNull();
+    expect(state!.retryUntil).toBeGreaterThan(Date.now());
+    // Second call within retry window should be throttled (no network)
+    fetchSpy.mockClear();
+    const second = await resolveVariantsForCandidates(opts);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(second.candidates.length).toBe(1);
+    expect(second.candidates[0].url).toBe('https://honestchew.com/products/antler');
+  });
+
+  it('aborts streaming body without Content-Length when exceeds 5MB', async () => {
+    __resetVariantDomainRateStateForTests();
+    // Create a stream that yields 6MB without Content-Length
+    const chunk = new Uint8Array(1024 * 1024); // 1MB
+    chunk.fill(65);
+    const stream = new ReadableStream({
+      async start(controller) {
+        for (let i = 0; i < 6; i++) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    const fetchSpy = vi.fn(async () => new Response(stream as any, { status: 200, headers: {} })) as any;
+    const candidates: InsertSourceData[] = [
+      { url: 'https://honestchew.com/products/antler', title: null, domain: 'honestchew.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const },
+    ];
+    const { candidates: result, resolution } = await resolveVariantsForCandidates({
+      candidates,
+      upc: '111111111111',
+      rawName: 'HonestChew Antler',
+      expectedName: 'HonestChew Antler',
+      brandHint: 'HonestChew',
+      brandDomains: ['honestchew.com'],
+      fetchFn: fetchSpy,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // Aborted before parse, so no variant expansion
+    expect(result.length).toBe(1);
+    expect(result[0].url).toBe('https://honestchew.com/products/antler');
+    expect(resolution.status === 'no_variants' || resolution.status === 'skipped_no_fetch').toBeTruthy();
   });
 });

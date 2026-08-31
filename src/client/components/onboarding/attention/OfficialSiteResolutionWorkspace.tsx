@@ -32,8 +32,12 @@ import {
 import { getItemWorkState } from '../../../onboarding-work-api';
 import { CandidateUrlPanel } from './CandidateUrlPanel';
 import { ExtractorStatusPanel } from './ExtractorStatusPanel';
+import { SemanticConflictPanel } from './SemanticConflictPanel';
+import { ChooseVariantPanel } from './ChooseVariantPanel';
+import { selectVariant } from '../../../onboarding-api';
 import { domainFromUrl, getAttentionConsequence } from './attention-logic';
 import './attention.css';
+import './semantic-conflict.css';
 
 interface OfficialSiteResolutionWorkspaceProps {
   batchId: string;
@@ -46,6 +50,7 @@ type Phase =
   | 'loading'
   | 'load-error'
   | 'url' // candidate decision / manual URL
+  | 'variant' // choose_variant matrix
   | 'extractor' // extractor status after URL confirmation (or directly)
   | 'conflicts' // distributor evidence conflict decision
   | 'semantic' // Curation blocked by semantic validation findings
@@ -69,6 +74,7 @@ function parseValue(valueJson: string): string {
 }
 
 export function OfficialSiteResolutionWorkspace({
+  batchId,
   itemId,
   onResolved,
 }: OfficialSiteResolutionWorkspaceProps): React.ReactElement {
@@ -101,6 +107,7 @@ export function OfficialSiteResolutionWorkspace({
   const [releaseResult, setReleaseResult] = useState<DomainReleaseResponse | null>(null);
   /** Honest resolution note rendered in the done phase (semantic re-run etc.). */
   const [resolutionNote, setResolutionNote] = useState<string | null>(null);
+  const [variantDetail, setVariantDetail] = useState<any | null>(null);
 
   // Conflict state (source_conflict flow)
   const [conflicts, setConflicts] = useState<OnboardingEvidenceConflict[] | null>(null);
@@ -119,8 +126,12 @@ export function OfficialSiteResolutionWorkspace({
       setQualificationView(detail.sourcingQualificationView ?? null);
       setEvidenceAttemptCount(detail.evidenceAttempts?.length ?? 0);
       setResolutionNote(null);
+      // load variant resolution if present
+      try { const vd = (detail as any).variantResolution; if (vd) setVariantDetail(vd); else setVariantDetail(null); } catch {}
       const reason = ws.workState.attentionReason;
-      if (reason === 'source_conflict') {
+      if (reason === 'choose_variant') {
+        setPhase('variant');
+      } else if (reason === 'source_conflict') {
         setPhase('conflicts');
       } else if (reason === 'semantic_validation_blocked') {
         setPhase('semantic');
@@ -589,6 +600,15 @@ export function OfficialSiteResolutionWorkspace({
           </div>
         ) : null}
 
+        {phase === 'variant' && variantDetail ? (
+          <ChooseVariantPanel
+            resolutionId={variantDetail.id}
+            identityMatrixHash={variantDetail.identityMatrixHash}
+            candidates={variantDetail.candidates.map((c:any)=>({ variantKey:c.variantKey, title:c.title, sku:c.identifiers?.find((i:any)=>i.kind==='sku')?.value ?? null, gtin:c.identifiers?.find((i:any)=>i.kind==='gtin')?.value ?? null, price:c.price ?? null, available:c.available, image:c.images?.[0]?.url ?? null, options:c.options }))}
+            onSelect={async (key)=>{ await selectVariant(itemId, { resolutionId: variantDetail.id, identityMatrixHash: variantDetail.identityMatrixHash, variantKey: key }); setResolutionNote(`Variant selected — extraction re-queued.`); setPhase('done'); }}
+          />
+        ) : null}
+
         {phase === 'url' ? (
           <>
             {!hasBrand && renderBrandSection()}
@@ -727,50 +747,8 @@ export function OfficialSiteResolutionWorkspace({
           </section>
         ) : null}
 
-        {phase === 'semantic' ? (
-          <section className="attn-section" aria-label="Curation semantic conflict">
-            <h3 className="attn-section-title">Curation blocked by semantic validation</h3>
-            <div className="attn-section-body">
-              {semanticFindings.length > 0 ? (
-                <ul className="attn-findings">
-                  {semanticFindings.map((finding, i) => (
-                    <li className="attn-finding" key={`${finding.code}-${i}`}>
-                      <span className="attn-finding-code">{finding.code.replace(/_/g, ' ')}</span>
-                      {finding.memberSku ? (
-                        <span className="attn-finding-sku">SKU {finding.memberSku}</span>
-                      ) : null}
-                      <span className="attn-finding-message">{finding.message}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p style={{ margin: 0, fontFamily: 'var(--font-body)', fontSize: '0.8125rem', color: 'var(--color-ledger-charcoal)' }}>
-                  {workState?.detail ?? 'Semantic validation found conflicts in this product family.'}
-                </p>
-              )}
-              <div className="attn-candidate-actions">
-                {family?.cohortId ? (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => void handleReRunCohort()}
-                    disabled={busy !== null}
-                  >
-                    {busy === 'rerun-cohort' ? 'Re-running…' : 'Re-run family curation'}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => void handleRetry()}
-                    disabled={busy !== null}
-                  >
-                    {busy === 'retry' ? 'Retrying…' : 'Retry curation'}
-                  </button>
-                )}
-              </div>
-            </div>
-          </section>
+        {phase === 'semantic' && workState ? (
+          <SemanticConflictPanel item={workState} batchId={batchId} onActionComplete={onResolved} />
         ) : null}
 
         {phase === 'retry' ? (

@@ -233,9 +233,20 @@ async function extractViaHttp(
  * HTTP Cheerio extraction (fast & lightweight) with fallback to Playwright stealth execution.
  * Returns validated ExtractionData with field provenance tracking.
  */
+export class VariantExtractionError extends Error {
+  failureCode: string;
+  matrixDecision?: unknown;
+  constructor(failureCode: string, message: string, matrixDecision?: unknown) {
+    super(message);
+    this.name = 'VariantExtractionError';
+    this.failureCode = failureCode;
+    this.matrixDecision = matrixDecision;
+  }
+}
+
 export async function extractProductData(
   url: string,
-  expected?: { name: string; brandHint?: string | null; price?: string | null; gtin?: string }
+  expected?: { name: string; brandHint?: string | null; price?: string | null; gtin?: string; variantSelection?: { resolutionId: string; identityMatrixHash: string; variantKey: string } }
 ): Promise<ExtractionData> {
   let domain = '';
   try {
@@ -302,6 +313,7 @@ export async function extractProductData(
         // real identity classification (ExtractRequest.expected.upc).
         upc: expected.gtin || null,
       },
+      variantSelection: (expected as any)?.variantSelection,
     });
 
     if (workerResult.ok && workerResult.data.title) {
@@ -320,7 +332,21 @@ export async function extractProductData(
       return result;
     }
 
-    // Worker failed — record domain status and throw
+    // Worker failed — preserve structured variant failure codes + canonical matrix for job-queue gate (M4)
+    if (!workerResult.ok && (workerResult as any).failureCode) {
+      const code = (workerResult as any).failureCode as string;
+      const msg = `variant:${code}:${workerResult.error}`;
+      console.warn(`[PageExtractor] Worker extraction failed (variant gate): ${msg}`);
+      if (domain) recordDomainStatus(domain, 'offline', msg);
+      const payload: any = (workerResult as any).matrixDecision ? { ...(workerResult as any).matrixDecision } : {};
+      // carry full matrix/candidates/hash so job-queue can persist selectable evidence (not zero hash [])
+      const vm: any = (workerResult as any).variantMatrix ?? (workerResult as any).matrix ?? null;
+      payload.candidates = (workerResult as any).candidates ?? (workerResult as any).matrixDecision?.candidates ?? vm?.candidates ?? payload.candidates ?? [];
+      payload.identityMatrixHash = (workerResult as any).identityMatrixHash ?? (workerResult as any).matrixDecision?.identityMatrixHash ?? vm?.identityMatrixHash ?? payload.identityMatrixHash;
+      payload.matrix = vm ?? (workerResult as any).matrixDecision?.matrix ?? payload.matrix;
+      payload.variantMatrix = vm ?? payload.variantMatrix;
+      throw new VariantExtractionError(code, msg, payload);
+    }
     let errorDetail: string;
     if (!workerResult.ok) {
       errorDetail = workerResult.error;

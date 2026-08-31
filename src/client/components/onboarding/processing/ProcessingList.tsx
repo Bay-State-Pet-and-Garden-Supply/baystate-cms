@@ -11,9 +11,10 @@ import { ProcessingStatus } from './ProcessingStatus';
 
 interface ProcessingListProps {
   groups: ActivityGroup[];
+  onViewFamily?: (cohortId: string) => void;
 }
 
-export function ProcessingList({ groups }: ProcessingListProps) {
+export function ProcessingList({ groups, onViewFamily }: ProcessingListProps) {
   if (groups.length === 0) {
     return (
       <div className="pw-empty">
@@ -34,7 +35,7 @@ export function ProcessingList({ groups }: ProcessingListProps) {
           </header>
           <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {group.items.map((item) => (
-              <ProcessingStatus key={item.itemId} item={item} />
+              <ProcessingStatus key={item.itemId} item={item} onViewFamily={onViewFamily} />
             ))}
           </ul>
         </section>

@@ -140,17 +140,23 @@ export function resolveEffectiveImages(ctx: ReviewCompletenessContext): {
   ));
   const designated = trimOrNull(ctx.reviewedMedia?.primaryImage ?? null);
 
+  const orderedAdditional = ctx.reviewedMedia?.orderedAdditional?.filter(
+    (u): u is string => typeof u === 'string' && u.length > 0 && !suppressed.has(u),
+  );
+
   if (ctx.sourceType === 'distributor_record') {
     const approved = (ctx.extractionData?.distributorImageApprovals ?? [])
       .map((a) => a.imageUrl)
       .filter((u): u is string => typeof u === 'string' && u.length > 0 && !suppressed.has(u));
-    const primary = designated && approved.includes(designated) ? designated : (approved[0] ?? null);
-    return { primaryImage: primary, additionalImages: approved.filter((u) => u !== primary) };
+    const primary = designated && (approved.includes(designated) || !approved.length) && !suppressed.has(designated)
+      ? designated
+      : (approved[0] ?? (designated && !suppressed.has(designated) ? designated : null));
+    const additionalImages = (ctx.reviewedMedia?.orderedAdditional && ctx.reviewedMedia.orderedAdditional.length > 0)
+      ? (orderedAdditional ?? [])
+      : approved.filter((u) => u !== primary);
+    return { primaryImage: primary, additionalImages: additionalImages.filter((u) => u !== primary) };
   }
 
-  const orderedAdditional = ctx.reviewedMedia?.orderedAdditional?.filter(
-    (u): u is string => typeof u === 'string' && u.length > 0 && !suppressed.has(u),
-  );
   const fallbackAdditional = (ctx.extractionData?.additionalImages ?? []).filter(
     (u): u is string => typeof u === 'string' && u.length > 0 && !suppressed.has(u),
   );
@@ -164,7 +170,7 @@ export function resolveEffectiveImages(ctx: ReviewCompletenessContext): {
   const fallbackPrimary =
     extractionPrimary && !suppressed.has(extractionPrimary) ? extractionPrimary : null;
   const primary = designatedPrimary ?? fallbackPrimary;
-  const additionalSource = orderedAdditional !== undefined && orderedAdditional !== null && orderedAdditional.length > 0
+  const additionalSource = (orderedAdditional && orderedAdditional.length > 0)
     ? orderedAdditional
     : fallbackAdditional;
   return { primaryImage: primary, additionalImages: additionalSource.filter((u) => u !== primary) };

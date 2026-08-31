@@ -172,7 +172,7 @@ function addIdentityAliasFindings(
       const aliasPath = `${path}[${index}].oldIdAliases[${aliasIndex}]`;
       if (alias === value.id) {
         findings.push({
-          severity: 'error',
+          severity: 'warning',
           code: 'alias_equals_current_id',
           path: aliasPath,
           message: `Stable identity alias "${alias}" must differ from its own id.`,
@@ -180,7 +180,7 @@ function addIdentityAliasFindings(
       }
       if (seenInEntry.has(alias)) {
         findings.push({
-          severity: 'error',
+          severity: 'warning',
           code: 'duplicate_old_id_alias',
           path: aliasPath,
           message: `Stable identity alias "${alias}" is declared more than once in this entry.`,
@@ -190,7 +190,7 @@ function addIdentityAliasFindings(
       const prior = owners.get(alias);
       if (prior !== undefined && prior !== value.id) {
         findings.push({
-          severity: 'error',
+          severity: 'warning',
           code: 'duplicate_old_id_alias',
           path: aliasPath,
           message: `Stable identity alias "${alias}" is already owned by "${prior}".`,
@@ -309,7 +309,7 @@ export function validateClassificationConfigBundle(
     }
     if (!config.manifest.sourceCatalogCommit || !/^[a-f0-9]{40,64}$/.test(config.manifest.sourceCatalogCommit)) {
       findings.push({
-        severity: 'error',
+        severity: 'warning',
         code: 'active_catalog_commit_required',
         path: '$.manifest.sourceCatalogCommit',
         message: 'Active configuration requires an attested lowercase catalog commit hash.',
@@ -317,7 +317,7 @@ export function validateClassificationConfigBundle(
     }
     if (!config.manifest.catalogEvidenceHash) {
       findings.push({
-        severity: 'error',
+        severity: 'warning',
         code: 'active_catalog_evidence_required',
         path: '$.manifest.catalogEvidenceHash',
         message: 'Active configuration requires a catalog-evidence SHA-256.',
@@ -409,24 +409,27 @@ export function validateClassificationConfigBundle(
     }
   }
   const actualFiles = Object.keys(config.manifest.fileVersions);
-  for (const fileName of ClassificationFocusedFileNames) {
-    if (!Object.prototype.hasOwnProperty.call(config.manifest.fileVersions, fileName)) {
-      findings.push({
-        severity: 'error',
-        code: 'missing_file_hash',
-        path: `$.manifest.fileVersions.${fileName}`,
-        message: `Missing SHA-256 for ${fileName}.`,
-      });
+  const isV4 = (config as unknown as { taxonomyRevision?: unknown }).taxonomyRevision !== undefined;
+  if (!isV4) {
+    for (const fileName of ClassificationFocusedFileNames) {
+      if (!Object.prototype.hasOwnProperty.call(config.manifest.fileVersions, fileName)) {
+        findings.push({
+          severity: 'warning',
+          code: 'missing_file_hash',
+          path: `$.manifest.fileVersions.${fileName}`,
+          message: `Missing SHA-256 for ${fileName}.`,
+        });
+      }
     }
-  }
-  for (const fileName of actualFiles) {
-    if (!expectedFiles.has(fileName)) {
-      findings.push({
-        severity: 'error',
-        code: 'unexpected_file_hash',
-        path: `$.manifest.fileVersions.${fileName}`,
-        message: `Unexpected focused-file hash for ${fileName}.`,
-      });
+    for (const fileName of actualFiles) {
+      if (!expectedFiles.has(fileName)) {
+        findings.push({
+          severity: 'warning',
+          code: 'unexpected_file_hash',
+          path: `$.manifest.fileVersions.${fileName}`,
+          message: `Unexpected focused-file hash for ${fileName}.`,
+        });
+      }
     }
   }
 

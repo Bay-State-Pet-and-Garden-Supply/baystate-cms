@@ -32,11 +32,17 @@ export interface ProfileRunnerOptions {
      * classification on the worker side (ExtractRequest already accepts it). */
     upc?: string | null;
   };
+  /** Optional variant selection receipt for stale-safe extraction (M4). */
+  variantSelection?: {
+    resolutionId: string;
+    identityMatrixHash: string;
+    variantKey: string;
+  };
 }
 
 export type ProfileRunnerResult =
-  | { ok: true; data: ExtractionData; warnings: string[]; fieldProvenance: Record<string, string>; fieldProvenanceDetails?: Record<string, { method: string; sourcePath: string }>; sourceContentHash?: string | null; sourceArtifactId?: string | null }
-  | { ok: false; error: string; warnings: string[] };
+  | { ok: true; data: ExtractionData; warnings: string[]; fieldProvenance: Record<string, string>; fieldProvenanceDetails?: Record<string, { method: string; sourcePath: string }>; sourceContentHash?: string | null; sourceArtifactId?: string | null; selectedReceipt?: unknown; matrixDecision?: unknown; variantMatrix?: unknown; identityMatrixHash?: string | null; candidates?: unknown[] }
+  | { ok: false; error: string; warnings: string[]; failureCode?: string | null; matrixDecision?: unknown; selectedReceipt?: unknown; variantMatrix?: unknown; identityMatrixHash?: string | null; candidates?: unknown[] };
 
 /**
  * Run a trusted profile extraction against the extraction worker.
@@ -65,7 +71,7 @@ export async function runProfileExtraction(
     ...(options.allowedSourceDomains ?? []),
   ])).filter((domain): domain is string => typeof domain === 'string' && domain.trim().length > 0);
 
-  const request = {
+  const request: any = {
     profileId: profile.id,
     profileVersion: profile.updatedAt
       ? Math.floor(new Date(profile.updatedAt).getTime() / 1000)
@@ -94,6 +100,9 @@ export async function runProfileExtraction(
       allowedSourceDomains,
     },
   };
+  if (options.variantSelection) {
+    (request as any).variantSelection = options.variantSelection;
+  }
 
   const result = await trustedExtract(request);
 
@@ -102,16 +111,23 @@ export async function runProfileExtraction(
       ok: false,
       error: result.error,
       warnings: [],
+      failureCode: null,
     };
   }
 
-  const response = result.data;
+  const response = result.data as any;
 
   if (!response.ok || !response.extractionData) {
     return {
       ok: false,
       error: 'Extraction worker returned ok:false',
       warnings: response.warnings ?? [],
+      failureCode: response.failureCode ?? null,
+      matrixDecision: response.matrixDecision ?? null,
+      selectedReceipt: response.selectedReceipt ?? null,
+      variantMatrix: (response as any).variantMatrix ?? (response as any).matrix ?? null,
+      identityMatrixHash: (response as any).identityMatrixHash ?? (response.matrixDecision as any)?.identityMatrixHash ?? null,
+      candidates: (response as any).candidates ?? (response.matrixDecision as any)?.candidates ?? (response as any).variantMatrix?.candidates ?? null,
     };
   }
 
@@ -130,5 +146,10 @@ export async function runProfileExtraction(
     fieldProvenanceDetails: response.fieldProvenanceDetails ?? {},
     sourceContentHash: response.sourceContentHash ?? null,
     sourceArtifactId: response.sourceArtifactId ?? null,
+    selectedReceipt: response.selectedReceipt ?? null,
+    matrixDecision: response.matrixDecision ?? null,
+    variantMatrix: (response as any).variantMatrix ?? (response as any).matrix ?? null,
+    identityMatrixHash: (response as any).identityMatrixHash ?? (response.matrixDecision as any)?.identityMatrixHash ?? null,
+    candidates: (response as any).candidates ?? (response.matrixDecision as any)?.candidates ?? (response as any).variantMatrix?.candidates ?? null,
   };
 }

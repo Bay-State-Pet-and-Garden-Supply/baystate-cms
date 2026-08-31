@@ -2933,7 +2933,7 @@ export async function processCohort(
         // reflects HARD findings only.
         semanticValidation = {
           status: semanticFindings.some(isBlockingSemanticFinding) ? 'blocked' : 'passed',
-          findings: semanticFindings,
+          findings: semanticFindings as unknown as NonNullable<CurationData['semanticValidation']>['findings'],
         };
       } finally {
         pipelineKeeper.stop();
@@ -3284,7 +3284,7 @@ export async function processCohort(
       );
       const finalCurationData: CurationData = {
         ...(existing ?? ({} as CurationData)),
-        semanticValidation: { status: 'blocked', findings: mergedFindings },
+        semanticValidation: { status: 'blocked', findings: mergedFindings as unknown as NonNullable<CurationData['semanticValidation']>['findings'] },
       };
       updates.push({
         itemId: affectedItem.id,

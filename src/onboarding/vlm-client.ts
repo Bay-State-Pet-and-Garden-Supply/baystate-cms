@@ -1,12 +1,9 @@
-import { getApiKey } from '../db/repositories/api-key-repo';
 import { acquireLocalSlot, releaseLocalSlot } from '../ai/local-runtime-coordinator';
 import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
 import { dispatchWorkloadChat } from '../ai/inference-dispatcher';
 import { resolveWorkloadRoute, isConnectionUsable } from '../ai/provider-connections';
 import {
-  DEFAULT_LOCAL_VISION_MODEL,
   LEGACY_ROUTE_FALLBACK_VISION_MODEL,
-  OLLAMA_VLM_SERVICE_NAME,
 } from '../ai/vision-model-defaults';
 import { redactTransportText } from '../classification/model-policy-gateway';
 
@@ -54,54 +51,22 @@ export interface VlmConfig {
  * Retrieve the active vision model configuration from the database.
  *
  * Resolves the connection-addressed `visionOcr` workload route WITH
- * inheritance (via `resolveWorkloadRoute`), so 'Vision / OCR: Inherit
- * Catalog Default' uses the catalog default when that connection is usable
- * — an inherited vision-capable catalog default must actually run OCR
- * instead of falling through to the legacy `api_keys.ollama_vlm` row.
- * Only when the resolved AI Compute primary is unusable (disabled, or a
- * cloud connection without a credential) does the legacy setting apply.
+ * inheritance (via `resolveWorkloadRoute`). Fail-closed if unusable —
+ * legacy `api_keys.ollama_vlm` fallback removed (AI Tasks removed, AI Routes is canonical).
  */
 export function getVlmConfig(): VlmConfig | null {
-  // 1. AI Compute visionOcr route — explicit OR inherited from the catalog
-  //    default. `resolveWorkloadRoute` resolves 'inherit' to
-  //    `defaults.catalogTarget`, so this is the same resolution the
-  //    InferenceDispatcher uses for live OCR calls.
-  try {
-    const config = getFullAiRoutingConfig();
-    const route = resolveWorkloadRoute('visionOcr', config);
-    const conn = config.connections[route.primary.connectionId];
-    if (conn && isConnectionUsable(conn)) {
-      return {
-        baseUrl: conn.baseUrl,
-        model: route.primary.modelId || LEGACY_ROUTE_FALLBACK_VISION_MODEL,
-        enabled: true,
-        transport: conn.transport,
-        credential: conn.credential ?? undefined,
-      };
-    }
-  } catch (err: unknown) {
-    // Database fallback — surface the swallowed routing-resolution failure
-    // (redacted-safe) so misconfigured AI Compute routing is diagnosable.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[VlmClient] AI Compute routing resolution failed; falling back to legacy ollama_vlm row: ${redactTransportText(msg)}`);
-  }
-
-  // 2. Legacy fallback: api_keys.ollama_vlm
-  const row = getApiKey(OLLAMA_VLM_SERVICE_NAME);
-  if (row) {
-    if (row.api_key !== 'enabled') {
-      return null;
-    }
-    const rawBaseUrl = row.base_url || 'http://localhost:11434';
-    const baseUrl = rawBaseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+  const config = getFullAiRoutingConfig();
+  const route = resolveWorkloadRoute('visionOcr', config);
+  const conn = config.connections[route.primary.connectionId];
+  if (conn && isConnectionUsable(conn)) {
     return {
-      baseUrl,
-      model: row.model || DEFAULT_LOCAL_VISION_MODEL,
+      baseUrl: conn.baseUrl,
+      model: route.primary.modelId || LEGACY_ROUTE_FALLBACK_VISION_MODEL,
       enabled: true,
-      transport: 'ollama-native',
+      transport: conn.transport,
+      credential: conn.credential ?? undefined,
     };
   }
-
   return null;
 }
 

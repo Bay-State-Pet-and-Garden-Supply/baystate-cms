@@ -199,6 +199,106 @@ describe('ReviewListingPanel media picker (e10s04, V2)', () => {
     expect(h.text()).not.toContain('Hidden (1)');
     h.unmount();
   });
+
+  it('allows adding a new image URL and saves the updated media selection', async () => {
+    const onSaveMedia = vi.fn().mockResolvedValue(undefined);
+    const h = await renderPanel({ v2: true, onSaveMedia });
+
+    const input = h.container.querySelector('input[type="url"]') as HTMLInputElement;
+    expect(input).toBeTruthy();
+
+    const newUrl = 'https://cdn.example.com/custom-photo.jpg';
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!;
+    await act(async () => {
+      nativeInputValueSetter.call(input, newUrl);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const addBtn = h.button('Add Image')!;
+    expect(addBtn).toBeTruthy();
+    await act(async () => {
+      addBtn.click();
+    });
+
+    // Thumbnail for the new image appears and save is enabled
+    const saveBtn = h.button('Save media selection')!;
+    expect(saveBtn.disabled).toBe(false);
+    await act(async () => {
+      saveBtn.click();
+    });
+
+    expect(onSaveMedia).toHaveBeenCalledTimes(1);
+    const payload = onSaveMedia.mock.calls[0][0];
+    expect(payload.primaryImage).toBe(IMG_A);
+    expect(payload.orderedAdditional).toContain(newUrl);
+    h.unmount();
+  });
+
+  it('sets newly added image as primary when listing had no prior images', async () => {
+    const onSaveMedia = vi.fn().mockResolvedValue(undefined);
+    const detailWithoutImages = makeDetail({
+      extraction: { primaryImage: null, additionalImages: [] },
+    });
+    const h = await renderPanel({ v2: true, detail: detailWithoutImages, onSaveMedia });
+
+    const input = h.container.querySelector('input[type="url"]') as HTMLInputElement;
+    const newUrl = 'https://cdn.example.com/first-photo.jpg';
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!;
+    await act(async () => {
+      nativeInputValueSetter.call(input, newUrl);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const addBtn = h.button('Add Image')!;
+    await act(async () => {
+      addBtn.click();
+    });
+
+    const saveBtn = h.button('Save media selection')!;
+    expect(saveBtn.disabled).toBe(false);
+    await act(async () => {
+      saveBtn.click();
+    });
+
+    expect(onSaveMedia).toHaveBeenCalledTimes(1);
+    const payload = onSaveMedia.mock.calls[0][0];
+    expect(payload.primaryImage).toBe(newUrl);
+    expect(payload.orderedAdditional).toEqual([]);
+    h.unmount();
+  });
+
+  it('shows error when adding an invalid URL', async () => {
+    const onSaveMedia = vi.fn().mockResolvedValue(undefined);
+    const h = await renderPanel({ v2: true, onSaveMedia });
+
+    const input = h.container.querySelector('input[type="url"]') as HTMLInputElement;
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!;
+    await act(async () => {
+      nativeInputValueSetter.call(input, 'invalid-url-protocol');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const addBtn = h.button('Add Image')!;
+    await act(async () => {
+      addBtn.click();
+    });
+
+    expect(h.text()).toContain('valid URL');
+    expect(onSaveMedia).not.toHaveBeenCalled();
+    h.unmount();
+  });
 });
 
 describe('readiness interplay (e10s04): reviewedMedia clears missing_primary_image', () => {

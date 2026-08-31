@@ -6,6 +6,7 @@ import {
   indexVariantUrls,
   type VariantUrlInput,
 } from '../db/repositories/brand-url-index-repo';
+import { productUrlIdentityKey } from './product-url-identity';
 import { fetchAndParseSitemap } from './sitemap-fetcher';
 import { getAllLatestRefreshRuns } from '../db/repositories/sitemap-telemetry-repo';
 

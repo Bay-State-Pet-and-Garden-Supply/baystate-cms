@@ -166,6 +166,11 @@ export function claimReadyCurationCohorts(
              SELECT 1 FROM classification_cohort_runs r
              WHERE r.cohort_id = c2.id AND r.status != 'superseded'
            )
+           AND EXISTS (
+             SELECT 1 FROM curation_cohort_members m
+             JOIN onboarding_items i ON i.id = m.onboarding_item_id
+             WHERE m.cohort_id = c2.id AND i.stage NOT IN ('review', 'promotion')
+           )
          ORDER BY c2.updated_at ASC
          LIMIT ?
        )
@@ -174,6 +179,11 @@ export function claimReadyCurationCohorts(
        AND NOT EXISTS (
          SELECT 1 FROM classification_cohort_runs r
          WHERE r.cohort_id = c.id AND r.status != 'superseded'
+       )
+       AND EXISTS (
+         SELECT 1 FROM curation_cohort_members m
+         JOIN onboarding_items i ON i.id = m.onboarding_item_id
+         WHERE m.cohort_id = c.id AND i.stage NOT IN ('review', 'promotion')
        )
        RETURNING *`,
     ).all(workerId, nowIso, leaseExpiresAt, nowIso, workspaceId, limit) as Record<string, any>[];

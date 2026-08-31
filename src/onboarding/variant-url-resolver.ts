@@ -1,7 +1,34 @@
 import { extractProductJsonFromHtml } from './shopify-json';
-import { diffRegisterVsExpected, tokenSet } from './variant-resolver';
+import { diffRegisterVsExpected, tokenSet, parseVariantMatrix, matchVariantMatrix, deriveVariantTokens } from './variant-resolver';
+import { productUrlIdentityKey, parentProductKey, buildVariantDeepLink, hasVariantParam } from './product-url-identity';
+import { getEffectiveVariantResolutionMode } from './variant-flags';
+import { computeIdentityMatrixHash } from '../shared/schemas/variant-resolution';
 import type { InsertSourceData } from '../db/repositories/onboarding-source-repo';
 import type { VariantUrlInput } from '../db/repositories/brand-url-index-repo';
+
+export const MAX_VARIANT_PARENT_FETCHES = 3;
+const FETCH_TIMEOUT_MS = 15000;
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+const DOMAIN_MIN_INTERVAL_MS = 500; // 2 req/s per domain
+const DOMAIN_RETRY_DEFAULT_MS = 5000;
+const DOMAIN_RETRY_MAX_MS = 60000;
+const domainRateState = new Map<string, { lastFetch: number; retryUntil: number }>();
+
+function getDomainKey(url: string): string {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, '').trim(); } catch { return url.toLowerCase(); }
+}
+function parseRetryAfter(value: string | null): number {
+  if (!value) return DOMAIN_RETRY_DEFAULT_MS;
+  const v = value.trim();
+  const n = parseInt(v, 10);
+  if (!isNaN(n) && String(n) === v) return Math.min(Math.max(n * 1000, 0), DOMAIN_RETRY_MAX_MS);
+  const d = Date.parse(v);
+  if (!isNaN(d)) return Math.min(Math.max(d - Date.now(), 0), DOMAIN_RETRY_MAX_MS);
+  return DOMAIN_RETRY_DEFAULT_MS;
+}
+function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
+export function __resetVariantDomainRateStateForTests() { domainRateState.clear(); }
+export function __getVariantDomainRateStateForTests(domain: string) { return domainRateState.get(domain.toLowerCase().replace(/^www\./, '').trim()) ?? null; }
 
 export interface VariantResolutionContext {
   upc: string;
@@ -286,11 +313,30 @@ export function resolveVariantsFromHtml(
 
 /**
  * Main entry point: run variant resolution on candidates.
+ * M3: canonical matrix, identity-aware dedupe, hard cap 3 after deterministic sort,
+ * official-domain gating, mode-aware (off→no fetch, observe→diagnostics only).
  */
 
 /** Minimal structural fetch signature — lets callers inject the PI
  *  policy-gateway bound fetch (P0-1). */
 type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export interface VariantDiscoveryResolution {
+  status: 'off' | 'no_variants' | 'resolved' | 'ambiguous' | 'observe' | 'skipped_no_fetch' | 'no_candidate';
+  selectedKey: string | null;
+  candidatesCount: number;
+  overflow: boolean;
+  warnings: string[];
+  identityHash: string | null;
+  expandedCount?: number;
+  // Canonical matrix candidates with real variantKey/identifiers for durable persistence (P1-1: avoid fabricated variant-0)
+  matrixCandidates?: import('../shared/schemas/variant-resolution').NormalizedVariantCandidate[];
+}
+
+export interface ResolveVariantsResult {
+  candidates: InsertSourceData[];
+  resolution: VariantDiscoveryResolution;
+}
+
 export async function resolveVariantsForCandidates(options: {
   candidates: InsertSourceData[];
   upc: string;
@@ -299,119 +345,259 @@ export async function resolveVariantsForCandidates(options: {
   brandHint: string | null;
   brandDomains: string[];
   price?: number | null;
-  /**
-   * P0-1 (round 2): injected fetch so Product Intelligence can bind the
-   * variant-page fetches to the policy gateway's gatewayFetch. The
-   * onboarding pipeline keeps the default global fetch.
-   */
   fetchFn?: NetworkFetch;
-}): Promise<InsertSourceData[]> {
-  const { candidates, upc, rawName, expectedName, brandHint, brandDomains, price, fetchFn } = options;
-
-  // Identify the bounded set: Top 3 candidates, sitemap candidates, and official domain candidates.
-  const boundedSet = new Set<InsertSourceData>();
-  candidates.slice(0, 3).forEach(c => boundedSet.add(c));
-  for (const c of candidates) {
-    if (c.domain && brandDomains.some(d => {
+  variantTokens?: string[];
+}): Promise<ResolveVariantsResult> {
+  const { candidates, upc, rawName, expectedName, brandHint, brandDomains, price, fetchFn, variantTokens: explicitTokens } = options;
+  const mode = getEffectiveVariantResolutionMode();
+  if (mode === 'off') return { candidates, resolution: { status: 'off', selectedKey: null, candidatesCount: 0, overflow: false, warnings: [], identityHash: null } };
+  // Already deep-linked candidates: retain without re-fetch when metadata sufficient
+  const alreadyVariantLinked = candidates.filter(c => hasVariantParam(c.url));
+  // Keep them; they don't consume fetch budget
+  // Build bounded set: deterministic sort first, then hard cap 3 with parent-key dedupe
+  const withRank = candidates.map(c => {
+    // Derive hostname from actual URL — not trusted c.domain to prevent spoofing (evil.com with betterbone.com domain string)
+    // Malformed URLs are not fetch-eligible — do not fall back to c.domain
+    let urlHostname = '';
+    try { urlHostname = new URL(c.url).hostname.toLowerCase().replace(/^www\./,'').trim(); } catch { urlHostname = ''; }
+    const isOfficial = brandDomains.some(d => {
       const normD = d.toLowerCase().replace(/^www\./, '').trim();
-      const normC = c.domain!.toLowerCase().replace(/^www\./, '').trim();
-      return normC === normD || normC.endsWith('.' + normD);
-    })) {
-      boundedSet.add(c);
-    }
-    if (c.sourceMethod && c.sourceMethod.startsWith('sitemap_')) {
-      boundedSet.add(c);
-    }
+      return urlHostname === normD || urlHostname.endsWith('.' + normD);
+    });
+    return {
+      c,
+      isOfficial,
+      identityKey: (() => { try { return productUrlIdentityKey(c.url); } catch { return c.url.toLowerCase(); } })(),
+      parentKey: (() => { try { return parentProductKey(c.url); } catch { return c.url.toLowerCase(); } })(),
+    };
+  });
+  withRank.sort((a, b) => {
+    if (b.c.confidence !== a.c.confidence) return b.c.confidence - a.c.confidence;
+    if (a.isOfficial !== b.isOfficial) return a.isOfficial ? -1 : 1;
+    return a.identityKey.localeCompare(b.identityKey);
+  });
+  const boundedList: InsertSourceData[] = [];
+  const seenParent = new Set<string>();
+  for (const wr of withRank) {
+    if (hasVariantParam(wr.c.url)) continue; // already linked, no fetch needed
+    const pk = wr.parentKey;
+    if (seenParent.has(pk)) continue;
+    // Official-domain gating: only fetch if candidate's domain matches an official brand domain
+    const allowFetch = wr.isOfficial;
+    if (!allowFetch) continue;
+    seenParent.add(pk);
+    boundedList.push(wr.c);
+    if (boundedList.length >= MAX_VARIANT_PARENT_FETCHES) break;
   }
 
-  const boundedList = Array.from(boundedSet);
-  const resolvedMap = new Map<string, VariantResolutionResult>();
-
-  // Fetch page HTML and run resolution in parallel
+  // Fetch and resolve using canonical matrix/matcher; degrade gracefully
+  const variantTokens = (explicitTokens && explicitTokens.length > 0) ? explicitTokens : deriveVariantTokens(rawName || expectedName, brandHint);
+  const resolvedMap = new Map<string, { matrix: ReturnType<typeof parseVariantMatrix>; decision: ReturnType<typeof matchVariantMatrix>; html: string }>();
+  // Enforce injected transport contract: if fetches are needed, fetchFn must be provided (mode off already returned)
+  if (boundedList.length > 0 && !fetchFn) {
+    throw new Error('resolveVariantsForCandidates: fetchFn is required when variant resolution mode is not off');
+  }
   await Promise.all(
     boundedList.map(async (cand) => {
       try {
-        const response = await (fetchFn ?? fetch)(cand.url, {
+        // Per-domain active sweep protection: min interval + Retry-After
+        const domainKey = getDomainKey(cand.url);
+        const state = domainRateState.get(domainKey);
+        const now = Date.now();
+        if (state && state.retryUntil > now) {
+          console.warn(`[variant-url-resolver] throttled ${cand.url} until ${new Date(state.retryUntil).toISOString()} (429)`);
+          return;
+        }
+        if (state && now - state.lastFetch < DOMAIN_MIN_INTERVAL_MS) {
+          const waitMs = DOMAIN_MIN_INTERVAL_MS - (now - state.lastFetch);
+          await sleep(waitMs);
+        }
+        domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: state?.retryUntil ?? 0 });
+        const fetcher = fetchFn!;
+        const res = await fetcher(cand.url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
           },
-          signal: AbortSignal.timeout(15000),
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
-        if (!response.ok) return;
-        const html = await response.text();
-
-        const result = resolveVariantsFromHtml(cand.url, html, {
-          upc,
-          rawName,
-          expectedName,
-          brandHint,
-          price,
-        });
-        if (result.status !== 'no_variants') {
-          resolvedMap.set(cand.url, result);
+        // Update lastFetch after network
+        domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: domainRateState.get(domainKey)?.retryUntil ?? 0 });
+        if (res.status === 429) {
+          const retryAfter = res.headers.get('retry-after') ?? res.headers.get('Retry-After');
+          const delayMs = parseRetryAfter(retryAfter);
+          const until = Date.now() + delayMs;
+          domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: until });
+          console.warn(`[variant-url-resolver] 429 for ${cand.url} retry-after ${delayMs}ms`);
+          return;
         }
+        if (!res.ok) return;
+        // Content-Length pre-check before buffering
+        const contentLength = res.headers.get('content-length');
+        if (contentLength) {
+          const len = parseInt(contentLength, 10);
+          if (!isNaN(len) && len > MAX_BODY_BYTES) return;
+        }
+        // Redirect domain policy: validate final URL BEFORE consuming body
+        try {
+          const finalUrl = res.url || cand.url;
+          const finalHost = new URL(finalUrl).hostname.toLowerCase().replace(/^www\./,'');
+          const origHost = new URL(cand.url).hostname.toLowerCase().replace(/^www\./,'');
+          if (finalHost !== origHost && !finalHost.endsWith('.'+origHost) && !origHost.endsWith('.'+finalHost)) return;
+        } catch { /* ignore */ }
+        // Stream with limit to avoid buffering >5MB before check
+        let buf: Uint8Array;
+        if (res.body && typeof (res.body as any).getReader === 'function') {
+          const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+          const chunks: Uint8Array[] = [];
+          let total = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+              total += value.length;
+              if (total > MAX_BODY_BYTES) { try { await reader.cancel(); } catch {} return; }
+              chunks.push(value);
+            }
+          }
+          buf = new Uint8Array(total);
+          let off = 0;
+          for (const c of chunks) { buf.set(c, off); off += c.length; }
+        } else {
+          buf = new Uint8Array(await res.arrayBuffer());
+          if (buf.length > MAX_BODY_BYTES) return;
+        }
+        const html = new TextDecoder().decode(buf);
+        const matrix = parseVariantMatrix(html, cand.url);
+        if (!matrix || matrix.candidates.length === 0) return;
+        const decision = matchVariantMatrix(matrix, { gtin: upc || null, sku: null, mpn: null, name: rawName || expectedName, brandHint: brandHint ?? null, price: price != null ? String(price) : null, variantTokens });
+        resolvedMap.set(cand.url, { matrix, decision, html });
       } catch (err) {
         console.warn(`[variant-url-resolver] Error resolving variants for ${cand.url}:`, err);
       }
     })
   );
-
-  // Build the new candidates array
+  // Observe mode: diagnostics only, no URL mutation but still produce structured resolution
+  if (mode === 'observe') {
+    const observed = candidates.map(c => {
+      const r = resolvedMap.get(c.url);
+      if (!r) return c;
+      try {
+        const meta = c.metadataJson ? JSON.parse(c.metadataJson) : {};
+        meta.variantResolutionObserve = { status: r.decision.status, reasonCodes: r.decision.reasonCodes, matchedBy: r.decision.matchedBy };
+        return { ...c, metadataJson: JSON.stringify(meta) };
+      } catch { return c; }
+    });
+    // Build resolution summary for observe
+    let status: VariantDiscoveryResolution['status'] = 'observe';
+    let selectedKey: string | null = null;
+    let candidatesCount = 0;
+    let overflow = false;
+    let warnings: string[] = [];
+    let identityHash: string | null = null;
+    let matrixCandidates: import('../shared/schemas/variant-resolution').NormalizedVariantCandidate[] | undefined = undefined;
+    for (const [, r] of resolvedMap) {
+      candidatesCount = Math.max(candidatesCount, r.matrix?.candidates.length ?? 0);
+      warnings = [...warnings, ...(r.matrix?.warnings ?? [])];
+      if (r.matrix) { try { identityHash = computeIdentityMatrixHash(r.matrix); } catch { identityHash = r.matrix.sourceContentHash ?? identityHash; } }
+      if (!matrixCandidates && r.matrix?.candidates) matrixCandidates = r.matrix.candidates.slice(0, 250);
+      if (r.decision.status === 'resolved' && r.decision.selectedVariantKey && !selectedKey) selectedKey = r.decision.selectedVariantKey;
+      if (r.decision.status === 'ambiguous') status = 'observe';
+      if ((r.matrix?.candidates.length ?? 0) > 250 || r.matrix?.warnings.includes('too_many_variants') || r.decision.status === 'too_many_variants' || r.matrix?.warnings.some(w => w.includes('too_many'))) overflow = true;
+    }
+    if (resolvedMap.size === 0) status = 'no_variants';
+    return { candidates: observed, resolution: { status, selectedKey, candidatesCount, overflow, warnings, identityHash, matrixCandidates } };
+  }
+  // Active mode: synthesize deep links from decision
   const output: InsertSourceData[] = [];
+  const alreadyAdded = new Set<string>();
+  // Preserve already deep-linked candidates verbatim without counting toward cap
+  for (const c of alreadyVariantLinked) {
+    const key = (()=>{ try { return productUrlIdentityKey(c.url); } catch { return c.url.toLowerCase(); }})();
+    if (!alreadyAdded.has(key)) { alreadyAdded.add(key); output.push(c); }
+  }
   for (const c of candidates) {
-    const resolved = resolvedMap.get(c.url);
-    if (!resolved) {
-      output.push(c);
+    if (hasVariantParam(c.url)) continue; // already handled
+    const r = resolvedMap.get(c.url);
+    if (!r) {
+      const key = (()=>{ try { return productUrlIdentityKey(c.url); } catch { return c.url.toLowerCase(); }})();
+      if (!alreadyAdded.has(key)) { alreadyAdded.add(key); output.push(c); }
       continue;
     }
-
-    if (resolved.status === 'resolved') {
+    const { matrix, decision } = r;
+    if (decision.status === 'resolved' && decision.selectedVariantKey) {
+      const sel = matrix!.candidates.find(x => x.variantKey === decision.selectedVariantKey);
+      if (!sel) { const key = (()=>{ try { return productUrlIdentityKey(c.url); } catch { return c.url.toLowerCase(); }})(); if (!alreadyAdded.has(key)) { alreadyAdded.add(key); output.push(c);} continue; }
+      const deep = buildVariantDeepLink(c.url, sel);
+      const key = (()=>{ try { return productUrlIdentityKey(deep); } catch { return deep.toLowerCase(); }})();
+      if (alreadyAdded.has(key)) continue;
+      alreadyAdded.add(key);
       output.push({
-        url: resolved.variant.url,
-        title: c.title ? `${c.title} - ${resolved.variant.title}` : resolved.variant.title,
+        url: deep,
+        title: c.title ? `${c.title} - ${sel.title}` : sel.title,
         snippet: c.snippet,
         domain: c.domain,
-        confidence: Math.max(0, Math.min(1, resolved.confidence)),
+        confidence: Math.max(0, Math.min(1, 0.85)),
         sourceMethod: 'shopify_variant',
-        metadataJson: JSON.stringify({
-          originalSourceMethod: c.sourceMethod ?? null,
-          variantResolution: {
-            status: 'resolved',
-            platform: 'shopify',
-            variantId: resolved.variant.id,
-            variantTitle: resolved.variant.title,
-            confidence: resolved.confidence,
-            matchedSignals: resolved.matchedSignals,
-          },
-        }),
+        metadataJson: JSON.stringify({ originalSourceMethod: c.sourceMethod ?? null, variantResolution: { status: 'resolved', platform: matrix!.platform, variantId: sel.platformId, variantTitle: sel.title, confidence: 0.85, matchedBy: decision.matchedBy, reasonCodes: decision.reasonCodes } }),
       });
-    } else if (resolved.status === 'ambiguous') {
-      for (const v of resolved.variants) {
+    } else if (decision.status === 'ambiguous') {
+      // Expand ambiguous but bounded to 250
+      const toExpand = matrix!.candidates.slice(0, 250);
+      for (const v of toExpand) {
+        const deep = buildVariantDeepLink(c.url, v);
+        const key = (()=>{ try { return productUrlIdentityKey(deep); } catch { return deep.toLowerCase(); }})();
+        if (alreadyAdded.has(key)) continue;
+        alreadyAdded.add(key);
         output.push({
-          url: v.url,
+          url: deep,
           title: c.title ? `${c.title} - ${v.title}` : v.title,
           snippet: c.snippet,
           domain: c.domain,
-          confidence: Math.max(0, Math.min(1, v.score / 100)),
+          confidence: Math.max(0, Math.min(1, 0.5)),
           sourceMethod: 'shopify_variant',
-          metadataJson: JSON.stringify({
-            originalSourceMethod: c.sourceMethod ?? null,
-            variantResolution: {
-              status: 'ambiguous',
-              platform: 'shopify',
-              variantId: v.id,
-              variantTitle: v.title,
-              confidence: v.score / 100,
-              matchedSignals: v.matchedSignals,
-              baseUrl: c.url,
-            },
-          }),
+          metadataJson: JSON.stringify({ originalSourceMethod: c.sourceMethod ?? null, variantResolution: { status: 'ambiguous', platform: matrix!.platform, variantId: v.platformId, variantTitle: v.title, confidence: 0.5, matchedBy: decision.matchedBy, reasonCodes: decision.reasonCodes, baseUrl: c.url } }),
         });
       }
+    } else {
+      const key = (()=>{ try { return productUrlIdentityKey(c.url); } catch { return c.url.toLowerCase(); }})();
+      if (!alreadyAdded.has(key)) { alreadyAdded.add(key); output.push(c); }
     }
   }
-
-  return output;
+  // Build structured resolution for active path
+  let resStatus: VariantDiscoveryResolution['status'] = 'no_variants';
+  let resSelectedKey: string | null = null;
+  let resCandidatesCount = 0;
+  let resOverflow = false;
+  let resWarnings: string[] = [];
+  let resIdentityHash: string | null = null;
+  let resMatrixCandidates: import('../shared/schemas/variant-resolution').NormalizedVariantCandidate[] | undefined = undefined;
+  let resExpandedCount: number | undefined = undefined;
+  if (resolvedMap.size > 0) {
+    // Determine aggregate status: if any resolved, prefer resolved, else ambiguous, else no_variants
+    let hasResolved = false, hasAmbiguous = false;
+    for (const [, r] of resolvedMap) {
+      resCandidatesCount = Math.max(resCandidatesCount, r.matrix?.candidates.length ?? 0);
+      resWarnings = [...resWarnings, ...(r.matrix?.warnings ?? [])];
+      if (r.matrix) { try { resIdentityHash = computeIdentityMatrixHash(r.matrix); } catch { if (r.matrix?.sourceContentHash) resIdentityHash = r.matrix.sourceContentHash; } }
+      if (!resMatrixCandidates && r.matrix?.candidates) resMatrixCandidates = r.matrix.candidates.slice(0, 250);
+      if ((r.matrix?.candidates.length ?? 0) > 250 || r.matrix?.warnings.includes('too_many_variants') || r.decision.status === 'too_many_variants' || r.matrix?.warnings.some(w => w.includes('too_many'))) resOverflow = true;
+      if (r.decision.status === 'resolved') { hasResolved = true; if (!resSelectedKey) resSelectedKey = r.decision.selectedVariantKey ?? null; }
+      else if (r.decision.status === 'ambiguous') hasAmbiguous = true;
+    }
+    if (hasResolved) resStatus = 'resolved';
+    else if (hasAmbiguous) resStatus = 'ambiguous';
+    else resStatus = 'no_variants';
+    resExpandedCount = output.length;
+  } else if (boundedList.length === 0) {
+    resStatus = 'no_candidate';
+  }
+  const resolution: VariantDiscoveryResolution = { status: resStatus, selectedKey: resSelectedKey, candidatesCount: resCandidatesCount, overflow: resOverflow, warnings: resWarnings, identityHash: resIdentityHash, expandedCount: resExpandedCount, matrixCandidates: resMatrixCandidates };
+  // Fallback: if observe/active produced empty due to gating, return original but with resolution
+  if (output.length === 0) return { candidates, resolution };
+  // Cap total candidates to reasonable limit but preserve variant distinctness
+  const capped = output.slice(0, 250);
+  if (capped.length < output.length) resolution.overflow = true;
+  return { candidates: capped, resolution };
 }

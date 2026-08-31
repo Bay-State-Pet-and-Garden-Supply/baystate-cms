@@ -1,0 +1,329 @@
+/* Task 3 — Family Inspector Drawer (Operate mode).
+ * Slide-over drawer, consistent with BatchWorkspace bws-drawer.
+ * Uses theme tokens; compact table/card layout for scanability. */
+
+.fid-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(33, 20, 20, 0.45);
+  display: flex;
+  justify-content: flex-end;
+  animation: fid-fade 160ms ease-out;
+}
+
+@keyframes fid-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.fid-drawer {
+  width: min(640px, 92vw);
+  max-height: 100vh;
+  background: var(--color-feed-bag-cream);
+  border-left: 1px solid var(--color-card-border);
+  box-shadow: -8px 0 24px rgba(33, 20, 20, 0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fid-slide 200ms ease-out;
+}
+
+.fid-current-values-note {
+  padding: 8px 16px;
+  background: var(--color-feed-bag-cream);
+  border-bottom: 1px solid var(--color-card-border);
+}
+
+.fid-current-values-note p {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+  line-height: 1.4;
+}
+
+.fid-ocr-detail {
+  color: var(--color-mulch-brown);
+  font-size: 0.75rem;
+}
+
+.fid-attr-provenance {
+  font-family: var(--font-body);
+  font-size: 0.6875rem;
+  color: var(--color-mulch-brown);
+  font-style: italic;
+}
+
+@keyframes fid-slide {
+  from { transform: translateX(12px); opacity: 0.9; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.fid-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  background: var(--color-uniform-green);
+  color: var(--color-feed-bag-cream);
+}
+
+.fid-eyebrow {
+  font-family: var(--font-body);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+
+.fid-title {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 2px 0 0;
+  color: var(--color-feed-bag-cream);
+}
+
+.fid-subtitle {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.fid-close {
+  flex-shrink: 0;
+  background: transparent !important;
+  border-color: rgba(250, 249, 242, 0.5) !important;
+  color: var(--color-feed-bag-cream) !important;
+  min-height: 2rem;
+}
+
+.fid-invariants {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--color-white-surface);
+  border-bottom: 1px solid var(--color-card-border);
+}
+
+.fid-invariant {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--color-feed-bag-cream);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-md);
+}
+
+.fid-invariant-warn {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+}
+
+.fid-invariant-label {
+  font-family: var(--font-body);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-mulch-brown);
+}
+
+.fid-invariant-value {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+  overflow-wrap: anywhere;
+}
+
+.fid-invariant-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-danger-text);
+}
+
+.fid-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+.fid-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fid-card {
+  background: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fid-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fid-card-identity {
+  min-width: 0;
+  flex: 1;
+}
+
+.fid-card-name {
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+  margin: 0;
+  line-height: 1.3;
+}
+
+.fid-card-meta {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-mulch-brown);
+}
+
+.fid-thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: var(--rounded-sm);
+  border: 1px solid var(--color-card-border);
+  flex-shrink: 0;
+}
+
+.fid-fields {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fid-field {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 8px;
+  font-size: 0.8125rem;
+}
+
+.fid-field dt {
+  font-family: var(--font-body);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-mulch-brown);
+  padding-top: 2px;
+}
+
+.fid-field dd {
+  font-family: var(--font-body);
+  color: var(--color-ledger-charcoal);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.fid-attr-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fid-attr-key {
+  font-weight: 600;
+  color: var(--color-mulch-brown);
+}
+
+.fid-footer {
+  padding: 10px 16px;
+  border-top: 1px solid var(--color-card-border);
+  background: var(--color-white-surface);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.fid-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fid-skeleton {
+  height: 72px;
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  background: linear-gradient(90deg, var(--color-card-border) 25%, #f3f1e6 50%, var(--color-card-border) 75%);
+  background-size: 200% 100%;
+  animation: fid-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes fid-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.fid-error {
+  padding: 12px;
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+  border-radius: var(--rounded-md);
+  font-size: 0.8125rem;
+}
+
+@media (max-width: 640px) {
+  .fid-invariants { grid-template-columns: 1fr; }
+  .fid-field { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 1024px) {
+  .fid-drawer {
+    width: min(860px, 94vw);
+  }
+  .fid-body {
+    overflow-x: auto;
+  }
+  .fid-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    align-items: start;
+  }
+}
+
+@media (min-width: 1440px) {
+  .fid-drawer {
+    width: min(900px, 92vw);
+  }
+  .fid-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fid-overlay, .fid-drawer, .fid-skeleton { animation: none; }
+}

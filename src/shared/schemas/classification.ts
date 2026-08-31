@@ -710,6 +710,8 @@ export const ClassificationConfigBundleV2Schema = z.object({
   guidance: z.array(GuidanceConfigV2Schema),
   modelPolicy: ModelPolicyConfigV2Schema,
   dataSharing: DataSharingConfigV2Schema,
+  taxonomyRevision: z.unknown().optional(),
+  pageAssignmentPolicyAdvisory: z.unknown().optional(),
 }).strict();
 export type ClassificationConfigBundleV2 = z.infer<typeof ClassificationConfigBundleV2Schema>;
 

@@ -67,3 +67,51 @@ describe('runProfileExtraction image deduplication', () => {
     }
   });
 });
+
+describe('runProfileExtraction variantSelection forwarding', () => {
+  it('forwards variantSelection when provided', async () => {
+    vi.clearAllMocks();
+    const { runProfileExtraction } = await import('../../onboarding/profile-runner-client');
+    const { trustedExtract } = await import('../../server/extraction-worker-client');
+    vi.mocked(trustedExtract).mockResolvedValueOnce({
+      ok: true,
+      data: {
+        ok: true,
+        extractionData: { title: 'T', brand: 'B', description: 'D', primaryImage: null, additionalImages: [], price: null, fieldProvenance: {} },
+        warnings: [],
+      } as any,
+    });
+    const profile: any = {
+      id: 'p1', domain: 'example.com', titleSelector: 'h1', titleOptionalSelectors: [], priceSelector: null, descriptionSelector: null, brandSelector: null, imagesSelector: null, sitemapProductUrlPattern: null, shopifyJSONPath: false, customSelectors: {}, variantSelectionStrategy: null, customSelectorMetadata: {}, runtime: 'static', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    };
+    await runProfileExtraction({
+      sourceUrl: 'https://example.com/products/betterbone?variant=1',
+      profile,
+      expected: { name: 'BetterBone Small' },
+      variantSelection: { resolutionId: 'res-1', identityMatrixHash: 'a'.repeat(64), variantKey: 'k1' },
+    });
+    const calls: any = vi.mocked(trustedExtract).mock.calls;
+    const call: any = calls[calls.length-1][0];
+    expect(call.variantSelection).toBeDefined();
+    expect(call.variantSelection.variantKey).toBe('k1');
+  });
+
+  it('preserves structured failureCode from worker', async () => {
+    const { runProfileExtraction } = await import('../../onboarding/profile-runner-client');
+    const { trustedExtract } = await import('../../server/extraction-worker-client');
+    vi.mocked(trustedExtract).mockResolvedValueOnce({
+      ok: true,
+      data: { ok: false, warnings: ['x'], failureCode: 'variant_selection_required', matrixDecision: { status: 'ambiguous' } } as any,
+    });
+    const profile: any = {
+      id: 'p1', domain: 'example.com', titleSelector: 'h1', titleOptionalSelectors: [], priceSelector: null, descriptionSelector: null, brandSelector: null, imagesSelector: null, sitemapProductUrlPattern: null, shopifyJSONPath: false, customSelectors: {}, variantSelectionStrategy: null, customSelectorMetadata: {}, runtime: 'static', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const res: any = await runProfileExtraction({
+      sourceUrl: 'https://example.com/products/betterbone',
+      profile,
+      expected: { name: 'BetterBone' },
+    });
+    expect(res.ok).toBe(false);
+    expect(res.failureCode).toBe('variant_selection_required');
+  });
+});

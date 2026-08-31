@@ -113,3 +113,28 @@ CREATE INDEX IF NOT EXISTS idx_onboarding_sources_item ON onboarding_sources(ite
 CREATE INDEX IF NOT EXISTS idx_onboarding_extractions_item ON onboarding_extractions(item_id);
 CREATE INDEX IF NOT EXISTS idx_brand_sites_brand ON brand_sites(brand_name);
 CREATE INDEX IF NOT EXISTS idx_extractor_profiles_domain ON extractor_profiles(domain);
+
+-- Variant resolution durable table (issue #90)
+CREATE TABLE IF NOT EXISTS onboarding_variant_resolutions (
+  id TEXT PRIMARY KEY,
+  onboarding_item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+  source_url TEXT NOT NULL,
+  canonical_parent_key TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  parser_version INTEGER NOT NULL,
+  identity_matrix_hash TEXT NOT NULL,
+  source_content_hash TEXT,
+  status TEXT NOT NULL CHECK(status IN ('resolved','ambiguous','no_match','unsupported','too_many_variants','selected','stale')),
+  reason_codes_json TEXT NOT NULL,
+  candidates_json TEXT NOT NULL,
+  automatic_variant_key TEXT,
+  selected_variant_key TEXT,
+  decision_origin TEXT CHECK(decision_origin IN ('automatic','operator')),
+  decided_at TEXT,
+  superseded_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_variant_res_item ON onboarding_variant_resolutions(onboarding_item_id);
+CREATE INDEX IF NOT EXISTS idx_variant_res_item_hash ON onboarding_variant_resolutions(onboarding_item_id, identity_matrix_hash);
+CREATE INDEX IF NOT EXISTS idx_variant_res_status ON onboarding_variant_resolutions(status);

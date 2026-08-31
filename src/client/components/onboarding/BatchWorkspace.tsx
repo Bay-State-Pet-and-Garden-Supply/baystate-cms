@@ -60,11 +60,52 @@ export interface BatchWorkspaceProps {
  *
  * Raw pipeline stage/stage_status are secondary diagnostics only.
  */
+const VALID_WORKSPACE_TABS: readonly WorkspaceTabId[] = [
+  'needs_attention',
+  'processing',
+  'waiting_on_family',
+  'review',
+  'approved',
+];
+
+function resolveWorkspaceTab(raw: string | null): WorkspaceTabId | null {
+  return raw && (VALID_WORKSPACE_TABS as readonly string[]).includes(raw)
+    ? (raw as WorkspaceTabId)
+    : null;
+}
+
 export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings, onOpenPreflight }: BatchWorkspaceProps) {
   const [counts, setCounts] = useState<WorkStateCounts | null>(null);
   const [countsError, setCountsError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<WorkspaceTabId>('needs_attention');
+  const [activeTab, setActiveTab] = useState<WorkspaceTabId>(() => {
+    if (typeof window !== 'undefined') {
+      const tabParam = new URLSearchParams(window.location.search).get('tab');
+      return resolveWorkspaceTab(tabParam) ?? 'needs_attention';
+    }
+    return 'needs_attention';
+  });
   const [updating, setUpdating] = useState(false);
+
+  const handleTabChange = useCallback((nextTab: WorkspaceTabId) => {
+    setActiveTab(nextTab);
+    const url = new URL(window.location.href);
+    if (nextTab === 'needs_attention') {
+      url.searchParams.delete('tab');
+    } else {
+      url.searchParams.set('tab', nextTab);
+    }
+    window.history.replaceState(null, '', url.toString());
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const tabParam = new URLSearchParams(window.location.search).get('tab');
+      const resolved = resolveWorkspaceTab(tabParam);
+      setActiveTab(resolved ?? 'needs_attention');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Cross-category filters (server-owned filtering).
   const [filterInput, setFilterInput] = useState<WorkspaceFilterInput>({});
@@ -118,9 +159,9 @@ export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings, onO
 
   const handleFamilyOpenItem = useCallback((itemId: string) => {
     // Blocking siblings live in Needs Attention — jump there and open them.
-    setActiveTab('needs_attention');
+    handleTabChange('needs_attention');
     setAttentionItemId(itemId);
-  }, []);
+  }, [handleTabChange]);
 
   const handleResolved = useCallback(() => {
     setAttentionItemId(null);
@@ -286,7 +327,7 @@ export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings, onO
           </div>
 
           {/* ── Tabs ── */}
-          <WorkStateTabs activeId={activeTab} counts={counts} onChange={setActiveTab} />
+          <WorkStateTabs activeId={activeTab} counts={counts} onChange={handleTabChange} />
 
           <div id="bws-tabpanel" role="tabpanel" aria-labelledby={`bws-tab-${activeTab}`}>
             {showFilteredResults ? (

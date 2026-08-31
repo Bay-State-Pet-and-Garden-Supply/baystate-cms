@@ -645,7 +645,8 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
     resolutions.map(res => res.reviewedTypeId).filter((id): id is string => id !== null),
   )];
   const confidentInferred = resolutions.filter(res => !res.inferredAbstention && res.inferredTypeId !== null);
-  const inferredIds = [...new Set(confidentInferred.map(res => res.inferredTypeId as string))];
+  const unreviewedConfident = resolutions.filter(res => res.reviewedTypeId === null && !res.inferredAbstention && res.inferredTypeId !== null);
+  const unreviewedInferredIds = [...new Set(unreviewedConfident.map(res => res.inferredTypeId as string))];
 
   // Rule 1: any two members' compatible reviewed types DIFFER -> conflicted.
   if (reviewedIds.length >= 2) {
@@ -662,24 +663,24 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
       confidenceFloor,
     };
   }
-  // Rule 2: a member's reviewed type differs from the cohort's confident
-  // inferred type -> conflicted (never silently coexist).
-  if (reviewedIds.length === 1 && inferredIds.some(id => id !== reviewedIds[0])) {
+  // Rule 2: an unreviewed member's confident inferred type differs from the cohort's reviewed type -> conflicted
+  // (never silently coexist: the unreviewed member would curate under one profile while the cohort execution type drives the reviewed member).
+  if (reviewedIds.length === 1 && unreviewedInferredIds.some(id => id !== reviewedIds[0])) {
     return {
       outcome: 'conflicted',
       productTypeId: null,
       confidence: null,
       memberSupport,
       supportingEvidenceIds: [],
-      contradictingEvidenceIds: confidentInferred.flatMap(res => res.supportingEvidenceIds),
+      contradictingEvidenceIds: unreviewedConfident.flatMap(res => res.supportingEvidenceIds),
       perMember,
       confidenceFloor,
     };
   }
-  // Legacy rule: >=2 confident DISTINCT inferred ids -> conflicted (id stays
+  // Legacy rule (when no reviewed facts are present): >=2 confident DISTINCT inferred ids -> conflicted (id stays
   // null; each side's evidence contradicts the other's — never resolved by
   // source order or majority).
-  if (inferredIds.length >= 2) {
+  if (reviewedIds.length === 0 && unreviewedInferredIds.length >= 2) {
     return {
       outcome: 'conflicted',
       productTypeId: null,

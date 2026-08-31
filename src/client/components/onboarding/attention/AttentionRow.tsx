@@ -8,43 +8,41 @@
  *
  * Presentational only — all text comes from the server projection
  * (label/detail) and the deterministic attention-logic helpers.
+ * Row container is NON-interactive; only dedicated buttons are interactive.
  */
-import React from 'react';
+import React, { useState } from 'react';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
 import {
   getAttentionActionLabel,
   getAttentionConsequence,
   getAttentionGroupLabel,
 } from './attention-logic';
+import { SemanticConflictPanel } from './SemanticConflictPanel';
+import './semantic-conflict.css';
 
 interface AttentionRowProps {
   workState: OnboardingWorkState;
-  /** Clicking anywhere on the row (or the Resolve button) opens the workspace. */
+  batchId: string;
+  /** Opens the workspace drawer for this item */
   onResolve: (itemId: string) => void;
   /** When true the Resolve button shows an in-flight state. */
   resolving?: boolean;
+  onViewFamily?: (cohortId: string) => void;
+  onActionComplete?: () => void;
 }
 
-export function AttentionRow({ workState, onResolve, resolving = false }: AttentionRowProps): React.ReactElement {
-  const { attentionReason, attentionAction, label, detail, upc, name, brand, itemId } = workState;
+export function AttentionRow({ workState, batchId, onResolve, resolving = false, onViewFamily, onActionComplete }: AttentionRowProps): React.ReactElement {
+  const { attentionReason, attentionAction, label, detail, upc, name, brand, itemId, findingCode, family } = workState;
   const reasonLabel = attentionReason ? getAttentionGroupLabel(attentionReason) : label;
   const actionLabel = attentionAction ? getAttentionActionLabel(attentionAction) : 'Resolve';
   const consequence = getAttentionConsequence(attentionReason, detail);
+  const isSemanticBlocked = attentionReason === 'semantic_validation_blocked';
+  const hasFamily = Boolean(family && family.memberCount > 1);
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = `attn-details-${itemId}`;
 
   return (
-    <article
-      className="attn-row"
-      role="button"
-      tabIndex={0}
-      aria-label={`Resolve ${name}`}
-      onClick={() => onResolve(itemId)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          onResolve(itemId);
-        }
-      }}
-    >
+    <article className="attn-row" aria-label={`${name} — ${reasonLabel}`}>
       <div className="attn-row-top">
         <div className="attn-row-identity">
           <div className="attn-row-name">{workState.curatedTitle || name}</div>
@@ -52,20 +50,52 @@ export function AttentionRow({ workState, onResolve, resolving = false }: Attent
             <span>{upc}</span>
             {brand ? <span>{brand}</span> : null}
             <span className="attn-action-chip">{reasonLabel}</span>
+            {hasFamily ? <span className="attn-family-badge" title={`Family ${family!.label ?? family!.cohortId} — ${family!.memberCount} members`}>{family!.memberCount} in family</span> : null}
           </div>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary"
-          style={{ flexShrink: 0 }}
-          onClick={(e) => {
-            e.stopPropagation();
-            onResolve(itemId);
-          }}
-          disabled={resolving}
-        >
-          {resolving ? 'Working…' : actionLabel}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
+          {hasFamily && onViewFamily ? (
+            <button
+              type="button"
+              className="btn btn-outline"
+              style={{ height: '2rem', padding: '0 0.625rem', fontSize: '0.75rem' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewFamily(family!.cohortId);
+              }}
+            >
+              View family
+            </button>
+          ) : null}
+          {isSemanticBlocked ? (
+            <button
+              type="button"
+              className="btn btn-outline"
+              aria-expanded={expanded}
+              aria-controls={detailsId}
+              aria-label={expanded ? 'Hide conflict details' : 'Show conflict details'}
+              style={{ height: '2rem', padding: '0 0.625rem', fontSize: '0.75rem' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded((v) => !v);
+              }}
+            >
+              {expanded ? '▴ Hide' : '▾ Details'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ flexShrink: 0 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              onResolve(itemId);
+            }}
+            disabled={resolving}
+          >
+            {resolving ? 'Working…' : actionLabel}
+          </button>
+        </div>
       </div>
 
       <div className="attn-row-four">
@@ -83,10 +113,15 @@ export function AttentionRow({ workState, onResolve, resolving = false }: Attent
         </div>
       </div>
 
-      {detail ? (
+      {detail && !findingCode ? (
         <div className="attn-answer">
           <span className="attn-answer-label">Detail</span>
           <span className="attn-answer-text">{detail}</span>
+        </div>
+      ) : null}
+      {isSemanticBlocked && expanded ? (
+        <div id={detailsId} onClick={(e) => e.stopPropagation()}>
+          <SemanticConflictPanel item={workState} batchId={batchId} onActionComplete={onActionComplete} />
         </div>
       ) : null}
     </article>

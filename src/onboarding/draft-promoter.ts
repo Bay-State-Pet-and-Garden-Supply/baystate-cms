@@ -676,10 +676,16 @@ export async function promoteItems(
     if (isDistributorSource) {
       const approvedUnsuppressed = distributorApprovedImages.filter((u) => !suppressedUrls.has(u));
       const designated = reviewedMedia?.primaryImage ?? null;
-      downloaderPrimary = designated && approvedUnsuppressed.includes(designated)
-        ? designated
-        : (approvedUnsuppressed[0] ?? null);
-      downloaderAdditional = approvedUnsuppressed.filter((u) => u !== downloaderPrimary);
+      const designatedPrimary = designated && !suppressedUrls.has(designated) ? designated : null;
+      const fallbackPrimary = approvedUnsuppressed[0] ?? null;
+      downloaderPrimary = designatedPrimary ?? fallbackPrimary;
+      const orderedSelection = (reviewedMedia?.orderedAdditional ?? []).filter(
+        (u) => typeof u === 'string' && u.length > 0 && !suppressedUrls.has(u),
+      );
+      const fallbackAdditional = approvedUnsuppressed.filter((u) => u !== downloaderPrimary);
+      downloaderAdditional = (reviewedMedia?.orderedAdditional && reviewedMedia.orderedAdditional.length > 0)
+        ? orderedSelection
+        : fallbackAdditional;
     } else {
       const orderedSelection = (reviewedMedia?.orderedAdditional ?? []).filter(
         (u) => typeof u === 'string' && u.length > 0 && !suppressedUrls.has(u),
@@ -700,7 +706,7 @@ export async function promoteItems(
           : null;
       const fallbackPrimary =
         extractionPrimary && !suppressedUrls.has(extractionPrimary) ? extractionPrimary : null;
-      downloaderPrimary = designatedPrimary || fallbackPrimary;
+      downloaderPrimary = designatedPrimary ?? fallbackPrimary;
       downloaderAdditional =
         orderedSelection.length > 0 ? orderedSelection : fallbackAdditional;
     }

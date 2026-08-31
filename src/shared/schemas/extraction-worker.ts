@@ -2,6 +2,7 @@
 
 import { z } from 'zod';
 import { ExtractionDataSchema } from './onboarding';
+import { VariantSelectionReceiptSchema, VariantMatrixSchema, NormalizedVariantCandidateSchema } from './variant-resolution';
 
 
 // ─── Network capture artifact (relocated from product-intelligence/assets/schema.ts, ADR-0030 PR 1.3) ───
@@ -143,6 +144,20 @@ export const SpreadsheetHintSchema = z.record(z.string(), z.string());
 
 export type SpreadsheetHint = z.infer<typeof SpreadsheetHintSchema>;
 
+export const StrictVariantSelectionStrategySchema = z.object({
+  axes: z.array(z.object({
+    axis: z.string().min(1).max(64),
+    selector: z.string().min(1).max(500),
+    optionType: z.enum(['dropdown', 'button_group', 'radio']),
+    optionValueSelector: z.string().max(500).optional(),
+    optionTextAttribute: z.string().max(64).optional(),
+    settledSelector: z.string().max(500).optional(),
+    settledAttribute: z.string().max(64).optional(),
+    timeoutMs: z.number().int().min(100).max(10000).optional(),
+  })).max(8),
+  timeoutMs: z.number().int().min(100).max(10000).optional().default(3000),
+});
+export type StrictVariantSelectionStrategy = z.infer<typeof StrictVariantSelectionStrategySchema>;
 export const VariantSelectionStrategySchema = z.object({
   containerSelector: z.string().nullable().default(null),
   optionType: z.enum(['dropdown', 'button_group', 'radio', 'unknown']).default('unknown'),
@@ -250,6 +265,20 @@ export type ValidateResponse = z.infer<typeof ValidateResponseSchema>;
 
 // ─── Trusted Profile Runner Extract ────────────────────────────────────────────
 
+export const VariantSelectionInputSchema = z.object({
+  resolutionId: z.string().min(1).max(256),
+  identityMatrixHash: z.string().regex(/^[a-f0-9]{64}$/),
+  variantKey: z.string().min(1).max(256),
+});
+export type VariantSelectionInput = z.infer<typeof VariantSelectionInputSchema>;
+
+export const VariantFailureCodeSchema = z.enum([
+  'variant_selection_required',
+  'variant_selection_stale',
+  'variant_matrix_invalid',
+]);
+export type VariantFailureCode = z.infer<typeof VariantFailureCodeSchema>;
+
 export const ExtractRequestSchema = z.object({
   profileId: z.string(),
   profileVersion: z.number().int(),
@@ -261,13 +290,15 @@ export const ExtractRequestSchema = z.object({
     spreadsheetHints: SpreadsheetHintSchema.default(() => ({})),
     price: z.string().nullable().default(null),
   }),
+  /** Optional variant selection receipt forwarded from job-queue for stale-safe extraction (M4). */
+  variantSelection: VariantSelectionInputSchema.optional(),
   profile: z.object({
     runtime: z.enum(['static', 'rendered']).default('rendered'),
     selectors: z.record(z.string(), z.string().nullable()).default(() => ({})),
     titleOptionalSelectors: z.array(z.string()).default(() => []),
     customSelectors: z.record(z.string(), z.string()).default(() => ({})),
     imageRules: z.record(z.string(), z.unknown()).default(() => ({})),
-    variantSelectionStrategy: VariantSelectionStrategySchema.nullable().default(null),
+    variantSelectionStrategy: z.union([StrictVariantSelectionStrategySchema, VariantSelectionStrategySchema]).nullable().default(null),
     /** Worker-side source-domain allowlist for this profile execution. When
      * non-empty, every destination (initial fetch, every redirect hop, and
      * every rendered sub-resource) must be an exact or subdomain-suffix match
@@ -279,6 +310,13 @@ export const ExtractRequestSchema = z.object({
 });
 
 export type ExtractRequest = z.infer<typeof ExtractRequestSchema>;
+
+export const MatrixDecisionSchema = z.object({
+  status: z.enum(['resolved', 'ambiguous', 'no_match', 'unsupported', 'too_many_variants', 'stale_selection']),
+  selectedVariantKey: z.string().nullable(),
+  reasonCodes: z.array(z.string()),
+});
+export type MatrixDecision = z.infer<typeof MatrixDecisionSchema>;
 
 export const ExtractResponseSchema = z.object({
   ok: z.boolean(),
@@ -294,6 +332,18 @@ export const ExtractResponseSchema = z.object({
   sourceContentHash: z.string().regex(/^[0-9a-f]{64}$/).nullable().default(null),
   sourceArtifactId: z.string().min(1).nullable().default(null),
   warnings: z.array(z.string()).default(() => []),
+  /** Variant matrix decision when variant resolution was evaluated (M4). */
+  matrixDecision: MatrixDecisionSchema.nullable().optional(),
+  /** Selected variant receipt when extraction was variant-scoped (M4). */
+  selectedReceipt: VariantSelectionReceiptSchema.nullable().optional(),
+  /** Structured variant failure code for job-queue gate (M4). */
+  failureCode: VariantFailureCodeSchema.nullable().optional(),
+  /** Canonical variant matrix for durable evidence (additive, bounded). */
+  variantMatrix: VariantMatrixSchema.nullable().optional(),
+  /** Identity hash of canonical matrix (sha256 64hex). */
+  identityMatrixHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  /** Bounded candidates subset (max 250) for evidence preservation. */
+  candidates: z.array(NormalizedVariantCandidateSchema).max(250).nullable().optional(),
 });
 
 export type ExtractResponse = z.infer<typeof ExtractResponseSchema>;
