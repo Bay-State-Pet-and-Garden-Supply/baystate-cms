@@ -1,45 +1,39 @@
 /**
- * Variant resolution feature flags — strict, re-read per call.
+ * Variant resolution feature flags — always-on since #90.
+ * Env vars BAYSTATE_CMS_VARIANT_RESOLUTION_MODE and BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED are deprecated and ignored.
+ * Resolution is always 'active'; interaction remains default-off unless test override enables it.
+ * Test overrides retained for isolated unit tests.
  */
 
 export type VariantResolutionMode = 'off' | 'observe' | 'active';
 
-const VALID_MODES: readonly VariantResolutionMode[] = ['off', 'observe', 'active'];
-
-export function parseVariantResolutionMode(raw: string | undefined): VariantResolutionMode {
-  if (raw === undefined || raw === null) return 'off';
-  const normalized = raw.trim().toLowerCase();
-  if ((VALID_MODES as readonly string[]).includes(normalized)) return normalized as VariantResolutionMode;
-  return 'off';
+export function parseVariantResolutionMode(_raw: string | undefined): VariantResolutionMode {
+  return 'active';
 }
 
-export function getVariantResolutionMode(env: Record<string, string | undefined> = process.env): VariantResolutionMode {
-  return parseVariantResolutionMode(env['BAYSTATE_CMS_VARIANT_RESOLUTION_MODE']);
+export function getVariantResolutionMode(_env: Record<string, string | undefined> = process.env): VariantResolutionMode {
+  return 'active';
 }
 
-export function isVariantResolutionActive(env?: Record<string, string | undefined>): boolean {
-  return getVariantResolutionMode(env) === 'active';
+export function isVariantResolutionActive(_env?: Record<string, string | undefined>): boolean {
+  return true;
 }
-export function isVariantResolutionObserve(env?: Record<string, string | undefined>): boolean {
-  return getVariantResolutionMode(env) === 'observe';
+export function isVariantResolutionObserve(_env?: Record<string, string | undefined>): boolean {
+  return false;
 }
-export function isVariantResolutionOff(env?: Record<string, string | undefined>): boolean {
-  return getVariantResolutionMode(env) === 'off';
-}
-
-export function parseVariantInteractionEnabled(raw: string | undefined): boolean {
-  if (raw === undefined || raw === null) return false;
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === 'true' || normalized === '1' || normalized === 'yes') return true;
-  if (normalized === 'false' || normalized === '0' || normalized === 'no') return false;
+export function isVariantResolutionOff(_env?: Record<string, string | undefined>): boolean {
   return false;
 }
 
-export function isVariantInteractionEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return parseVariantInteractionEnabled(env['BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED']);
+export function parseVariantInteractionEnabled(_raw: string | undefined): boolean {
+  return false;
 }
 
-// Test overrides
+export function isVariantInteractionEnabled(_env: Record<string, string | undefined> = process.env): boolean {
+  return false;
+}
+
+// Test overrides — retained for unit tests that need to simulate off/observe
 let modeOverride: VariantResolutionMode | null = null;
 let interactionOverride: boolean | null = null;
 
@@ -53,9 +47,9 @@ export function resetVariantFlagsOverride(): void {
 }
 export function getEffectiveVariantResolutionMode(): VariantResolutionMode {
   if (modeOverride !== null) return modeOverride;
-  return getVariantResolutionMode();
+  return 'active';
 }
 export function getEffectiveVariantInteractionEnabled(): boolean {
   if (interactionOverride !== null) return interactionOverride;
-  return isVariantInteractionEnabled();
+  return false;
 }
