@@ -49,6 +49,9 @@ export function serializeEmbedding(vec: Float32Array): Buffer {
  * (~11x faster).
  */
 export function deserializeEmbedding(buf: Buffer): Float32Array {
+  if (buf.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error('Invalid embedding buffer length: must be multiple of 4');
+  }
   if (buf.byteOffset % Float32Array.BYTES_PER_ELEMENT === 0) {
     return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / Float32Array.BYTES_PER_ELEMENT);
   }
