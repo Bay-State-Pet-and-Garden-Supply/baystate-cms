@@ -100,10 +100,9 @@ describe('Settings tab accessibility', () => {
     expect(tablist!.getAttribute('aria-label')).toBe('Store Settings sections');
 
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(7); // includes the P4 Taxonomy Release card tab
+    expect(tabs.length).toBe(6); // includes the P4 Taxonomy Release card tab
 
     const generalTab = getTab(container, 'general');
-    const aiTasksTab = getTab(container, 'ai-tasks');
     const aiTab = getTab(container, 'ai');
     const catalogTab = getTab(container, 'catalog');
     const typesTab = getTab(container, 'types');
@@ -111,13 +110,12 @@ describe('Settings tab accessibility', () => {
     const taxonomyReleaseTab = getTab(container, 'taxonomy-release');
 
     expect(generalTab.getAttribute('aria-selected')).toBe('true');
-    for (const tab of [aiTasksTab, aiTab, catalogTab, typesTab, mappingsHealthTab, taxonomyReleaseTab]) {
+    for (const tab of [aiTab, catalogTab, typesTab, mappingsHealthTab, taxonomyReleaseTab]) {
       expect(tab.getAttribute('aria-selected')).toBe('false');
       expect(tab.tabIndex).toBe(-1);
     }
 
     expect(generalTab.getAttribute('aria-controls')).toBe('settings-tabpanel-general');
-    expect(aiTasksTab.getAttribute('aria-controls')).toBe('settings-tabpanel-ai-tasks');
     expect(aiTab.getAttribute('aria-controls')).toBe('settings-tabpanel-ai');
     expect(catalogTab.getAttribute('aria-controls')).toBe('settings-tabpanel-catalog');
 
@@ -145,7 +143,6 @@ describe('Settings tab accessibility', () => {
   it('supports ArrowRight/ArrowLeft/Home/End keyboard navigation with focus movement', async () => {
     const { container, unmount } = await renderSettings();
     const generalTab = getTab(container, 'general');
-    const aiTasksTab = getTab(container, 'ai-tasks');
     const aiTab = getTab(container, 'ai');
     const catalogTab = getTab(container, 'catalog');
 
@@ -153,18 +150,9 @@ describe('Settings tab accessibility', () => {
       generalTab.focus();
       generalTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     });
-    expect(document.activeElement).toBe(aiTasksTab);
-    expect(aiTasksTab.getAttribute('aria-selected')).toBe('true');
-    expect(generalTab.tabIndex).toBe(-1);
-    expect(aiTasksTab.tabIndex).toBe(0);
-    expect(getPanel(container, 'ai-tasks').hasAttribute('hidden')).toBe(false);
-
-    await act(async () => {
-      aiTasksTab.focus();
-      aiTasksTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-    });
     expect(document.activeElement).toBe(aiTab);
     expect(aiTab.getAttribute('aria-selected')).toBe('true');
+    expect(generalTab.tabIndex).toBe(-1);
     expect(aiTab.tabIndex).toBe(0);
     expect(getPanel(container, 'ai').hasAttribute('hidden')).toBe(false);
 

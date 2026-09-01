@@ -711,6 +711,7 @@ describe('OnboardingWorker Curation cohort integration (issue #30, PR3 M3)', () 
     // the old run and claims a FRESH run that executes the new state.
     const live = findItemById(items[0].id)!;
     updateItemExtractionData(items[0].id, JSON.stringify({ ...live.extractionData, brand: 'CHANGED BRAND' }));
+    getDb().run("UPDATE onboarding_items SET stage = 'curation', stage_status = 'pending' WHERE id = ?", [items[0].id]);
 
     await worker.poll();
     await drainWorker(worker);

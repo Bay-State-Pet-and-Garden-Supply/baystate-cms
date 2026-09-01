@@ -663,16 +663,16 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
       confidenceFloor,
     };
   }
-  // Rule 2: an unreviewed member's confident inferred type differs from the cohort's reviewed type -> conflicted
-  // (never silently coexist: the unreviewed member would curate under one profile while the cohort execution type drives the reviewed member).
-  if (reviewedIds.length === 1 && unreviewedInferredIds.some(id => id !== reviewedIds[0])) {
+  // Rule 2: any member's confident inferred type differs from the cohort's reviewed type -> conflicted
+  // (never silently coexist: a reviewed decision and a differing confident inference on any member must conflict).
+  if (reviewedIds.length === 1 && confidentInferred.some(res => res.inferredTypeId !== reviewedIds[0])) {
     return {
       outcome: 'conflicted',
       productTypeId: null,
       confidence: null,
       memberSupport,
       supportingEvidenceIds: [],
-      contradictingEvidenceIds: unreviewedConfident.flatMap(res => res.supportingEvidenceIds),
+      contradictingEvidenceIds: confidentInferred.flatMap(res => res.supportingEvidenceIds),
       perMember,
       confidenceFloor,
     };

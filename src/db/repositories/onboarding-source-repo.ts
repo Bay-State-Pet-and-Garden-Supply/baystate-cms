@@ -31,17 +31,19 @@ export interface DiscoveryRunRow {
 }
 
 export type DiscoveryRunStep =
+  // Active steps in sitemap & local-index discovery pipeline
   | 'preflight'
   | 'sitemap_fetch'
   | 'sitemap_match'
-  | 'official_search'
-  | 'identifier_search'
-  | 'name_consolidation'
-  | 'name_search'
   | 'variant_resolution'
   | 'page_verification'
   | 'ranking'
-  | 'applying_outcome';
+  | 'applying_outcome'
+  // Legacy SERP-era steps retained for historical discovery trace audit
+  | 'official_search'
+  | 'identifier_search'
+  | 'name_consolidation'
+  | 'name_search';
 
 export type DiscoveryRunOutcome =
   | 'auto_selected'

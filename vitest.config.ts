@@ -53,12 +53,8 @@ export default defineConfig({
       'src/tests/unit/taxonomy-release-v4.test.ts',
       'src/tests/unit/classification-model-call-repo.test.ts',
       'src/tests/unit/classification-run-routes.test.ts',
-      'src/tests/unit/source-discovery.test.ts',
       'src/tests/unit/profile-generation-repo.test.ts',
       'src/tests/unit/profile-promoter.test.ts',
-      'src/tests/unit/serper-cache-integration.test.ts',
-      'src/tests/unit/serper-cache-repo.test.ts',
-      'src/tests/unit/price-supplementer.test.ts',
       'src/tests/unit/sitemap-cache-repo.test.ts',
       'src/tests/unit/sitemap-fetcher.test.ts',
       'src/tests/unit/sitemap-matcher.test.ts',
@@ -69,6 +65,7 @@ export default defineConfig({
       'src/tests/unit/llm-client-task-routing.test.ts',
       // bun:sqlite suites missing from the excludes at 0e9a242 (vitest
       // cannot collect them); registered in package.json test:db
+      'src/tests/unit/onboarding-variant-selection-route.test.ts',
       'src/tests/unit/packaging-ocr-stage.test.ts',
       'src/tests/unit/packaging-ocr-shadow.test.ts',
       'src/tests/unit/packaging-ocr-consumer-wiring.test.ts',

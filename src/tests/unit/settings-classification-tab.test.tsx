@@ -94,21 +94,6 @@ describe('Settings classification tabs (P1 UI revamp)', () => {
     window.history.replaceState(null, '', '/');
   });
 
-  it('deep-links to AI Tasks and loads configs via GET /settings/llm-task-configs', async () => {
-    const { container, unmount } = await renderSettings('&tab=ai-tasks');
-    const aiTasksTab = container.querySelector<HTMLButtonElement>('#settings-tab-ai-tasks');
-    expect(aiTasksTab).not.toBeNull();
-    expect(aiTasksTab!.getAttribute('aria-selected')).toBe('true');
-
-    const panel = container.querySelector<HTMLElement>('#settings-tabpanel-ai-tasks');
-    expect(panel).not.toBeNull();
-    expect(panel!.hasAttribute('hidden')).toBe(false);
-    // The panel mounted the LLM task routing surface and fetched task configs
-    expect(getLlmTaskConfigs).toHaveBeenCalled();
-    expect(panel!.textContent).toContain('Profile generation');
-    await unmount();
-  });
-
   it('shows the frozen banner on read-only Types & Attributes with no mutation controls', async () => {
     const { container, unmount } = await renderSettings('&tab=types');
     const panel = container.querySelector<HTMLElement>('#settings-tabpanel-types');

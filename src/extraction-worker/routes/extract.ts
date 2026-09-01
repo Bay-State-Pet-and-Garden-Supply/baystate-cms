@@ -65,7 +65,8 @@ async function resolveVariantGate(
   let matrix = parseVariantMatrix(html, finalUrl);
   let shopifyJsFetched = false;
   if (!matrix || matrix.candidates.length <= 1) {
-    const isShopifyUrl = finalUrl.includes('/products/');
+    const isShopify = /\/cdn\/shop\//.test(html) || /Shopify\.theme/.test(html) || /shopify\.com/i.test(html) || /window\.Shopify/i.test(html);
+    const isShopifyUrl = isShopify && finalUrl.includes('/products/');
     if (isShopifyUrl) {
       try {
         const jsUrl = finalUrl.split('?')[0].split('#')[0].replace(/\/$/, '') + '.js';

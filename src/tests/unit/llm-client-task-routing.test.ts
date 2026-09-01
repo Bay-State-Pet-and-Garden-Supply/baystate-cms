@@ -10,7 +10,7 @@
  * the test database via the `api_keys` table.
  */
 
-import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach, spyOn } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -73,6 +73,8 @@ describe('LLM Client — task-specific routing', () => {
     upsertApiKey('deepseek', 'sk-deepseek-test', null, 'deepseek-default');
     upsertApiKey('openai', 'sk-openai-test', null, 'gpt-4o-mini');
     upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'llama3');
+    // Clear seeded AI compute routes so legacy task routing is active
+    getDb().run('DELETE FROM ai_workload_routes');
   });
 
   afterAll(() => {
@@ -517,7 +519,7 @@ describe('Protected classification operations — model-policy gateway (issue #1
         modelPolicy: view,
         protectedOperation: 'evidence_extraction',
       });
-      expect(config?.provider).toBe('office-desktop');
+      expect(config?.provider).toBe('office-desktop' as any);
       expect(config?.model).toBe('qwen3.8:27b');
       expect(config?.baseUrl).toBe('http://192.168.7.20:1234/v1');
 
@@ -661,7 +663,7 @@ describe('Protected classification operations — model-policy gateway (issue #1
   });
 
   test('discovery name consolidation logs a redacted UPC, never the raw value', async () => {
-    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const spy = spyOn(console, 'log').mockImplementation(() => {});
     try {
         const view = buildModelPolicyView(
         {
@@ -712,7 +714,7 @@ describe('Protected classification operations — model-policy gateway (issue #1
       );
     }) as unknown as typeof fetch;
     globalThis.fetch = mock;
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spy = spyOn(console, 'warn').mockImplementation(() => {});
     const view = buildModelPolicyView(
       {
         defaultProvider: 'deepseek',
@@ -782,7 +784,7 @@ describe('Protected classification operations — model-policy gateway (issue #1
       throw new Error('{"api_key":"supersecret"} Authorization: Basic dXNlcjpwYXNz');
     }) as unknown as typeof fetch;
     globalThis.fetch = mock;
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spy = spyOn(console, 'warn').mockImplementation(() => {});
     const view = buildModelPolicyView(
       {
         defaultProvider: 'deepseek',
@@ -999,10 +1001,10 @@ describe('Protected classification operations — model-policy gateway (issue #1
       })) as unknown as typeof fetch;
     const { consolidateProductName } = await import('../../onboarding/llm-client');
     const logLines: string[] = [];
-    const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+    const logSpy = spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       logLines.push(args.map(String).join(' '));
     });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    const errSpy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
       logLines.push(args.map(String).join(' '));
     });
     try {

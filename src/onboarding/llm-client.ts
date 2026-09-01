@@ -1466,7 +1466,7 @@ export async function consolidateProductName(
 - Brand Hint: "${brandHint || 'Unknown'}"
 - UPC/Barcode: "${upc}"
 
-We searched Google for the UPC and got these top results:
+Candidate product page hints for the UPC:
 ${itemsText}
 
 Task:
