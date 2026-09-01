@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { sha256 } from './hash';
 
 export type CanonicalJsonPrimitive = string | number | boolean | null;
 export type CanonicalJsonValue =
@@ -186,7 +186,8 @@ function canonicalJsonUtf8(value: unknown): Uint8Array {
 }
 
 export function sha256Hex(input: string | Uint8Array): string {
-  return createHash('sha256').update(input).digest('hex');
+  const str = typeof input === 'string' ? input : new TextDecoder().decode(input);
+  return sha256(str);
 }
 
 export function hashCanonicalJson(value: unknown): string {

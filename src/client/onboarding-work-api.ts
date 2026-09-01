@@ -136,18 +136,66 @@ export async function getItemWorkState(itemId: string): Promise<{ workState: Onb
 
 // ─── Bulk approval ─────────────────────────────────────────────────────────────
 
+function generateIdempotencyKey(): string {
+  try {
+    // Browser / Bun
+    if (typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function') {
+      return (crypto as any).randomUUID();
+    }
+  } catch {}
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /**
  * Bulk approval of reviewed items. Per-item structured outcomes; approval
  * NEVER exports anything. Unreviewed items are rejected by the server.
+ * Idempotency-Key header engages scoped receipt replay (DB receipt is authority).
  */
 export async function approveItems(
   batchId: string,
   itemIds: string[],
-): Promise<ApproveItemsResponse> {
-  return request<ApproveItemsResponse>(`/batches/${batchId}/approve`, {
+  opts?: { idempotencyKey?: string },
+): Promise<ApproveItemsResponse & { receiptId?: string; principal?: string }> {
+  const key = opts?.idempotencyKey ?? generateIdempotencyKey();
+  return request<ApproveItemsResponse & { receiptId?: string; principal?: string }>(`/batches/${batchId}/approve`, {
     method: 'POST',
+    headers: { 'Idempotency-Key': key },
     body: JSON.stringify({ itemIds }),
   });
+}
+
+export interface CreateExportDraftsResponse {
+  results: Array<{ itemId: string; status: string; reason: string | null }>;
+  createdCount: number;
+  rejectedCount: number;
+  rejected: Array<{ itemId: string; reason: string }>;
+  created: string[];
+  changeSetId: string | null;
+  audited: boolean;
+  receiptId: string;
+  principal: string;
+}
+
+/**
+ * Create export drafts (change set) for approved items. Separate operation
+ * from approval with its own idempotency lifecycle (catalog_exporter).
+ * Header Idempotency-Key is required for receipt replay; generated per logical operation.
+ */
+export async function createExportDrafts(
+  batchId: string,
+  itemIds: string[],
+  opts?: { idempotencyKey?: string },
+): Promise<CreateExportDraftsResponse> {
+  const key = opts?.idempotencyKey ?? generateIdempotencyKey();
+  return request<CreateExportDraftsResponse>(`/batches/${batchId}/create-export-drafts`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': key },
+    body: JSON.stringify({ itemIds }),
+  });
+}
+
+export function createIdempotencyKey(): string {
+  return generateIdempotencyKey();
 }
 
 // ─── Domain-level release ──────────────────────────────────────────────────────

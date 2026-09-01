@@ -14,7 +14,7 @@
  * the Batch Workspace UI.
  */
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { sha256 } from '../hash';
 import { PipelineStageEnum, StageStatusEnum, SourceTypeEnum } from './onboarding';
 
 // ─── Categories ─────────────────────────────────────────────────────────────────
@@ -393,7 +393,7 @@ export function computeWorkStateFilterHash(filters: WorkStateFilters): string {
   if (filters.cohortId && filters.cohortId.trim()) canonical.cohortId = filters.cohortId.trim();
   if (filters.reviewState) canonical.reviewState = filters.reviewState;
   const serialized = JSON.stringify(canonical, Object.keys(canonical).sort());
-  return createHash('sha256').update(serialized, 'utf8').digest('hex').slice(0, 16);
+  return sha256(serialized).slice(0, 16);
 }
 
 export function encodeWorkStateCursor(payload: WorkStateCursorPayload): string {

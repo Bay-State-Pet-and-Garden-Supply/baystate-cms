@@ -1,6 +1,6 @@
 // fallow-ignore-file unused-export
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { sha256 } from '../hash';
 import { SourceTypeEnum } from './onboarding';
 import { ReviewStateEnum } from './onboarding-work-state';
 
@@ -153,7 +153,7 @@ export function computeReviewQueueFilterHash(filters: ReviewQueueFilters): strin
     canonical.q = filters.q.trim().toLowerCase();
   }
   const serialized = JSON.stringify(canonical, Object.keys(canonical).sort());
-  return createHash('sha256').update(serialized, 'utf8').digest('hex').slice(0, 16);
+  return sha256(serialized).slice(0, 16);
 }
 
 /** Encode cursor payload to base64url string. */

@@ -38,6 +38,11 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
   const [showApproveAllConfirm, setShowApproveAllConfirm] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [isDegraded, setIsDegraded] = useState(false);
+  const idempotencyKeyRef = useRef<string | null>(null);
+  // Retain key per logical operation; new selection gets new key
+  useEffect(() => {
+    idempotencyKeyRef.current = null;
+  }, [JSON.stringify(selection.selectedIds)]);
 
   const loadEligible = useCallback(async () => {
     try {
@@ -114,8 +119,21 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
       setBusy(true);
       setError(null);
       setNotice(null);
+      // Generate and retain idempotency key for logical operation/retry (double-click/network retry retains same key)
+      if (!idempotencyKeyRef.current) {
+        try {
+          idempotencyKeyRef.current = typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function'
+            ? (crypto as any).randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        } catch {
+          idempotencyKeyRef.current = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        }
+      }
+      const currentKey = idempotencyKeyRef.current as string;
       try {
-        const res = await approveItems(batchId, ids);
+        const res = await approveItems(batchId, ids, { idempotencyKey: currentKey });
+        // Success or idempotent replay: clear key so next logical operation gets a new one
+        idempotencyKeyRef.current = null;
         setResult(res);
         const summary = summarizeOutcomes(res.results);
         if (summary.rejectedCount === 0) {
