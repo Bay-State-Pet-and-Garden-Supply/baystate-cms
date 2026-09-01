@@ -531,14 +531,10 @@ export function createExportDraftsWithReceipt(input: {
       for (const id of validIds) {
         const item = db.query('SELECT upc FROM onboarding_items WHERE id = ?').get(id) as { upc: string } | undefined;
         if (!item) { rejected.push({ itemId: id, reason: 'item_not_found' }); continue; }
-        // Check if already in change set? Allow duplicate? Just insert
+        // Unexpected draft-insert errors must escape the transaction to ensure all-or-nothing rollback (no partially persisted change_sets/audit/receipt)
         const draftId = randomUUID();
-        try {
-          db.query(`INSERT INTO change_set_items (id, change_set_id, sku, operation, draft_json, base_json, draft_hash, validation_status, created_at, updated_at) VALUES (?, ?, ?, 'create', ?, NULL, ?, 'pending', ?, ?)`).run(draftId, csId, item.upc, JSON.stringify({ itemId: id, upc: item.upc }), 'hash-' + id.slice(0,8), now, now);
-          created.push(id);
-        } catch (e) {
-          rejected.push({ itemId: id, reason: 'draft_create_failed' });
-        }
+        db.query(`INSERT INTO change_set_items (id, change_set_id, sku, operation, draft_json, base_json, draft_hash, validation_status, created_at, updated_at) VALUES (?, ?, ?, 'create', ?, NULL, ?, 'pending', ?, ?)`).run(draftId, csId, item.upc, JSON.stringify({ itemId: id, upc: item.upc }), 'hash-' + id.slice(0,8), now, now);
+        created.push(id);
       }
     }
 

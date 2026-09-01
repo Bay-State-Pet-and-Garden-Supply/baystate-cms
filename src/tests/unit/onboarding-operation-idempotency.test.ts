@@ -57,6 +57,56 @@ function makeReviewBatch(itemCount = 2): { batchId: string; itemIds: string[] } 
   return { batchId: batch.id, itemIds: ids };
 }
 
+function injectFault(snippet: string, errorMsg: string): () => void {
+  const db: any = getDb();
+  const originalQuery = db.query.bind(db);
+  const originalRun = db.run.bind(db);
+  db.query = (sql: string, ...rest: any[]) => {
+    const stmt: any = originalQuery(sql, ...rest);
+    if (typeof sql === 'string' && sql.includes(snippet)) {
+      const origRun = stmt.run?.bind(stmt);
+      if (origRun) stmt.run = (...args: any[]) => { throw new Error(errorMsg); };
+      const origGet = stmt.get?.bind(stmt);
+      if (origGet) stmt.get = (...args: any[]) => { throw new Error(errorMsg); };
+      const origAll = stmt.all?.bind(stmt);
+      if (origAll) stmt.all = (...args: any[]) => { throw new Error(errorMsg); };
+    }
+    return stmt;
+  };
+  db.run = (sql: string, ...args: any[]) => {
+    if (typeof sql === 'string' && sql.includes(snippet)) throw new Error(errorMsg);
+    return originalRun(sql, ...args);
+  };
+  return () => {
+    db.query = originalQuery;
+    db.run = originalRun;
+  };
+}
+
+function assertAllOrNothing(batchId: string, itemIds: string[] = [], opts: { expectedApproved?: number, expectedPromoted?: number } = {}) {
+  const db = getDb();
+  const receipt = db.query('SELECT COUNT(*) as c FROM onboarding_operation_receipts WHERE batch_id = ?').get(batchId) as { c: number };
+  expect(receipt.c).toBe(0);
+  const expectedApproved = opts.expectedApproved ?? 0;
+  const expectedPromoted = opts.expectedPromoted ?? 0;
+  const approved = db.query('SELECT COUNT(*) as c FROM onboarding_review_state WHERE batch_id = ? AND approved_at IS NOT NULL').get(batchId) as { c: number };
+  expect(approved.c).toBe(expectedApproved);
+  const promoted = db.query("SELECT COUNT(*) as c FROM onboarding_items WHERE batch_id = ? AND stage = 'promotion'").get(batchId) as { c: number };
+  expect(promoted.c).toBe(expectedPromoted);
+  const batchAudits = db.query('SELECT COUNT(*) as c FROM audit_log WHERE entity_id = ?').get(batchId) as { c: number };
+  let totalAudits = batchAudits.c;
+  if (itemIds.length > 0) {
+    const placeholders = itemIds.map(() => '?').join(',');
+    const itemAudits = db.query(`SELECT COUNT(*) as c FROM audit_log WHERE entity_id IN (${placeholders})`).get(...itemIds) as { c: number };
+    totalAudits += itemAudits.c;
+  }
+  expect(totalAudits).toBe(0);
+  const cs = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+  expect(cs.c).toBe(0);
+  const csi = db.query('SELECT COUNT(*) as c FROM change_set_items').get() as { c: number };
+  expect(csi.c).toBe(0);
+}
+
 async function postApprove(batchId: string, itemIds: string[], headers: Record<string, string> = {}, bodyExtra: any = {}) {
   const body = { itemIds, reviewerId: 'evil-operator', ...bodyExtra };
   const req = new Request(`http://localhost/api/onboarding/batches/${batchId}/approve`, {
@@ -384,5 +434,141 @@ describe('approval idempotency and server-derived principal', () => {
     // Approval batch audit still correct
     const approveAudit = db.query("SELECT details_json FROM audit_log WHERE entity_id = ? AND action = 'bulk_approve' ORDER BY created_at DESC LIMIT 1").get(approveBatch) as { details_json: string } | undefined;
     expect(approveAudit).toBeTruthy();
+  });
+
+  it('concurrent approval with same Idempotency-Key does not double-advance', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const { batchId, itemIds } = makeReviewBatch(2);
+    const key = 'idem-concurrent-' + randomUUID();
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const [first, second] = await Promise.all([
+      postApprove(batchId, itemIds, headers),
+      postApprove(batchId, itemIds, headers),
+    ]);
+    // Both should succeed or one replays; neither should 500
+    expect([first.status, second.status].every(s => s === 200)).toBe(true);
+    expect(first.json.receiptId).toBeTruthy();
+    expect(second.json.receiptId).toBeTruthy();
+    expect(first.json.receiptId).toBe(second.json.receiptId);
+    expect(first.json).toEqual(second.json);
+    expect(first.json.approvedCount).toBe(2);
+    // Exactly once: onboarding_review_state approved count and stage promotion
+    const db = getDb();
+    const approvedRows = db.query('SELECT COUNT(*) as c FROM onboarding_review_state WHERE batch_id = ? AND approved_at IS NOT NULL').get(batchId) as { c: number };
+    expect(approvedRows.c).toBe(2);
+    const promotedRows = db.query('SELECT COUNT(*) as c FROM onboarding_items WHERE batch_id = ? AND stage = ?').get(batchId, 'promotion') as { c: number };
+    expect(promotedRows.c).toBe(2);
+    const receipt = findByScopedIdempotencyKey(workspaceId, batchId, 'approve', key);
+    expect(receipt).toBeTruthy();
+    expect(receipt!.id).toBe(first.json.receiptId);
+    // Audit written exactly once for this batch+key
+    const auditRows = db.query("SELECT COUNT(*) as c FROM audit_log WHERE entity_id = ? AND action = 'bulk_approve'").get(batchId) as { c: number };
+    // At least one audit; concurrent should not double-count
+    expect(auditRows.c).toBe(1);
+  });
+
+  it('fault-injection during receipt claim rolls back with no partial state', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const { batchId, itemIds } = makeReviewBatch(2);
+    const key = 'idem-fault-claim-' + randomUUID();
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const db = getDb();
+    const beforeApproved = (db.query('SELECT COUNT(*) as c FROM onboarding_review_state WHERE batch_id = ? AND approved_at IS NOT NULL').get(batchId) as { c: number }).c;
+    const beforeReceipt = findByScopedIdempotencyKey(workspaceId, batchId, 'approve', key);
+    expect(beforeReceipt).toBeFalsy();
+    const restore = injectFault('INSERT INTO onboarding_operation_receipts', 'injected receipt claim failure');
+    let res: any;
+    try {
+      res = await postApprove(batchId, itemIds, headers);
+    } catch {}
+    restore();
+    if (res) expect([500, 409].includes(res.status)).toBe(true);
+    assertAllOrNothing(batchId, itemIds);
+  });
+
+  it('fault-injection during approval mutation rolls back receipt and audit', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const { batchId, itemIds } = makeReviewBatch(2);
+    const key = 'idem-fault-approve-' + randomUUID();
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const beforeReceipt = findByScopedIdempotencyKey(workspaceId, batchId, 'approve', key);
+    expect(beforeReceipt).toBeFalsy();
+    const restore = injectFault('UPDATE onboarding_review_state', 'injected approval mutation failure');
+    let res: any;
+    try { res = await postApprove(batchId, itemIds, headers); } catch {}
+    restore();
+    const db = getDb();
+    if (res) expect([500, 409].includes(res.status)).toBe(true);
+    assertAllOrNothing(batchId, itemIds);
+  });
+
+  it('fault-injection during audit insertion rolls back approval and receipt completion', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const { batchId, itemIds } = makeReviewBatch(2);
+    const key = 'idem-fault-audit-' + randomUUID();
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const restore = injectFault('INSERT INTO audit_log', 'injected audit failure');
+    let res: any;
+    try { res = await postApprove(batchId, itemIds, headers); } catch {}
+    restore();
+    const db = getDb();
+    if (res) expect([500, 409].includes(res.status)).toBe(true);
+    assertAllOrNothing(batchId, itemIds);
+  });
+
+  it('fault-injection during receipt completion leaves no completed receipt without audit', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const { batchId, itemIds } = makeReviewBatch(2);
+    const key = 'idem-fault-complete-' + randomUUID();
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const restore = injectFault('UPDATE onboarding_operation_receipts SET details_json', 'injected receipt completion failure');
+    let res: any;
+    try { res = await postApprove(batchId, itemIds, headers); } catch {}
+    restore();
+    const db = getDb();
+    if (res) expect([500, 409].includes(res.status)).toBe(true);
+    assertAllOrNothing(batchId, itemIds);
+  });
+
+  it('fault-injection during draft insertion rolls back with no partial state', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const batch = createBatch({ workspaceId, name: `ExportDraft-${randomUUID().slice(0,4)}`, fileName: 'd.csv', totalItems: 0 });
+    const rows = Array.from({ length: 2 }, (_, i) => ({
+      upc: `DRAFT-${randomUUID().slice(0,6)}-${i}`,
+      name: `Product ${i}`,
+      brandHint: 'Blue Buffalo',
+      sourceUrl: null,
+      rowNumber: i + 1,
+      stage: 'promotion' as const,
+      stageStatus: 'pending' as const,
+    }));
+    const inserted = insertItems(batch.id, rows, 'promotion' as any, 1);
+    const ids = inserted.map(r => r.id);
+    const db0 = getDb();
+    const now = new Date().toISOString();
+    for (const id of ids) {
+      db0.run(
+        `INSERT INTO onboarding_review_state (item_id, batch_id, reviewed_at, reviewed_by, review_invalidated_at, review_invalidation_reason, approved_at, approved_by, approval_origin, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, 'test', ?, ?)`,
+        [id, batch.id, now, 'tester', now, 'tester', now, now],
+      );
+    }
+    const key = 'export-draft-fault-' + randomUUID();
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const restore = injectFault('INSERT INTO change_set_items', 'injected draft insert failure');
+    let res: any;
+    try {
+      const body = { itemIds: ids };
+      const req = new Request(`http://localhost/api/onboarding/batches/${batch.id}/create-export-drafts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+      });
+      const response = await app.fetch(req);
+      res = { status: response.status, json: await response.json().catch(() => ({})) };
+    } catch {}
+    restore();
+    const db = getDb();
+    if (res) expect([500, 409].includes(res.status)).toBe(true);
+    assertAllOrNothing(batch.id, ids, { expectedApproved: 2, expectedPromoted: 2 });
   });
 });
