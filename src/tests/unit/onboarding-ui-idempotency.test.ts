@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { approveItems, createExportDrafts } from '../../client/onboarding-work-api';
 
 /**
@@ -9,10 +9,10 @@ import { approveItems, createExportDrafts } from '../../client/onboarding-work-a
  */
 
 describe('onboarding UI idempotency — client operation paths (M4)', () => {
-  let fetchSpy: ReturnType<typeof spyOn>;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    fetchSpy = spyOn(globalThis as any, 'fetch').mockImplementation(
+    fetchSpy = vi.spyOn(globalThis as any, 'fetch').mockImplementation(
       async () =>
         ({
           ok: true,
