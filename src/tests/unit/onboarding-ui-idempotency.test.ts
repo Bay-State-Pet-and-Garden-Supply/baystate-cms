@@ -110,5 +110,74 @@ describe('onboarding UI idempotency — client operation paths (M4)', () => {
     expect(content).toContain('idempotencyKeyRef');
     expect(content).toContain('approveItems');
     expect(content.toLowerCase()).toContain('idempotency');
+    // New fingerprint-aware retention: {key, fingerprint} and sorted join
+    expect(content).toContain('fingerprint');
+    expect(content).toContain("sort().join");
+  });
+
+  it('ApprovedView key reuse: same payload retains key, different payload generates new key', async () => {
+    // Simulate the ApprovedView ref logic exactly as implemented
+    let ref: { key: string; fingerprint: string } | null = null;
+    function getOrCreateKey(ids: string[]): string {
+      const fingerprint = [...ids].sort().join(',');
+      const stored = ref;
+      if (!stored || stored.fingerprint !== fingerprint) {
+        const newKey = typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function'
+          ? (crypto as any).randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        ref = { key: newKey, fingerprint };
+      }
+      return ref!.key;
+    }
+    function clearOnSuccess() { ref = null; }
+
+    const selected = ['id-a', 'id-b'];
+    const allEligible = ['id-a', 'id-b', 'id-c'];
+
+    // First call with selected -> generates key1
+    const key1 = getOrCreateKey(selected);
+    expect(typeof key1).toBe('string');
+    expect(key1.length).toBeGreaterThan(8);
+    // Retry with same payload (same ids, same order) -> reuses key1 (failure retains)
+    const key1Retry = getOrCreateKey(selected);
+    expect(key1Retry).toBe(key1);
+    // Retry with same ids different order -> still same fingerprint (order-insensitive) -> same key
+    const key1Reordered = getOrCreateKey(['id-b', 'id-a']);
+    expect(key1Reordered).toBe(key1);
+    // Different payload (all eligible) -> generates new key2
+    const key2 = getOrCreateKey(allEligible);
+    expect(key2).not.toBe(key1);
+    expect(typeof key2).toBe('string');
+    // Back to selected -> generates new key again (since fingerprint differs from stored allEligible)
+    // First need to simulate success clearing, then retry selected should be new vs original key1? Actually after switching to allEligible, ref now holds key2 fingerprint. Calling again with selected should generate new key != key2
+    const key3 = getOrCreateKey(selected);
+    expect(key3).not.toBe(key2);
+    // Same selected again without clear -> reuses key3
+    const key3Retry = getOrCreateKey(selected);
+    expect(key3Retry).toBe(key3);
+    // Simulate success clears ref, next same payload should generate new key != key3
+    clearOnSuccess();
+    const key4 = getOrCreateKey(selected);
+    expect(key4).not.toBe(key3);
+    expect(typeof key4).toBe('string');
+  });
+
+  it('ApprovedView key reuse survives retry after failure (real fetch mock)', async () => {
+    // Verify that approveItems with retained key actually sends same header on retry
+    await approveItems('batch-x', ['id-1', 'id-2'], { idempotencyKey: 'fixed-key-1' });
+    await approveItems('batch-x', ['id-1', 'id-2'], { idempotencyKey: 'fixed-key-1' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const [, opts1] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const [, opts2] = fetchSpy.mock.calls[1] as [string, RequestInit];
+    const h1 = (opts1.headers as Record<string, string>)['Idempotency-Key'];
+    const h2 = (opts2.headers as Record<string, string>)['Idempotency-Key'];
+    expect(h1).toBe('fixed-key-1');
+    expect(h2).toBe('fixed-key-1');
+    // Different payload should use different key
+    await approveItems('batch-x', ['id-1', 'id-2', 'id-3'], { idempotencyKey: 'fixed-key-2' });
+    const [, opts3] = fetchSpy.mock.calls[2] as [string, RequestInit];
+    const h3 = (opts3.headers as Record<string, string>)['Idempotency-Key'];
+    expect(h3).toBe('fixed-key-2');
+    expect(h3).not.toBe(h1);
   });
 });

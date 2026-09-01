@@ -38,11 +38,7 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
   const [showApproveAllConfirm, setShowApproveAllConfirm] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [isDegraded, setIsDegraded] = useState(false);
-  const idempotencyKeyRef = useRef<string | null>(null);
-  // Retain key per logical operation; new selection gets new key
-  useEffect(() => {
-    idempotencyKeyRef.current = null;
-  }, [JSON.stringify(selection.selectedIds)]);
+  const idempotencyKeyRef = useRef<{ key: string; fingerprint: string } | null>(null);
 
   const loadEligible = useCallback(async () => {
     try {
@@ -119,17 +115,22 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
       setBusy(true);
       setError(null);
       setNotice(null);
-      // Generate and retain idempotency key for logical operation/retry (double-click/network retry retains same key)
-      if (!idempotencyKeyRef.current) {
+      // Retain {key, fingerprint} per logical operation. Generate new key whenever requested ids fingerprint differs.
+      // Fingerprint is order-insensitive sorted join, so same logical payload reuses key (retry), different payload (selected vs all) gets new key — avoids 409 payload_mismatch.
+      const fingerprint = [...ids].sort().join(',');
+      const stored = idempotencyKeyRef.current;
+      if (!stored || stored.fingerprint !== fingerprint) {
+        let newKey: string;
         try {
-          idempotencyKeyRef.current = typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function'
+          newKey = typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function'
             ? (crypto as any).randomUUID()
             : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         } catch {
-          idempotencyKeyRef.current = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+          newKey = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         }
+        idempotencyKeyRef.current = { key: newKey, fingerprint };
       }
-      const currentKey = idempotencyKeyRef.current as string;
+      const currentKey = idempotencyKeyRef.current!.key;
       try {
         const res = await approveItems(batchId, ids, { idempotencyKey: currentKey });
         // Success or idempotent replay: clear key so next logical operation gets a new one
