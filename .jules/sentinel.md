@@ -15,3 +15,7 @@
 **Learning:** Standard WHATWG URL parsers reformat IPv6-mapped IPv4 addresses to hexadecimal word pairs (`::ffff:7f00:1`). SSRF checks that expect dotted-decimal IPv4 suffixes after `::ffff:` fail on normalized URL hostnames.
 **Prevention:** Convert hexadecimal 16-bit word pairs following `::ffff:` into canonical dotted-decimal IPv4 octets before evaluating against private CIDR blocks.
 
+## 2025-05-21 - Non-Shorthand & Unique-Local IPv6 SSRF Bypass in IP Classification
+**Vulnerability:** The IP classification helper `classifyIp()` in `src/shared/ssrf.ts` relied on naive string prefix checks (e.g., `lower === '::1'`, `lower.startsWith('fe8')`) to identify IPv6 loopback, link-local, and IPv4-mapped addresses. Alternate IPv6 representations such as non-shorthand zero-padded addresses (`0000:0000:0000:0000:0000:0000:0000:0001` or `0:0:0:0:0:ffff:127.0.0.1`) or unique-local IPv6 ranges (`fc00::/7` like `fc00::1`, `fd00::1`) bypassed these prefix checks and evaluated as `public`, opening SSRF risks.
+**Learning:** IPv6 addresses have multiple valid textual representations (zero-padded 4-hex-digit words, `::` zero compression at different positions, zone identifiers, and IPv4-embedded forms). Naive string matching fails to classify valid IPv6 representations.
+**Prevention:** Always parse IPv6 strings into canonical 8-element 16-bit numerical arrays before matching against CIDR ranges (`fc00::/7`, `fe80::/10`, `::1/128`, `::/128`, etc.) or extracting embedded IPv4 octets.
