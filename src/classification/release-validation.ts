@@ -1116,14 +1116,33 @@ function effectiveScopeOf(
   return null;
 }
 
+export interface CanonicalHierarchyReleaseCoreResult<TNode extends V4HierarchyNode | V5HierarchyNode> {
+  report: ReleaseValidationReport;
+  parsed: {
+    manifest: V4Manifest | null;
+    hierarchy: TNode[];
+    facetProfiles: V4FacetProfile[];
+    legacyMappings: V4LegacyMapping[];
+    attributes: ProductAttributeConfigV2[];
+    exportMappings: AttributeMappingConfigV2[];
+    pageProjections: V4PageProjection[];
+    guidance: GuidanceConfigV2[];
+    pagePolicy: PageAssignmentPolicyV2 | null;
+  };
+}
+
 /**
- * Validate a v4 canonical-hierarchy release directory. Same philosophy as the
- * v3 gate: a broken hierarchy must be impossible to load. Reuses the v3
- * attribute/export-mapping checks (Rule A below) and adds the hierarchy
- * invariants. Returns a report; never throws (callers use
- * `loadTaxonomyReleaseV4` / `assertReleaseValidV4` to fail closed).
+ * Shared validation core for canonical hierarchy releases (v4, v5, etc.).
+ * Verifies file presence, manifest schema, sha256 file hashes, node uniqueness,
+ * parent references, root structure (exactly 10 roots), reachability / DFS cycle protection,
+ * classifiable profile relationships, profile references/provenance/fingerprints,
+ * legacy migration bijection & completeness, ShopSite page projections & species scope,
+ * manifest counts & directory identity, export duality, proposer coverage, and species safety.
  */
-export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidationReport {
+export function validateCanonicalHierarchyReleaseCore<TNode extends V4HierarchyNode | V5HierarchyNode>(
+  releaseDir: string,
+  hierarchySchema: { safeParse(v: unknown): { success: true; data: { entries: TNode[]; bundleOrigin: unknown } } | { success: false; error?: any } },
+): CanonicalHierarchyReleaseCoreResult<TNode> {
   const findings: ReleaseValidationFinding[] = [];
   const dir = resolveReleaseDir(releaseDir);
   const report: ReleaseValidationReport = {
@@ -1137,7 +1156,7 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
     findings.push({ code, message, severity: 'error' });
   };
 
-  // ── Read + parse every v4 file (missing/malformed = error) ─────────────
+  // ── Read + parse every file (missing/malformed = error) ─────────────
   const rawFiles: Record<string, unknown> = {};
   for (const fileName of V4_RELEASE_FILES) {
     const filePath = path.join(dir, fileName);
@@ -1162,7 +1181,7 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   const manifest = manifestParsed?.success ? manifestParsed.data : null;
 
   // ── Envelope parsing ──────────────────────────────────────────────────────
-  const hierarchy = parseV4Envelope(rawFiles['hierarchy.json'], V4HierarchySchema, 'hierarchy.json', findings)?.entries ?? [];
+  const hierarchy = parseV4Envelope(rawFiles['hierarchy.json'], hierarchySchema, 'hierarchy.json', findings)?.entries ?? [];
   const facetProfiles = parseV4Envelope(rawFiles['facet-profiles.json'], V4FacetProfilesSchema, 'facet-profiles.json', findings)?.entries ?? [];
   const legacyMappings = parseV4Envelope(rawFiles['legacy-mappings.json'], V4LegacyMappingsSchema, 'legacy-mappings.json', findings)?.entries ?? [];
   const attributes = parseV4Envelope(rawFiles['attributes.json'], AttributesFileV2Schema, 'attributes.json', findings)?.entries ?? [];
@@ -1207,7 +1226,7 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   }
 
   // ── Rule 2: parentId references; roots exist; exactly 10 roots ───────────
-  const nodeById = new Map<string, V4HierarchyNode>();
+  const nodeById = new Map<string, TNode>();
   for (const node of hierarchy) nodeById.set(node.id, node);
 
   {
@@ -1377,9 +1396,6 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   }
 
   // ── Rule 5d: independently recompute v3 profile fingerprints ────────────
-  // Stored fingerprints are claims emitted by the builder. Recompute the
-  // source-side value from the immutable v3 sibling release so a consistently
-  // wrong v3Fingerprint/v4Fingerprint pair cannot pass Rule 5c.
   {
     const v3DirForProfiles = path.resolve(path.dirname(dir), 'bay-state-v3');
     const v3ProfilesFile = path.join(v3DirForProfiles, 'attribute-profiles.json');
@@ -1414,10 +1430,6 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   // ── Rule 6: leaf bijection with v3 product-types.json ────────────────────
   {
     const leafNodes = hierarchy.filter(n => n.classifiable);
-    // v4-native leaves (derivation type_native, e.g. fish-food) carry NO
-    // legacy v3 type — they are legitimate additions beyond the v3 universe
-    // (ChatGPT fix-phase review). Only migrated leaves must satisfy the
-    // v3 bijection.
     const migratedLeaves = leafNodes.filter(n => n.derivation !== 'type_native');
     for (const leaf of migratedLeaves) {
       if (!leaf.legacyTypeIds || leaf.legacyTypeIds.length === 0) {
@@ -1449,8 +1461,6 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
       }
 
       if (v3TypeIds.length > 0) {
-        // Every v3 type must appear in EXACTLY ONE leaf's legacyTypeIds, and
-        // every leaf legacyTypeId must be a known v3 type (bijection).
         const leafTypeIdCounts = new Map<string, number>();
         const unknownLeafTypes: string[] = [];
         for (const leaf of leafNodes) {
@@ -1528,17 +1538,11 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
           } else if (!node.classifiable) {
             fail('canonical_leaf_node_not_classifiable', `Canonical leaf page "${page.pageName}" references non-classifiable node "${page.nodeId}".`);
           } else {
-            // Page→node scope compatibility (ChatGPT fix-phase review #4): a
-            // page whose name is confidently scoped to one animal domain must
-            // not ratify to a node in a different domain. Deterministic
-            // species check: page starts with a species token.
             const pageSpecies = pageSpeciesHint(page.pageName);
             const nodeScope = effectiveScopeOf(node.id, nodeById);
             if (pageSpecies && nodeScope && pageSpecies !== nodeScope && nodeScope !== 'wild_bird') {
               fail('page_scope_mismatch', `Page "${page.pageName}" is ${pageSpecies}-scoped but maps to node "${page.nodeId}" (scope ${nodeScope}).`);
             }
-            // wild-bird pages may only map to nodes under the wild-bird family
-            // (never deer-wildlife-feed or the department root).
             if (pageSpecies === 'wild_bird' && !isDescendantOf(node.id, 'wild-bird', nodeById)) {
               fail('page_scope_mismatch', `Wild-bird page "${page.pageName}" maps to "${page.nodeId}" outside the wild-bird family.`);
             }
@@ -1612,8 +1616,6 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
       }
     }
 
-    // Export duality set-equality (v3 Rule 8b): export-mappings must equal
-    // exactly the projection of shopsite-disposition attributes.
     const expectedByAttribute = new Map<string, string>();
     for (const attr of attributes) {
       if (attr.exportDisposition?.kind === 'shopsite') {
@@ -1652,8 +1654,6 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   }
 
   // ── Rule A2 (P2 disposition codification): exported ⇔ proposer ──────────
-  // Facet profiles are the v4 proposer registry; universal attributes are
-  // proposed by the universal tier instead. See assertExportedAttributesHaveProposers.
   {
     const profiledAttributeIds = new Set<string>();
     for (const profile of facetProfiles) {
@@ -1668,9 +1668,6 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   }
 
   // ── Rule 10: species-safety cross-check ──────────────────────────────────
-  // Scope metadata is part of the v4 hierarchy contract. The legacy-type
-  // bijection remains a second structural safeguard against cross-species
-  // duplication.
   {
     const dogGroup = hierarchy.find(n => n.id === 'dog');
     const catGroup = hierarchy.find(n => n.id === 'cat');
@@ -1685,16 +1682,11 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
   }
 
   // ── Rule 10b: scope inheritance safety (ChatGPT fix-phase review #4) ────
-  // Every node's effective scope must equal its nearest declared ancestor
-  // scope; a descendant may never contradict its parent's scope. Also verify
-  // scoped branches are internally consistent (fish under pet-supplies,
-  // wild-bird under wild-bird-wildlife with deer OUTSIDE the wild-bird
-  // family).
   {
     const nodeByIdMap = new Map(hierarchy.map(n => [n.id, n]));
-    const declaredScope = (n: V4HierarchyNode | undefined): string | null => n?.scope?.animalDomain ?? null;
-    const effectiveScope = (n: V4HierarchyNode | undefined): string | null => {
-      let cursor: V4HierarchyNode | undefined = n;
+    const declaredScope = (n: TNode | undefined): string | null => n?.scope?.animalDomain ?? null;
+    const effectiveScope = (n: TNode | undefined): string | null => {
+      let cursor: TNode | undefined = n;
       const visited = new Set<string>();
       while (cursor) {
         if (visited.has(cursor.id)) return null; // cycle rule reports it
@@ -1712,7 +1704,6 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
       if (own && ancestorScope && own !== ancestorScope) {
         fail('scope_conflict', `Node "${node.id}" declares scope ${own} but inherits ${ancestorScope} from its ancestor.`);
       }
-      // Classifiable leaves must not escape their branch's species.
       if (node.classifiable && inherited === 'dog' && !isDescendantOf(node.id, 'dog', nodeByIdMap)) {
         fail('scope_escape', `Classifiable node "${node.id}" inherits dog scope but is not a descendant of dog.`);
       }
@@ -1720,13 +1711,10 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
         fail('scope_escape', `Classifiable node "${node.id}" inherits cat scope but is not a descendant of cat.`);
       }
     }
-    // deer-wildlife-feed must be OUTSIDE wild-bird (it is a wildlife leaf
-    // directly under the department root, never under the wild-bird family).
     const deer = hierarchy.find(n => n.id === 'deer-wildlife-feed');
     if (deer && isDescendantOf('deer-wildlife-feed', 'wild-bird', nodeByIdMap)) {
       fail('scope_escape', 'deer-wildlife-feed must not be a descendant of the wild-bird family (wildlife is a separate partition).');
     }
-    // fish-food must be under fish.
     const fishFood = hierarchy.find(n => n.id === 'fish-food');
     if (fishFood && !isDescendantOf('fish-food', 'fish', nodeByIdMap)) {
       fail('scope_escape', 'fish-food must be a descendant of the fish browse node.');
@@ -1752,18 +1740,37 @@ export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidation
     }
   }
 
-  return {
-    ok: findings.every(f => f.severity !== 'error'),
-    findings,
-    counts: {
-      productTypes: hierarchy.filter(n => n.classifiable).length,
-      attributes: attributes.length,
-      attributeProfiles: facetProfiles.length,
-      departments: hierarchy.filter(n => n.parentId === null).length,
-      mappings: exportMappings.length,
-    },
-    profileBlastRadii: report.profileBlastRadii,
+  report.ok = findings.every(f => f.severity !== 'error');
+  report.counts = {
+    productTypes: hierarchy.filter(n => n.classifiable).length,
+    attributes: attributes.length,
+    attributeProfiles: facetProfiles.length,
+    departments: hierarchy.filter(n => n.parentId === null).length,
+    mappings: exportMappings.length,
   };
+
+  return {
+    report,
+    parsed: {
+      manifest,
+      hierarchy,
+      facetProfiles,
+      legacyMappings,
+      attributes,
+      exportMappings,
+      pageProjections,
+      guidance,
+      pagePolicy,
+    },
+  };
+}
+
+/**
+ * Validate a v4 canonical-hierarchy release directory.
+ */
+export function validateTaxonomyReleaseV4(releaseDir: string): ReleaseValidationReport {
+  const { report } = validateCanonicalHierarchyReleaseCore(releaseDir, V4HierarchySchema);
+  return report;
 }
 
 /**
@@ -1815,132 +1822,44 @@ export function assertReleaseValidV4(releaseDir: string): ReleaseValidationRepor
 
 /**
  * Validate a v5 release bundle directory.
- * Preserves all v4 taxonomy validation rules while validating `invariantAttributes`
- * on classifiable leaf nodes against facet profiles, attributes, and allowed values.
+ * Preserves all canonical hierarchy validation rules from the core validator, while
+ * strictly validating `invariantAttributes` on leaf nodes:
+ * 1. Non-classifiable nodes must not define non-empty `invariantAttributes`.
+ * 2. Invariants must reference known attributes.
+ * 3. Invariants must be applicable to the node's facet profile (or universal).
+ * 4. Invariants must match single vs array cardinality shapes.
+ * 5. Invariants on controlled attributes must only use allowedValues.
  */
 export function validateTaxonomyReleaseV5(releaseDir: string): ReleaseValidationReport {
-  const findings: ReleaseValidationFinding[] = [];
-  const dir = resolveReleaseDir(releaseDir);
-
+  const { report, parsed } = validateCanonicalHierarchyReleaseCore(releaseDir, V5HierarchySchema);
   const fail = (code: string, message: string) => {
-    findings.push({ code, message, severity: 'error' });
+    report.findings.push({ code, message, severity: 'error' });
+    report.ok = false;
   };
 
-  const rawFiles: Record<string, unknown> = {};
-  for (const fileName of V4_RELEASE_FILES) {
-    const filePath = path.join(dir, fileName);
-    if (!fs.existsSync(filePath)) {
-      fail('missing_release_file', `${fileName} is missing from the release.`);
-      continue;
-    }
-    let text: string;
-    try {
-      text = fs.readFileSync(filePath, 'utf8');
-    } catch (err) {
-      fail('release_file_read_error', `Cannot read ${fileName}: ${err instanceof Error ? err.message : String(err)}`);
-      continue;
-    }
-    try {
-      rawFiles[fileName] = JSON.parse(text);
-    } catch (err) {
-      fail('release_file_parse_error', `${fileName} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  if (findings.length > 0) {
-    return {
-      ok: false,
-      findings,
-      counts: { productTypes: 0, attributes: 0, attributeProfiles: 0, departments: 0, mappings: 0 },
-      profileBlastRadii: [],
-    };
-  }
-
-  // Use V5HierarchySchema to parse hierarchy with invariantAttributes
-  let hierarchy: V5HierarchyNode[] = [];
-  if (rawFiles['hierarchy.json']) {
-    const parsed = V5HierarchySchema.safeParse(rawFiles['hierarchy.json']);
-    if (!parsed.success) {
-      fail('schema_hierarchy_invalid', `hierarchy.json failed v5 schema validation: ${parsed.error.message}`);
-    } else {
-      hierarchy = parsed.data.entries;
-    }
-  }
-
-  // Parse remaining files
-  let facetProfiles: V4FacetProfile[] = [];
-  if (rawFiles['facet-profiles.json']) {
-    const parsed = V4FacetProfilesSchema.safeParse(rawFiles['facet-profiles.json']);
-    if (!parsed.success) {
-      fail('schema_facet_profiles_invalid', `facet-profiles.json failed schema validation: ${parsed.error.message}`);
-    } else {
-      facetProfiles = parsed.data.entries;
-    }
-  }
-
-  let attributes: ProductAttributeConfigV2[] = [];
-  if (rawFiles['attributes.json']) {
-    const parsed = AttributesFileV2Schema.safeParse(rawFiles['attributes.json']);
-    if (!parsed.success) {
-      fail('schema_attributes_invalid', `attributes.json failed schema validation: ${parsed.error.message}`);
-    } else {
-      attributes = parsed.data.entries;
-    }
-  }
-
-  let exportMappings: AttributeMappingConfigV2[] = [];
-  if (rawFiles['export-mappings.json']) {
-    const parsed = AttributeMappingsFileV2Schema.safeParse(rawFiles['export-mappings.json']);
-    if (!parsed.success) {
-      fail('schema_export_mappings_invalid', `export-mappings.json failed schema validation: ${parsed.error.message}`);
-    } else {
-      exportMappings = parsed.data.entries;
-    }
-  }
-
-  let _legacyMappings: V4LegacyMapping[] = [];
-  if (rawFiles['legacy-mappings.json']) {
-    const parsed = V4LegacyMappingsSchema.safeParse(rawFiles['legacy-mappings.json']);
-    if (!parsed.success) {
-      fail('schema_legacy_mappings_invalid', `legacy-mappings.json failed schema validation: ${parsed.error.message}`);
-    } else {
-      _legacyMappings = parsed.data.entries;
-    }
-  }
-
-  let _pageProjections: V4PageProjection[] = [];
-  if (rawFiles['shopsite-projection.json']) {
-    const parsed = V4ShopsiteProjectionSchema.safeParse(rawFiles['shopsite-projection.json']);
-    if (!parsed.success) {
-      fail('schema_page_projections_invalid', `shopsite-projection.json failed schema validation: ${parsed.error.message}`);
-    } else {
-      _pageProjections = parsed.data.entries;
-    }
-  }
-
-  if (findings.length > 0) {
-    return {
-      ok: false,
-      findings,
-      counts: {
-        productTypes: hierarchy.filter(n => n.classifiable).length,
-        attributes: attributes.length,
-        attributeProfiles: facetProfiles.length,
-        departments: hierarchy.filter(n => n.parentId === null).length,
-        mappings: exportMappings.length,
-      },
-      profileBlastRadii: [],
-    };
-  }
-
-  // Validate invariants on classifiable nodes
+  const { hierarchy, facetProfiles, attributes } = parsed;
   const attributeById = new Map(attributes.map(a => [a.id, a]));
   const profileById = new Map(facetProfiles.map(p => [p.id, p]));
 
   for (const node of hierarchy) {
-    if (!node.classifiable || !node.invariantAttributes) continue;
+    const invAttrs = node.invariantAttributes ?? {};
+    const invEntries = Object.entries(invAttrs);
+
+    // Rule 1: Non-classifiable nodes must not define non-empty invariantAttributes
+    if (!node.classifiable) {
+      if (invEntries.length > 0) {
+        fail(
+          'invariant_attributes_on_non_classifiable_node',
+          `Non-classifiable node "${node.id}" must not have invariantAttributes (found: ${Object.keys(invAttrs).join(', ')}). Invariants are only permitted on classifiable leaf nodes.`,
+        );
+      }
+      continue;
+    }
+
+    if (invEntries.length === 0) continue;
+
     const profile = node.facetProfileId ? profileById.get(node.facetProfileId) : undefined;
-    for (const [attrId, rawVal] of Object.entries(node.invariantAttributes)) {
+    for (const [attrId, rawVal] of invEntries) {
       const attr = attributeById.get(attrId);
       if (!attr) {
         fail('unknown_invariant_attribute', `Hierarchy node "${node.id}" defines invariant for unknown attribute "${attrId}".`);
@@ -1978,27 +1897,7 @@ export function validateTaxonomyReleaseV5(releaseDir: string): ReleaseValidation
     }
   }
 
-  const profileBlastRadii = facetProfiles.map(profile => {
-    const nodeIds = hierarchy.filter(n => n.facetProfileId === profile.id).map(n => n.id);
-    return {
-      profileId: profile.id,
-      nodeCount: nodeIds.length,
-      nodeIds,
-    };
-  });
-
-  return {
-    ok: findings.every(f => f.severity !== 'error'),
-    findings,
-    counts: {
-      productTypes: hierarchy.filter(n => n.classifiable).length,
-      attributes: attributes.length,
-      attributeProfiles: facetProfiles.length,
-      departments: hierarchy.filter(n => n.parentId === null).length,
-      mappings: exportMappings.length,
-    },
-    profileBlastRadii,
-  };
+  return report;
 }
 
 /**

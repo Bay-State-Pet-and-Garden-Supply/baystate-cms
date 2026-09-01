@@ -158,5 +158,121 @@ describe('bay-state-v5 release validation & invariants', () => {
       expect(report.ok).toBe(false);
       expectFinding(report, 'invariant_cardinality_mismatch');
     });
+
+    it('fails when a non-classifiable node defines non-empty invariantAttributes', () => {
+      const dir = copyV5Release('non-classifiable-invariants');
+      const hierarchyPath = path.join(dir, 'hierarchy.json');
+      const h = JSON.parse(fs.readFileSync(hierarchyPath, 'utf8'));
+      // pet-supplies is an L1 department root (non-classifiable)
+      const dept = h.entries.find((n: any) => n.id === 'pet-supplies');
+      expect(dept.classifiable).toBe(false);
+      dept.invariantAttributes = { species: 'Dog' };
+      fs.writeFileSync(hierarchyPath, JSON.stringify(h, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'invariant_attributes_on_non_classifiable_node');
+    });
+  });
+
+  describe('shared canonical integrity rules inherited by V5', () => {
+    it('fails when a file hash does not match manifest.fileVersions', () => {
+      const dir = copyV5Release('corrupt-hash');
+      const guidancePath = path.join(dir, 'guidance.json');
+      fs.writeFileSync(guidancePath, JSON.stringify({ bundleOrigin: { kind: 'release', releaseId: 'bay-state-v5', createdAt: '2026-09-01T12:00:00.000Z' }, schemaVersion: 2, entries: [] }));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'manifest_hash_mismatch');
+    });
+
+    it('fails when hierarchy contains a cycle or unreachable node', () => {
+      const dir = copyV5Release('cycle');
+      const hierarchyPath = path.join(dir, 'hierarchy.json');
+      const h = JSON.parse(fs.readFileSync(hierarchyPath, 'utf8'));
+      // Create a cycle: pet-supplies -> dog -> pet-supplies
+      const dept = h.entries.find((n: any) => n.id === 'pet-supplies');
+      dept.parentId = 'dog';
+      fs.writeFileSync(hierarchyPath, JSON.stringify(h, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'hierarchy_cycle_or_unreachable');
+    });
+
+    it('fails when a node references an unknown parentId', () => {
+      const dir = copyV5Release('unknown-parent');
+      const hierarchyPath = path.join(dir, 'hierarchy.json');
+      const h = JSON.parse(fs.readFileSync(hierarchyPath, 'utf8'));
+      const dog = h.entries.find((n: any) => n.id === 'dog');
+      dog.parentId = 'non-existent-parent';
+      fs.writeFileSync(hierarchyPath, JSON.stringify(h, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'unknown_parent_node');
+    });
+
+    it('fails when duplicate node ids exist', () => {
+      const dir = copyV5Release('duplicate-node');
+      const hierarchyPath = path.join(dir, 'hierarchy.json');
+      const h = JSON.parse(fs.readFileSync(hierarchyPath, 'utf8'));
+      h.entries.push({ ...h.entries[0] });
+      fs.writeFileSync(hierarchyPath, JSON.stringify(h, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'duplicate_node_id');
+    });
+
+    it('fails when a classifiable leaf is missing a facet profile', () => {
+      const dir = copyV5Release('missing-profile');
+      const hierarchyPath = path.join(dir, 'hierarchy.json');
+      const h = JSON.parse(fs.readFileSync(hierarchyPath, 'utf8'));
+      const dog = h.entries.find((n: any) => n.id === 'dog-food-dry');
+      dog.facetProfileId = null;
+      fs.writeFileSync(hierarchyPath, JSON.stringify(h, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'classifiable_node_missing_profile');
+    });
+
+    it('fails when a non-classifiable node specifies a facet profile', () => {
+      const dir = copyV5Release('non-classifiable-profile');
+      const hierarchyPath = path.join(dir, 'hierarchy.json');
+      const h = JSON.parse(fs.readFileSync(hierarchyPath, 'utf8'));
+      const dept = h.entries.find((n: any) => n.id === 'pet-supplies');
+      dept.facetProfileId = 'profile-accessories';
+      fs.writeFileSync(hierarchyPath, JSON.stringify(h, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'non_classifiable_node_has_profile');
+    });
+
+    it('fails when an export mapping is missing for an attribute with shopsite disposition', () => {
+      const dir = copyV5Release('missing-export-mapping');
+      const mappingPath = path.join(dir, 'export-mappings.json');
+      const m = JSON.parse(fs.readFileSync(mappingPath, 'utf8'));
+      m.entries = m.entries.filter((entry: any) => entry.attributeId !== 'species');
+      fs.writeFileSync(mappingPath, JSON.stringify(m, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'export_mapping_missing');
+    });
+
+    it('fails when a shopsite page projection remains needs_review', () => {
+      const dir = copyV5Release('needs-review-page');
+      const projectionPath = path.join(dir, 'shopsite-projection.json');
+      const p = JSON.parse(fs.readFileSync(projectionPath, 'utf8'));
+      p.entries[0].role = 'needs_review';
+      fs.writeFileSync(projectionPath, JSON.stringify(p, null, 2));
+
+      const report = validateTaxonomyReleaseV5(dir);
+      expect(report.ok).toBe(false);
+      expectFinding(report, 'page_projection_needs_review');
+    });
   });
 });
