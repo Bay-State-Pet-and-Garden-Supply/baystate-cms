@@ -286,6 +286,8 @@ export default defineConfig({
       'src/tests/integration/onboarding-betterbone-variant-flow.test.ts',
       'src/tests/unit/sourcing-engine-dual-connector.test.ts',
       'src/tests/unit/profile-engineer-workflow-repo.test.ts',
+      'src/tests/unit/official-page-identity-benchmark.test.ts',
+      'src/tests/unit/review-queue-routes-adversarial.test.ts',
     ],
   },
 });

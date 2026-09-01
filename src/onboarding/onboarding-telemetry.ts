@@ -14,6 +14,7 @@
  *   unblocks, family waits + duration, cohort curation success, review
  *   throughput + edit rate, bulk approval success, export success.
  */
+import { getDb } from '../db/connection';
 import { listBatches, findBatchById } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import {
@@ -257,6 +258,7 @@ function buildMetrics(
   agg: Aggregated,
   workspaceId: string,
   scope: 'batch' | 'global',
+  batchId?: string | null,
 ): OnboardingTelemetry['metrics'] {
   const activeItems = agg.totalItems - agg.skippedCount;
 
@@ -418,6 +420,121 @@ function buildMetrics(
       : metric(null, 'ratio', 'not_available', 'No change sets exist yet');
   }
 
+  // M6 (P2) — strict proof-class / needs-input delta (derived from discovery telemetry if available; otherwise not_available)
+  const strictProofClassSelectionRate = metric(null, 'ratio', 'not_available', 'M6 closeout: strict proof-class selection requires discovery proof-class counters sampled over window');
+  const needsInputDelta = metric(null, 'count', 'not_available', 'M6 closeout: needs_input delta requires benchmark baseline window');
+  const reviewQueueRowRequests = metric(null, 'count', 'not_available', 'M6 closeout: review queue row requests require request logging window');
+  const reviewDetailRequests = metric(null, 'count', 'not_available', 'M6 closeout: review detail requests require request logging window');
+  const workStateP95Ms = metric(null, 'ms', 'not_available', 'M6 closeout: work-state p95 requires latency histogram window');
+  const workStateP99Ms = metric(null, 'ms', 'not_available', 'M6 closeout: work-state p99 requires latency histogram window');
+  const workStateStatements = metric(null, 'count', 'not_available', 'M6 closeout: work-state statements require query-count instrumentation window');
+  const workStateScannedRows = metric(null, 'count', 'not_available', 'M6 closeout: work-state scanned rows require scan instrumentation window');
+  // Projection degradation derived from durable work-state health issues if batch-scoped traversal were available; here report not_available until windowed
+  const projectionDegradationCount = metric(null, 'count', 'not_available', 'M6 closeout: projection degradation requires work-state health window');
+  // Receipt counts derived from durable receipts when table exists
+  let approvalAttempts: TelemetryMetric;
+  let approvalReplays: TelemetryMetric;
+  let approvalConflicts: TelemetryMetric;
+  let approvalInterruptedReceipts: TelemetryMetric;
+  let exportDraftAttempts: TelemetryMetric;
+  let exportDraftReplays: TelemetryMetric;
+  try {
+    const db = getDb();
+    const baseWhere = scope === 'batch' && batchId ? "workspace_id = ? AND batch_id = ?" : "workspace_id = ?";
+    const params: any[] = scope === 'batch' && batchId ? [workspaceId, batchId] : [workspaceId];
+    const rows = db.query(`SELECT operation, details_json as detailsJson FROM onboarding_operation_receipts WHERE ${baseWhere}`).all(...params) as Array<{operation:string, detailsJson:string|null}>;
+    let aAttempts = rows.filter(r=>r.operation==='approve').length;
+    let eAttempts = rows.filter(r=>r.operation==='export').length;
+    let aSuccess = 0, aReject = 0, aReplays = 0, aConflicts = 0, aInterrupted = 0;
+    let eSuccess = 0, eReject = 0, eConflicts = 0, eInterrupted = 0, eReplays = 0;
+    for (const r of rows) {
+      if (r.detailsJson === null) {
+        if (r.operation === 'approve') aInterrupted += 1;
+        else if (r.operation === 'export') eInterrupted += 1;
+        continue;
+      }
+      try {
+        const d = JSON.parse(r.detailsJson);
+        if (r.operation === 'approve') {
+          if (typeof d.approvedCount === 'number') aSuccess += d.approvedCount;
+          if (typeof d.rejectedCount === 'number') aReject += d.rejectedCount;
+        } else if (r.operation === 'export') {
+          if (typeof d.successCount === 'number') eSuccess += d.successCount;
+          if (typeof d.rejectedCount === 'number') eReject += d.rejectedCount;
+        }
+      } catch {}
+    }
+    approvalAttempts = metric(aAttempts, 'count', 'exact', 'Count of approve receipts (batch-scoped when batchId given)');
+    approvalReplays = metric(null, 'count', 'not_available', 'Replays require durable replay marker (not persisted in receipt details)');
+    approvalConflicts = metric(null, 'count', 'not_available', 'Conflicts require durable conflict marker (conflict returns directly, not persisted)');
+    approvalInterruptedReceipts = metric(aInterrupted, 'count', 'exact', 'Interrupted approve receipts (null details_json)');
+    exportDraftAttempts = metric(eAttempts, 'count', 'exact', 'Count of export receipts');
+    exportDraftReplays = metric(null, 'count', 'not_available', 'Export replays require durable replay marker (not persisted)');
+    // Also expose success/reject/conflict/interrupted for export/approval
+    var approvalSuccessCount = metric(aSuccess, 'count', 'exact', 'Approved items');
+    var approvalRejectCount = metric(aReject, 'count', 'exact', 'Rejected items');
+    var exportSuccessCount = metric(eSuccess, 'count', 'exact', 'Export success');
+    var exportRejectCount = metric(eReject, 'count', 'exact', 'Export reject');
+    var exportConflictCount = metric(null, 'count', 'not_available', 'Export conflicts require durable marker');
+    var exportInterruptedCount = metric(eInterrupted, 'count', 'exact', 'Export interrupted (null details_json)');
+  } catch {
+    approvalAttempts = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    approvalReplays = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    approvalConflicts = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    approvalInterruptedReceipts = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    exportDraftAttempts = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    exportDraftReplays = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    var approvalSuccessCount = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    var approvalRejectCount = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    var exportSuccessCount = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    var exportRejectCount = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    var exportConflictCount = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+    var exportInterruptedCount = metric(null, 'count', 'not_available', 'Receipt table unavailable');
+  }
+  let importNormalizationCounts: TelemetryMetric;
+  let lossyLegacyRows: TelemetryMetric;
+  try {
+    const db = getDb();
+    const scopeWhere = scope === 'batch' && batchId ? "batch_id = ?" : "batch_id IN (SELECT id FROM onboarding_batches WHERE workspace_id = ?)";
+    const normParams: any[] = scope === 'batch' && batchId ? [batchId] : [workspaceId];
+    // Aggregate bounded transformations[].code from validated normalized envelopes
+    const rows = db.query(`SELECT normalized_identity_json as normJson FROM onboarding_items WHERE ${scopeWhere} AND normalized_identity_json IS NOT NULL`).all(...normParams) as Array<{normJson:string}>;
+    const codeCounts = new Map<string, number>();
+    for (const r of rows) {
+      try {
+        const env = JSON.parse(r.normJson);
+        const trans = Array.isArray(env.transformations) ? env.transformations : [];
+        for (const tr of trans) {
+          if (tr && typeof tr.code === 'string') {
+            const c = tr.code;
+            codeCounts.set(c, (codeCounts.get(c) ?? 0) + 1);
+          }
+        }
+      } catch {}
+    }
+    const breakdown = [...codeCounts.entries()].map(([k,v])=>({key:k, value:v, share: null})).sort((a,b)=>b.value-a.value);
+    const totalTransformations = [...codeCounts.values()].reduce((sum, n) => sum + n, 0);
+    importNormalizationCounts = { value: totalTransformations, unit: 'count', derivation: 'exact', note: 'Bounded counts by transformation code (split_glued_size, move_trailing_brand) — headline is total transformations, not rows', breakdown };
+    const lossyWhere = scope === 'batch' && batchId ? "batch_id = ? AND (raw_identity_json IS NULL OR identity_provenance_hash IS NULL)" : "batch_id IN (SELECT id FROM onboarding_batches WHERE workspace_id = ?) AND (raw_identity_json IS NULL OR identity_provenance_hash IS NULL)";
+    const lossy = db.query(`SELECT COUNT(*) as cnt FROM onboarding_items WHERE ${lossyWhere}`).get(...normParams) as {cnt:number}|undefined;
+    lossyLegacyRows = metric(lossy ? Number(lossy.cnt) : 0, 'count', 'exact', 'Rows without raw identity or provenance hash (lossy legacy)');
+  } catch {
+    importNormalizationCounts = metric(null, 'count', 'not_available', 'Identity columns unavailable');
+    lossyLegacyRows = metric(null, 'count', 'not_available', 'Identity columns unavailable');
+  }
+
+  // Derive review queue payload/latency from available instrumentation if present, else not_available honestly
+  const reviewQueuePayloadSize = metric(null, 'bytes', 'not_available', 'Review queue payload requires request-size instrumentation window');
+  const reviewQueueLoadLatencyMs = metric(null, 'ms', 'not_available', 'Review queue load latency requires timing histogram window');
+  // Ensure newly added approval/export detailed counts are available via earlier var hoisting (may be null if receipt table unavailable)
+  // Provide fallbacks if var not set due to scope
+  const _approvalSuccessCount = typeof approvalSuccessCount !== 'undefined' ? approvalSuccessCount : metric(null, 'count', 'not_available', 'Receipt table unavailable');
+  const _approvalRejectCount = typeof approvalRejectCount !== 'undefined' ? approvalRejectCount : metric(null, 'count', 'not_available', 'Receipt table unavailable');
+  const _exportSuccessCount = typeof exportSuccessCount !== 'undefined' ? exportSuccessCount : metric(null, 'count', 'not_available', 'Receipt table unavailable');
+  const _exportRejectCount = typeof exportRejectCount !== 'undefined' ? exportRejectCount : metric(null, 'count', 'not_available', 'Receipt table unavailable');
+  const _exportConflictCount = typeof exportConflictCount !== 'undefined' ? exportConflictCount : metric(null, 'count', 'not_available', 'Receipt table unavailable');
+  const _exportInterruptedCount = typeof exportInterruptedCount !== 'undefined' ? exportInterruptedCount : metric(null, 'count', 'not_available', 'Receipt table unavailable');
+  const _exportInterruptedReceipts = typeof exportInterruptedCount !== 'undefined' ? exportInterruptedCount : metric(null, 'count', 'not_available', 'Receipt table unavailable');
   return {
     automationToReviewRate: automation,
     attentionVolume: attention,
@@ -435,6 +552,32 @@ function buildMetrics(
     reviewEditRate: reviewEditRate,
     approvalRate: approvalSuccessRate,
     exportSuccessRate: exportSuccessRate,
+    strictProofClassSelectionRate,
+    needsInputDelta,
+    reviewQueueRowRequests,
+    reviewDetailRequests,
+    reviewQueuePayloadSize,
+    reviewQueueLoadLatencyMs,
+    workStateP95Ms,
+    workStateP99Ms,
+    workStateStatements,
+    workStateScannedRows,
+    projectionDegradationCount,
+    approvalAttempts,
+    approvalSuccessCount: _approvalSuccessCount,
+    approvalRejectCount: _approvalRejectCount,
+    approvalReplays,
+    approvalConflicts,
+    approvalInterruptedReceipts,
+    exportDraftAttempts,
+    exportSuccessCount: _exportSuccessCount,
+    exportRejectCount: _exportRejectCount,
+    exportConflictCount: _exportConflictCount,
+    exportInterruptedCount: _exportInterruptedCount,
+    exportDraftReplays,
+    exportInterruptedReceipts: _exportInterruptedReceipts,
+    importNormalizationCounts,
+    lossyLegacyRows,
   };
 }
 
@@ -462,7 +605,7 @@ export function getOnboardingMetrics(input: OnboardingMetricsInput): OnboardingT
   }
 
   const agg = aggregateBatch(slices, input.workspaceId);
-  const metrics = buildMetrics(agg, input.workspaceId, scope);
+  const metrics = buildMetrics(agg, input.workspaceId, scope, input.batchId ?? null);
 
   return {
     scope,

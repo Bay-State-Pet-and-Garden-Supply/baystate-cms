@@ -33,6 +33,7 @@ import {
   listReviewStates,
   approveAndAdvanceItems,
 } from '../../db/repositories/onboarding-review-repo';
+import { computeRequestHash } from '../../db/repositories/onboarding-operation-receipt-repo';
 import {
   deriveItemWorkState,
   buildBatchWorkStateContext,
@@ -220,7 +221,8 @@ describe('bulk approval route (epic #46 Phase 7)', () => {
     const item = findItemById(id)!;
     expect(item.stage).toBe('promotion');
     expect(item.stageStatus).toBe('pending');
-    expect(getReviewState(id)!.approvedBy).toBe('store-manager');
+    // Server-derived principal beats client reviewerId; without token principal is system
+    expect(getReviewState(id)!.approvedBy).toBe('system');
 
     const projected = derive(batchId, id);
     expect(projected.category).toBe('approved');
@@ -514,7 +516,7 @@ describe('epic #46 review remediation — fix 1: approval + advance are atomic',
     // race window) — the primitive must re-validate and refuse.
     markReviewInvalidated(id, 'consequential_edit');
 
-    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager' });
+    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager', requestHash: computeRequestHash([id]) });
     expect(approved).toHaveLength(0);
     expect(rejected[0].reason).toBe('review_invalidated');
     expect(findItemById(id)!.stage).toBe('review');
@@ -530,7 +532,7 @@ describe('epic #46 review remediation — fix 1: approval + advance are atomic',
     updateItemStageStatus(id, 'completed'); // still review
     getDb().run("UPDATE onboarding_items SET stage = 'curation' WHERE id = ?", [id]);
 
-    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager' });
+    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager', requestHash: computeRequestHash([id]) });
     expect(approved).toHaveLength(0);
     expect(rejected[0].reason).toMatch(/^not_eligible:/);
     // No approval leaked onto a non-promotion item.
@@ -563,7 +565,7 @@ describe('epic #46 review remediation — fix 1: approval + advance are atomic',
     }) });
     markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
 
-    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager' });
+    const { approved, rejected } = approveAndAdvanceItems({ itemIds: [id], batchId, approvedBy: 'manager', requestHash: computeRequestHash([id]) });
     expect(approved).toHaveLength(0);
     expect(rejected[0].reason).toMatch(/^semantic_validation_blocked/);
     expect(findItemById(id)!.stage).toBe('review');

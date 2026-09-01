@@ -14,6 +14,7 @@
  * the Batch Workspace UI.
  */
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import { PipelineStageEnum, StageStatusEnum, SourceTypeEnum } from './onboarding';
 
 // ─── Categories ─────────────────────────────────────────────────────────────────
@@ -243,15 +244,64 @@ export const WorkStateCountsSchema = z.object({
 
 export type WorkStateCounts = z.infer<typeof WorkStateCountsSchema>;
 
+export const WORK_STATE_PROJECTION_VERSION = '1.0.0';
+
+export const WorkStateProjectionHealthIssueSchema = z
+  .object({
+    source: z.string(),
+    code: z.string(),
+    affectedCount: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export type WorkStateProjectionHealthIssue = z.infer<typeof WorkStateProjectionHealthIssueSchema>;
+
+export const WorkStateProjectionHealthSchema = z
+  .object({
+    status: z.enum(['healthy', 'degraded']),
+    version: z.string(),
+    computedAt: z.string(),
+    issues: z.array(WorkStateProjectionHealthIssueSchema).default([]),
+  })
+  .strict();
+
+export type WorkStateProjectionHealth = z.infer<typeof WorkStateProjectionHealthSchema>;
+
 export const BatchWorkStateSchema = z.object({
   batchId: z.string(),
   counts: WorkStateCountsSchema,
   items: z.array(OnboardingWorkStateSchema),
-  /** Total items matching the applied filters (before limit/offset). */
+  /** Total items matching the applied filters (before cursor/limit). */
   total: z.number().int(),
+  projectionHealth: WorkStateProjectionHealthSchema.optional(),
 });
 
 export type BatchWorkState = z.infer<typeof BatchWorkStateSchema>;
+
+// ─── Bounded counts/items responses (Milestone 3 / P1-E) ──────────────────────
+
+export const WorkStateCountsResponseSchema = z
+  .object({
+    batchId: z.string(),
+    counts: WorkStateCountsSchema,
+    total: z.number().int().nonnegative(),
+    projectionHealth: WorkStateProjectionHealthSchema,
+  })
+  .strict();
+
+export type WorkStateCountsResponse = z.infer<typeof WorkStateCountsResponseSchema>;
+
+export const WorkStateItemsResponseSchema = z
+  .object({
+    batchId: z.string(),
+    items: z.array(OnboardingWorkStateSchema),
+    nextCursor: z.string().nullable(),
+    total: z.number().int().nonnegative(),
+    projectionHealth: WorkStateProjectionHealthSchema,
+  })
+  .strict();
+
+export type WorkStateItemsResponse = z.infer<typeof WorkStateItemsResponseSchema>;
 
 /**
  * Client-safe filter shape (mirrors the projection service's WorkStateFilters;
@@ -267,7 +317,125 @@ export interface WorkStateFilters {
   cohortId?: string;
   reviewState?: ReviewState;
   limit?: number;
+  /** @deprecated — use cursor pagination */
   offset?: number;
+  cursor?: string;
+}
+
+export type OnboardingWorkStateFilters = WorkStateFilters;
+
+export const WorkStateFiltersSchema = z
+  .object({
+    category: WorkStateCategoryEnum.optional(),
+    q: z.string().optional(),
+    domain: z.string().optional(),
+    sourceType: SourceTypeEnum.optional(),
+    cohortId: z.string().optional(),
+    reviewState: ReviewStateEnum.optional(),
+    limit: z.number().int().min(1).max(500).optional(),
+    offset: z.number().int().min(0).optional(),
+    cursor: z.string().optional(),
+  })
+  .strict();
+
+// ─── Work-state cursor (cursor-based pagination, Milestone 3) ─────────────────
+
+export interface WorkStateCursorPayload {
+  v: 1;
+  sortKey: string;
+  itemId: string;
+  filterHash: string;
+}
+
+export const WorkStateCursorPayloadSchema = z
+  .object({
+    v: z.literal(1),
+    sortKey: z.string(),
+    itemId: z.string(),
+    filterHash: z.string().regex(/^[a-f0-9]{16,64}$/),
+  })
+  .strict();
+
+export class WorkStateCursorError extends Error {
+  constructor(
+    message: string,
+    public readonly code: 'malformed_cursor' | 'filter_mismatch' | 'invalid_version',
+  ) {
+    super(message);
+    this.name = 'WorkStateCursorError';
+  }
+}
+
+/** Deterministic hash of work-state filters for cursor binding. */
+export function computeWorkStateFilterHash(filters: WorkStateFilters): string {
+  const canonical: Record<string, unknown> = {};
+  if (filters.category) canonical.category = filters.category;
+  if (filters.q && filters.q.trim()) canonical.q = filters.q.trim().toLowerCase();
+  if (filters.domain && filters.domain.trim()) canonical.domain = filters.domain.trim().toLowerCase();
+  if (filters.sourceType) canonical.sourceType = filters.sourceType;
+  if (filters.cohortId && filters.cohortId.trim()) canonical.cohortId = filters.cohortId.trim();
+  if (filters.reviewState) canonical.reviewState = filters.reviewState;
+  const serialized = JSON.stringify(canonical, Object.keys(canonical).sort());
+  return createHash('sha256').update(serialized, 'utf8').digest('hex').slice(0, 16);
+}
+
+export function encodeWorkStateCursor(payload: WorkStateCursorPayload): string {
+  const json = JSON.stringify(payload);
+  return Buffer.from(json, 'utf8').toString('base64url');
+}
+
+export function decodeWorkStateCursor(cursor: string): WorkStateCursorPayload {
+  try {
+    const json = Buffer.from(cursor, 'base64url').toString('utf8');
+    const parsed = JSON.parse(json);
+    const result = WorkStateCursorPayloadSchema.safeParse(parsed);
+    if (!result.success) {
+      throw new WorkStateCursorError('Invalid cursor schema', 'malformed_cursor');
+    }
+    return result.data;
+  } catch (err) {
+    if (err instanceof WorkStateCursorError) throw err;
+    throw new WorkStateCursorError(
+      `Malformed work-state cursor: ${err instanceof Error ? err.message : String(err)}`,
+      'malformed_cursor',
+    );
+  }
+}
+
+export function validateWorkStateCursor(
+  cursor: string,
+  currentFilters: WorkStateFilters,
+): WorkStateCursorPayload {
+  const payload = decodeWorkStateCursor(cursor);
+  const expectedHash = computeWorkStateFilterHash(currentFilters);
+  if (payload.filterHash !== expectedHash) {
+    throw new WorkStateCursorError(
+      'Cursor filter hash does not match current query filters',
+      'filter_mismatch',
+    );
+  }
+  return payload;
+}
+
+const WORK_STATE_CATEGORY_ORDER: Record<string, number> = {
+  needs_attention: 0,
+  processing: 1,
+  waiting_on_family: 2,
+  ready_for_review: 3,
+  approved: 4,
+  ready_to_export: 5,
+  completed: 6,
+  skipped: 7,
+};
+
+export function buildWorkStateSortKey(
+  category: string | null,
+  displayName: string,
+  itemId: string,
+): string {
+  const catOrder = WORK_STATE_CATEGORY_ORDER[category ?? 'processing'] ?? 8;
+  const titlePart = displayName.toLowerCase().slice(0, 64).padEnd(64, ' ');
+  return `${catOrder}:${titlePart}:${itemId}`;
 }
 
 export const EMPTY_WORK_STATE_COUNTS: WorkStateCounts = {
@@ -280,6 +448,22 @@ export const EMPTY_WORK_STATE_COUNTS: WorkStateCounts = {
   completed: 0,
   skipped: 0,
 };
+
+// ─── Operation receipt (Milestone 4 / P1-D) ─────────────────────────────────────
+
+export const OperationReceiptSchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  batchId: z.string(),
+  operation: z.enum(['approve', 'export']),
+  principal: z.string(),
+  role: z.string(),
+  createdAt: z.string(),
+  idempotencyKey: z.string().nullable().default(null),
+  detailsJson: z.string().nullable().default(null),
+});
+
+export type OperationReceipt = z.infer<typeof OperationReceiptSchema>;
 
 // ─── Approval request/response ─────────────────────────────────────────────────
 

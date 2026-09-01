@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+import type { ReviewQueueRow } from '../../../../shared/schemas/onboarding-review-queue';
 import type { MediaSelectionRequest, SourceType } from '../../../../shared/schemas/onboarding';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import { distributorApprovedImages } from './review-logic';
@@ -12,7 +13,7 @@ import {
 import { gateMessageId } from './review-readiness';
 
 export interface ReviewListingPanelProps {
-  workState?: OnboardingWorkState | null;
+  workState?: ReviewQueueRow | OnboardingWorkState | null;
   detail: ItemDetailResponse | null;
   editing: boolean;
   draft: ReviewDraft;
@@ -267,14 +268,19 @@ export function ReviewListingPanel({
       ? 'Distributor record image'
       : 'Official page image';
 
-  const title = curation?.curatedTitle ?? workState?.curatedTitle ?? ext?.title ?? workState?.name ?? '';
+  const title =
+    curation?.curatedTitle ??
+    ('curatedTitle' in (workState ?? {}) ? (workState as any).curatedTitle : null) ??
+    ext?.title ??
+    (('displayTitle' in (workState ?? {})) ? (workState as any).displayTitle : (workState as any)?.name) ??
+    '';
   const brand = workState?.brand ?? detail?.item.brandHint ?? ext?.brand ?? null;
   const sizeAttr = (ext?.variantAttributes as Record<string, any> | undefined)?.size;
   const rawWeight =
     curation?.curatedWeight ??
     ext?.weight ??
     (typeof sizeAttr === 'string' && sizeAttr.trim().length > 0 ? sizeAttr.trim() : null) ??
-    workState?.weight ??
+    ('weight' in (workState ?? {}) ? (workState as any).weight : null) ??
     null;
   const weight =
     rawWeight != null && String(rawWeight).trim().length > 0
@@ -283,7 +289,11 @@ export function ReviewListingPanel({
         : String(rawWeight).trim()
       : null;
 
-  const description = curation?.curatedDescription ?? ext?.description ?? workState?.description ?? null;
+  const description =
+    curation?.curatedDescription ??
+    ext?.description ??
+    ('description' in (workState ?? {}) ? (workState as any).description : null) ??
+    null;
   const bullets = ext?.bulletPoints ?? [];
   const keywords = curation?.searchKeywords ?? ext?.searchKeywords ?? null;
   const customFields = ext?.customFields ?? {};
@@ -341,7 +351,7 @@ export function ReviewListingPanel({
               >
                 <img
                   src={activeImage}
-                  alt={`${title || workState?.name || 'Product'} primary image`}
+                  alt={`${title || ('displayTitle' in (workState ?? {}) ? (workState as any).displayTitle : (workState as any)?.name) || 'Product'} primary image`}
                 />
               </button>
             ) : (

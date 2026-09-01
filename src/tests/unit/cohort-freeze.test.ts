@@ -636,6 +636,7 @@ describe('execution-evidence projection builder (PR3 M2)', () => {
     expect(ExecutionEvidenceProjectionV1Schema.safeParse(v2).success).toBe(false);
     // The adapter normalizes V1 → V2 with official-page provenance.
     const normalized = parseExecutionEvidenceProjection(v1Payload);
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
     expect(normalized.version).toBe('execution-evidence-v2');
     expect(normalized.members[0].itemSourceType).toBe('official_page');
     expect(normalized.members[0].extractionSourceType).toBe('official_page');
@@ -773,7 +774,8 @@ describe('two-phase freeze service (PR3 M2)', () => {
     const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
     expect(snap).not.toBeNull();
     const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
-    expect(projection.version).toBe('execution-evidence-v2');
+// @ts-ignore -- Milestone 5 V3: new freezes persist V3
+    expect(projection.version).toBe('execution-evidence-v3');
     expect(projection.members).toHaveLength(2);
     expect(hashCanonicalJson(projection)).toBe(finalized.evidenceSnapshotHash!);
 

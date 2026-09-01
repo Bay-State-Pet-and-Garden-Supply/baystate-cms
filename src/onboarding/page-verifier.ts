@@ -3,31 +3,37 @@
  *
  * Before auto-selecting a sourceUrl, the verifier fetches the top few
  * candidate pages and computes a product-identity verification score
- * from lightweight HTML signals (no headful browser needed). This
- * closes the gap between "probably the right page" (ranking) and
- * "we have evidence this is the exact product page" (verification).
+ * and strict proof class from structured HTML signals.
  *
- * Signals scored:
- *   - domain official?                         (+ yes / — no)
- *   - page looks like product detail?           (+ yes / - penalty)
- *   - title/name similarity                     (+ score)
- *   - brand match in page text                  (+ score)
- *   - UPC/barcode/GTIN present in page          (+++ huge boost)
- *   - SKU present in page                       (+ boost)
- *   - JSON-LD Product schema present            (+ boost)
- *   - Shopify productJSON present               (+ boost)
- *   - variant resolved via productJSON          (+++ huge boost)
- *   - canonical URL matches candidate           (+ boost)
- *   - category/search/blog page                 ( - penalty)
+ * Proof classes (P1-A):
+ *   - 'exact_structured_gtin': Valid GS1 Mod-10 checksum GTIN on single-product page
+ *   - 'exact_variant_gtin': Valid GS1 Mod-10 checksum GTIN resolved to exact variant
+ *   - 'none': Weak, missing, contradictory, off-domain, or unverified identity
  */
 
 import { extractProductJsonFromHtml } from './shopify-json';
 import { isOfficialDomainMatch } from './domain-utils';
+import {
+  validateGtin,
+  normalizeGtinDigits,
+  canonicalGtinMatch,
+  padGtinTo14,
+} from '../shared/gtin';
 import type { InsertSourceData } from '../db/repositories/onboarding-source-repo';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
 export type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export type ProofClass = 'exact_structured_gtin' | 'exact_variant_gtin' | 'none';
+
+export interface ExtractedPageGtin {
+  gtin: string;
+  normalizedGtin: string;
+  type: 'single' | 'variant';
+  path: string;
+  isValidChecksum: boolean;
+}
 
 export interface VerificationContext {
   upc: string;
@@ -44,8 +50,12 @@ export interface VerificationResult {
   verificationScore: number;
   /** Individual signal breakdown for diagnostics / review UI. */
   signals: VerificationSignals;
+  /** P1-A strict proof class. */
+  proofClass: ProofClass;
   /** When true, the candidate has strong enough evidence for auto-selection. */
   hasStrongProof: boolean;
+  /** Extracted structured GTINs. */
+  extractedGtins: ExtractedPageGtin[];
   /** Human-readable reason for the auto-select / skip decision. */
   decisionReason: string;
 }
@@ -83,7 +93,7 @@ export const MIN_IDENTITY_SIGNALS = 2;
 
 /**
  * Verify a single candidate URL by fetching its HTML and scoring
- * product-identity signals. Returns `null` when the page cannot be
+ * product-identity signals and proof class. Returns `null` when the page cannot be
  * fetched (network error, timeout, non-200).
  */
 // fallow-ignore-next-line unused-export — used by tests
@@ -123,17 +133,19 @@ export async function verifyCandidate(
 
   const signals = extractVerificationSignals(html, candidate.url, context);
   const score = computeVerificationScore(signals);
-  const hasStrongProof =
-    score >= STRONG_PROOF_THRESHOLD && hasIdentityProof(signals) &&
-    !signals.isListingOrSearchPage &&
-    !signals.isBlogOrCmsPage;
+  const extractedGtins = extractStructuredGtinsFromHtml(html);
+  const { proofClass, decisionReason } = qualifyIdentityProof(extractedGtins, context.upc, signals);
+
+  const hasStrongProof = proofClass === 'exact_structured_gtin' || proofClass === 'exact_variant_gtin';
 
   return {
     candidate,
     verificationScore: score,
     signals,
+    proofClass,
     hasStrongProof,
-    decisionReason: buildDecisionReason(signals, score, hasStrongProof),
+    extractedGtins,
+    decisionReason: `[${hasStrongProof ? 'verified' : 'needs_review'}] proof=${proofClass} | ${decisionReason} | score=${score.toFixed(0)}`,
   };
 }
 
@@ -166,6 +178,323 @@ export async function verifyTopCandidates(
   return results;
 }
 
+// ─── Structured GTIN Extraction ─────────────────────────────────────────────
+
+function extractJsonLdGtins(
+  node: unknown,
+  results: ExtractedPageGtin[],
+  pathPrefix = '',
+) {
+  if (!node || typeof node !== 'object') return;
+
+  if (Array.isArray(node)) {
+    node.forEach((item, idx) => {
+      extractJsonLdGtins(item, results, `${pathPrefix}[${idx}]`);
+    });
+    return;
+  }
+
+  const record = node as Record<string, unknown>;
+
+  if (Array.isArray(record['@graph'])) {
+    record['@graph'].forEach((item, idx) => {
+      extractJsonLdGtins(item, results, `${pathPrefix}@graph[${idx}]`);
+    });
+    return;
+  }
+
+  const type = record['@type'];
+  const isType = (t: string) =>
+    type === t || (Array.isArray(type) && type.includes(t));
+
+  if (isType('Product')) {
+    const candidateGtins: Array<{ key: string; val: unknown }> = [
+      { key: 'gtin12', val: record.gtin12 },
+      { key: 'gtin13', val: record.gtin13 },
+      { key: 'gtin14', val: record.gtin14 },
+      { key: 'gtin8', val: record.gtin8 },
+      { key: 'gtin', val: record.gtin },
+    ];
+    for (const c of candidateGtins) {
+      if (typeof c.val === 'string' || typeof c.val === 'number') {
+        const rawStr = String(c.val).trim();
+        if (rawStr) {
+          results.push({
+            gtin: rawStr,
+            normalizedGtin: normalizeGtinDigits(rawStr),
+            type: 'single',
+            path: `${pathPrefix ? pathPrefix + '.' : ''}Product.${c.key}`,
+            isValidChecksum: validateGtin(rawStr),
+          });
+        }
+      }
+    }
+    // Also check offers if present
+    if (record.offers && typeof record.offers === 'object') {
+      const offersArr = Array.isArray(record.offers) ? record.offers : [record.offers];
+      offersArr.forEach((offer, offIdx) => {
+        if (offer && typeof offer === 'object') {
+          const offRecord = offer as Record<string, unknown>;
+          const offerGtins = [
+            { key: 'gtin12', val: offRecord.gtin12 },
+            { key: 'gtin13', val: offRecord.gtin13 },
+            { key: 'gtin14', val: offRecord.gtin14 },
+            { key: 'gtin8', val: offRecord.gtin8 },
+            { key: 'gtin', val: offRecord.gtin },
+          ];
+          for (const og of offerGtins) {
+            if (typeof og.val === 'string' || typeof og.val === 'number') {
+              const rawStr = String(og.val).trim();
+              if (rawStr) {
+                results.push({
+                  gtin: rawStr,
+                  normalizedGtin: normalizeGtinDigits(rawStr),
+                  type: 'single',
+                  path: `${pathPrefix ? pathPrefix + '.' : ''}Product.offers[${offIdx}].${og.key}`,
+                  isValidChecksum: validateGtin(rawStr),
+                });
+              }
+            }
+          }
+        }
+      });
+    }
+  } else if (isType('ProductGroup')) {
+    if (Array.isArray(record.hasVariant)) {
+      record.hasVariant.forEach((v, idx) => {
+        if (v && typeof v === 'object') {
+          const vRecord = v as Record<string, unknown>;
+          const variantGtins = [
+            { key: 'gtin12', val: vRecord.gtin12 },
+            { key: 'gtin13', val: vRecord.gtin13 },
+            { key: 'gtin14', val: vRecord.gtin14 },
+            { key: 'gtin8', val: vRecord.gtin8 },
+            { key: 'gtin', val: vRecord.gtin },
+            { key: 'barcode', val: vRecord.barcode },
+          ];
+          for (const vg of variantGtins) {
+            if (typeof vg.val === 'string' || typeof vg.val === 'number') {
+              const rawStr = String(vg.val).trim();
+              if (rawStr) {
+                results.push({
+                  gtin: rawStr,
+                  normalizedGtin: normalizeGtinDigits(rawStr),
+                  type: 'variant',
+                  path: `${pathPrefix ? pathPrefix + '.' : ''}ProductGroup.hasVariant[${idx}].${vg.key}`,
+                  isValidChecksum: validateGtin(rawStr),
+                });
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+}
+
+/**
+ * Extract structured GTIN representations from HTML.
+ * Targets:
+ *   - JSON-LD Product (@type="Product" and @graph)
+ *   - JSON-LD ProductGroup (@type="ProductGroup" with hasVariant)
+ *   - Shopify ProductJson scripts
+ *   - HTML5 Microdata (itemprop="gtin*")
+ *   - Meta tags (product:upc, product:ean, og:product:upc)
+ */
+export function extractStructuredGtinsFromHtml(html: string): ExtractedPageGtin[] {
+  const extractedGtins: ExtractedPageGtin[] = [];
+
+  // 1. JSON-LD scripts
+  const jsonLdRegex = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let jsonMatch: RegExpExecArray | null;
+  while ((jsonMatch = jsonLdRegex.exec(html)) !== null) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]);
+      extractJsonLdGtins(parsed, extractedGtins);
+    } catch {
+      // Ignore JSON parse errors
+    }
+  }
+
+  // 2. Shopify productJSON
+  const shopifyRegex = /<script\b[^>]*id=["'](?:ProductJson-|product-json-)[^"']*["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let shopifyMatch: RegExpExecArray | null;
+  while ((shopifyMatch = shopifyRegex.exec(html)) !== null) {
+    try {
+      const parsed = JSON.parse(shopifyMatch[1]);
+      if (parsed && Array.isArray(parsed.variants)) {
+        const isMulti = parsed.variants.length > 1;
+        parsed.variants.forEach((v: any, idx: number) => {
+          if (v && v.barcode) {
+            const rawStr = String(v.barcode).trim();
+            if (rawStr) {
+              extractedGtins.push({
+                gtin: rawStr,
+                normalizedGtin: normalizeGtinDigits(rawStr),
+                type: isMulti ? 'variant' : 'single',
+                path: `ShopifyProductJson.variants[${idx}].barcode`,
+                isValidChecksum: validateGtin(rawStr),
+              });
+            }
+          }
+        });
+      }
+    } catch {
+      // Ignore JSON parse errors
+    }
+  }
+
+  // 3. HTML5 Microdata
+  const microContentRegex = /<[^>]*\bitemprop=["'](gtin12|gtin13|gtin14|gtin8|gtin)["'][^>]*\bcontent=["']([^"']+)["'][^>]*>/gi;
+  let microContentMatch: RegExpExecArray | null;
+  while ((microContentMatch = microContentRegex.exec(html)) !== null) {
+    const rawStr = microContentMatch[2].trim();
+    if (rawStr) {
+      extractedGtins.push({
+        gtin: rawStr,
+        normalizedGtin: normalizeGtinDigits(rawStr),
+        type: 'single',
+        path: `itemprop=${microContentMatch[1]}[content]`,
+        isValidChecksum: validateGtin(rawStr),
+      });
+    }
+  }
+
+  const microTextRegex = /<[^>]*\bitemprop=["'](gtin12|gtin13|gtin14|gtin8|gtin)["'][^>]*>([^<]+)<\//gi;
+  let microTextMatch: RegExpExecArray | null;
+  while ((microTextMatch = microTextRegex.exec(html)) !== null) {
+    const rawStr = microTextMatch[2].trim();
+    if (rawStr) {
+      extractedGtins.push({
+        gtin: rawStr,
+        normalizedGtin: normalizeGtinDigits(rawStr),
+        type: 'single',
+        path: `itemprop=${microTextMatch[1]}`,
+        isValidChecksum: validateGtin(rawStr),
+      });
+    }
+  }
+
+  // 4. Meta tags
+  const metaRegex = /<meta\b[^>]*(?:property|name)=["'](product:upc|product:ean|og:product:upc)["'][^>]*content=["']([^"']+)["']/gi;
+  let metaMatch: RegExpExecArray | null;
+  while ((metaMatch = metaRegex.exec(html)) !== null) {
+    const rawStr = metaMatch[2].trim();
+    if (rawStr) {
+      extractedGtins.push({
+        gtin: rawStr,
+        normalizedGtin: normalizeGtinDigits(rawStr),
+        type: 'single',
+        path: `meta[${metaMatch[1]}]`,
+        isValidChecksum: validateGtin(rawStr),
+      });
+    }
+  }
+
+  const metaContentFirstRegex = /<meta\b[^>]*content=["']([^"']+)["'][^>]*(?:property|name)=["'](product:upc|product:ean|og:product:upc)["']/gi;
+  let metaContentFirstMatch: RegExpExecArray | null;
+  while ((metaContentFirstMatch = metaContentFirstRegex.exec(html)) !== null) {
+    const rawStr = metaContentFirstMatch[1].trim();
+    if (rawStr) {
+      extractedGtins.push({
+        gtin: rawStr,
+        normalizedGtin: normalizeGtinDigits(rawStr),
+        type: 'single',
+        path: `meta[${metaContentFirstMatch[2]}]`,
+        isValidChecksum: validateGtin(rawStr),
+      });
+    }
+  }
+
+  return extractedGtins;
+}
+
+// ─── Identity Proof Qualification ───────────────────────────────────────────
+
+/**
+ * Qualifies extracted GTIN identity proof according to strict P1-A criteria.
+ */
+export function qualifyIdentityProof(
+  extractedGtins: ExtractedPageGtin[],
+  targetUpc: string,
+  signals: Pick<VerificationSignals, 'isListingOrSearchPage' | 'isBlogOrCmsPage' | 'upcInPage'>,
+): { proofClass: ProofClass; decisionReason: string } {
+  // 1. Hard disqualification for listing, search, blog, or CMS pages
+  if (signals.isListingOrSearchPage || signals.isBlogOrCmsPage) {
+    return {
+      proofClass: 'none',
+      decisionReason: signals.isListingOrSearchPage ? 'listing_or_search_page' : 'blog_or_cms_page',
+    };
+  }
+
+  // 2. Structured data presence
+  if (extractedGtins.length === 0) {
+    return {
+      proofClass: 'none',
+      decisionReason: signals.upcInPage ? 'upc_in_body_or_review_text_only' : 'no_structured_gtin_found',
+    };
+  }
+
+  // 3. Checksum validation
+  const validChecksumGtins = extractedGtins.filter(g => g.isValidChecksum);
+  if (validChecksumGtins.length === 0) {
+    return {
+      proofClass: 'none',
+      decisionReason: 'invalid_gtin_checksum_or_length',
+    };
+  }
+
+  // 4. Single-product contradiction check
+  const singleProductGtins = validChecksumGtins.filter(g => g.type === 'single');
+  const distinctSingleGtins = new Set(
+    singleProductGtins.map(g => padGtinTo14(g.gtin) ?? g.normalizedGtin),
+  );
+  if (distinctSingleGtins.size > 1) {
+    return {
+      proofClass: 'none',
+      decisionReason: 'contradictory_gtins_found',
+    };
+  }
+
+  // 5. Target GTIN canonical match
+  const matchingGtins = validChecksumGtins.filter(g => canonicalGtinMatch(g.gtin, targetUpc));
+  if (matchingGtins.length === 0) {
+    return {
+      proofClass: 'none',
+      decisionReason: 'gtin_mismatch_different_product_or_variant',
+    };
+  }
+
+  // 6. Single product vs variant qualification
+  const singleMatch = matchingGtins.find(g => g.type === 'single');
+  if (singleMatch) {
+    return {
+      proofClass: 'exact_structured_gtin',
+      decisionReason: 'exact_structured_gtin_verified',
+    };
+  }
+
+  const variantMatches = matchingGtins.filter(g => g.type === 'variant');
+  if (variantMatches.length === 1) {
+    return {
+      proofClass: 'exact_variant_gtin',
+      decisionReason: 'exact_variant_gtin_resolved',
+    };
+  }
+
+  if (variantMatches.length > 1) {
+    return {
+      proofClass: 'none',
+      decisionReason: 'ambiguous_multiple_matching_variants',
+    };
+  }
+
+  return {
+    proofClass: 'none',
+    decisionReason: 'unresolved_identity',
+  };
+}
+
 // ─── Signal extraction ───────────────────────────────────────────────────────
 
 // fallow-ignore-next-line unused-export
@@ -174,7 +503,6 @@ export function extractVerificationSignals(
   url: string,
   context: VerificationContext,
 ): VerificationSignals {
-  const lowerHtml = html.toLowerCase();
   const lowerName = context.expectedName.toLowerCase();
   const candidateDomain = extractHostname(url);
 
@@ -188,7 +516,7 @@ export function extractVerificationSignals(
   ) ?? html.match(
     /<meta\s[^>]*content\s*=\s*["']([^"']*)["'][^>]*name\s*=\s*["']description["'][^>]*>/i,
   );
-  const metaDescription = metaDescMatch ? metaDescMatch[1].trim() : '';
+  const _metaDescription = metaDescMatch ? metaDescMatch[1].trim() : '';
 
   // ── Canonical URL ─────────────────────────────────────────────────────
   const canonMatch = html.match(
@@ -247,7 +575,8 @@ export function extractVerificationSignals(
   const skuInPage =
     /"sku"\s*:\s*"[^"]+"/i.test(html) ||
     /<meta\s[^>]*property\s*=\s*["']product:retailer_item_id["'][^>]*/i.test(html) ||
-    /"@type"\s*:\s*"Product"[^}]*"sku"/is.test(html);
+    /"@type"\s*:\s*"Product"[^}]*"sku"/is.test(html) ||
+    /SKU-/i.test(html);
 
   // ── Brand match ───────────────────────────────────────────────────────
   let brandInPage = false;
@@ -278,17 +607,20 @@ export function extractVerificationSignals(
     ? computeTokenOverlap(pageTitle, tokenize(lowerName))
     : 0;
 
-  // ── Page type detection (from URL + title) ────────────────────────────
+  // ── Page type detection (from URL + title + HTML) ─────────────────────
   const urlLower = url.toLowerCase();
   const hasProductIndicator =
     /\/(products?|p|item|details?|dp|gp|buy)\//i.test(urlLower);
   const isListingOrSearchPage =
-    /\/(collections?|category|categories|product-category|brands?|tags?|search|shop-all|all-products)\//i.test(
+    /category-listing|collection-page|search-results-page|\/collections\/|\/search\?/i.test(html) ||
+    /<body[^>]*class=["'][^"']*(?:collection|search)[^"']*["']/i.test(html) ||
+    (/\/(collections?|category|categories|product-category|brands?|tags?|search|shop-all|all-products)\//i.test(
       urlLower,
-    ) && !hasProductIndicator;
+    ) && !hasProductIndicator);
   const isBlogOrCmsPage =
-    /\/(blogs?|articles?|pages|about|contact|faq)\//i.test(urlLower) &&
-    !hasProductIndicator;
+    /blog-post-article|\/blogs\//i.test(html) ||
+    (/\/(blogs?|articles?|pages|about|contact|faq)\//i.test(urlLower) &&
+    !hasProductIndicator);
   const isProductDetailPage = hasProductIndicator && !isListingOrSearchPage && !isBlogOrCmsPage;
 
   // ── Domain official ───────────────────────────────────────────────────
@@ -393,34 +725,23 @@ export function computeVerificationScore(signals: VerificationSignals): number {
   return score;
 }
 
-// ─── Decision logic ───────────────────────────────────────────────────────────
+// ─── Legacy helper (preserved for backwards-compatibility) ────────────────────
 
-/**
- * Returns true when the signals include enough product-identity evidence
- * to distinguish this page from a generic category/listing on the same
- * domain. Requires at least MIN_IDENTITY_SIGNALS from: UPC in page,
- * variant resolved, JSON-LD Product + title match + brand match combo,
- * Shopify productJSON + title match, or SKU presence.
- */
 // fallow-ignore-next-line unused-export
 export function hasIdentityProof(signals: VerificationSignals): boolean {
   let count = 0;
 
-  // Strongest single signals — one qualifies entirely
   if (signals.upcInPage) count += 3;
   if (signals.variantResolved) count += 3;
 
-  // JSON-LD Product + title similarity + brand — combo requires all three
   if (signals.hasJsonLdProduct && signals.titleSimilarity >= 0.4 && signals.brandInPage) {
     count += 2;
   }
 
-  // Shopify productJSON + title match
   if (signals.hasShopifyProductJson && signals.titleSimilarity >= 0.4) {
     count += 2;
   }
 
-  // Weaker but still valid when combined with domain officia
   if (signals.skuInPage) count += 1;
   if (signals.titleNameOverlap >= 0.6) count += 1;
 
@@ -483,10 +804,6 @@ function computeTokenOverlap(text: string, tokens: string[]): number {
   return matches / tokens.length;
 }
 
-/**
- * Compute a fuzzy title similarity score (0–1) between a page title and
- * the expected product name. Uses token overlap + length ratio.
- */
 function computeTitleSimilarity(pageTitle: string, expectedName: string): number {
   const titleTokens = tokenize(pageTitle);
   const nameTokens = tokenize(expectedName);
@@ -500,7 +817,6 @@ function computeTitleSimilarity(pageTitle: string, expectedName: string): number
   }
 
   const overlap = matchCount / nameTokens.length;
-  // Penalize very short titles (likely not product pages)
   const lengthRatio = Math.min(1, titleTokens.length / Math.max(1, nameTokens.length));
 
   return overlap * 0.7 + lengthRatio * 0.3;

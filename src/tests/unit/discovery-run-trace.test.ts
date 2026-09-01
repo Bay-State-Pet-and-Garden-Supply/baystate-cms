@@ -75,7 +75,9 @@ function strongVerification(candidate: InsertSourceData): VerificationResult {
     candidate,
     verificationScore: 0.9,
     signals: STRONG_SIGNALS,
+    proofClass: 'exact_structured_gtin',
     hasStrongProof: true,
+    extractedGtins: [],
     decisionReason: 'UPC match + title overlap',
   };
 }
@@ -85,7 +87,9 @@ function weakVerification(candidate: InsertSourceData): VerificationResult {
     candidate,
     verificationScore: 0.1,
     signals: { ...STRONG_SIGNALS, domainOfficial: false, upcInPage: false, titleNameOverlap: 0.05 },
+    proofClass: 'none',
     hasStrongProof: false,
+    extractedGtins: [],
     decisionReason: 'no identity proof on retailer page',
   };
 }

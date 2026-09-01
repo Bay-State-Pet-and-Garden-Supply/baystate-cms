@@ -10,12 +10,13 @@
  * attribute plus an adjacent role=status explanation — never color-only).
  */
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+import type { ReviewQueueRow } from '../../../../shared/schemas/onboarding-review-queue';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import type { ReviewCompletenessBlockerCode } from '../../../../shared/schemas/onboarding';
 import { warningInfoFromDetail } from './review-logic';
 
 export interface ReviewActionsProps {
-  workState: OnboardingWorkState | null;
+  workState: ReviewQueueRow | OnboardingWorkState | null;
   detail: ItemDetailResponse | null;
   busy: boolean;
   editing: boolean;

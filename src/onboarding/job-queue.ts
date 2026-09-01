@@ -1416,12 +1416,12 @@ export class OnboardingWorker {
           );
         }
 
-        // ── Auto-selection policy (tightened with verification) ──────
+        // ── Auto-selection policy (tightened with P1-A strict identity gate) ──────
         // A candidate may be auto-selected ONLY when the page verifier
-        // finds strong proof of product identity. The old threshold-
-        // based logic (sitemap > 0.7 on official domain) is replaced
-        // by evidence-gated selection: UPC match, Shopify variant
-        // resolution, or verified JSON-LD/title match.
+        // finds strict strong proof of product identity (proofClass is exact_structured_gtin
+        // or exact_variant_gtin with valid GS1 Mod-10 checksum) AND the candidate's domain
+        // strictly satisfies the brand authority gate (ADR 0017).
+        // The relaxed officialDomainResult bypass is eliminated.
         const isAmbiguous = (s: InsertSourceData) => {
           if (!s.metadataJson) return false;
           try {
@@ -1435,20 +1435,6 @@ export class OnboardingWorker {
         const verifiedStrong = verificationResults
           .filter(vr => vr.hasStrongProof && !isAmbiguous(vr.candidate));
 
-        // Prefer any valid product page candidate on the official brand domain
-        // (even with relaxed verification thresholds) over retailer pages, to ensure
-        // consistent image and details sourcing from the brand's official site.
-        const officialDomainResult = verificationResults.find(vr => {
-          const sig = vr.signals;
-          return (
-            sig.domainOfficial &&
-            !sig.isListingOrSearchPage &&
-            !sig.isBlogOrCmsPage &&
-            (sig.titleSimilarity >= 0.25 || sig.titleNameOverlap >= 0.25 || sig.skuInPage) &&
-            !isAmbiguous(vr.candidate)
-          );
-        });
-
         // ADR 0017 commitment 2 — authority gate: auto-accept is allowed only
         // when the chosen candidate's domain is a mapped official brand domain
         // (strict isOfficialDomainMatch against the pre-run snapshot). A
@@ -1459,22 +1445,24 @@ export class OnboardingWorker {
         const hasAuthority = (s: InsertSourceData): boolean =>
           passesAuthorityGate(activeBrandHint, officialDomains, s.domain);
 
-        const autoSelectedResult =
-          officialDomainResult && hasAuthority(officialDomainResult.candidate)
-            ? officialDomainResult
-            : verifiedStrong.find((v) => hasAuthority(v.candidate)) ?? null;
+        // Operational Kill Switch (P1-A):
+        // Instant rollback to manual review mode if needed without code regression.
+        const isOfficialAutoSelectDisabled =
+          process.env.BAYSTATE_CMS_OFFICIAL_AUTO_SELECT_DISABLED === '1' ||
+          process.env.BAYSTATE_CMS_OFFICIAL_AUTO_SELECT_DISABLED?.toLowerCase() === 'true';
+
+        const autoSelectedResult = isOfficialAutoSelectDisabled
+          ? null
+          : verifiedStrong.find((v) => hasAuthority(v.candidate)) ?? null;
         const autoSelectedSource = autoSelectedResult?.candidate ?? null;
         const shouldAutoSelect = autoSelectedSource !== null;
 
-        // When raw identity evidence was strong but the domain failed the
-        // authority gate, name the requirement in the review reason so the
-        // reviewer knows WHY auto-selection was skipped. The trigger is
-        // autoSelectedResult === null AND a candidate existed (official or
-        // strongly verified) — it never falsely fires when an authorized
-        // strong candidate was selected.
+        const killSwitchActive = isOfficialAutoSelectDisabled && verifiedStrong.some(v => hasAuthority(v.candidate));
         const deniedByAuthority =
+          !isOfficialAutoSelectDisabled &&
           autoSelectedResult === null &&
-          (officialDomainResult !== undefined || verifiedStrong.length > 0);
+          verifiedStrong.length > 0;
+
         const authorityDetail = deniedByAuthority
           ? ` | authority: auto-accept requires the brand's mapped official domain` +
             ` (brand "${activeBrandHint ?? ''}"` +
@@ -1483,6 +1471,11 @@ export class OnboardingWorker {
               : ` has no mapped official domain — assign one in Settings → Domain Configuration`) +
             ')'
           : '';
+
+        const killSwitchDetail = killSwitchActive
+          ? ' | kill_switch: official auto-selection disabled by kill switch (BAYSTATE_CMS_OFFICIAL_AUTO_SELECT_DISABLED=1)'
+          : '';
+
         updateDiscoveryRunStep(discoveryRunId, 'applying_outcome');
 
         if (shouldAutoSelect && autoSelectedSource) {
@@ -1517,10 +1510,10 @@ export class OnboardingWorker {
           completeDiscoveryRun(
             discoveryRunId,
             'needs_input_candidates',
-            `No candidate passed verification — needs manual URL review${verificationDetail}${authorityDetail}`,
+            `No candidate passed verification — needs manual URL review${verificationDetail}${authorityDetail}${killSwitchDetail}`,
           );
           const manualReviewReason =
-            `needs_review: no candidate passed verification${verificationDetail}${authorityDetail}`;
+            `needs_review: no candidate passed verification${verificationDetail}${authorityDetail}${killSwitchDetail}`;
           updateItemStageStatus(item.id, 'completed', manualReviewReason);
 
           console.log(
@@ -1539,7 +1532,8 @@ export class OnboardingWorker {
             ? null
             : `needs_review: no candidate passed verification` +
               (topVerificationForEvent ? ` | ${topVerificationForEvent.decisionReason}` : '') +
-              authorityDetail,
+              authorityDetail +
+              killSwitchDetail,
           bestCandidateUrl: bestSource.url,
           bestCandidateDomain: bestSource.domain ?? null,
           officialDomains,
@@ -1551,6 +1545,7 @@ export class OnboardingWorker {
           verificationResults: verificationResults.map(vr => ({
             url: vr.candidate.url,
             score: vr.verificationScore,
+            proofClass: vr.proofClass,
             hasStrongProof: vr.hasStrongProof,
             decisionReason: vr.decisionReason,
             signals: vr.signals,
@@ -1703,7 +1698,9 @@ export class OnboardingWorker {
               });
             }
           }
-        } catch {}
+        } catch {
+          // best-effort resolution persistence
+        }
         insertExtraction({
           itemId: item.id,
           sourceUrl: item.sourceUrl,
@@ -1804,7 +1801,9 @@ export class OnboardingWorker {
                 }
               }
             }
-          } catch {}
+          } catch {
+            // best-effort resolution persistence
+          }
           console.warn(`[OnboardingWorker] Variant gate ${code} for ${item.id} — parking as needs_input`);
           updateItemStageStatus(item.id, 'needs_input', `variant:${code}:${String(err)}`);
           onboardingEvents.emitItemStatus(item.batchId, item.id, 'needs_input', {

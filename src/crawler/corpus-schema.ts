@@ -71,29 +71,7 @@ export const ScrapedProductEvidenceSchema = z.object({
 
 export type ScrapedProductEvidence = z.input<typeof ScrapedProductEvidenceSchema>;
 
-/**
- * GTIN/UPC/EAN checksum validation (mod-10).
- * Accepts 8-14 digit codes; verifies the check digit for 12/13/14-digit codes
- * and 8-digit EAN-8 codes.
- */
-export function validateGtin(code: string): boolean {
-  const digits = code.replace(/[^0-9]/g, '');
-  if (digits.length !== 8 && digits.length !== 12 && digits.length !== 13 && digits.length !== 14) {
-    return false;
-  }
-  const body = digits.slice(0, -1);
-  const check = Number(digits.slice(-1));
-  let sum = 0;
-  // Right-to-left, alternate weights 3 and 1, starting with 3 for the
-  // rightmost body digit.
-  let weight = 3;
-  for (let i = body.length - 1; i >= 0; i--) {
-    sum += Number(body[i]) * weight;
-    weight = weight === 3 ? 1 : 3;
-  }
-  const computed = (10 - (sum % 10)) % 10;
-  return computed === check;
-}
+export { validateGtin } from '../shared/gtin.js';
 
 /**
  * Deterministic payload hash for a Bronze record: canonical JSON of the record

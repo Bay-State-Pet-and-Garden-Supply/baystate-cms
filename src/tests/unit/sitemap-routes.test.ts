@@ -52,10 +52,11 @@ describe('Sitemap API Routes (/api/onboarding/sitemaps)', () => {
       'https://purina.com/sitemap.xml',
     );
 
+    const now = new Date().toISOString();
     recordRefreshRun({
       domain: 'purina.com',
-      started_at: '2026-08-18T10:00:00Z',
-      completed_at: '2026-08-18T10:00:02Z',
+      started_at: now,
+      completed_at: now,
       status: 'success',
       source_url: 'https://purina.com/sitemap.xml',
       total_urls_observed: 2,

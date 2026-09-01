@@ -19,7 +19,8 @@ export type WorkspaceTabId =
   | 'processing'
   | 'waiting_on_family'
   | 'review'
-  | 'approved';
+  | 'approved'
+  | 'ready_to_export';
 
 export interface WorkspaceTabDef {
   id: WorkspaceTabId;
@@ -76,9 +77,17 @@ export const WORKSPACE_TABS: readonly WorkspaceTabDef[] = [
     id: 'approved',
     label: 'Approved',
     category: 'approved',
-    countCategories: ['approved', 'ready_to_export', 'completed'],
-    description: 'Approved products, export drafts, and completed releases.',
+    countCategories: ['approved'],
+    description: 'Approved products awaiting export draft creation.',
     emptyMessage: 'No approved products yet — approve reviewed products to see them here.',
+  },
+  {
+    id: 'ready_to_export',
+    label: 'Ready to Export',
+    category: 'ready_to_export',
+    countCategories: ['ready_to_export', 'completed'],
+    description: 'Export drafts ready for Store release.',
+    emptyMessage: 'No export-ready products yet.',
   },
 ];
 
@@ -198,8 +207,10 @@ export function workspaceTabForCategory(category: WorkStateCategory): WorkspaceT
     case 'ready_for_review':
       return 'review';
     case 'approved':
+      return 'approved';
     case 'ready_to_export':
     case 'completed':
+      return 'ready_to_export';
     case 'skipped':
       return 'approved';
     default:

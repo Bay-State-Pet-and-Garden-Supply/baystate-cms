@@ -15,6 +15,7 @@
  *   review and no prior approval. Approval does NOT export anything.
  */
 import { getDb } from '../connection';
+import { randomUUID } from 'node:crypto';
 
 export interface OnboardingReviewState {
   itemId: string;
@@ -176,16 +177,103 @@ export function approveAndAdvanceItems(input: {
   batchId: string;
   approvedBy: string;
   origin?: string;
-}): { approved: string[]; rejected: Array<{ itemId: string; reason: string }> } {
+  principal?: string;
+  role?: string;
+  idempotencyKey?: string | null;
+  workspaceId?: string;
+  requestHash: string;
+  preRejected?: Array<{ itemId: string; reason: string }>;
+}): { approved: string[]; rejected: Array<{ itemId: string; reason: string }>; receiptId?: string } {
   const db = getDb();
   const now = new Date().toISOString();
   const approved: string[] = [];
   const rejected: Array<{ itemId: string; reason: string }> = [];
 
+  let receiptId: string | undefined;
+  const requestHash = input.requestHash;
+  if (!requestHash) throw new Error('requestHash is required');
+
   db.transaction(() => {
+    // Resolve workspaceId for receipt
+    let wsId = input.workspaceId ?? null;
+    if (!wsId) {
+      const batchRow = db.query('SELECT workspace_id FROM onboarding_batches WHERE id = ?').get(input.batchId) as { workspace_id: string } | undefined;
+      wsId = batchRow?.workspace_id ?? null;
+    }
+
+    // Idempotent receipt handling with composite key + payload hash verification (P1-D)
+    if (wsId) {
+      if (input.idempotencyKey) {
+        const existing = db.query(
+          'SELECT id, request_hash, details_json FROM onboarding_operation_receipts WHERE workspace_id = ? AND batch_id = ? AND operation = ? AND idempotency_key = ?'
+        ).get(wsId, input.batchId, 'approve', input.idempotencyKey) as { id: string; request_hash: string; details_json: string | null } | undefined;
+        if (existing) {
+          if (existing.request_hash !== requestHash) {
+            const err: any = new Error('payload_mismatch');
+            err.code = 'payload_mismatch';
+            err.existingReceiptId = existing.id;
+            throw err;
+          }
+          if (existing.details_json) {
+            try {
+              const parsed = JSON.parse(existing.details_json) as { results?: Array<{ itemId: string; status: string; reason: string | null }>; approved?: string[]; rejected?: Array<{ itemId: string; reason: string }>; receiptId?: string; approvedCount?: number; rejectedCount?: number; audited?: boolean; principal?: string };
+              if (Array.isArray(parsed.results) && typeof parsed.receiptId === 'string') {
+                // Full envelope replay - extract approved/rejected from results for return value
+                for (const r of parsed.results) {
+                  if (r.status === 'approved') approved.push(r.itemId);
+                  else rejected.push({ itemId: r.itemId, reason: r.reason ?? 'rejected' });
+                }
+                receiptId = parsed.receiptId;
+                return;
+              }
+              if (Array.isArray(parsed.approved)) {
+                approved.push(...parsed.approved);
+                if (parsed.rejected) rejected.push(...parsed.rejected);
+                receiptId = existing.id;
+                return;
+              }
+            } catch {}
+          }
+          receiptId = existing.id;
+          return;
+        }
+        receiptId = randomUUID();
+        try {
+          db.query(`INSERT INTO onboarding_operation_receipts (id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, request_hash, details_json)
+           VALUES (?, ?, ?, 'approve', ?, ?, ?, ?, ?, NULL)`).run(receiptId!, wsId, input.batchId, input.principal ?? input.approvedBy, input.role ?? 'operator', now, input.idempotencyKey, requestHash);
+        } catch (e) {
+          const dup = db.query('SELECT id, request_hash, details_json FROM onboarding_operation_receipts WHERE workspace_id = ? AND batch_id = ? AND operation = ? AND idempotency_key = ?').get(wsId, input.batchId, 'approve', input.idempotencyKey) as { id: string; request_hash: string; details_json: string | null } | undefined;
+          if (dup) {
+            if (dup.request_hash !== requestHash) {
+              const err: any = new Error('payload_mismatch');
+              err.code = 'payload_mismatch';
+              err.existingReceiptId = dup.id;
+              throw err;
+            }
+            if (dup.details_json) {
+              try {
+                const parsed = JSON.parse(dup.details_json) as { approved?: string[]; rejected?: Array<{ itemId: string; reason: string }> };
+                if (Array.isArray(parsed.approved)) {
+                  approved.push(...parsed.approved);
+                  if (parsed.rejected) rejected.push(...parsed.rejected);
+                  receiptId = dup.id;
+                  return;
+                }
+              } catch {}
+            }
+            receiptId = dup.id;
+            return;
+          }
+          throw e;
+        }
+      } else {
+        receiptId = randomUUID();
+        db.query(`INSERT INTO onboarding_operation_receipts (id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, request_hash, details_json)
+         VALUES (?, ?, ?, 'approve', ?, ?, ?, NULL, ?, NULL)`).run(receiptId!, wsId, input.batchId, input.principal ?? input.approvedBy, input.role ?? 'operator', now, requestHash);
+      }
+    }
+
     for (const id of input.itemIds) {
-      // 1. Read the CURRENT item state inside the transaction (serializable
-      //    single-writer: no interleaving is possible after this read).
       const itemRow = db.query(
         `SELECT id, batch_id, stage, stage_status, curation_data_json
          FROM onboarding_items WHERE id = ?`,
@@ -204,8 +292,6 @@ export function approveAndAdvanceItems(input: {
         rejected.push({ itemId: id, reason: `not_eligible:${itemRow.stage}/${itemRow.stage_status}` });
         continue;
       }
-      // Semantic-block parity with the diagnostics advance guard: a blocked
-      // member is never a release decision.
       let curation: {
         semanticValidation?: { status?: unknown; findings?: Array<{ message?: unknown }> };
       } | null = null;
@@ -216,8 +302,6 @@ export function approveAndAdvanceItems(input: {
             }
           : null;
       } catch {
-        // Corrupt curation payload — fail closed per item, never abort the
-        // whole bulk approval transaction (reviewer P6).
         rejected.push({ itemId: id, reason: 'invalid_curation_data' });
         continue;
       }
@@ -236,15 +320,13 @@ export function approveAndAdvanceItems(input: {
         continue;
       }
 
-      // 2. Guarded durable approval write.
       const approvalResult = db.query(
         `UPDATE onboarding_review_state
          SET approved_at = ?, approved_by = ?, approval_origin = ?, updated_at = ?
          WHERE item_id = ? AND batch_id = ?
            AND reviewed_at IS NOT NULL AND review_invalidated_at IS NULL AND approved_at IS NULL`,
-      ).run(now, input.approvedBy, input.origin ?? 'bulk', now, id, input.batchId);
+      ).run(now, input.principal ?? input.approvedBy, input.origin ?? 'bulk', now, id, input.batchId);
       if (approvalResult.changes === 0) {
-        // Precise rejection reason from the CURRENT durable row.
         const row = db.query(
           'SELECT reviewed_at, review_invalidated_at, approved_at FROM onboarding_review_state WHERE item_id = ?',
         ).get(id) as
@@ -262,8 +344,6 @@ export function approveAndAdvanceItems(input: {
         continue;
       }
 
-      // 3. Guarded advance review→promotion in the SAME transaction. On
-      //    failure the approval write is reverted atomically below.
       const advanceResult = db.query(
         `UPDATE onboarding_items
          SET stage = 'promotion', stage_status = 'pending', error_message = NULL, retry_count = 0,
@@ -281,7 +361,39 @@ export function approveAndAdvanceItems(input: {
         rejected.push({ itemId: id, reason: 'advance_failed_state_changed' });
       }
     }
+
+    // Update receipt with final details and insert audit logs atomically
+    // Merge pre-validation rejections (phase 1) so mixed eligible/ineligible replays identically
+    if (receiptId && wsId) {
+      const pre = input.preRejected ?? [];
+      const finalRejected = [...pre, ...rejected];
+      const results = [
+        ...approved.map(itemId => ({ itemId, status: 'approved' as const, reason: null as string | null })),
+        ...finalRejected.map(r => ({ itemId: r.itemId, status: 'rejected' as const, reason: r.reason })),
+      ];
+      const envelope = {
+        results,
+        approvedCount: approved.length,
+        rejectedCount: finalRejected.length,
+        rejected: finalRejected,
+        audited: true,
+        receiptId: receiptId!,
+        principal: input.principal ?? input.approvedBy,
+      };
+      const details = JSON.stringify(envelope);
+      db.query('UPDATE onboarding_operation_receipts SET details_json = ? WHERE id = ?').run(details, receiptId!);
+      // Per-item audit
+      for (const id of approved) {
+        const aid = randomUUID();
+        db.query(`INSERT INTO audit_log (id, workspace_id, entity_type, entity_id, action, message, details_json, created_at)
+           VALUES (?, ?, 'onboarding_item', ?, 'bulk_approve', ?, ?, ?)`).run(aid, wsId, id, `Item approved for export (bulk approval by ${input.principal ?? input.approvedBy})`, JSON.stringify({ batchId: input.batchId, origin: input.origin ?? 'bulk' }), now);
+      }
+      // Batch audit
+      const batchAid = randomUUID();
+      db.query(`INSERT INTO audit_log (id, workspace_id, entity_type, entity_id, action, message, details_json, created_at)
+         VALUES (?, ?, 'onboarding_batch', ?, 'bulk_approve', ?, ?, ?)`).run(batchAid, wsId, input.batchId, `Bulk approval completed: ${approved.length} approved, ${rejected.length} rejected`, JSON.stringify({ approvedCount: approved.length, rejectedCount: rejected.length, approvedBy: input.principal ?? input.approvedBy }), now);
+    }
   })();
 
-  return { approved, rejected };
+  return { approved, rejected, receiptId };
 }

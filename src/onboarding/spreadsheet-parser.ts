@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { ColumnMapping, SpreadsheetRow } from '../shared/schemas/onboarding';
+import { captureImportedIdentity } from './imported-identity';
 
 export interface ParsedSpreadsheet {
   headers: string[];
@@ -192,16 +193,15 @@ export function applyColumnMapping(
     const raw = rows[i];
     const rowNumber = i + 2; // +2 because row 1 is headers, data starts at row 2
 
-    const upc = raw[mapping.upc]?.trim();
+    // Milestone 5 — lossless identity: capture IMMEDIATELY after obtaining raw row
+    // BEFORE any trim/join/normalize, then derive operational fields from normalized envelope
+    const captured = captureImportedIdentity({ ...raw, __rowNumber: String(rowNumber) }, mapping);
+    const normalizedForOperational = JSON.parse(captured.normalized_identity_json!) as { name: string; brandHint: string | null; price: string | null; quantity: string | null; departmentHint: string | null; sourceUrl: string | null; upc: string };
 
-    // Concatenate split description columns if nameMergeWith is set
-    let name = raw[mapping.name]?.trim() ?? '';
-    if (mapping.nameMergeWith) {
-      const part2 = raw[mapping.nameMergeWith]?.trim() ?? '';
-      if (part2) {
-        name = (name + part2).trim();
-      }
-    }
+    const upc = normalizedForOperational.upc?.trim() ?? raw[mapping.upc]?.trim();
+
+    // Operational name is the normalized envelope's name (already includes boundary + glue-split + brand-move)
+    let name = normalizedForOperational.name;
 
     if (!upc) {
       errors.push({ row: rowNumber, message: 'Missing UPC' });
@@ -212,17 +212,12 @@ export function applyColumnMapping(
       continue;
     }
 
-    const price = mapping.price ? raw[mapping.price]?.trim() || null : null;
-    const quantityRaw = mapping.quantity ? raw[mapping.quantity]?.trim() : null;
+    const price = normalizedForOperational.price;
+    const quantityRaw = normalizedForOperational.quantity;
     const quantity = quantityRaw ? parseInt(quantityRaw, 10) : null;
-    const brandHint = mapping.brand ? raw[mapping.brand]?.trim() || null : null;
-    // Normalize distributor naming defects BEFORE persistence: fused size+
-    // brand tokens ("LGHARVEST") and brand-last ordering both deterministically
-    // crash cohort title coordination downstream (T2 skeleton mismatch / T3
-    // duplicate brand) — see normalizeImportedProductName.
-    name = normalizeImportedProductName(name, brandHint);
-    const departmentHint = mapping.department ? raw[mapping.department]?.trim() || null : null;
-    const sourceUrlRaw = mapping.sourceUrl ? raw[mapping.sourceUrl]?.trim() || null : null;
+    const brandHint = normalizedForOperational.brandHint;
+    const departmentHint = normalizedForOperational.departmentHint;
+    const sourceUrlRaw = normalizedForOperational.sourceUrl;
 
     // Validate URL if provided
     let sourceUrl: string | null = null;
@@ -235,7 +230,6 @@ export function applyColumnMapping(
         sourceUrl = null;
       }
     }
-
     valid.push({
       upc,
       name,
@@ -245,6 +239,15 @@ export function applyColumnMapping(
       departmentHint,
       sourceUrl,
       rowNumber,
+        rawIdentityJson: captured.raw_identity_json,
+        normalizedIdentityJson: captured.normalized_identity_json,
+        identityNormalizerVersion: captured.identity_normalizer_version,
+        identityProvenanceHash: captured.identity_provenance_hash,
+    } as SpreadsheetRow & {
+      rawIdentityJson: string | null;
+      normalizedIdentityJson: string | null;
+      identityNormalizerVersion: number;
+      identityProvenanceHash: string;
     });
   }
 

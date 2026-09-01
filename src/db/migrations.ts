@@ -5394,6 +5394,141 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Milestone 4 (P1-D): Operation receipts for idempotent approval/export ──
+  try {
+    const receiptVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('onboarding_operation_receipt_schema_version') as { value: string } | undefined;
+    if (!receiptVersion) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS onboarding_operation_receipts (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+          batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+          operation TEXT NOT NULL CHECK(operation IN ('approve','export')),
+          principal TEXT NOT NULL,
+          role TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          idempotency_key TEXT,
+          request_hash TEXT NOT NULL DEFAULT '',
+          details_json TEXT,
+          UNIQUE(workspace_id, batch_id, operation, idempotency_key)
+        );
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_operation_receipts_batch ON onboarding_operation_receipts(batch_id);');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_operation_receipts_workspace ON onboarding_operation_receipts(workspace_id);');
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_operation_receipt_schema_version', '2');");
+      console.log('[Migrations] Operation receipts table created (v2).');
+    } else if (receiptVersion.value === '1') {
+      console.log('[Migrations] Migrating operation receipts v1 -> v2 (composite key + request_hash)...');
+      const cols = db.query('PRAGMA table_info(onboarding_operation_receipts)').all() as Array<{ name: string }>;
+      const hasRequestHash = cols.some(c => c.name === 'request_hash');
+      if (!hasRequestHash) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS onboarding_operation_receipts_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            operation TEXT NOT NULL CHECK(operation IN ('approve','export')),
+            principal TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            idempotency_key TEXT,
+            request_hash TEXT NOT NULL DEFAULT '',
+            details_json TEXT,
+            UNIQUE(workspace_id, batch_id, operation, idempotency_key)
+          );
+        `);
+        db.exec(`
+          INSERT OR IGNORE INTO onboarding_operation_receipts_new (id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, request_hash, details_json)
+          SELECT id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, '' , details_json FROM onboarding_operation_receipts;
+        `);
+        db.exec('DROP TABLE onboarding_operation_receipts;');
+        db.exec('ALTER TABLE onboarding_operation_receipts_new RENAME TO onboarding_operation_receipts;');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_operation_receipts_batch ON onboarding_operation_receipts(batch_id);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_operation_receipts_workspace ON onboarding_operation_receipts(workspace_id);');
+      }
+      db.exec("UPDATE app_meta SET value = '2' WHERE key = 'onboarding_operation_receipt_schema_version';");
+      console.log('[Migrations] Operation receipts migrated to v2.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to create operation receipts table:', e);
+  }
+
+  // ── Milestone 5 (P1-B): Lossless imported identity ──────────────────────
+  // Atomic, guarded, truthful legacy backfill — per hardening plan 350-354
+  const identityVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('imported_identity_schema_version') as { value: string } | undefined;
+  if (!identityVersion) {
+    console.log('[Migrations] Running imported identity schema migration (atomic, guarded)...');
+    try {
+      db.transaction(() => {
+        // Guard INSIDE same transaction: refuse if active cohort runs exist; only swallow exact "no such table" else rethrow
+        try {
+          const row = db.query("SELECT COUNT(*) as c FROM classification_cohort_runs WHERE status IN ('freezing','running')").get() as { c: number } | undefined;
+          const activeRuns = row?.c ?? 0;
+          if (activeRuns > 0) {
+            console.error(`[Migrations] Refusing imported-identity migration: ${activeRuns} active cohort runs (freezing|running) — pause worker and retry.`);
+            throw new Error(`Imported-identity migration refused: ${activeRuns} active cohort runs`);
+          }
+        } catch (e: any) {
+          if (e && typeof e.message === 'string' && e.message.includes('no such table: classification_cohort_runs')) {
+            // Fresh DB — no cohort runs table yet, treat as 0
+          } else {
+            throw e;
+          }
+        }
+        const cols = db.query('PRAGMA table_info(onboarding_items)').all() as Array<{ name: string }>;
+        const colNames = new Set(cols.map(c => c.name));
+        if (!colNames.has('raw_identity_json')) {
+          db.exec('ALTER TABLE onboarding_items ADD COLUMN raw_identity_json TEXT;');
+        }
+        if (!colNames.has('normalized_identity_json')) {
+          db.exec('ALTER TABLE onboarding_items ADD COLUMN normalized_identity_json TEXT;');
+        }
+        if (!colNames.has('identity_normalizer_version')) {
+          db.exec('ALTER TABLE onboarding_items ADD COLUMN identity_normalizer_version INTEGER;');
+        }
+        if (!colNames.has('identity_provenance_hash')) {
+          db.exec('ALTER TABLE onboarding_items ADD COLUMN identity_provenance_hash TEXT;');
+        }
+        // Backfill legacy rows as lossy truthful envelope: preserve every operational field, raw NULL, version 0, lossy=true
+        const legacyRows = db.query("SELECT id, upc, name, price, quantity, brand_hint, department_hint, source_url, row_number FROM onboarding_items WHERE normalized_identity_json IS NULL AND name IS NOT NULL").all() as Array<{ id: string; upc: string; name: string; price: string | null; quantity: number | null; brand_hint: string | null; department_hint: string | null; source_url: string | null; row_number: number }>;
+        // Use canonical provenance: hash of canonical raw (null) + normalized envelope + source
+        const { canonicalJsonStringify } = require('../shared/stable-id');
+        const updateStmt = db.query('UPDATE onboarding_items SET normalized_identity_json = ?, raw_identity_json = NULL, identity_normalizer_version = 0, identity_provenance_hash = ? WHERE id = ?');
+        for (const r of legacyRows) {
+          const normalizedEnvelope = {
+            version: 0,
+            upc: (r as any).upc ?? '',
+            name: r.name,
+            brandHint: r.brand_hint ?? null,
+            departmentHint: (r as any).department_hint ?? null,
+            price: (r as any).price ?? null,
+            quantity: (r as any).quantity !== null && (r as any).quantity !== undefined ? String((r as any).quantity) : null,
+            sourceUrl: (r as any).source_url ?? null,
+            rowNumber: r.row_number ?? 1,
+            mappingHash: require('node:crypto').createHash('sha256').update('legacy', 'utf8').digest('hex'),
+            transformations: [],
+            parserProvenance: { source: 'legacy_operational_backfill', parserVersion: 0 },
+          };
+          const normalizedJson = canonicalJsonStringify(normalizedEnvelope);
+          // Truthful legacy provenanceHash: hash(version0 + normalized + legacy_operational_backfill + lossy)
+          const { computeLegacyProvenanceHash } = require('../onboarding/imported-identity');
+          const hash = computeLegacyProvenanceHash(normalizedJson);
+          updateStmt.run(normalizedJson, hash, r.id);
+        }
+        console.log(`[Migrations] Backfilled ${legacyRows.length} legacy imported identities (lossy, truthful).`);
+        db.exec("INSERT INTO app_meta (key, value) VALUES ('imported_identity_schema_version', '1');");
+      })();
+      console.log('[Migrations] Imported identity schema migration complete (v1, atomic).');
+    } catch (e) {
+      console.error('[Migrations] Imported identity schema migration failed (atomic rollback, marker NOT written):', e);
+      throw e;
+    }
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

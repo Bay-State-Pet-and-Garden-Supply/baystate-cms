@@ -499,6 +499,7 @@ async function freezeActiveCohort(wsId: string, wsPath: string): Promise<CohortR
 /** Parse the run's frozen execution-evidence projection from its snapshot. */
 function loadProjection(wsId: string, run: CohortRun): ExecutionEvidenceProjectionV2 {
   const snap = getCohortSnapshotByHash(wsId, run.evidenceSnapshotHash!)!;
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
   return parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
 }
 

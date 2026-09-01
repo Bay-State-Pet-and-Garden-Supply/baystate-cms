@@ -7,15 +7,16 @@
  * by the workspace).
  */
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+import type { ReviewQueueRow as ReviewQueueRowType } from '../../../../shared/schemas/onboarding-review-queue';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import { distributorApprovedImages, groupQueueItems, isReviewed, itemDisplayName, sourceTypeLabel } from './review-logic';
 
 export interface ReviewQueueProps {
-  items: OnboardingWorkState[];
+  items: Array<ReviewQueueRowType | OnboardingWorkState>;
   currentItemId: string | null;
-  /** Enriched detail cache (for thumbnails + warning badges). */
-  details: Map<string, ItemDetailResponse>;
-  /** Item ids known to carry warnings (enriched). */
+  /** Optional enriched detail cache (for backward compatibility). */
+  details?: Map<string, ItemDetailResponse>;
+  /** Item ids known to carry warnings. */
   warnedIds: Set<string>;
   /** Item ids edited during this session. */
   editedIds: Set<string>;
@@ -100,12 +101,12 @@ export function ReviewQueue({
             }
           >
             {group.items.map(item => (
-              <ReviewQueueRow
+              <ReviewQueueRowItem
                 key={item.itemId}
                 item={item}
                 active={item.itemId === currentItemId}
-                detail={details.get(item.itemId) ?? null}
-                warned={warnedIds.has(item.itemId)}
+                detail={details?.get(item.itemId) ?? null}
+                warned={'hasWarnings' in item ? Boolean(item.hasWarnings) || warnedIds.has(item.itemId) : warnedIds.has(item.itemId)}
                 edited={editedIds.has(item.itemId)}
                 selected={onToggleSelected ? selectedIds.has(item.itemId) : false}
                 onSelect={onSelect}
@@ -119,7 +120,7 @@ export function ReviewQueue({
   );
 }
 
-function ReviewQueueRow({
+function ReviewQueueRowItem({
   item,
   active,
   detail,
@@ -129,7 +130,7 @@ function ReviewQueueRow({
   onSelect,
   onToggleSelected,
 }: {
-  item: OnboardingWorkState;
+  item: ReviewQueueRowType | OnboardingWorkState;
   active: boolean;
   detail: ItemDetailResponse | null;
   warned: boolean;
@@ -141,12 +142,12 @@ function ReviewQueueRow({
   const ext = detail?.extraction ?? detail?.item.extractionData ?? null;
   const approved = distributorApprovedImages(ext);
   const image =
+    item.imageUrl ??
     ext?.primaryImage ??
     approved?.primary ??
     (ext as any)?.distributorImageCandidates?.[0]?.url ??
-    item.imageUrl ??
     null;
-  const curatedTitle = detail?.item.curationData?.curatedTitle ?? item.curatedTitle ?? null;
+  const curatedTitle = detail?.item.curationData?.curatedTitle ?? ('curatedTitle' in item ? (item as any).curatedTitle : null);
   const title = itemDisplayName(item, curatedTitle);
   const brand = item.brand ?? detail?.item.brandHint ?? null;
   const reviewed = isReviewed(item);
@@ -192,7 +193,10 @@ function ReviewQueueRow({
           <span style={{ fontFamily: 'var(--font-mono)' }}>{item.upc}</span>
           {brand ? <span>{brand}</span> : null}
           {item.family ? (
-            <span className="rv-badge rv-badge-family" title={`${item.family.label ?? 'Family'} — ${item.family.readyCount}/${item.family.memberCount} ready`}>
+            <span
+              className="rv-badge rv-badge-family"
+              title={`${item.family.label ?? 'Family'} — ${item.family.readyCount}/${item.family.memberCount} ready`}
+            >
               👪 {item.family.readyCount}/{item.family.memberCount}
             </span>
           ) : null}

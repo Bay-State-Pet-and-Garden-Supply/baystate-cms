@@ -9,6 +9,7 @@
  * field (SC 3.3.3 recovery path).
  */
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+import type { ReviewQueueRow } from '../../../../shared/schemas/onboarding-review-queue';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import {
   deriveReadiness,
@@ -21,7 +22,7 @@ import {
 
 export interface ReviewReadinessPanelProps {
   detail: ItemDetailResponse | null;
-  workState?: OnboardingWorkState | null;
+  workState?: ReviewQueueRow | OnboardingWorkState | null;
   /** Pre-derived readiness (used when the caller already holds one). */
   readiness?: ReviewReadiness;
   /** Present ⇒ blocker/warning rows are focus-jump buttons. */
@@ -36,7 +37,7 @@ export interface ReviewReadinessPanelProps {
 
 export function resolvePanelReadiness(
   detail: ItemDetailResponse | null,
-  workState?: OnboardingWorkState | null,
+  workState?: ReviewQueueRow | OnboardingWorkState | null,
 ): ReviewReadiness {
   return deriveReadiness(detail, workState);
 }

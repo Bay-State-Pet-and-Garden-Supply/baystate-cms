@@ -38,6 +38,45 @@ export const SpreadsheetRowSchema = z.object({
   departmentHint: z.string().nullable().default(null),
   sourceUrl: z.string().url().nullable().default(null),
   rowNumber: z.number().int(),
+  // Milestone 5 — lossless imported identity (bounded, fail-closed, cross-field)
+  rawIdentityJson: z.string().max(10000).nullable().optional(),
+  normalizedIdentityJson: z.string().max(10000).nullable().optional(),
+  identityNormalizerVersion: z.number().int().min(0).max(10).nullable().optional(),
+  identityProvenanceHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  identityLossy: z.boolean().optional(),
+}).superRefine((data, ctx) => {
+  // Shared tuple validator (M5 round 3) — fail-closed via dynamic require to avoid cycle
+  const { validateIdentityTuple } = require('../../onboarding/imported-identity');
+  const res = validateIdentityTuple({
+    rawJson: (data as any).rawIdentityJson ?? null,
+    normalizedJson: (data as any).normalizedIdentityJson ?? null,
+    version: (data as any).identityNormalizerVersion ?? null,
+    provenanceHash: (data as any).identityProvenanceHash ?? null,
+    lossy: (data as any).identityLossy,
+  });
+  if (!res.ok) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: res.reason || 'identity tuple invalid', path: ['identityNormalizerVersion'] });
+  }
+  // Also enforce individual envelope canonical + schema validation when present
+  const checkCanonical = (json: string | null, path: string, isRaw: boolean) => {
+    if (json === null) return;
+    try {
+      const parsed = JSON.parse(json);
+      const { canonicalJsonStringify } = require('../stable-id');
+      if (canonicalJsonStringify(parsed) !== json) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'not canonical JSON', path: [path] });
+        return;
+      }
+      const { RawIdentityEnvelopeV1Schema, NormalizedIdentityEnvelopeV1Schema } = require('../../onboarding/imported-identity');
+      const schema = isRaw ? RawIdentityEnvelopeV1Schema : NormalizedIdentityEnvelopeV1Schema;
+      const r = schema.safeParse(parsed);
+      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'envelope schema invalid', path: [path] });
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'invalid JSON', path: [path] });
+    }
+  };
+  checkCanonical((data as any).rawIdentityJson ?? null, 'rawIdentityJson', true);
+  checkCanonical((data as any).normalizedIdentityJson ?? null, 'normalizedIdentityJson', false);
 });
 
 export type SpreadsheetRow = z.infer<typeof SpreadsheetRowSchema>;
@@ -1118,9 +1157,48 @@ export const OnboardingItemSchema = z.object({
   existingSku: z.string().nullable(),
   extractionData: ExtractionDataSchema.nullable().default(null),
   curationData: CurationDataSchema.nullable().default(null),
+  // Milestone 5 (P1-B) — lossless imported identity (bounded, fail-closed, lossy flag, cross-field)
+  rawIdentityJson: z.string().max(10000).nullable().optional(),
+  normalizedIdentityJson: z.string().max(10000).nullable().optional(),
+  identityNormalizerVersion: z.number().int().min(0).max(10).nullable().optional(),
+  identityProvenanceHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  identityLossy: z.boolean().optional(),
   rowNumber: z.number().int(),
   createdAt: z.string(),
   updatedAt: z.string(),
+}).superRefine((data, ctx) => {
+  // Shared tuple validator (M5 round 3) — fail-closed via dynamic require to avoid cycle
+  const { validateIdentityTuple } = require('../../onboarding/imported-identity');
+  const res = validateIdentityTuple({
+    rawJson: (data as any).rawIdentityJson ?? null,
+    normalizedJson: (data as any).normalizedIdentityJson ?? null,
+    version: (data as any).identityNormalizerVersion ?? null,
+    provenanceHash: (data as any).identityProvenanceHash ?? null,
+    lossy: (data as any).identityLossy,
+  });
+  if (!res.ok) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: res.reason || 'identity tuple invalid', path: ['identityNormalizerVersion'] });
+  }
+  // Also enforce individual envelope canonical + schema validation when present
+  const checkCanonical = (json: string | null, path: string, isRaw: boolean) => {
+    if (json === null) return;
+    try {
+      const parsed = JSON.parse(json);
+      const { canonicalJsonStringify } = require('../stable-id');
+      if (canonicalJsonStringify(parsed) !== json) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'not canonical JSON', path: [path] });
+        return;
+      }
+      const { RawIdentityEnvelopeV1Schema, NormalizedIdentityEnvelopeV1Schema } = require('../../onboarding/imported-identity');
+      const schema = isRaw ? RawIdentityEnvelopeV1Schema : NormalizedIdentityEnvelopeV1Schema;
+      const r = schema.safeParse(parsed);
+      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'envelope schema invalid', path: [path] });
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'invalid JSON', path: [path] });
+    }
+  };
+  checkCanonical((data as any).rawIdentityJson ?? null, 'rawIdentityJson', true);
+  checkCanonical((data as any).normalizedIdentityJson ?? null, 'normalizedIdentityJson', false);
 });
 
 export type OnboardingItem = z.infer<typeof OnboardingItemSchema>;
