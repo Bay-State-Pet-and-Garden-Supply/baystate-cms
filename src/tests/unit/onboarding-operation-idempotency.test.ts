@@ -83,7 +83,7 @@ function injectFault(snippet: string, errorMsg: string): () => void {
   };
 }
 
-function assertAllOrNothing(batchId: string, itemIds: string[] = [], opts: { expectedApproved?: number, expectedPromoted?: number } = {}) {
+function assertAllOrNothing(batchId: string, itemIds: string[] = [], opts: { expectedApproved?: number, expectedPromoted?: number, baselineChangeSetItems?: number } = {}) {
   const db = getDb();
   const receipt = db.query('SELECT COUNT(*) as c FROM onboarding_operation_receipts WHERE batch_id = ?').get(batchId) as { c: number };
   expect(receipt.c).toBe(0);
@@ -104,7 +104,7 @@ function assertAllOrNothing(batchId: string, itemIds: string[] = [], opts: { exp
   const cs = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
   expect(cs.c).toBe(0);
   const csi = db.query('SELECT COUNT(*) as c FROM change_set_items').get() as { c: number };
-  expect(csi.c).toBe(0);
+  expect(csi.c).toBe(opts.baselineChangeSetItems ?? 0);
 }
 
 async function postApprove(batchId: string, itemIds: string[], headers: Record<string, string> = {}, bodyExtra: any = {}) {
@@ -472,8 +472,6 @@ describe('approval idempotency and server-derived principal', () => {
     const { batchId, itemIds } = makeReviewBatch(2);
     const key = 'idem-fault-claim-' + randomUUID();
     const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
-    const db = getDb();
-    const beforeApproved = (db.query('SELECT COUNT(*) as c FROM onboarding_review_state WHERE batch_id = ? AND approved_at IS NOT NULL').get(batchId) as { c: number }).c;
     const beforeReceipt = findByScopedIdempotencyKey(workspaceId, batchId, 'approve', key);
     expect(beforeReceipt).toBeFalsy();
     const restore = injectFault('INSERT INTO onboarding_operation_receipts', 'injected receipt claim failure');
@@ -497,7 +495,6 @@ describe('approval idempotency and server-derived principal', () => {
     let res: any;
     try { res = await postApprove(batchId, itemIds, headers); } catch {}
     restore();
-    const db = getDb();
     if (res) expect([500, 409].includes(res.status)).toBe(true);
     assertAllOrNothing(batchId, itemIds);
   });
@@ -511,7 +508,6 @@ describe('approval idempotency and server-derived principal', () => {
     let res: any;
     try { res = await postApprove(batchId, itemIds, headers); } catch {}
     restore();
-    const db = getDb();
     if (res) expect([500, 409].includes(res.status)).toBe(true);
     assertAllOrNothing(batchId, itemIds);
   });
@@ -525,7 +521,6 @@ describe('approval idempotency and server-derived principal', () => {
     let res: any;
     try { res = await postApprove(batchId, itemIds, headers); } catch {}
     restore();
-    const db = getDb();
     if (res) expect([500, 409].includes(res.status)).toBe(true);
     assertAllOrNothing(batchId, itemIds);
   });
@@ -554,6 +549,7 @@ describe('approval idempotency and server-derived principal', () => {
     }
     const key = 'export-draft-fault-' + randomUUID();
     const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const baselineChangeSetItems = (getDb().query('SELECT COUNT(*) as c FROM change_set_items').get() as { c: number }).c;
     const restore = injectFault('INSERT INTO change_set_items', 'injected draft insert failure');
     let res: any;
     try {
@@ -567,8 +563,7 @@ describe('approval idempotency and server-derived principal', () => {
       res = { status: response.status, json: await response.json().catch(() => ({})) };
     } catch {}
     restore();
-    const db = getDb();
     if (res) expect([500, 409].includes(res.status)).toBe(true);
-    assertAllOrNothing(batch.id, ids, { expectedApproved: 2, expectedPromoted: 2 });
+    assertAllOrNothing(batch.id, ids, { expectedApproved: 2, expectedPromoted: 2, baselineChangeSetItems });
   });
 });
