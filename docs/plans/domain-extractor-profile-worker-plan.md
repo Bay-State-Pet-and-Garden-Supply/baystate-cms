@@ -1,3 +1,6 @@
+> [!NOTE] Superseded by Onboarding Hardening Plan M6 — see `docs/plans/onboarding-hardening-plan.md`.
+> **Partial supersession:** Deterministic worker/profile governance remains valid. Runtime LLM extraction and agent orchestration remain prohibited by ADR 0030/ADR 0033 — do not use this plan to reintroduce them.
+
 # Domain Extractor Profile Worker Plan
 
 ## Goal

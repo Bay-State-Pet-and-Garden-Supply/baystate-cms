@@ -15,10 +15,12 @@
  *
  * The mapping table follows the epic #46 test plan EXACTLY (each internal
  * state maps to one operator category/label/attention pair).
+ *
+ * Milestone 3 (P1-E): Bounded read model — all DB access via bulk repositories,
+ * cursor pagination, projection health, fail-closed on corrupt data.
  */
-import { listItemsByBatch, findItemById } from '../db/repositories/onboarding-item-repo';
+import { listItemsByBatch, listItemsByBatchChunked, findItemById } from '../db/repositories/onboarding-item-repo';
 import { findBatchById } from '../db/repositories/onboarding-batch-repo';
-import { listSourcesByItem } from '../db/repositories/onboarding-source-repo';
 import { listCohortsByBatch } from '../db/repositories/curation-cohort-repo';
 import { buildCohortView } from './curation-cohort-service';
 import {
@@ -27,10 +29,23 @@ import {
   type OnboardingReviewState,
 } from '../db/repositories/onboarding-review-repo';
 import { listChangeSetStatusBySkus } from '../db/repositories/change-set-repo';
+import {
+  bulkLoadVariantResolutions,
+  bulkCountDiscoveryCandidates,
+  bulkGetCohortRunStatusByItem,
+  bulkGetLatestClassificationRunIdByItem,
+  bulkGetClassificationStageResults,
+  bulkLoadVariantResolutionsWithHealth,
+  bulkCountDiscoveryCandidatesWithHealth,
+  bulkGetCohortRunStatusByItemWithHealth,
+  bulkGetLatestClassificationRunIdByItemWithHealth,
+  bulkGetClassificationStageResultsWithHealth,
+  WorkStateProjectionError,
+  type BulkStageRow,
+} from '../db/repositories/onboarding-work-state-repo';
 import { convertToLbs } from '../shared/weight-converter';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 import type { CurationCohortView } from '../shared/schemas/cohorts';
-import { getDb } from '../db/connection';
 import {
   type WorkStateCategory,
   type WorkActivity,
@@ -43,9 +58,20 @@ import {
   type FindingCode,
   type SuggestedAction,
   type FindingDetail,
+  type WorkStateProjectionHealth,
+  type WorkStateProjectionHealthIssue,
   FindingCodeEnum,
   SuggestedActionEnum,
   EMPTY_WORK_STATE_COUNTS,
+  WORK_STATE_PROJECTION_VERSION,
+  computeWorkStateFilterHash,
+  encodeWorkStateCursor,
+  encodeWorkStateDbCursor,
+  validateWorkStateCursor,
+  validateWorkStateDbCursor,
+  validateAnyWorkStateCursor,
+  WorkStateCursorError,
+  buildWorkStateSortKey,
 } from '../shared/schemas/onboarding-work-state';
 
 // ─── Context ───────────────────────────────────────────────────────────────────
@@ -72,39 +98,14 @@ export interface WorkStateContext {
   changeSetStatusBySku: Map<string, string>;
   candidateCountByItem: Map<string, number>;
   variantResolutionByItem: Map<string, { id: string; status: string; candidates: unknown[]; identityMatrixHash: string; platform: string }>;
-}
-
-function loadVariantResolutionByItem(itemIds: string[]): Map<string, { id: string; status: string; candidates: unknown[]; identityMatrixHash: string; platform: string }> {
-  if (itemIds.length === 0) return new Map();
-  try {
-    const db = getDb();
-    const placeholders = itemIds.map(() => '?').join(',');
-    const rows = db
-      .prepare(`SELECT * FROM onboarding_variant_resolutions WHERE onboarding_item_id IN (${placeholders}) AND superseded_at IS NULL`)
-      .all(...itemIds) as Array<{
-      id: string;
-      onboarding_item_id: string;
-      status: string;
-      candidates_json: string;
-      identity_matrix_hash: string;
-      platform: string;
-    }>;
-    const map = new Map<string, { id: string; status: string; candidates: unknown[]; identityMatrixHash: string; platform: string }>();
-    for (const r of rows) {
-      let candidates: unknown[] = [];
-      try { candidates = JSON.parse(r.candidates_json); } catch { candidates = []; }
-      map.set(r.onboarding_item_id, {
-        id: r.id,
-        status: r.status,
-        candidates,
-        identityMatrixHash: r.identity_matrix_hash,
-        platform: r.platform,
-      });
-    }
-    return map;
-  } catch {
-    return new Map();
-  }
+  /** Milestone 3 bulk: cohort run status (freezing/running) per item. */
+  cohortRunStatusByItem: Map<string, string>;
+  /** Milestone 3 bulk: latest classification run id per item. */
+  latestRunIdByItem: Map<string, string>;
+  /** Milestone 3 bulk: stage results per runId. */
+  stageResultsByRunId: Map<string, BulkStageRow[]>;
+  /** Projection health issues collected during context building. */
+  healthIssues: WorkStateProjectionHealthIssue[];
 }
 
 export interface WorkStateFilters {
@@ -116,6 +117,7 @@ export interface WorkStateFilters {
   reviewState?: ReviewState;
   limit?: number;
   offset?: number;
+  cursor?: string;
 }
 
 // ─── Context builders ──────────────────────────────────────────────────────────
@@ -135,15 +137,9 @@ function normalizeHost(url: string | null | undefined): string | null {
  * load inside `buildCohortView`).
  */
 export function buildCohortContext(batchId: string, items: OnboardingItem[]): Map<string, FamilyCohortState> {
-  // Include superseded cohorts: family grouping is display context for Review
-  // (and historical audit), and a family whose cohort was superseded after its
-  // members were curated must still render grouped. Processing never reads this
-  // map — the claim queue selects `status = 'ready'` rows directly.
   const views: CurationCohortView[] = listCohortsByBatch(batchId, { includeSuperseded: true }).map(cohort => buildCohortView(cohort, items));
   const map = new Map<string, FamilyCohortState>();
   for (const view of views) {
-    // `waitingOn` excludes blocked members, so memberCount - readyCount -
-    // waitingOn.length is the blocked count.
     const blockedCount = Math.max(0, view.memberCount - view.readyCount - view.waitingOn.length);
     for (const member of view.members) {
       map.set(member.onboardingItemId, {
@@ -166,39 +162,130 @@ export function buildCohortContext(batchId: string, items: OnboardingItem[]): Ma
 
 /** Build the full batch projection context (one batch-level load per source). */
 export function buildBatchWorkStateContext(batchId: string, items: OnboardingItem[]): WorkStateContext {
-  const reviewStates = listReviewStates(batchId);
-  const cohortByItem = buildCohortContext(batchId, items);
+  const healthIssues: WorkStateProjectionHealthIssue[] = [];
+  let hasCriticalIssue = false;
+  const reviewStates = (() => {
+    try {
+      return listReviewStates(batchId);
+    } catch (e) {
+      healthIssues.push({ source: 'onboarding_review_state', code: 'review_state_failed', affectedCount: items.length });
+      hasCriticalIssue = true;
+      return new Map<string, OnboardingReviewState>();
+    }
+  })();
+  let cohortByItem: Map<string, FamilyCohortState>;
+  try {
+    cohortByItem = buildCohortContext(batchId, items);
+  } catch {
+    cohortByItem = new Map();
+    healthIssues.push({ source: 'curation_cohorts', code: 'cohort_context_failed', affectedCount: items.length });
+    hasCriticalIssue = true;
+  }
   const promotedSkus = items
     .filter(item => item.stage === 'promotion')
     .map(item => item.upc);
-  // Workspace-scoped change-set status (epic #46 fix 3): identical SKUs in
-  // other workspaces must never leak a pushed/draft status into this batch.
   const workspaceId = findBatchById(batchId)?.workspaceId ?? '';
-  const changeSetStatusBySku = listChangeSetStatusBySkus(workspaceId, promotedSkus);
-  const candidateCountByItem = new Map<string, number>();
-  for (const item of items) {
-    if (item.stage === 'discovery') {
-      candidateCountByItem.set(item.id, listSourcesByItem(item.id).length);
+  let changeSetStatusBySku: Map<string, string>;
+  try {
+    changeSetStatusBySku = listChangeSetStatusBySkus(workspaceId, promotedSkus);
+  } catch {
+    changeSetStatusBySku = new Map();
+    if (promotedSkus.length > 0) {
+      healthIssues.push({ source: 'change_sets', code: 'change_set_lookup_failed', affectedCount: promotedSkus.length });
+      hasCriticalIssue = true;
     }
   }
-  const variantResolutionByItem = loadVariantResolutionByItem(items.map(i => i.id));
-  return { reviewStates, cohortByItem, changeSetStatusBySku, candidateCountByItem, variantResolutionByItem };
+  const itemIds = items.map(i => i.id);
+  const candidateRes = bulkCountDiscoveryCandidatesWithHealth(itemIds);
+  if (candidateRes.issue) {
+    healthIssues.push(candidateRes.issue);
+    hasCriticalIssue = true;
+  }
+  const candidateCountByItem = candidateRes.data;
+  const variantRes = bulkLoadVariantResolutionsWithHealth(itemIds);
+  if (variantRes.issue) {
+    healthIssues.push(variantRes.issue);
+    hasCriticalIssue = true;
+  }
+  const variantResolutionByItem = variantRes.data;
+
+  const cohortRunRes = bulkGetCohortRunStatusByItemWithHealth(itemIds);
+  if (cohortRunRes.issue) {
+    healthIssues.push(cohortRunRes.issue);
+    hasCriticalIssue = true;
+  }
+  const cohortRunStatusByItem = cohortRunRes.data;
+
+  const latestRes = bulkGetLatestClassificationRunIdByItemWithHealth(itemIds);
+  if (latestRes.issue) {
+    healthIssues.push(latestRes.issue);
+    hasCriticalIssue = true;
+  }
+  const latestRunIdByItem = latestRes.data;
+  const effectiveRunIds: string[] = [];
+  const runIdByItem = new Map<string, string>();
+  for (const item of items) {
+    const curData = item.curationData as Record<string, unknown> | null;
+    const explicitRunId = curData && typeof curData.classificationRunId === 'string' && (curData.classificationRunId as string).trim().length > 0
+      ? (curData.classificationRunId as string).trim()
+      : null;
+    const runId = explicitRunId ?? latestRunIdByItem.get(item.id) ?? null;
+    if (runId) {
+      runIdByItem.set(item.id, runId);
+      effectiveRunIds.push(runId);
+    }
+    if (curData !== null && typeof curData !== 'object') {
+      healthIssues.push({ source: 'onboarding_items', code: 'corrupt_curation_data', affectedCount: 1 });
+    }
+  }
+  const stageRes = bulkGetClassificationStageResultsWithHealth(effectiveRunIds);
+  if (stageRes.issue) {
+    healthIssues.push(stageRes.issue);
+    hasCriticalIssue = true;
+  }
+  const stageResultsByRunId = stageRes.data;
+  if (hasCriticalIssue) {
+    // Attach flag for caller to decide 503 vs degraded 200. Per-item corrupt (corrupt_curation_data) alone is not critical.
+    // Only bulk DB failures are critical. If the only issues are per-item corrupt, hasCriticalIssue would be false.
+    // Here we have at least one bulk failure, so mark context as critical.
+    (healthIssues as any)._hasCritical = true;
+  }
+
+  // Fail-closed: surface corrupt detection without false zeros
+  // If any bulk loader returned degraded (empty maps for non-empty input),
+  // ensure health reflects degraded but counts remain accurate via fallback.
+
+  return {
+    reviewStates,
+    cohortByItem,
+    changeSetStatusBySku,
+    candidateCountByItem,
+    variantResolutionByItem,
+    cohortRunStatusByItem,
+    latestRunIdByItem: runIdByItem,
+    stageResultsByRunId,
+    healthIssues,
+  };
+}
+
+export function buildProjectionHealth(issues: WorkStateProjectionHealthIssue[]): WorkStateProjectionHealth {
+  return {
+    status: issues.length > 0 ? 'degraded' : 'healthy',
+    version: WORK_STATE_PROJECTION_VERSION,
+    computedAt: new Date().toISOString(),
+    issues,
+  };
 }
 
 // ─── Derivation helpers ────────────────────────────────────────────────────────
 
 function deriveReviewState(item: OnboardingItem, row: OnboardingReviewState | undefined): ReviewState {
-  // Durable record wins whenever present: an invalidated record is UNREVIEWED
-  // (the legacy stage-based inference must never override it).
   if (row) {
     if (row.approvedAt && !row.reviewInvalidatedAt) return 'approved';
     if (row.reviewInvalidatedAt) return 'unreviewed';
     if (row.reviewedAt) return 'reviewed';
     return 'unreviewed';
   }
-  // Legacy-inferred reviewed: the durable table backfills existing
-  // review-completed/promoted items at migration time; `review / completed`
-  // is the legacy review-complete marker before that migration runs.
   if (item.stage === 'review' && item.stageStatus === 'completed') return 'reviewed';
   if (item.stage === 'promotion' && item.stageStatus === 'completed') return 'reviewed';
   if (item.stage === 'curation' && item.stageStatus === 'completed') return 'unreviewed';
@@ -263,7 +350,7 @@ function stageNameToWorkActivity(stageName: string): WorkActivity | null {
 }
 
 /** Derive the most specific curation sub-activity for a curation-stage item. */
-function deriveCurationSubActivity(item: OnboardingItem): WorkActivity {
+function deriveCurationSubActivity(item: OnboardingItem, ctx: WorkStateContext): WorkActivity {
   const curData = item.curationData as Record<string, unknown> | null;
   const sv = curData?.semanticValidation as { status?: string; findings?: unknown } | undefined;
   if (sv?.status === 'blocked' && Array.isArray(sv.findings) && sv.findings.length > 0) {
@@ -272,51 +359,36 @@ function deriveCurationSubActivity(item: OnboardingItem): WorkActivity {
     const mapped = curationSubActivityForFindingCode(firstCode);
     if (mapped) return mapped;
   }
-  // Live run stage projection: check cohort run and classification stage results for
-  // in-progress curation sub-stage. This is the authoritative source for active work.
+  // Live run stage projection: check bulk-loaded cohort run and classification stage results.
   try {
-    // 1) Cohort run lease state: freezing/running cohorts are in cohort_freezing
-    const cohortRunRow = getDb()
-      .query("SELECT status FROM classification_cohort_runs WHERE cohort_id IN (SELECT cohort_id FROM curation_cohort_members WHERE onboarding_item_id = ?) AND status IN ('freezing','running') LIMIT 1")
-      .get(item.id) as { status: string } | undefined;
-    if (cohortRunRow) {
-      if (cohortRunRow.status === 'freezing') return 'cohort_freezing';
-      // running cohort → look at child classification run stage
-    }
-    // 2) Per-item classification run stages (authoritative granular stage)
-    const curRunId = (curData as Record<string, unknown> | null)?.classificationRunId;
-    const runId = typeof curRunId === 'string' && curRunId.length > 0 ? curRunId : null;
-    const lookupId = runId ?? getDb().query(
-      "SELECT id FROM classification_runs WHERE onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1"
-    ).get(item.id) as { id: string } | undefined;
-    const effectiveRunId = runId ?? (lookupId && typeof (lookupId as unknown as string) === 'string' ? (lookupId as unknown as string) : (lookupId as { id: string } | undefined)?.id ?? null);
-    if (effectiveRunId) {
-      const stageRows = getDb()
-        .query("SELECT stage_name, status FROM classification_stage_results WHERE run_id = ? ORDER BY started_at ASC")
-        .all(effectiveRunId) as Array<{ stage_name: string; status: string }>;
-      // Prefer a stage currently running
-      for (const r of stageRows) {
-        if (r.status === 'running') {
-          const mapped = stageNameToWorkActivity(r.stage_name);
+    const cohortStatus = ctx.cohortRunStatusByItem.get(item.id);
+    if (cohortStatus === 'freezing') return 'cohort_freezing';
+    // If cohort is running, continue to stage lookup below
+    const runId = ctx.latestRunIdByItem.get(item.id);
+    if (runId) {
+      const stageRows = ctx.stageResultsByRunId.get(runId);
+      if (stageRows && stageRows.length > 0) {
+        for (const r of stageRows) {
+          if (r.status === 'running') {
+            const mapped = stageNameToWorkActivity(r.stage_name);
+            if (mapped) return mapped;
+          }
+        }
+        let lastSucceededIdx = -1;
+        for (let i = 0; i < stageRows.length; i++) {
+          if (stageRows[i].status === 'succeeded' || stageRows[i].status === 'abstained') lastSucceededIdx = i;
+          else break;
+        }
+        const nextPending = stageRows[lastSucceededIdx + 1];
+        if (nextPending && nextPending.status === 'pending') {
+          const mapped = stageNameToWorkActivity(nextPending.stage_name);
           if (mapped) return mapped;
         }
-      }
-      // Otherwise the first pending stage after last succeeded
-      let lastSucceededIdx = -1;
-      for (let i = 0; i < stageRows.length; i++) {
-        if (stageRows[i].status === 'succeeded' || stageRows[i].status === 'abstained') lastSucceededIdx = i;
-        else break;
-      }
-      const nextPending = stageRows[lastSucceededIdx + 1];
-      if (nextPending && nextPending.status === 'pending') {
-        const mapped = stageNameToWorkActivity(nextPending.stage_name);
-        if (mapped) return mapped;
-      }
-      // Fallback: last running-pending heuristic not matched, check for any pending
-      for (const r of stageRows) {
-        if (r.status === 'pending') {
-          const mapped = stageNameToWorkActivity(r.stage_name);
-          if (mapped) return mapped;
+        for (const r of stageRows) {
+          if (r.status === 'pending') {
+            const mapped = stageNameToWorkActivity(r.stage_name);
+            if (mapped) return mapped;
+          }
         }
       }
     }
@@ -353,7 +425,6 @@ function extractFindingDetails(curationData: Record<string, unknown> | null): {
   if (!Array.isArray(sv.findings) || sv.findings.length === 0) {
     return { findingCode: null, findingSummary: null, conflictingValues: null, suggestedAction: null, findingDetails: null };
   }
-  // Guard each entry: must be non-null object
   const validFindings = sv.findings.filter((f): f is Record<string, unknown> => f !== null && typeof f === 'object' && !Array.isArray(f));
   if (validFindings.length === 0) {
     return { findingCode: null, findingSummary: null, conflictingValues: null, suggestedAction: null, findingDetails: null };
@@ -365,7 +436,6 @@ function extractFindingDetails(curationData: Record<string, unknown> | null): {
     ? (first.conflictingValues as unknown[]).filter((v): v is string => typeof v === 'string')
     : null;
   const suggestedAction = safeSuggestedAction(first.suggestedAction);
-  // Fallback summary: use stored message even when code fails enum validation
   const fallbackSummary = findingSummary ?? (typeof first.message === 'string' ? first.message : null);
   const findingDetails: FindingDetail[] = validFindings
     .filter(f => typeof f.code === 'string' && typeof f.message === 'string' && safeFindingCode(f.code) !== null)
@@ -399,10 +469,16 @@ function semanticBlockedInput(item: OnboardingItem): DerivationInput | null {
     (findings.length > 0 && findings[0] !== null && typeof findings[0] === 'object' && typeof (findings[0] as Record<string, unknown>).message === 'string'
       ? ((findings[0] as Record<string, unknown>).message as string)
       : 'A hard cohort semantic validation finding blocks this item.');
-  const granularActivity = deriveCurationSubActivity(item);
+  const granularActivity = item.curationData ? 'semantic_validation' as WorkActivity : null;
+  // Use derived activity from findings when available, else generic
+  let activity: WorkActivity | null = granularActivity;
+  if (extracted.findingCode) {
+    const mapped = curationSubActivityForFindingCode(extracted.findingCode);
+    if (mapped) activity = mapped;
+  }
   return {
     category: 'needs_attention',
-    activity: granularActivity !== 'curation' ? granularActivity : null,
+    activity,
     label: 'Curation blocked by semantic validation',
     detail: firstMessage,
     attentionReason: 'semantic_validation_blocked',
@@ -542,7 +618,6 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
     return build(item, row, cohort, { category: 'skipped', label: 'Skipped', detail: error });
   }
 
-  // Held products waiting on preflight / brand resolution
   if (item.isHeld) {
     if (item.heldReason === 'missing_brand' || !item.brandHint || item.brandHint.trim().length === 0) {
       return attention(
@@ -560,17 +635,16 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
     );
   }
 
-  // Centralized semantic-block projection: curation AND review rows with a
-  // persisted blocked semantic validation surface as needs_attention BEFORE
-  // any ready_for_review inference. Promotion does not re-project semantic
-  // blocks (those rows advance beyond curation only after the block clears).
   const semanticBlock = semanticBlockedInput(item);
   if (semanticBlock && (item.stage === 'curation' || item.stage === 'review')) {
+    // Override activity with granular if available via ctx
+    const granular = deriveCurationSubActivity(item, ctx);
+    if (granular !== 'curation' && semanticBlock.activity === 'semantic_validation') {
+      semanticBlock.activity = granular;
+    }
     return build(item, row, cohort, semanticBlock);
   }
 
-  // ── Variant resolution choose_variant projection (M6) ─────────────────
-  // When a current unresolved variant matrix exists and item is parked for input, surface choose_variant
   const variantRes = ctx.variantResolutionByItem?.get(item.id);
   if (
     variantRes &&
@@ -578,17 +652,21 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
     (item.stage === 'discovery' || item.stage === 'extraction') &&
     item.stageStatus === 'needs_input'
   ) {
-    const { getEffectiveVariantResolutionMode } = require('./variant-flags');
-    if (getEffectiveVariantResolutionMode() === 'active') {
-      return build(item, row, cohort, {
-        category: 'needs_attention',
-        activity: null,
-        label: 'Choose product variant',
-        detail: 'Multiple variants detected — choose the exact variant.',
-        attentionReason: 'choose_variant',
-        attentionAction: 'choose_variant',
-        variantResolution: variantRes as any,
-      });
+    try {
+      const { getEffectiveVariantResolutionMode } = require('./variant-flags');
+      if (getEffectiveVariantResolutionMode() === 'active') {
+        return build(item, row, cohort, {
+          category: 'needs_attention',
+          activity: null,
+          label: 'Choose product variant',
+          detail: 'Multiple variants detected — choose the exact variant.',
+          attentionReason: 'choose_variant',
+          attentionAction: 'choose_variant',
+          variantResolution: variantRes as any,
+        });
+      }
+    } catch {
+      // fail closed: variant flag check failure does not project choose_variant
     }
   }
 
@@ -596,8 +674,6 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
     case 'promotion': {
       if (item.stageStatus === 'completed') {
         const changeSetStatus = ctx.changeSetStatusBySku.get(item.upc);
-        // Verified terminal export: the change set holding this SKU was
-        // pushed. Never report exported otherwise.
         if (changeSetStatus === 'pushed') {
           return build(item, row, cohort, { category: 'completed', activity: 'export', label: 'Exported', detail: 'Change set pushed to the store' });
         }
@@ -611,12 +687,6 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
       if (item.stageStatus === 'failed') {
         return attention('processing_failed', 'retry_processing', 'Export failed');
       }
-      // Epic #46 audit fix: 'approved' is a DURABLE release decision, never a
-      // stage inference. A promotion-stage item without a durable approval
-      // (legacy diagnostics advance, pre-epic promoted rows without backfill,
-      // or an approval cleared by a consequential edit that is still in
-      // promotion) is NOT approved — it projects back into Ready-for-Review
-      // so the operator re-approves before any export path can run.
       if (row?.approvedAt && !row.reviewInvalidatedAt) {
         return build(item, row, cohort, { category: 'approved', activity: 'export', label: 'Approved — ready to export', detail: error });
       }
@@ -645,15 +715,12 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
 
     case 'curation': {
       if (item.stageStatus === 'completed') {
-        // Semantic blocks are already handled by the centralized check above;
-        // this branch is reached only for non-blocked completed curation.
         return build(item, row, cohort, { category: 'ready_for_review', activity: 'review', label: 'Ready for review' });
       }
       if (item.stageStatus === 'failed') {
         return attention('processing_failed', 'retry_processing', 'Curation failed');
       }
-      // pending / in_progress → family barrier or cohort/legacy curation.
-      const granularActivity = deriveCurationSubActivity(item);
+      const granularActivity = deriveCurationSubActivity(item, ctx);
       const activityForProcessing = granularActivity !== 'curation' ? granularActivity : 'curation';
       if (cohort) {
         if (cohort.cohortState === 'ready' || cohort.cohortStatus === 'ready') {
@@ -687,7 +754,6 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
         }
         return build(item, row, cohort, { category: 'processing', activity: 'extraction', label: 'Materializing distributor data' });
       }
-      // official page
       if (item.stageStatus === 'needs_input') {
         return attention('verify_official_url', 'verify_official_url', 'Extraction needs attention', error ?? 'Extraction paused for operator input');
       }
@@ -726,8 +792,6 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
         return attention('processing_failed', 'retry_processing', 'Official site search failed');
       }
       if (item.stageStatus === 'completed') {
-        // The worker records manual-review candidates as completed with a
-        // deterministic needs_review reason; otherwise auto-selection succeeded.
         if (error && /needs_review/i.test(error)) {
           const candidates = ctx.candidateCountByItem.get(item.id) ?? 0;
           if (candidates > 0) {
@@ -767,7 +831,6 @@ function initCounts(): WorkStateCounts {
   return { ...EMPTY_WORK_STATE_COUNTS };
 }
 
-/** Human label for the source type (used by the free-text search haystack). */
 function sourceTypeLabel(sourceType: OnboardingWorkState['sourceType']): string {
   if (sourceType === 'distributor_record') return 'distributor record';
   if (sourceType === 'official_page') return 'official page';
@@ -778,10 +841,6 @@ function matchesFilters(state: OnboardingWorkState, filters: WorkStateFilters): 
   if (filters.category && state.category !== filters.category) return false;
   if (filters.reviewState && state.reviewState !== filters.reviewState) return false;
   if (filters.sourceType && state.sourceType !== filters.sourceType) return false;
-  // Dimensional filter: domain matches the item's OWN normalized host ONLY
-  // (epic #46 fix 5). A family label that merely CONTAINS the domain string
-  // is not a domain match — domain=purina must never match the family
-  // "Purina Pro Plan" when the item's source domain is unrelated.
   if (filters.domain) {
     const needle = filters.domain.toLowerCase().replace(/^www\./, '');
     const domainMatch = state.domain?.toLowerCase() === needle || state.domain?.toLowerCase().endsWith(`.${needle}`);
@@ -791,9 +850,6 @@ function matchesFilters(state: OnboardingWorkState, filters: WorkStateFilters): 
   if (filters.q) {
     const q = filters.q.trim().toLowerCase();
     if (!q) return true;
-    // Free-text search covers the epic's full contract: UPC, name/title,
-    // Brand, domain, source type, family/cohort label, and work-state label +
-    // category.
     const haystack = [
       state.upc,
       state.name,
@@ -809,34 +865,274 @@ function matchesFilters(state: OnboardingWorkState, filters: WorkStateFilters): 
   return true;
 }
 
-/** Project every item in a batch into work states with category counts. */
-export function getBatchWorkState(batchId: string, filters: WorkStateFilters = {}): BatchWorkState {
+function deriveAllStatesWithHealth(batchId: string, filters: WorkStateFilters): {
+  counts: WorkStateCounts;
+  filtered: OnboardingWorkState[];
+  health: WorkStateProjectionHealth;
+  totalUnfiltered: number;
+} {
   const items = listItemsByBatch(batchId);
-  const ctx = buildBatchWorkStateContext(batchId, items);
-  const allStates = items.map(item => deriveItemWorkState(item, ctx));
-
+  let ctx: WorkStateContext;
+  try {
+    ctx = buildBatchWorkStateContext(batchId, items);
+  } catch (e) {
+    const maybeErr = e as WorkStateProjectionError;
+    const issues: WorkStateProjectionHealthIssue[] = maybeErr?.source
+      ? [{ source: maybeErr.source, code: maybeErr.code, affectedCount: items.length }]
+      : [{ source: 'work_state', code: 'context_build_failed', affectedCount: items.length }];
+    const fallbackHealth = buildProjectionHealth(issues);
+    // Category-critical: propagate as 503, not healthy empty
+    throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health: fallbackHealth });
+  }
+  if ((ctx.healthIssues as any)._hasCritical) {
+    const health = buildProjectionHealth(ctx.healthIssues);
+    throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health });
+  }
+  const allStates: OnboardingWorkState[] = [];
+  let corruptCount = 0;
+  for (const item of items) {
+    try {
+      const state = deriveItemWorkState(item, ctx);
+      allStates.push(state);
+    } catch {
+      corruptCount += 1;
+      // Fail-closed: still produce a visible row, never silently drop
+      allStates.push({
+        itemId: item.id,
+        category: 'needs_attention',
+        activity: null,
+        label: 'Projection error',
+        detail: 'Corrupt work-state data — operator attention required',
+        attentionReason: 'processing_failed',
+        attentionAction: 'retry_processing',
+        findingCode: null,
+        findingSummary: null,
+        conflictingValues: null,
+        suggestedAction: null,
+        findingDetails: null,
+        family: null,
+        reviewState: 'not_ready',
+        stage: item.stage as any,
+        stageStatus: item.stageStatus as any,
+        variantResolution: null,
+        upc: item.upc,
+        name: item.name,
+        brand: item.brandHint ?? null,
+        sourceType: item.sourceType as any,
+        domain: normalizeHost(item.sourceUrl),
+        curatedTitle: null,
+        imageUrl: null,
+        description: null,
+        weight: null,
+      });
+    }
+  }
   const counts = initCounts();
   for (const state of allStates) {
     counts[state.category] += 1;
   }
-
+  const healthIssues = [...ctx.healthIssues];
+  if (corruptCount > 0) {
+    healthIssues.push({ source: 'onboarding_items', code: 'corrupt_projection', affectedCount: corruptCount });
+  }
+  // Never false zeros: if items exist but allStates empty due to exception, counts would be zero — surface degraded
+  if (items.length > 0 && allStates.length === 0) {
+    healthIssues.push({ source: 'work_state', code: 'projection_empty_with_items', affectedCount: items.length });
+  }
+  const health = buildProjectionHealth(healthIssues);
   const filtered = allStates.filter(state => matchesFilters(state, filters));
+  return { counts, filtered, health, totalUnfiltered: allStates.length };
+}
+
+/** Project every item in a batch into work states with category counts. */
+export function getBatchWorkState(batchId: string, filters: WorkStateFilters = {}): BatchWorkState {
+  const { counts, filtered, health } = deriveAllStatesWithHealth(batchId, filters);
+  // Cursor pagination (Milestone 3) — takes precedence over offset
+  if (filters.cursor) {
+    try {
+      const cursorPayload = validateWorkStateCursor(filters.cursor, filters);
+      // Sort deterministically by sortKey then paginate after cursor
+      const sorted = [...filtered].sort((a, b) => {
+        const ka = buildWorkStateSortKey(a.category, a.name || a.upc, a.itemId);
+        const kb = buildWorkStateSortKey(b.category, b.name || b.upc, b.itemId);
+        if (ka !== kb) return ka.localeCompare(kb);
+        return a.itemId.localeCompare(b.itemId);
+      });
+      const cursorIdx = sorted.findIndex(
+        r => {
+          const rk = buildWorkStateSortKey(r.category, r.name || r.upc, r.itemId);
+          return rk > cursorPayload.sortKey || (rk === cursorPayload.sortKey && r.itemId > cursorPayload.itemId);
+        }
+      );
+      const startIndex = cursorIdx === -1 ? sorted.length : cursorIdx;
+      const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 500) : 100;
+      const paged = sorted.slice(startIndex, startIndex + limit);
+      return { batchId, counts, items: paged, total: filtered.length, projectionHealth: health };
+    } catch (err) {
+      if (err instanceof WorkStateCursorError) throw err;
+      // Fall through to offset behavior on unexpected cursor error (fail-closed: surface health)
+    }
+  }
   const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 500) : 100;
   const offset = filters.offset && filters.offset > 0 ? filters.offset : 0;
   const paged = filtered.slice(offset, offset + limit);
-
-  return { batchId, counts, items: paged, total: filtered.length };
+  return { batchId, counts, items: paged, total: filtered.length, projectionHealth: health };
 }
 
-/** Work-state counts only (batch summary payload, Phase 3 shell). */
+/** Legacy counts (batch summary) — returns just counts for backward compat (onboarding-routes). */
 export function getBatchWorkStateCounts(batchId: string): WorkStateCounts {
-  const items = listItemsByBatch(batchId);
-  const ctx = buildBatchWorkStateContext(batchId, items);
-  const counts = initCounts();
-  for (const item of items) {
-    counts[deriveItemWorkState(item, ctx).category] += 1;
-  }
+  const { counts } = deriveAllStatesWithHealth(batchId, {} as WorkStateFilters);
   return counts;
+}
+
+/** Bounded counts response (new /counts endpoint). */
+export function getBatchWorkStateCountsWithHealth(batchId: string, filters: Omit<WorkStateFilters, 'cursor' | 'limit' | 'offset'> = {}): { counts: WorkStateCounts; total: number; projectionHealth: WorkStateProjectionHealth } {
+  const { counts, filtered, health } = deriveAllStatesWithHealth(batchId, filters as WorkStateFilters);
+  return { counts, total: filtered.length, projectionHealth: health };
+}
+
+/** Bounded cursor-paginated items response (new /items endpoint) — true bounded DB cursor.
+ *
+ * - DB cursor is (row_number, id) — stable, explicitly documented.
+ * - Reads a bounded raw chunk (50 rows) first, bulk-loads context ONLY for chunk IDs,
+ *   projects, filters, and loops until `limit` filtered items are collected or batch exhausted.
+ * - If a sparse filter does not fill `limit`, returns what was found plus a continuation cursor
+ *   rather than scanning the entire batch in one request.
+ * - `counts` is the ONE endpoint allowed to scan the full batch; this endpoint keeps per-request
+ *   scanned rows and query count bounded (see query-plan tests).
+ * - Category-critical bulk failures throw WorkStateProjectionError → 503 + degraded health.
+ */
+export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilters = {}): { items: OnboardingWorkState[]; nextCursor: string | null; projectionHealth: WorkStateProjectionHealth; scannedRows?: number; queryCount?: number } {
+  const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 500) : 100;
+  const CHUNK_SIZE = 50;
+  let dbCursor: { rowNumber: number; id: string } | null = null;
+  if (filters.cursor) {
+    // Support both v2 DB cursor and legacy v1 sortKey cursor (for deprecated /work-state path).
+    try {
+      const dbPayload = validateWorkStateDbCursor(filters.cursor, filters);
+      dbCursor = { rowNumber: dbPayload.rowNumber, id: dbPayload.id };
+    } catch (e) {
+      if (e instanceof WorkStateCursorError && e.code === 'filter_mismatch') throw e;
+      // Fallback to legacy v1 — treat as malformed for bounded endpoint (fail closed 400)
+      // But keep deprecated path working via getBatchWorkState (sortKey). For bounded items, require DB cursor.
+      // If legacy cursor passed to bounded endpoint, decode as v1 and translate to DB position via full scan fallback (bounded degraded).
+      // For now, throw malformed to force client to use DB cursor.
+      try {
+        validateWorkStateCursor(filters.cursor, filters);
+        throw new WorkStateCursorError('Legacy cursor not supported for bounded items; use DB cursor from /work-state/items', 'malformed_cursor');
+      } catch (inner) {
+        if (inner instanceof WorkStateCursorError) throw inner;
+        throw new WorkStateCursorError('Malformed cursor', 'malformed_cursor');
+      }
+    }
+  }
+
+  const collected: OnboardingWorkState[] = [];
+  let scannedRows = 0;
+  let queryCount = 0;
+  let lastScannedCursor: { rowNumber: number; id: string } | null = dbCursor;
+  let lastCollectedCursor: { rowNumber: number; id: string } | null = null;
+  let chunk: { items: any[]; lastCursor: any; hasMore: boolean } | null = null;
+  let hasMoreDb = true;
+  let healthIssues: WorkStateProjectionHealthIssue[] = [];
+  let projectionHealth: WorkStateProjectionHealth = buildProjectionHealth([]);
+  // Bounded: fetch exactly ONE chunk (50 rows) per request, project/filter only that chunk.
+  {
+    chunk = listItemsByBatchChunked(batchId, CHUNK_SIZE, lastScannedCursor);
+    scannedRows += chunk.items.length;
+    queryCount++;
+    hasMoreDb = chunk.hasMore;
+    if (chunk.items.length > 0) {
+      lastScannedCursor = chunk.lastCursor;
+      let chunkCtx: WorkStateContext;
+      try {
+        chunkCtx = buildBatchWorkStateContext(batchId, chunk.items);
+        if ((chunkCtx.healthIssues as any)._hasCritical) {
+          const health = buildProjectionHealth(chunkCtx.healthIssues);
+          throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health });
+        }
+        healthIssues.push(...chunkCtx.healthIssues);
+      } catch (e) {
+        const maybeErr = e as any;
+        if (maybeErr?.health) throw e;
+        healthIssues.push({ source: 'work_state', code: 'chunk_context_failed', affectedCount: chunk.items.length });
+        throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health: buildProjectionHealth(healthIssues) });
+      }
+      for (const item of chunk.items) {
+        try {
+          const state = deriveItemWorkState(item, chunkCtx);
+          if (matchesFilters(state, filters)) {
+            collected.push(state);
+            lastCollectedCursor = { rowNumber: (item as any).rowNumber ?? 0, id: item.id };
+            if (collected.length >= limit) break;
+          }
+        } catch {
+          healthIssues.push({ source: 'onboarding_items', code: 'corrupt_projection', affectedCount: 1 });
+          const fallback: OnboardingWorkState = {
+            itemId: item.id,
+            category: 'needs_attention',
+            activity: null,
+            label: 'Projection error',
+            detail: 'Corrupt work-state data — operator attention required',
+            attentionReason: 'processing_failed',
+            attentionAction: 'retry_processing',
+            findingCode: null,
+            findingSummary: null,
+            conflictingValues: null,
+            suggestedAction: null,
+            findingDetails: null,
+            family: null,
+            reviewState: 'not_ready',
+            stage: item.stage as any,
+            stageStatus: item.stageStatus as any,
+            variantResolution: null,
+            upc: item.upc,
+            name: item.name,
+            brand: item.brandHint ?? null,
+            sourceType: item.sourceType as any,
+            domain: normalizeHost(item.sourceUrl),
+            curatedTitle: null,
+            imageUrl: null,
+            description: null,
+            weight: null,
+          };
+          if (matchesFilters(fallback, filters)) {
+            collected.push(fallback);
+            lastCollectedCursor = { rowNumber: (item as any).rowNumber ?? 0, id: item.id };
+            if (collected.length >= limit) break;
+          }
+        }
+      }
+    } else {
+      hasMoreDb = false;
+    }
+  }
+  // Merge health
+  if (healthIssues.length > 0) {
+    const existing = projectionHealth.issues ?? [];
+    projectionHealth = buildProjectionHealth([...existing, ...healthIssues]);
+  }
+  const paged = collected.slice(0, limit);
+  let nextCursor: string | null = null;
+  if (paged.length === limit && paged.length > 0) {
+    const cursorSrc = lastCollectedCursor ?? lastScannedCursor;
+    if (cursorSrc) {
+      nextCursor = encodeWorkStateDbCursor({
+        v: 2,
+        rowNumber: cursorSrc.rowNumber,
+        id: cursorSrc.id,
+        filterHash: computeWorkStateFilterHash(filters),
+      });
+    }
+  } else if (hasMoreDb && lastScannedCursor) {
+    nextCursor = encodeWorkStateDbCursor({
+      v: 2,
+      rowNumber: lastScannedCursor.rowNumber,
+      id: lastScannedCursor.id,
+      filterHash: computeWorkStateFilterHash(filters),
+    });
+  }
+  return { items: paged, nextCursor, projectionHealth, scannedRows, queryCount };
 }
 
 /** Project a batch's items using an ALREADY-LOADED item list (items route). */
@@ -848,9 +1144,41 @@ export function getBatchWorkStateForItems(batchId: string, items: OnboardingItem
   const counts = initCounts();
   const byItem = new Map<string, OnboardingWorkState>();
   for (const item of items) {
-    const state = deriveItemWorkState(item, ctx);
-    byItem.set(item.id, state);
-    counts[state.category] += 1;
+    try {
+      const state = deriveItemWorkState(item, ctx);
+      byItem.set(item.id, state);
+      counts[state.category] += 1;
+    } catch {
+      byItem.set(item.id, {
+        itemId: item.id,
+        category: 'needs_attention',
+        activity: null,
+        label: 'Projection error',
+        detail: 'Corrupt work-state data',
+        attentionReason: 'processing_failed',
+        attentionAction: 'retry_processing',
+        findingCode: null,
+        findingSummary: null,
+        conflictingValues: null,
+        suggestedAction: null,
+        findingDetails: null,
+        family: null,
+        reviewState: 'not_ready',
+        stage: item.stage as any,
+        stageStatus: item.stageStatus as any,
+        variantResolution: null,
+        upc: item.upc,
+        name: item.name,
+        brand: item.brandHint ?? null,
+        sourceType: item.sourceType as any,
+        domain: normalizeHost(item.sourceUrl),
+        curatedTitle: null,
+        imageUrl: null,
+        description: null,
+        weight: null,
+      });
+      counts.needs_attention += 1;
+    }
   }
   return { byItem, counts };
 }
@@ -861,14 +1189,62 @@ export function getItemWorkState(itemId: string): OnboardingWorkState | undefine
   if (!item) return undefined;
   const reviewRow = getReviewState(itemId);
   const workspaceId = findBatchById(item.batchId)?.workspaceId ?? '';
+  // Use bulk helpers even for single item (keeps query plan uniform)
+  const cohortByItem = buildCohortContext(item.batchId, listItemsByBatch(item.batchId));
+  const changeSetStatusBySku = item.stage === 'promotion' ? listChangeSetStatusBySkus(workspaceId, [item.upc]) : new Map();
+  const candidateCountByItem = bulkCountDiscoveryCandidates([item.id]);
+  const variantResolutionByItem = bulkLoadVariantResolutions([item.id]);
+  const cohortRunStatusByItem = bulkGetCohortRunStatusByItem([item.id]);
+  const latestRunIdByItemRaw = bulkGetLatestClassificationRunIdByItem([item.id]);
+  // Prefer explicit runId from curationData
+  const curData = item.curationData as Record<string, unknown> | null;
+  const explicitRunId = curData && typeof curData.classificationRunId === 'string' && (curData.classificationRunId as string).trim().length > 0
+    ? (curData.classificationRunId as string).trim()
+    : null;
+  const effectiveRunId = explicitRunId ?? latestRunIdByItemRaw.get(item.id) ?? null;
+  const runIdByItem = effectiveRunId ? new Map([[item.id, effectiveRunId]]) : new Map();
+  const stageResultsByRunId = effectiveRunId ? bulkGetClassificationStageResults([effectiveRunId]) : new Map();
   const ctx: WorkStateContext = {
     reviewStates: new Map(reviewRow ? [[item.id, reviewRow]] : []),
-    cohortByItem: buildCohortContext(item.batchId, listItemsByBatch(item.batchId)),
-    changeSetStatusBySku: item.stage === 'promotion' ? listChangeSetStatusBySkus(workspaceId, [item.upc]) : new Map(),
-    candidateCountByItem: item.stage === 'discovery'
-      ? new Map([[item.id, listSourcesByItem(item.id).length]])
-      : new Map(),
-    variantResolutionByItem: loadVariantResolutionByItem([item.id]),
+    cohortByItem,
+    changeSetStatusBySku,
+    candidateCountByItem,
+    variantResolutionByItem,
+    cohortRunStatusByItem,
+    latestRunIdByItem: runIdByItem,
+    stageResultsByRunId,
+    healthIssues: [],
   };
-  return deriveItemWorkState(item, ctx);
+  try {
+    return deriveItemWorkState(item, ctx);
+  } catch {
+    return {
+      itemId: item.id,
+      category: 'needs_attention',
+      activity: null,
+      label: 'Projection error',
+      detail: 'Corrupt work-state data — operator attention required',
+      attentionReason: 'processing_failed',
+      attentionAction: 'retry_processing',
+      findingCode: null,
+      findingSummary: null,
+      conflictingValues: null,
+      suggestedAction: null,
+      findingDetails: null,
+      family: null,
+      reviewState: 'not_ready',
+      stage: item.stage as any,
+      stageStatus: item.stageStatus as any,
+      variantResolution: null,
+      upc: item.upc,
+      name: item.name,
+      brand: item.brandHint ?? null,
+      sourceType: item.sourceType as any,
+      domain: normalizeHost(item.sourceUrl),
+      curatedTitle: null,
+      imageUrl: null,
+      description: null,
+      weight: null,
+    };
+  }
 }

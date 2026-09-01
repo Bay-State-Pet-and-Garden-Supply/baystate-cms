@@ -7,18 +7,20 @@
  * and immediately opens the next unreviewed product — hundreds of items
  * without returning to the board.
  *
- * Server is the source of truth: queue + progress come from the work-state
- * projection; durable review writes go through `completeReviewStage`; edits
- * through `updateItem` (which invalidates durable review server-side);
- * proposal decisions through `submitDecisions`.
+ * Milestone 1 (P1-C): Bounded Rapid Review Loading.
+ * Uses `useReviewQueue` for cursor-paginated lightweight `ReviewQueueRow` loading,
+ * and `useReviewDetailCache` for bounded LRU detail fetching (max 5 items,
+ * active + adjacent prefetching only).
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { subscribeBatchEvents } from '../../../onboarding-work-api';
 import {
-  getBatchWorkState,
-  subscribeBatchEvents,
-} from '../../../onboarding-work-api';
-import { completeReviewStage, getItemDetail, moveToPreviousStage, submitDecisions, updateItem, updateItemMedia, type ItemDetailResponse } from '../../../onboarding-api';
-import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+  completeReviewStage,
+  moveToPreviousStage,
+  submitDecisions,
+  updateItem,
+  updateItemMedia,
+} from '../../../onboarding-api';
 import type { ClassificationProposal } from '../../../../shared/schemas/classification';
 import {
   activeFilterChips,
@@ -41,7 +43,6 @@ import {
   sortForReview,
   toggleGroupSelection,
   toggleQueueSelection,
-  warningInfoFromDetail,
   type ReviewQueueFilters,
 } from './review-logic';
 import type { ReviewDraft, ReviewInspectorItem } from './review-types';
@@ -61,6 +62,8 @@ import {
   type EffectiveGateValues,
   type GateValueDiffRow,
 } from './review-readiness';
+import { useReviewQueue } from './use-review-queue';
+import { useReviewDetailCache } from './use-review-detail-cache';
 import { ReviewQueue } from './ReviewQueue';
 import { ReviewIdentityPanel } from './ReviewIdentityPanel';
 import { ReviewPagesPanel } from './ReviewPagesPanel';
@@ -72,8 +75,6 @@ import { ReviewConfirmStep, shouldOpenConfirmStep } from './ReviewConfirmStep';
 import { ReviewActions } from './ReviewActions';
 import './review.css';
 
-const QUEUE_PAGE_SIZE = 500;
-const ENRICH_CHUNK = 24;
 const REFRESH_DEBOUNCE_MS = 900;
 
 export interface ReviewWorkspaceProps {
@@ -81,15 +82,6 @@ export interface ReviewWorkspaceProps {
 }
 
 export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
-  // ── Queue state (server projection) ─────────────────────────────────────
-  const [items, setItems] = useState<OnboardingWorkState[]>([]);
-  const [total, setTotal] = useState(0);
-  const [reviewedTotal, setReviewedTotal] = useState(0);
-  const [optimisticReviewed, setOptimisticReviewed] = useState(0);
-  const [queueState, setQueueState] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [queueError, setQueueError] = useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
-
   // ── Filters / facets ────────────────────────────────────────────────────
   const [filters, setFilters] = useState<ReviewQueueFilters>({});
 
@@ -100,16 +92,13 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
 
-
   // ── Session tracking ────────────────────────────────────────────────────
   const [editedIds, setEditedIds] = useState<Set<string>>(() => new Set());
   const [warnedIds, setWarnedIds] = useState<Set<string>>(() => new Set());
+  const [optimisticReviewed, setOptimisticReviewed] = useState(0);
 
   // ── Current inspector item ──────────────────────────────────────────────
   const [currentItemId, setCurrentItemId] = useState<string | null>(null);
-  const [details, setDetails] = useState<Map<string, ItemDetailResponse>>(() => new Map());
-  const [detailErrors, setDetailErrors] = useState<Map<string, string>>(() => new Map());
-  const [inflight, setInflight] = useState<Set<string>>(() => new Set());
 
   // ── Actions ─────────────────────────────────────────────────────────────
   const [busyItemIds, setBusyItemIds] = useState<Set<string>>(() => new Set());
@@ -123,7 +112,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // ── V2 review surface state (e10s02/e10s03; inert while flag off) ──────
-  // Flag computed once per mount — Vite env flags are static per build.
   const v2 = useMemo(() => getOnboardingFeatureFlags().reviewUiV2, []);
   /** Pre-edit seed of the active draft — dirty detection base. */
   const draftSeedRef = useRef<ReviewDraft | null>(null);
@@ -134,9 +122,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   /** Pending confirm-step diff (open ⇒ modal visible). */
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingDiff, setPendingDiff] = useState<GateValueDiffRow[]>([]);
-  const [confirmWarnings, setConfirmWarnings] = useState<
-    ReviewCompletenessWarningCode[]
-  >([]);
+  const [confirmWarnings, setConfirmWarnings] = useState<ReviewCompletenessWarningCode[]>([]);
 
   // ── Lightbox ────────────────────────────────────────────────────────────
   const [lightbox, setLightbox] = useState<{ url: string; caption: string } | null>(null);
@@ -144,10 +130,40 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const doneIds = useRef<Set<string>>(new Set());
-  const queueVersionRef = useRef(0);
-  /** Set by keyboard navigation so the active row receives DOM focus
-   *  (visible :focus-visible ring follows arrow-key selection). */
   const keyboardNavRef = useRef(false);
+
+  // ── Cursor-Paginated Queue Loading (Milestone 1 / P1-C) ─────────────────
+  const {
+    rows,
+    counts,
+    hasMore,
+    loading: queueLoading,
+    loadingMore,
+    error: queueError,
+    loadQueue,
+    loadMore,
+    optimisticUpdateRow,
+    optimisticRemoveRow,
+  } = useReviewQueue({ batchId, filters, pageSize: 50 });
+
+  // ── Derived filtered & sorted queue ─────────────────────────────────────
+  const sortedAll = useMemo(() => sortForReview(rows), [rows]);
+  const filteredItems = useMemo(
+    () => applyQueueFilters(sortedAll, filters, { editedIds, warnedIds }),
+    [sortedAll, filters, editedIds, warnedIds],
+  );
+
+  // ── Bounded LRU Detail Cache with Active + Adjacent Prefetch (P1-C) ─────
+  const {
+    details,
+    detailErrors,
+    invalidateItem,
+  } = useReviewDetailCache({
+    batchId,
+    selectedItemId: currentItemId,
+    visibleRows: filteredItems,
+    maxCacheSize: 5,
+  });
 
   // Keyboard focus follow: after an arrow-key selection, move DOM focus to the
   // active queue row so the focus ring and screen-reader position track it.
@@ -157,79 +173,31 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     document.getElementById(currentItemId)?.focus();
   }, [currentItemId]);
 
-  // ── Queue loading ───────────────────────────────────────────────────────
-  const loadQueue = useCallback(
-    async (opts?: { silent?: boolean }) => {
-      const generation = ++queueVersionRef.current;
-      if (!opts?.silent) setQueueState('loading');
-      setQueueError(null);
-      try {
-        const [all, reviewed] = await Promise.all([
-          getBatchWorkState(batchId, { category: 'ready_for_review', limit: QUEUE_PAGE_SIZE }),
-          getBatchWorkState(batchId, {
-            category: 'ready_for_review',
-            reviewState: 'reviewed',
-            limit: 1,
-          }),
-        ]);
-        if (generation !== queueVersionRef.current) return;
-        setItems(all.items);
-        setTotal(all.total);
-        setReviewedTotal(reviewed.total);
-        setOptimisticReviewed(0);
-        setQueueState('ready');
-        doneIds.current = new Set<string>();
-      } catch (err) {
-        if (generation !== queueVersionRef.current) return;
-        setQueueError(err instanceof Error ? err.message : 'Failed to load review queue');
-        setQueueState('error');
-      }
-    },
-    [batchId],
-  );
-
-  // Load the next page of the server-projection queue and append (audit M7).
-  // The base set is all `ready_for_review` items; client-side filters remain
-  // applied over the loaded pool. `total` is server-authoritative.
-  const loadMoreQueue = useCallback(async () => {
-    if (loadingMore) return;
-    setLoadingMore(true);
-    try {
-      const res = await getBatchWorkState(batchId, {
-        category: 'ready_for_review',
-        limit: QUEUE_PAGE_SIZE,
-        offset: items.length,
-      });
-      const seen = new Set(items.map(i => i.itemId));
-      const added = res.items.filter(i => !seen.has(i.itemId));
-      if (added.length > 0) {
-        setItems(prev => [...prev, ...added]);
-      }
-      setTotal(res.total);
-    } catch (err) {
-      // Non-fatal: the loaded pool is already usable; counts stay intact.
-      console.warn('[ReviewWorkspace] Load-more failed:', err);
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [batchId, items, loadingMore]);
-
-  // Initial load + reselect on batch change.
+  // Reset local state on batch change
   useEffect(() => {
     setCurrentItemId(null);
-    setDetails(new Map());
-    setDetailErrors(new Map());
-    setInflight(new Set());
     setEditedIds(new Set());
     setWarnedIds(new Set());
     setEditing(false);
     setDraft(null);
     setAllReviewed(false);
+    setOptimisticReviewed(0);
     doneIds.current = new Set<string>();
-    void loadQueue();
-  }, [loadQueue]);
+  }, [batchId]);
 
-  // SSE-driven refresh (debounced) — counts + queue stay live.
+  // Auto-select the first unreviewed item once queue is loaded
+  useEffect(() => {
+    if (queueLoading || currentItemId) return;
+    if (sortedAll.length === 0) {
+      setAllReviewed(false);
+      return;
+    }
+    const target = findNextReviewTarget(sortedAll, null, doneIds.current);
+    if (target) setCurrentItemId(target.itemId);
+    else setAllReviewed(true);
+  }, [queueLoading, sortedAll, currentItemId]);
+
+  // SSE-driven refresh (debounced) — counts + queue stay live without killing dirty draft
   useEffect(() => {
     const unsubscribe = subscribeBatchEvents(batchId, () => {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
@@ -243,84 +211,19 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     };
   }, [batchId, loadQueue]);
 
-  // Dirty-draft guard (impeccable polish): an unsaved edit draft must never
-  // die silently to a tab close/refresh. Item-switching within the workspace
-  // is already guarded by selectItem → attemptCancelEdit; the SSE refresh
-  // path only replaces queue rows and never evicts the actively-edited
-  // item's detail cache, so the open draft cannot be clobbered by it.
+  // Dirty-draft guard
   const draftDirty = v2 && editing && isDraftDirty(draftSeedRef.current, draft);
   useEffect(() => {
     if (!draftDirty) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
-      // Chrome requires returnValue; legacy convention.
       e.returnValue = '';
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [draftDirty]);
 
-  // ── Enrichment: load item details for queue rows in parallel chunks ─────
-  const sortedAll = useMemo(() => sortForReview(items), [items]);
-
-  const ensureDetails = useCallback(
-    async (ids: string[]) => {
-      const missing = ids.filter(id => {
-        if (details.has(id) || detailErrors.has(id) || inflight.has(id)) return false;
-        return true;
-      });
-      if (missing.length === 0) return;
-      setInflight(prev => new Set([...prev, ...missing]));
-      for (let i = 0; i < missing.length; i += ENRICH_CHUNK) {
-        const chunk = missing.slice(i, i + ENRICH_CHUNK);
-        const results = await Promise.all(
-          chunk.map(async id => {
-            try {
-              return { id, detail: await getItemDetail(id), error: null as string | null };
-            } catch (err) {
-              return { id, detail: null as ItemDetailResponse | null, error: err instanceof Error ? err.message : String(err) };
-            }
-          }),
-        );
-        setDetails(prev => {
-          const next = new Map(prev);
-          for (const r of results) if (r.detail) next.set(r.id, r.detail);
-          return next;
-        });
-        setDetailErrors(prev => {
-          const next = new Map(prev);
-          for (const r of results) if (r.error) next.set(r.id, r.error);
-          return next;
-        });
-        // Recompute warned ids from the enriched cache.
-        setWarnedIds(prevWarned => {
-          const next = new Set(prevWarned);
-          for (const r of results) {
-            if (r.detail) {
-              const info = warningInfoFromDetail(r.detail);
-              if (info.blocked || info.messages.length > 0) next.add(r.id);
-              else next.delete(r.id);
-            }
-          }
-          return next;
-        });
-      }
-      setInflight(prev => {
-        const next = new Set(prev);
-        for (const id of missing) next.delete(id);
-        return next;
-      });
-    },
-    [details, detailErrors, inflight],
-  );
-
-  // Enrich the visible (filtered) queue.
-  useEffect(() => {
-    if (items.length === 0) return;
-    void ensureDetails(items.map(i => i.itemId));
-  }, [items, ensureDetails]);
-
-  // Immediate detail load when the current item changes.
+  // Immediate detail reset for inspector state when current item changes
   useEffect(() => {
     if (!currentItemId) {
       setEditing(false);
@@ -328,43 +231,18 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       draftSeedRef.current = null;
       return;
     }
-    // V2: per-item confirm/rejection state never leaks across items.
     setRejectedBlockers(null);
     setConfirmOpen(false);
     setPendingDiff([]);
     setActionError(null);
-    void ensureDetails([currentItemId]);
-  }, [currentItemId, ensureDetails]);
-
-  // Auto-select the first unreviewed item once the queue is ready.
-  useEffect(() => {
-    if (queueState !== 'ready' || currentItemId) return;
-    if (sortedAll.length === 0) {
-      // Nothing to review yet (or all items already reviewed) — the queue
-      // pane shows the friendly empty state; do not claim 'all reviewed'.
-      setAllReviewed(false);
-      return;
-    }
-    const target = findNextReviewTarget(sortedAll, null, doneIds.current);
-    if (target) setCurrentItemId(target.itemId);
-    else setAllReviewed(true);
-  }, [queueState, sortedAll.length]);
-
-  // ── Derived view ─────────────────────────────────────────────────────────
-  const filteredItems = useMemo(
-    () => applyQueueFilters(sortedAll, filters, { editedIds, warnedIds }),
-    [sortedAll, filters, editedIds, warnedIds],
-  );
+  }, [currentItemId]);
 
   // Prune the bulk-review selection whenever the queue reloads.
   useEffect(() => {
-    setSelectedIds(prev => pruneQueueSelection(prev, items.map(i => i.itemId)));
-  }, [items]);
+    setSelectedIds(prev => pruneQueueSelection(prev, rows.map(i => i.itemId)));
+  }, [rows]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  // GPT review (MEDIUM): the modal count and the submitted payload must be
-  // the SAME set — only selected ids that are unreviewed AND in the visible
-  // (filtered) queue are submitted.
   const reviewableSelectedIds = useMemo(
     () => reviewableSelectionIds(selectedIds, filteredItems),
     [selectedIds, filteredItems],
@@ -394,15 +272,20 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     }
   }, [reviewableSelectedIds, bulkBusy, loadQueue]);
 
+  const totalCount = counts ? counts.total : rows.length;
+  const reviewedCount = counts
+    ? counts.reviewedTotal + optimisticReviewed
+    : rows.filter(r => r.reviewState === 'reviewed' || r.reviewState === 'approved').length;
+
   const progress = useMemo(() => {
-    const base = reviewProgress(items, { total, reviewedTotal: reviewedTotal + optimisticReviewed });
-    return base;
-  }, [items, total, reviewedTotal, optimisticReviewed]);
+    return reviewProgress(rows, { total: totalCount, reviewedTotal: reviewedCount });
+  }, [rows, totalCount, reviewedCount]);
 
   const currentWorkState = useMemo(
-    () => (currentItemId ? items.find(i => i.itemId === currentItemId) ?? null : null),
-    [items, currentItemId],
+    () => (currentItemId ? rows.find(i => i.itemId === currentItemId) ?? null : null),
+    [rows, currentItemId],
   );
+
   const currentInspector: ReviewInspectorItem | null = useMemo(() => {
     if (!currentWorkState) return null;
     return {
@@ -411,6 +294,18 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       detailError: detailErrors.get(currentWorkState.itemId) ?? null,
     };
   }, [currentWorkState, details, detailErrors]);
+
+  const readiness = useMemo(
+    () =>
+      v2 && currentInspector
+        ? deriveReadiness(currentInspector.detail, currentInspector.workState)
+        : null,
+    [v2, currentInspector],
+  );
+  const mergedReadiness = useMemo(() => {
+    if (!v2 || !readiness) return null;
+    return rejectedBlockers ? applyServerBlockers(readiness, rejectedBlockers) : readiness;
+  }, [v2, readiness, rejectedBlockers]);
 
   const facets = useMemo(
     () => ({ brands: distinctBrands(sortedAll), families: distinctFamilies(sortedAll) }),
@@ -425,13 +320,12 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     setActionError(null);
     try {
       await completeReviewStage([id]);
-      // Structured rejection codes consumed — the live snapshot was accurate.
       setRejectedBlockers(null);
-      // Optimistic durable state: the item is now reviewed server-side.
       doneIds.current.add(id);
-      setItems(prev => prev.map(i => (i.itemId === id ? { ...i, reviewState: 'reviewed' } : i)));
+      optimisticUpdateRow(id, { reviewState: 'reviewed' });
       setOptimisticReviewed(prev => prev + 1);
-      const next = findNextReviewTarget(sortForReview(items.map(i => (i.itemId === id ? { ...i, reviewState: 'reviewed' } : i))), id, doneIds.current);
+      const remaining = rows.map(i => (i.itemId === id ? { ...i, reviewState: 'reviewed' as const } : i));
+      const next = findNextReviewTarget(sortForReview(remaining), id, doneIds.current);
       if (next) {
         setCurrentItemId(next.itemId);
       } else {
@@ -440,15 +334,12 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       }
       void loadQueue({ silent: true });
     } catch (err) {
-      // e10s03 stale-snapshot handling: structured blocker codes from the
-      // authoritative gate are merged into the readiness panel so the
-      // reviewer sees exactly which checks now block.
       const codes = v2 ? parseBlockersFromRejection(err, id) : [];
       if (codes.length > 0) {
         setRejectedBlockers(codes);
         setActionError(`Review completion rejected — mandatory checks failed: ${codes.join(', ')}.`);
       } else {
-        setActionError(err instanceof Error ? err.message : 'Failed to save review');
+        setActionError(err instanceof Error ? err.message : 'Failed to mark item reviewed');
       }
     } finally {
       setBusyItemIds(prev => {
@@ -457,148 +348,107 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
         return next;
       });
     }
-  }, [currentWorkState, items, loadQueue, v2]);
+  }, [currentWorkState, rows, optimisticUpdateRow, loadQueue, v2]);
 
-  /**
-   * Looks Good entry point. V2 order of guards: completeness blockers →
-   * blocking warnings → confirm step (only when session-edited AND at least
-   * one gate value changed; clean passes short-circuit straight to approve).
-   */
-  const handleLooksGood = useCallback(async () => {
-    if (!currentWorkState) return;
-    // Always-editable guard: unsaved draft values are NOT what approval would
-    // persist — force an explicit Save (or Cancel) before the gate runs.
-    if (v2 && editing && isDraftDirty(draftSeedRef.current, draft)) {
-      setActionError('You have unsaved edits — click “Save edits” (or Cancel) before marking reviewed.');
-      return;
-    }
-    const id = currentWorkState.itemId;
-    const detail = currentInspector?.detail ?? null;
-
-    if (v2) {
-      const readiness = deriveReadiness(detail, currentWorkState);
-      const merged = rejectedBlockers
-        ? applyServerBlockers(readiness, rejectedBlockers)
-        : readiness;
-      if (merged.blockers.length > 0) {
-        setActionError(
-          `Blocked — ${merged.blockers.length} mandatory check${merged.blockers.length === 1 ? '' : 's'} incomplete. Fix them in the readiness checklist first.`,
-        );
-        return;
-      }
-    }
-
-    const blocking = warningInfoFromDetail(detail ?? {}).blocked;
-    if (blocking) {
-      setActionError('This product has blocking warnings. Resolve them before marking it reviewed.');
-      return;
-    }
-
-    // Confirm step: only for session-edited items with a real value change.
-    if (v2) {
-      const baseline = baselineRef.current.get(id) ?? null;
-      const diff = diffEffectiveValues(
-        baseline,
-        effectiveGateValues(detail, currentWorkState),
-      );
-      if (shouldOpenConfirmStep(id, editedIds, diff)) {
-        const warnings = deriveReadiness(detail, currentWorkState).warnings;
-        setPendingDiff(diff);
-        setConfirmWarnings(warnings);
-        setConfirmOpen(true);
-        return;
-      }
-    }
-
-    await approveCurrentItem();
-  }, [currentWorkState, currentInspector, v2, rejectedBlockers, editedIds, approveCurrentItem]);
-
-  // ── Edit lifecycle ───────────────────────────────────────────────────────
   const beginEdit = useCallback(() => {
     if (!currentInspector) return;
     const id = currentInspector.workState.itemId;
     const item = currentInspector.detail?.item;
+    const cur = item?.curationData as Record<string, unknown> | undefined;
     const ext = currentInspector.detail?.extraction ?? item?.extractionData ?? null;
-    const cur = item?.curationData;
-    const sizeAttr = (ext?.variantAttributes as Record<string, any> | undefined)?.size;
-    const seeded: ReviewDraft = {
-      curatedTitle: cur?.curatedTitle ?? currentInspector.workState.curatedTitle ?? ext?.title ?? currentInspector.workState.name ?? '',
+    const seed: ReviewDraft = {
+      curatedTitle:
+        cur?.curatedTitle ??
+        ('curatedTitle' in currentInspector.workState ? (currentInspector.workState as any).curatedTitle : null) ??
+        ext?.title ??
+        (('displayTitle' in currentInspector.workState) ? currentInspector.workState.displayTitle : currentInspector.workState.name) ??
+        '',
       brandHint: currentInspector.workState.brand ?? item?.brandHint ?? ext?.brand ?? '',
-      // Explicit branches: a '' literal in a ?? chain short-circuits every
-      // later fallback, which previously made sizeAttr/workState.weight
-      // unreachable when extraction weight was absent.
       curatedWeight:
-        cur?.curatedWeight != null && cur.curatedWeight !== ''
-          ? cur.curatedWeight
-          : ext?.weight != null && ext.weight !== ''
-            ? String(ext.weight)
-            : typeof sizeAttr === 'string' && sizeAttr !== ''
-              ? sizeAttr
-              : currentInspector.workState.weight ?? '',
-      curatedDescription: cur?.curatedDescription ?? currentInspector.workState.description ?? ext?.description ?? '',
-      searchKeywords: cur?.searchKeywords ?? ext?.searchKeywords ?? '',
-      // V2: seed price/quantity so the full-field form edits the promotable
-      // values (official-page only — distributor rows render them locked/RO).
+        (cur?.curatedWeight as string) ??
+        (('weight' in currentInspector.workState ? (currentInspector.workState as any).weight : null) ?? ''),
+      curatedDescription:
+        (cur?.curatedDescription as string) ??
+        ('description' in currentInspector.workState ? (currentInspector.workState as any).description : null) ??
+        ext?.description ??
+        '',
+      searchKeywords: (cur?.searchKeywords as string) ?? '',
       ...(v2
         ? {
-            price: item?.price ?? '',
-            quantity: typeof item?.quantity === 'number' ? String(item.quantity) : '',
+            price: (item?.price ?? ('price' in currentInspector.workState ? (currentInspector.workState as any).price : null) ?? ext?.price ?? '') as string,
+            quantity: item?.quantity !== null && item?.quantity !== undefined ? String(item.quantity) : '',
           }
         : {}),
     };
-    // V2: capture the pre-edit baseline ONCE per session per item so the
-    // confirm step diffs against the values before ANY edit this session.
+    setDraft(seed);
+    draftSeedRef.current = seed;
+    setEditing(true);
+    setSaveError(null);
     if (v2 && !baselineRef.current.has(id)) {
       baselineRef.current.set(
         id,
         effectiveGateValues(currentInspector.detail, currentInspector.workState),
       );
     }
-    draftSeedRef.current = v2 ? { ...seeded } : null;
-    setDraft(seeded);
-    setSaveError(null);
-    setEditing(true);
   }, [currentInspector, v2]);
 
-  /** Cancel/revert editing. V2 fields are ALWAYS live inputs, so Cancel
-   * reverts the draft to its seeded values and stays in the form; legacy
-   * mode exits back to the read-only tree. */
   const attemptCancelEdit = useCallback((): boolean => {
-    if (v2 && isDraftDirty(draftSeedRef.current, draft)) {
-      if (!window.confirm('Discard unsaved changes?')) return false;
-    }
-    setSaveError(null);
-    if (v2) {
-      if (draftSeedRef.current) setDraft({ ...draftSeedRef.current });
+    if (!v2 || !editing) {
+      setEditing(false);
+      setDraft(null);
+      draftSeedRef.current = null;
+      setSaveError(null);
       return true;
+    }
+    if (isDraftDirty(draftSeedRef.current, draft)) {
+      const ok = window.confirm('Discard unsaved listing changes for this product?');
+      if (!ok) return false;
     }
     setEditing(false);
     setDraft(null);
     draftSeedRef.current = null;
+    setSaveError(null);
     return true;
-  }, [v2, draft]);
+  }, [v2, editing, draft]);
 
-  /** Guarded item selection: V2 prompts before discarding unsaved edits. */
   const selectItem = useCallback(
-    (itemId: string) => {
-      if (editing && itemId !== currentItemId) {
-        if (!attemptCancelEdit()) return;
+    (id: string) => {
+      if (id === currentItemId) return;
+      if (v2 && editing && isDraftDirty(draftSeedRef.current, draft)) {
+        const ok = window.confirm('Discard unsaved listing changes and open another product?');
+        if (!ok) return;
       }
-      setCurrentItemId(itemId);
+      setEditing(false);
+      setDraft(null);
+      draftSeedRef.current = null;
+      setCurrentItemId(id);
     },
-    [editing, currentItemId, attemptCancelEdit],
+    [currentItemId, v2, editing, draft],
   );
 
+  const handleLooksGood = useCallback(async () => {
+    if (!currentInspector) return;
+    const id = currentInspector.workState.itemId;
+    const baseline = baselineRef.current.get(id);
+    const current = effectiveGateValues(currentInspector.detail, currentInspector.workState);
+    const diff = baseline ? diffEffectiveValues(baseline, current) : [];
+    if (v2 && shouldOpenConfirmStep(id, editedIds, diff)) {
+      setPendingDiff(diff);
+      setConfirmWarnings(readiness?.warnings ?? []);
+      setConfirmOpen(true);
+    } else {
+      await approveCurrentItem();
+    }
+  }, [currentInspector, approveCurrentItem, v2, editedIds, readiness]);
+
   const moveTo = useCallback(
-    (direction: 'next' | 'previous') => {
+    (dir: 'next' | 'previous') => {
       const target =
-        direction === 'next'
+        dir === 'next'
           ? findNextQueuedItem(filteredItems, currentItemId)
           : findPreviousReviewTarget(filteredItems, currentItemId);
-      const targetId = target?.itemId ?? null;
-      if (targetId === null || targetId === currentItemId) return;
-      // V2 dirty guard: navigating away with unsaved edits prompts first.
-      selectItem(targetId);
+      if (!target) return;
+      selectItem(target.itemId);
     },
     [filteredItems, currentItemId, selectItem],
   );
@@ -609,17 +459,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     setBusyItemIds(prev => new Set(prev).add(id));
     setSaveError(null);
     try {
-      // V2: the editability matrix builds the payload — the quantity key
-      // appears ONLY for official-page items; distributor payloads omit it
-      // entirely (server guards + upstream inventory authority). Price is
-      // sent for both source types (adjudication — item.price is the only
-      // promotion price authority). Flag off ⇒ the pre-epic legacy payload
-      // PLUS curatedWeight write-back (V1 renders a Weight editor, so its
-      // value must persist); benign vs. instant rollback — convertToLbs is
-      // idempotent and the same consequential-invalidation path fires.
-      // SourceType derivation PARITY with ReviewListingPanel (post-review fix):
-      // falls back to workState so an unloaded/failed detail fetch can never
-      // downgrade a distributor row to official-page payload semantics.
       const sourceType: SourceType =
         currentInspector.detail?.item.sourceType === 'distributor_record'
           ? 'distributor_record'
@@ -634,14 +473,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       setEditing(false);
       setDraft(null);
       draftSeedRef.current = null;
-      // Server invalidates durable review on consequential edits; the queue
-      // refresh will flip the item back to unreviewed. Reload detail eagerly.
-      setDetails(prev => {
-        const next = new Map(prev);
-        next.delete(id);
-        return next;
-      });
-      void ensureDetails([id]);
+      invalidateItem(id);
       void loadQueue({ silent: true });
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
@@ -652,37 +484,21 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
         return next;
       });
     }
-  }, [currentInspector, draft, ensureDetails, loadQueue, v2]);
+  }, [currentInspector, draft, invalidateItem, loadQueue, v2]);
 
-  // ── V2 always-editable seeding ─────────────────────────────────────────
-  // There is no read-only state to return to under V2: the listing fields are
-  // live text inputs for the item's whole visit. Seed the draft as soon as a
-  // detail is available, and reseed from refreshed server data after each
-  // save (handleSaveEdit clears the draft, this effect re-seeds it).
   useEffect(() => {
     if (!v2 || editing || !currentInspector?.detail) return;
     beginEdit();
   }, [v2, editing, currentInspector, beginEdit]);
 
-  // ── e10s04 media selection ─────────────────────────────────────────────
-  // Persist the reviewer media selection via the dedicated endpoint (server
-  // validates candidate-set union + distributor constraints and performs the
-  // consequential-edit invalidation), then refresh detail/queue exactly like
-  // handleSaveEdit so readiness + carousel reflect the saved selection.
   const handleSaveMedia = useCallback(async (selection: MediaSelectionRequest) => {
     if (!currentInspector) return;
     const id = currentInspector.workState.itemId;
     await updateItemMedia(id, selection);
-    setDetails(prev => {
-      const next = new Map(prev);
-      next.delete(id);
-      return next;
-    });
-    void ensureDetails([id]);
+    invalidateItem(id);
     void loadQueue({ silent: true });
-  }, [currentInspector, ensureDetails, loadQueue]);
+  }, [currentInspector, invalidateItem, loadQueue]);
 
-  // ── Classification decisions ─────────────────────────────────────────────
   const handleDecision = useCallback(
     async (proposal: ClassificationProposal, decision: 'accepted' | 'rejected') => {
       if (!currentInspector) return;
@@ -690,18 +506,12 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       setBusyDecisionId(proposal.id);
       try {
         await submitDecisions(id, [{ proposalId: proposal.id, decision }]);
-        // Reload the detail to reflect the resolved proposal.
-        setDetails(prev => {
-          const next = new Map(prev);
-          next.delete(id);
-          return next;
-        });
-        await ensureDetails([id]);
+        invalidateItem(id);
       } finally {
         setBusyDecisionId(null);
       }
     },
-    [currentInspector, ensureDetails],
+    [currentInspector, invalidateItem],
   );
 
   const handleUpdatePages = useCallback(
@@ -715,10 +525,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
           curation_data: {
             ...curation,
             suggestedPages: nextPages,
-            // e09 round-3 FIX 1 (adjudication #10): when the reviewer added a
-            // VERIFIED page, persist the manual-selection correction record so
-            // the review completion gate can resolve an abstained durable
-            // Category Page decision. Additive optional key — absent otherwise.
             ...(correction
               ? {
                   correctedCategoryPage: {
@@ -730,12 +536,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
               : {}),
           },
         });
-        setDetails(prev => {
-          const next = new Map(prev);
-          next.delete(id);
-          return next;
-        });
-        await ensureDetails([id]);
+        invalidateItem(id);
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -746,13 +547,11 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
         });
       }
     },
-    [currentInspector, ensureDetails],
+    [currentInspector, invalidateItem],
   );
 
   const handleSendToCuration = useCallback(async () => {
     if (!currentWorkState) return;
-    // Always-editable guard: sending back discards the draft — require an
-    // explicit Save/Cancel decision first.
     if (v2 && editing && isDraftDirty(draftSeedRef.current, draft)) {
       setActionError('You have unsaved edits — click “Save edits” (or Cancel) before sending back to curation.');
       return;
@@ -762,8 +561,8 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     setActionError(null);
     try {
       await moveToPreviousStage([id]);
-      setItems(prev => prev.filter(i => i.itemId !== id));
-      const remaining = items.filter(i => i.itemId !== id);
+      optimisticRemoveRow(id);
+      const remaining = rows.filter(i => i.itemId !== id);
       const next = findNextReviewTarget(sortForReview(remaining), id, doneIds.current);
       if (next) {
         setCurrentItemId(next.itemId);
@@ -780,7 +579,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
         return next;
       });
     }
-  }, [currentWorkState, items, loadQueue]);
+  }, [currentWorkState, v2, editing, draft, rows, optimisticRemoveRow, loadQueue]);
 
   const handleBulkSendToCuration = useCallback(async () => {
     if (selectedIds.length === 0 || bulkBusy) return;
@@ -820,18 +619,12 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       }
       if (!workspaceRef.current?.contains(target ?? document.body)) return;
       if (editing) {
-        // V2: Escape cancels editing with a dirty-confirm guard (WCAG —
-        // never lose edits silently). Focus inside a field returns early
-        // above, so this fires when focus is outside the inputs.
         if (e.key === 'Escape') {
           e.preventDefault();
           attemptCancelEdit();
         }
         return;
       }
-      // Escape closes the inspector selection when no lightbox is open (the
-      // lightbox branch above already handled Esc there). Functional update
-      // keeps this fresh without re-binding on every selection change.
       if (e.key === 'Escape') {
         if (currentItemId !== null) {
           e.preventDefault();
@@ -861,24 +654,10 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [lightbox, editing, moveTo, handleLooksGood, currentItemId, attemptCancelEdit]);
+  }, [lightbox, editing, currentItemId, attemptCancelEdit, moveTo, handleLooksGood]);
 
-  const busy = currentWorkState ? busyItemIds.has(currentWorkState.itemId) : false;
+  const busy = currentItemId ? busyItemIds.has(currentItemId) : false;
 
-  // ── V2 readiness + jump-to-fix (inert while flag off) ──────────────────
-  const readiness = useMemo(
-    () =>
-      v2 && currentInspector
-        ? deriveReadiness(currentInspector.detail, currentInspector.workState)
-        : null,
-    [v2, currentInspector],
-  );
-  const mergedReadiness = useMemo(() => {
-    if (!v2 || !readiness) return null;
-    return rejectedBlockers ? applyServerBlockers(readiness, rejectedBlockers) : readiness;
-  }, [v2, readiness, rejectedBlockers]);
-
-  /** Jump-to-fix: enter edit mode for field targets, then move focus. */
   const jumpToFix = useCallback(
     (code: string) => {
       const targetId = jumpTargetFor(code);
@@ -887,7 +666,6 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       if (isFieldTarget && !editing) {
         beginEdit();
       }
-      // Wait a frame so edit inputs mount before focus moves.
       requestAnimationFrame(() => {
         focusJumpTarget(targetId);
       });
@@ -895,20 +673,15 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     [editing, beginEdit],
   );
 
-  /** Bulk-review gating: count selected reviewable items blocked by the gate. */
+  /** Bulk-review gating: fail-closed safety on unknown / blocked status */
   const selectedBlockedCount = useMemo(() => {
-    if (!v2) return 0;
-    return countGateBlockedItems(reviewableSelectedIds, id => {
-      const ws = items.find(i => i.itemId === id);
-      if (!ws) return null;
-      return { detail: details.get(id) ?? null, workState: ws };
-    });
-  }, [v2, reviewableSelectedIds, items, details]);
+    return countGateBlockedItems(reviewableSelectedIds, filteredItems, details);
+  }, [reviewableSelectedIds, filteredItems, details]);
 
   const loadedCount = filteredItems.length;
   const filtersTotal = filteredItems.length;
 
-  // Filters change → always keep a valid selection.
+  // Filters change → keep a valid selection.
   useEffect(() => {
     if (!currentItemId) return;
     if (filteredItems.some(i => i.itemId === currentItemId)) return;
@@ -917,7 +690,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   }, [filteredItems]);
 
   const queueEmptyMessage =
-    queueState === 'loading'
+    queueLoading
       ? 'Loading review queue…'
       : filtersTotal === 0 && hasActiveQueueFilters(filters)
         ? 'No products match the current filters.'
@@ -938,7 +711,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
             onChange={setFilters}
             facets={facets}
             progress={progress}
-            total={total}
+            total={totalCount}
             shownCount={loadedCount}
           />
           {(selectedIds.length > 0 || filters.sourceType === 'distributor_record') && (
@@ -1026,7 +799,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
               </div>
             </div>
           )}
-          {queueState === 'error' ? (
+          {queueError ? (
             <div className="rv-state-note" role="alert">
               Could not load the review queue: {queueError}
             </div>
@@ -1048,20 +821,20 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
               onSelect={selectItem}
             />
           )}
-          {queueState === 'ready' && total > items.length ? (
+          {hasMore && (
             <div className="rv-load-more">
               <button
                 type="button"
                 className="btn btn-outline"
-                onClick={() => void loadMoreQueue()}
+                onClick={() => void loadMore()}
                 disabled={loadingMore}
               >
                 {loadingMore
                   ? 'Loading more…'
-                  : `Load more (${items.length} of ${total} shown)`}
+                  : `Load more (${rows.length} of ${totalCount} shown)`}
               </button>
             </div>
-          ) : null}
+          )}
         </div>
 
         <div className="rv-inspector-pane" tabIndex={-1} aria-label="Review inspector">
@@ -1199,15 +972,10 @@ function QueueHeader({
   );
 }
 
-// ─── Collapsed filter controls (impeccable polish) ───────────────────────────
+// ─── Collapsed filter controls ───────────────────────────────────────────────
 
 const LEGEND_DISMISS_KEY = 'rv-shortcuts-dismissed';
 
-/**
- * Collapsed filter surface: one trigger with an active-count badge opens a
- * popover holding all six controls; applied filters remain visible as
- * removable chips. All filter capabilities and their pure logic are unchanged.
- */
 function FilterControls({
   filters,
   onChange,
@@ -1224,8 +992,6 @@ function FilterControls({
     familyLabel: facets.families.find(f => f.cohortId === filters.familyCohortId)?.label,
   });
 
-  // Close on outside click or Escape (Escape must not bubble into the
-  // workspace's item-navigation Esc handler).
   useEffect(() => {
     if (!open) return;
     const onDocMouseDown = (e: MouseEvent) => {
@@ -1238,7 +1004,7 @@ function FilterControls({
       }
     };
     document.addEventListener('mousedown', onDocMouseDown);
-    document.addEventListener('keydown', onKeyDown, true); // capture: beats workspace handler
+    document.addEventListener('keydown', onKeyDown, true);
     return () => {
       document.removeEventListener('mousedown', onDocMouseDown);
       document.removeEventListener('keydown', onKeyDown, true);
@@ -1390,8 +1156,6 @@ function FilterControls({
 
 // ─── Shortcut legend (dismissible — persisted) ──────────────────────────────
 
-/** Pure read of the persisted dismissal so tests can exercise it without jsdom
- *  localStorage flakiness leaking between cases. */
 export function isLegendDismissed(store: Pick<Storage, 'getItem'> = localStorage): boolean {
   try {
     return store.getItem(LEGEND_DISMISS_KEY) === '1';
@@ -1404,7 +1168,7 @@ function dismissLegend(store: Pick<Storage, 'setItem'> = localStorage): void {
   try {
     store.setItem(LEGEND_DISMISS_KEY, '1');
   } catch {
-    /* storage unavailable — legend simply reappears next mount */
+    /* storage unavailable */
   }
 }
 

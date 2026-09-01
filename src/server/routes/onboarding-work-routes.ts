@@ -1,8 +1,10 @@
 /**
- * Epic #46 — operator work-state routes (Phases 1/7/8).
+ * Epic #46 — operator work-state routes (Phases 1/7/8, Milestone 3 / P1-E).
  *
  * - `GET  /api/onboarding/batches/:id/work-state` — Batch Workspace
- *   projection (counts + paginated items, server-owned derivation).
+ *   projection (counts + paginated items, server-owned derivation) [deprecated, kept for compat].
+ * - `GET  /api/onboarding/batches/:id/work-state/counts` — bounded counts + projectionHealth.
+ * - `GET  /api/onboarding/batches/:id/work-state/items?cursor&limit` — cursor-paginated items + projectionHealth.
  * - `GET  /api/onboarding/items/:id/work-state` — single-item projection.
  * - `POST /api/onboarding/batches/:id/approve` — bulk approval of reviewed
  *   items (per-item structured outcomes; approval NEVER exports).
@@ -18,10 +20,22 @@ import {
 } from '../../db/repositories/onboarding-item-repo';
 import {
   getBatchWorkState,
+  getBatchWorkStateCountsWithHealth,
+  getBatchWorkStateItems,
   getItemWorkState,
   type WorkStateFilters,
 } from '../../onboarding/onboarding-work-state';
-import { getReviewState, approveAndAdvanceItems } from '../../db/repositories/onboarding-review-repo';
+import { WorkStateCursorError } from '../../shared/schemas/onboarding-work-state';
+import { WorkStateProjectionError } from '../../db/repositories/onboarding-work-state-repo';
+import { buildProjectionHealth } from '../../onboarding/onboarding-work-state';
+import { getBatchReviewQueue } from '../../onboarding/onboarding-review-queue';
+import {
+  ReviewQueueCursorError,
+  ReviewQueueFiltersSchema,
+} from '../../shared/schemas/onboarding-review-queue';
+import { getReviewState, approveAndAdvanceItems, createExportDraftsWithReceipt } from '../../db/repositories/onboarding-review-repo';
+import { findByScopedIdempotencyKey, computeRequestHash } from '../../db/repositories/onboarding-operation-receipt-repo';
+import { derivePrincipal, derivePrincipalForOperation } from '../authenticated-principal';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
@@ -29,7 +43,8 @@ import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
 import { getOnboardingMetrics } from '../../onboarding/onboarding-telemetry';
 import { getExtractorProfileDomainBlockers } from '../../onboarding/extraction/profile-blockers';
 import { verifyDistributorImageryForBatch } from '../../onboarding/distributor-imagery';
-import { getWorker } from './onboarding-routes';import {
+import { getWorker } from './onboarding-routes';
+import {
   ApproveItemsRequestSchema,
   WorkStateCategoryEnum,
   ReviewStateEnum,
@@ -69,6 +84,7 @@ function parseWorkStateFilters(c: { req: { query: (key: string) => string | unde
   const sourceTypeRaw = c.req.query('sourceType');
   const limitRaw = c.req.query('limit');
   const offsetRaw = c.req.query('offset');
+  const cursorRaw = c.req.query('cursor');
 
   const filters: WorkStateFilters = {};
   if (categoryRaw) {
@@ -93,12 +109,14 @@ function parseWorkStateFilters(c: { req: { query: (key: string) => string | unde
   const offset = offsetRaw ? Number.parseInt(offsetRaw, 10) : NaN;
   if (Number.isFinite(limit)) filters.limit = limit;
   if (Number.isFinite(offset)) filters.offset = offset;
+  if (cursorRaw && cursorRaw.trim()) filters.cursor = cursorRaw.trim();
   return filters;
 }
 
 /**
  * GET /api/onboarding/batches/:id/work-state
  * Server-derived operator work-state projection for the Batch Workspace.
+ * @deprecated — use /work-state/counts + /work-state/items (cursor) for bounded reads.
  */
 route.get('/onboarding/batches/:id/work-state', async (c) => {
   const batchId = c.req.param('id');
@@ -106,15 +124,141 @@ route.get('/onboarding/batches/:id/work-state', async (c) => {
   if (!batch) {
     return c.json({ error: 'Batch not found' }, 404);
   }
-  // Workspace-ownership guard (epic #46 review round 2): batch projections
-  // are workspace-scoped — foreign-workspace batches are 404, never readable.
   const workspace = findWorkspace();
   if (!workspace || batch.workspaceId !== workspace.id) {
     return c.json({ error: 'Batch not found' }, 404);
   }
   const filters = parseWorkStateFilters(c);
-  const payload = getBatchWorkState(batchId, filters);
-  return c.json(payload);
+  try {
+    const payload = getBatchWorkState(batchId, filters);
+    return c.json(payload);
+  } catch (err) {
+    if (err instanceof WorkStateCursorError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    if (err instanceof WorkStateProjectionError) {
+      const health = (err as any).health ?? buildProjectionHealth([{ source: (err as WorkStateProjectionError).source, code: (err as WorkStateProjectionError).code, affectedCount: 1 }]);
+      return c.json({ error: 'projection_failed', code: (err as WorkStateProjectionError).code, projectionHealth: health }, 503);
+    }
+    throw err;
+  }
+});
+
+/**
+ * GET /api/onboarding/batches/:id/work-state/counts
+ * Bounded work-state counts (Milestone 3 / P1-E). Always includes projectionHealth.
+ */
+route.get('/onboarding/batches/:id/work-state/counts', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const workspace = findWorkspace();
+  if (!workspace || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const filters = parseWorkStateFilters(c);
+  try {
+    const countsPayload = getBatchWorkStateCountsWithHealth(batchId, {
+      category: filters.category,
+      q: filters.q,
+      domain: filters.domain,
+      sourceType: filters.sourceType,
+      cohortId: filters.cohortId,
+      reviewState: filters.reviewState,
+    });
+    return c.json({ batchId, ...countsPayload });
+  } catch (err) {
+    if (err instanceof WorkStateProjectionError) {
+      const health = (err as any).health ?? buildProjectionHealth([{ source: (err as WorkStateProjectionError).source, code: (err as WorkStateProjectionError).code, affectedCount: 1 }]);
+      return c.json({ error: 'projection_failed', code: (err as WorkStateProjectionError).code, projectionHealth: health }, 503);
+    }
+    throw err;
+  }
+});
+
+/**
+ * GET /api/onboarding/batches/:id/work-state/items?cursor&limit
+ * Cursor-paginated work-state items (Milestone 3 / P1-E). Always includes projectionHealth.
+ */
+route.get('/onboarding/batches/:id/work-state/items', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const workspace = findWorkspace();
+  if (!workspace || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const filters = parseWorkStateFilters(c);
+  try {
+    const page = getBatchWorkStateItems(batchId, filters);
+    return c.json({ batchId, items: page.items, nextCursor: page.nextCursor, projectionHealth: page.projectionHealth, scannedRows: (page as any).scannedRows ?? 0, queryCount: (page as any).queryCount ?? 0 });
+  } catch (err) {
+    if (err instanceof WorkStateCursorError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    if (err instanceof WorkStateProjectionError) {
+      const health = (err as any).health ?? buildProjectionHealth([{ source: (err as WorkStateProjectionError).source, code: (err as WorkStateProjectionError).code, affectedCount: 1 }]);
+      return c.json({ error: 'projection_failed', code: (err as WorkStateProjectionError).code, projectionHealth: health }, 503);
+    }
+    console.error('[WorkState] Unexpected error in getBatchWorkStateItems:', err);
+    return c.json({ error: 'Failed to generate work-state projection' }, 500);
+  }
+});
+
+/**
+ * GET /api/onboarding/batches/:id/review-queue
+ * Bounded, cursor-paginated review queue projection (Milestone 1 / P1-C).
+ */
+route.get('/onboarding/batches/:id/review-queue', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const workspace = findWorkspace();
+  if (!workspace || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+
+  const limitRaw = c.req.query('limit');
+  const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
+  const warningsOnlyRaw = c.req.query('warningsOnly');
+  const reviewStatesRaw = c.req.query('reviewStates');
+
+  const filterInput: Record<string, unknown> = {
+    cursor: c.req.query('cursor') || undefined,
+    limit: Number.isFinite(limitParsed) ? limitParsed : undefined,
+    warningsOnly: warningsOnlyRaw === 'true' || warningsOnlyRaw === '1' ? true : undefined,
+    gateStatus: c.req.query('gateStatus') || undefined,
+    familyCohortId: c.req.query('familyCohortId') || undefined,
+    brand: c.req.query('brand') || undefined,
+    sourceType: c.req.query('sourceType') || undefined,
+    q: c.req.query('q') || undefined,
+  };
+
+  if (reviewStatesRaw) {
+    filterInput.reviewStates = reviewStatesRaw.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  const parsedFilters = ReviewQueueFiltersSchema.safeParse(filterInput);
+  if (!parsedFilters.success) {
+    return c.json({ error: 'Invalid query filters', details: parsedFilters.error.format() }, 400);
+  }
+
+  try {
+    const queuePage = getBatchReviewQueue(batchId, parsedFilters.data, { workspaceId: workspace.id });
+    return c.json(queuePage);
+  } catch (err) {
+    if (err instanceof ReviewQueueCursorError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    console.error('[ReviewQueue] Unexpected error in getBatchReviewQueue:', err);
+    return c.json({ error: 'Failed to generate review queue projection' }, 500);
+  }
 });
 
 /**
@@ -220,9 +364,69 @@ route.post('/onboarding/batches/:id/approve', async (c) => {
     return c.json({ error: 'Invalid approval payload.', issues: parsed.error.issues }, 400);
   }
 
-  const approvedBy = parsed.data.reviewerId && parsed.data.reviewerId.trim()
-    ? parsed.data.reviewerId.trim()
-    : 'operator';
+  const principal = derivePrincipal(c);
+  if (!principal) {
+    return c.json({ error: 'Unauthorized', code: 'unauthorized' }, 401);
+  }
+  if (principal.role !== 'catalog_approver' && principal.role !== 'system') {
+    return c.json({ error: 'Forbidden', code: 'forbidden' }, 403);
+  }
+  const approvedBy = principal.actor;
+  const idempotencyKey = c.req.header('Idempotency-Key') ?? c.req.header('idempotency-key') ?? null;
+  const originalHash = computeRequestHash(parsed.data.itemIds);
+  const originalItemIds = parsed.data.itemIds;
+
+  // Early idempotent replay before mutable validation (P1-D: identical retry replays previous response)
+  if (idempotencyKey) {
+    const incomingHash = originalHash;
+    const existing = findByScopedIdempotencyKey(workspace.id, batchId, 'approve', idempotencyKey);
+    if (existing) {
+      if (existing.requestHash !== incomingHash) {
+        return c.json({ error: 'payload_mismatch', code: 'payload_mismatch', receiptId: existing.id }, 409);
+      }
+      if (existing.status === 'started' && !existing.detailsJson) {
+        return c.json({ error: 'operation_in_progress', code: 'operation_in_progress', receiptId: existing.id }, 409);
+      }
+      if (existing.detailsJson) {
+        try {
+          const stored = JSON.parse(existing.detailsJson) as { approved?: string[]; rejected?: Array<{ itemId: string; reason: string }>; principal?: string; role?: string; results?: Array<{ itemId: string; status: string; reason: string | null }>; approvedCount?: number; rejectedCount?: number; audited?: boolean; receiptId?: string };
+          // If stored is full envelope (with receiptId and results), replay it IDENTICALLY
+          if (Array.isArray(stored.results) && typeof stored.receiptId === 'string' && typeof stored.approvedCount === 'number') {
+            return c.json(stored);
+          }
+          if (Array.isArray(stored.results) && typeof stored.approvedCount === 'number') {
+            return c.json({
+              results: stored.results,
+              approvedCount: stored.approvedCount,
+              rejectedCount: stored.rejectedCount ?? (stored.rejected?.length ?? 0),
+              rejected: stored.rejected ?? [],
+              audited: stored.audited ?? true,
+              receiptId: existing.id,
+              principal: stored.principal ?? existing.principal,
+            });
+          }
+          if (Array.isArray(stored.approved)) {
+            const approved = stored.approved;
+            const rejectedStored = stored.rejected ?? [];
+            const results = [
+              ...approved.map(itemId => ({ itemId, status: 'approved' as const, reason: null })),
+              ...rejectedStored.map(r => ({ itemId: r.itemId, status: 'rejected' as const, reason: r.reason })),
+            ];
+            return c.json({
+              results,
+              approvedCount: approved.length,
+              rejectedCount: rejectedStored.length,
+              rejected: rejectedStored,
+              audited: true,
+              receiptId: existing.id,
+              principal: stored.principal ?? existing.principal,
+            });
+          }
+        } catch {}
+      }
+      return c.json({ results: [], approvedCount: 0, rejectedCount: 0, rejected: [], audited: true, receiptId: existing.id, principal: existing.principal });
+    }
+  }
 
   // ── Phase 1: validate every item (per-item, fail-closed reasons) ───────
   const validIds: string[] = [];
@@ -273,30 +477,35 @@ route.post('/onboarding/batches/:id/approve', async (c) => {
     validIds.push(id);
   }
 
-  // ── Phase 2: ATOMIC durable approval + review→promotion advance ──────
-  // One transaction per item (approveAndAdvanceItems): a concurrent
-  // consequential edit can never interleave between the approval write and
-  // the stage transition — an item can never land in `promotion` WITHOUT
-  // durable approval (epic #46 review remediation, fix 1). Approval NEVER
-  // exports.
-  const { approved: advancedIds, rejected: atomicRejected } = approveAndAdvanceItems({
-    itemIds: validIds,
-    batchId,
-    approvedBy,
-    origin: 'bulk',
-  });
-  for (const id of advancedIds) {
-    addAuditLog({
+  // ── Phase 2: ATOMIC durable approval + review→promotion advance + receipt + audit ──────
+  // Receipt + approval + audit in ONE transaction (Milestone 4 / P1-D). Idempotency via Idempotency-Key.
+  // Server-derived principal beats client reviewerId. Handle payload_mismatch 409 from scoped receipt hash check.
+  let advancedIds: string[];
+  let atomicRejected: Array<{ itemId: string; reason: string }>;
+  let receiptId: string | undefined;
+  try {
+    const res = approveAndAdvanceItems({
+      itemIds: validIds,
+      batchId,
+      approvedBy,
+      origin: 'bulk',
+      principal: principal.actor,
+      role: principal.role,
+      idempotencyKey,
       workspaceId: workspace.id,
-      entityType: 'onboarding_item',
-      entityId: id,
-      action: 'bulk_approve',
-      message: `Item approved for export (bulk approval by ${approvedBy})`,
-      detailsJson: JSON.stringify({ batchId, origin: 'bulk' }),
+      requestHash: originalHash,
+      preRejected: rejected,
     });
-    // Epic #46 audit fix: emit an item:status SSE event per approved item so
-    // the Batch Workspace tabs + Ready-to-Export queue refresh without a
-    // manual reload (approval is a durable release decision, not a publish).
+    advancedIds = res.approved;
+    atomicRejected = res.rejected;
+    receiptId = res.receiptId;
+  } catch (e: any) {
+    if (e?.code === 'payload_mismatch') {
+      return c.json({ error: 'payload_mismatch', code: 'payload_mismatch', receiptId: e.existingReceiptId }, 409);
+    }
+    throw e;
+  }
+  for (const id of advancedIds) {
     onboardingEvents.emitItemStatus(findItemById(id)?.batchId ?? batchId, id, 'approved', {
       stage: 'promotion',
       approvalOrigin: 'bulk',
@@ -312,16 +521,86 @@ route.post('/onboarding/batches/:id/approve', async (c) => {
   const approvedCount = advancedIds.length;
   const rejectedCount = rejected.length;
 
-  addAuditLog({
-    workspaceId: workspace.id,
-    entityType: 'onboarding_batch',
-    entityId: batchId,
-    action: 'bulk_approve',
-    message: `Bulk approval completed: ${approvedCount} approved, ${rejectedCount} rejected`,
-    detailsJson: JSON.stringify({ approvedCount, rejectedCount, approvedBy: approvedBy }),
-  });
+  // Batch audit already done inside transaction with finalRejected; also ensure idempotency replay handled
+  return c.json({ results, approvedCount, rejectedCount, rejected, audited: true, receiptId, principal: principal.actor });
+});
 
-  return c.json({ results, approvedCount, rejectedCount, rejected, audited: true });
+/**
+ * POST /api/onboarding/batches/:id/create-export-drafts
+ * Separate export-draft operation with its own idempotency lifecycle (P1-D item 5).
+ * Requires catalog_exporter, revalidates durable approval immediately before draft mutation, never auto-approves.
+ */
+route.post('/onboarding/batches/:id/create-export-drafts', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) return c.json({ error: 'No active workspace loaded' }, 400);
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) return c.json({ error: 'Batch not found' }, 404);
+  if (batch.workspaceId !== workspace.id) return c.json({ error: 'Batch not found' }, 404);
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body.' }, 400); }
+  const parsed = ApproveItemsRequestSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'Invalid export draft payload.', issues: parsed.error.issues }, 400);
+  const principal = derivePrincipalForOperation(c, 'export');
+  if (!principal) return c.json({ error: 'Unauthorized', code: 'unauthorized' }, 401);
+  if (principal.role !== 'catalog_exporter' && principal.role !== 'system') return c.json({ error: 'Forbidden', code: 'forbidden' }, 403);
+  const idempotencyKey = c.req.header('Idempotency-Key') ?? c.req.header('idempotency-key') ?? null;
+  const originalHash = computeRequestHash(parsed.data.itemIds);
+  if (idempotencyKey) {
+    const existing = findByScopedIdempotencyKey(workspace.id, batchId, 'export', idempotencyKey);
+    if (existing) {
+      if (existing.requestHash !== originalHash) return c.json({ error: 'payload_mismatch', code: 'payload_mismatch', receiptId: existing.id }, 409);
+      if (existing.status === 'started' && !existing.detailsJson) return c.json({ error: 'operation_in_progress', code: 'operation_in_progress', receiptId: existing.id }, 409);
+      if (existing.detailsJson) {
+        try { const stored = JSON.parse(existing.detailsJson); if (stored.receiptId && Array.isArray(stored.results)) return c.json(stored); } catch {}
+        // Fallback: return stored details
+        try { const stored = JSON.parse(existing.detailsJson); return c.json({ ...stored, receiptId: existing.id }); } catch {}
+      }
+    }
+  }
+  // Pre-validation (fail-closed reasons, no mutation yet)
+  const preRejected: Array<{ itemId: string; reason: string }> = [];
+  const validIds: string[] = [];
+  for (const id of parsed.data.itemIds) {
+    const item = findItemById(id);
+    if (!item) { preRejected.push({ itemId: id, reason: 'item_not_found' }); continue; }
+    if (item.batchId !== batchId) { preRejected.push({ itemId: id, reason: 'item_not_in_batch' }); continue; }
+    validIds.push(id);
+  }
+  try {
+    const res = createExportDraftsWithReceipt({
+      itemIds: validIds,
+      batchId,
+      requestedBy: principal.actor,
+      principal: principal.actor,
+      role: principal.role,
+      idempotencyKey,
+      workspaceId: workspace.id,
+      requestHash: originalHash,
+      preRejected,
+    });
+    // Build response envelope matching approve shape but with export lifecycle fields
+    const finalRejected = [...preRejected, ...res.rejected];
+    const results = [
+      ...res.created.map(itemId => ({ itemId, status: 'created' as const, reason: null })),
+      ...finalRejected.map(r => ({ itemId: r.itemId, status: 'rejected' as const, reason: r.reason })),
+    ];
+    return c.json({
+      results,
+      createdCount: res.created.length,
+      rejectedCount: finalRejected.length,
+      rejected: finalRejected,
+      created: res.created,
+      changeSetId: res.changeSetId,
+      audited: true,
+      receiptId: res.receiptId,
+      principal: principal.actor,
+    });
+  } catch (e: any) {
+    if (e?.code === 'payload_mismatch') return c.json({ error: 'payload_mismatch', code: 'payload_mismatch', receiptId: e.existingReceiptId }, 409);
+    if (e?.code === 'operation_in_progress') return c.json({ error: 'operation_in_progress', code: 'operation_in_progress', receiptId: e.existingReceiptId }, 409);
+    throw e;
+  }
 });
 
 /**

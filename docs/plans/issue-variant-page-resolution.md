@@ -1,3 +1,6 @@
+> [!NOTE] Superseded by Onboarding Hardening Plan M6 — see `docs/plans/onboarding-hardening-plan.md`.
+> **Historical / partially implemented:** Variant extraction architecture here is superseded. Hash-stability assertions now live in characterization tests `src/tests/unit/variant-resolution-schema.test.ts`, `src/tests/unit/curation-cohort-repo.test.ts`, `src/tests/unit/onboarding-variant-resolution-repo.test.ts`, and `src/tests/integration/onboarding-betterbone-variant-flow.test.ts`. See also `src/db/repositories/curation-cohort-repo.ts:computeExtractionHash` and `src/shared/schemas/variant-resolution.ts:computeIdentityMatrixHash`.
+
 ## Problem
 
 During Discovery and Official URL selection, the domain sitemap is indexed successfully and a relevant product page is selected. However, when a brand storefront groups multiple product variants (sizes, flavors, densities, colors, pack counts) onto a **single base product page URL** (e.g. `https://betterbone.com/products/the-betterbone-beef` or `https://brand.com/products/chew-toy`), extraction fails to target the specific variant required by the onboarding item.

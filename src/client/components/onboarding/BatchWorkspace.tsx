@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { colors, fonts, rounded, typography } from '../../theme';
 import {
-  getBatchWorkState,
+  getBatchWorkStateCounts,
+  getBatchWorkStateItems,
   subscribeBatchEvents,
   type WorkStateFilters,
 } from '../../onboarding-work-api';
 import type {
-  BatchWorkState,
   OnboardingWorkState,
   ReviewState,
   WorkStateCounts,
+  WorkStateProjectionHealth,
 } from '../../../shared/schemas/onboarding-work-state';
 import {
   buildWorkStateFilters,
@@ -66,6 +67,7 @@ const VALID_WORKSPACE_TABS: readonly WorkspaceTabId[] = [
   'waiting_on_family',
   'review',
   'approved',
+  'ready_to_export',
 ];
 
 function resolveWorkspaceTab(raw: string | null): WorkspaceTabId | null {
@@ -115,10 +117,12 @@ export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings, onO
 
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [projectionHealth, setProjectionHealth] = useState<WorkStateProjectionHealth | null>(null);
   const refreshCounts = useCallback(async () => {
     try {
-      const res = await getBatchWorkState(batchId, { limit: 1 });
+      const res = await getBatchWorkStateCounts(batchId);
       setCounts(res.counts);
+      setProjectionHealth(res.projectionHealth);
       setCountsError(null);
     } catch (err) {
       setCountsError(err instanceof Error ? err.message : String(err));
@@ -266,6 +270,23 @@ export function BatchWorkspace({ batchId, batchName, onBack, onOpenSettings, onO
           }}
         >
           Could not load batch progress: {countsError}
+        </div>
+      )}
+      {projectionHealth?.status === 'degraded' && (
+        <div
+          role="status"
+          aria-label="Projection health degraded"
+          style={{
+            backgroundColor: '#fff3cd',
+            color: '#856404',
+            border: '1px solid #ffeaa7',
+            borderRadius: rounded.md,
+            padding: '10px 14px',
+            marginBottom: 14,
+            fontSize: '0.8125rem',
+          }}
+        >
+          Projection degraded: {projectionHealth.issues.length} issue(s) — counts may be partial. (v{projectionHealth.version})
         </div>
       )}
 
@@ -428,8 +449,13 @@ function TabContent({
       return <ReviewWorkspace batchId={batchId} />;
     case 'approved':
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <div data-testid="approved-view" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
           <ApprovedView batchId={batchId} />
+        </div>
+      );
+    case 'ready_to_export':
+      return (
+        <div data-testid="ready-to-export-view" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
           <ReadyToExportView batchId={batchId} />
         </div>
       );
@@ -449,26 +475,24 @@ function FilteredResultsList({
   filters: WorkStateFilters;
   onOpenItem: (itemId: string) => void;
 }) {
-  const [data, setData] = useState<BatchWorkState | null>(null);
+  const [items, setItems] = useState<OnboardingWorkState[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [projectionHealth, setProjectionHealth] = useState<WorkStateProjectionHealth | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [offset, setOffset] = useState(0);
 
   const load = useCallback(
-    async (nextOffset: number) => {
+    async (cursor: string | null) => {
       setLoading(true);
       try {
-        const res = await getBatchWorkState(batchId, {
+        const res = await getBatchWorkStateItems(batchId, {
           ...filters,
           limit: FILTER_PAGE_SIZE,
-          offset: nextOffset,
+          cursor: cursor ?? undefined,
         });
-        setData(prev =>
-          prev && nextOffset > 0
-            ? { ...res, items: [...prev.items, ...res.items] }
-            : res,
-        );
-        setOffset(nextOffset);
+        setItems(prev => (cursor ? [...prev, ...res.items] : res.items));
+        setNextCursor(res.nextCursor);
+        setProjectionHealth(res.projectionHealth);
         setError(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -480,9 +504,10 @@ function FilteredResultsList({
   );
 
   useEffect(() => {
-    setData(null);
-    setOffset(0);
-    load(0);
+    setItems([]);
+    setNextCursor(null);
+    setProjectionHealth(null);
+    load(null);
     // Key on the serialized filter shape so object identity churn never
     // retriggers the fetch; only actual filter changes do.
   }, [JSON.stringify(filters)]);
@@ -494,10 +519,10 @@ function FilteredResultsList({
       </div>
     );
   }
-  if (!data) {
+  if (loading && items.length === 0) {
     return <div className="bws-muted" style={{ padding: '1rem 0' }}>Loading results…</div>;
   }
-  if (data.items.length === 0) {
+  if (items.length === 0) {
     return (
       <div className="bws-muted" style={{ padding: '2rem 1rem', textAlign: 'center' }}>
         No products match your filters.
@@ -507,8 +532,14 @@ function FilteredResultsList({
 
   return (
     <div>
+      {projectionHealth?.status === 'degraded' && (
+        <div style={{ backgroundColor: '#fff3cd', color: '#856404', borderRadius: 6, padding: '8px 12px', marginBottom: 8, fontSize: '0.75rem' }}>
+          Projection degraded: {projectionHealth.issues.length} issue(s)
+        </div>
+      )}
       <p className="bws-muted" style={{ margin: '0 0 8px 0', fontSize: '0.8125rem' }}>
-        {formatCount(data.total)} matching {data.total === 1 ? 'product' : 'products'}
+        {formatCount(items.length)} matching {items.length === 1 ? 'product' : 'products'}
+        {nextCursor ? ' — more available' : ''}
       </p>
       <table className="bws-results-table">
         <thead>
@@ -522,15 +553,15 @@ function FilteredResultsList({
           </tr>
         </thead>
         <tbody>
-          {data.items.map(item => (
+          {items.map(item => (
             <ResultRow key={item.itemId} item={item} onOpenItem={onOpenItem} />
           ))}
         </tbody>
       </table>
-      {data.total > data.items.length && (
+      {nextCursor && (
         <button
           type="button"
-          onClick={() => load(offset + FILTER_PAGE_SIZE)}
+          onClick={() => load(nextCursor)}
           disabled={loading}
           style={{
             marginTop: 12,
@@ -545,7 +576,7 @@ function FilteredResultsList({
             minHeight: 36,
           }}
         >
-          {loading ? 'Loading…' : `Load more (${formatCount(data.total - data.items.length)} remaining)`}
+          {loading ? 'Loading…' : "Load more"}
         </button>
       )}
     </div>

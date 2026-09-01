@@ -18,11 +18,23 @@ import type {
   OnboardingWorkState,
   WorkStateCategory,
   WorkStateFilters,
+  WorkStateCountsResponse,
+  WorkStateItemsResponse,
+  WorkStateProjectionHealth,
   ApproveItemsResponse,
   DomainReleaseResponse,
   ExtractorProfileBlockersResponse,
   BrandDomainSetupResponse,
 } from '../shared/schemas/onboarding-work-state';
+import type {
+  ReviewQueuePage,
+  ReviewQueueRow,
+  ReviewQueueCounts,
+  ReviewGateStatus,
+  ReviewFamilySummary,
+  ProjectionHealth,
+} from '../shared/schemas/onboarding-review-queue';
+import type { ReviewQueueFilters } from './components/onboarding/review/review-logic';
 
 const API_BASE = '/api/onboarding';
 
@@ -56,6 +68,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
  * Batch-level operator projection: counts + paginated items.
  * Filters: category, q (upc/name/brand), domain, sourceType, cohortId,
  * reviewState, limit, offset. Invalid filter values fail closed server-side.
+ * @deprecated — prefer getBatchWorkStateCounts / getBatchWorkStateItems (bounded, cursor-paginated)
  */
 export async function getBatchWorkState(
   batchId: string,
@@ -71,9 +84,49 @@ export async function getBatchWorkState(
     if (filters.reviewState) params.set('reviewState', filters.reviewState);
     if (typeof filters.limit === 'number') params.set('limit', String(filters.limit));
     if (typeof filters.offset === 'number') params.set('offset', String(filters.offset));
+    if (filters.cursor) params.set('cursor', filters.cursor);
   }
   const qs = params.toString();
   return request<BatchWorkState>(`/batches/${batchId}/work-state${qs ? `?${qs}` : ''}`);
+}
+
+/** Bounded work-state counts (Milestone 3 / P1-E). */
+export async function getBatchWorkStateCounts(
+  batchId: string,
+  filters?: Omit<WorkStateFilters, 'cursor' | 'limit' | 'offset'>,
+): Promise<WorkStateCountsResponse> {
+  const params = new URLSearchParams();
+  if (filters) {
+    if (filters.category) params.set('category', filters.category);
+    if (filters.q) params.set('q', filters.q);
+    if (filters.domain) params.set('domain', filters.domain);
+    if (filters.sourceType) params.set('sourceType', filters.sourceType);
+    if (filters.cohortId) params.set('cohortId', filters.cohortId);
+    if (filters.reviewState) params.set('reviewState', filters.reviewState);
+  }
+  const qs = params.toString();
+  return request<WorkStateCountsResponse>(`/batches/${batchId}/work-state/counts${qs ? `?${qs}` : ''}`);
+}
+
+/** Cursor-paginated work-state items (Milestone 3 / P1-E). */
+export async function getBatchWorkStateItems(
+  batchId: string,
+  filters?: WorkStateFilters,
+): Promise<WorkStateItemsResponse> {
+  const params = new URLSearchParams();
+  if (filters) {
+    if (filters.category) params.set('category', filters.category);
+    if (filters.q) params.set('q', filters.q);
+    if (filters.domain) params.set('domain', filters.domain);
+    if (filters.sourceType) params.set('sourceType', filters.sourceType);
+    if (filters.cohortId) params.set('cohortId', filters.cohortId);
+    if (filters.reviewState) params.set('reviewState', filters.reviewState);
+    if (typeof filters.limit === 'number') params.set('limit', String(filters.limit));
+    if (filters.cursor) params.set('cursor', filters.cursor);
+    // offset intentionally not sent — server uses cursor
+  }
+  const qs = params.toString();
+  return request<WorkStateItemsResponse>(`/batches/${batchId}/work-state/items${qs ? `?${qs}` : ''}`);
 }
 
 /** Single-item operator projection. */
@@ -83,18 +136,66 @@ export async function getItemWorkState(itemId: string): Promise<{ workState: Onb
 
 // ─── Bulk approval ─────────────────────────────────────────────────────────────
 
+function generateIdempotencyKey(): string {
+  try {
+    // Browser / Bun
+    if (typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function') {
+      return (crypto as any).randomUUID();
+    }
+  } catch {}
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /**
  * Bulk approval of reviewed items. Per-item structured outcomes; approval
  * NEVER exports anything. Unreviewed items are rejected by the server.
+ * Idempotency-Key header engages scoped receipt replay (DB receipt is authority).
  */
 export async function approveItems(
   batchId: string,
   itemIds: string[],
-): Promise<ApproveItemsResponse> {
-  return request<ApproveItemsResponse>(`/batches/${batchId}/approve`, {
+  opts?: { idempotencyKey?: string },
+): Promise<ApproveItemsResponse & { receiptId?: string; principal?: string }> {
+  const key = opts?.idempotencyKey ?? generateIdempotencyKey();
+  return request<ApproveItemsResponse & { receiptId?: string; principal?: string }>(`/batches/${batchId}/approve`, {
     method: 'POST',
+    headers: { 'Idempotency-Key': key },
     body: JSON.stringify({ itemIds }),
   });
+}
+
+export interface CreateExportDraftsResponse {
+  results: Array<{ itemId: string; status: string; reason: string | null }>;
+  createdCount: number;
+  rejectedCount: number;
+  rejected: Array<{ itemId: string; reason: string }>;
+  created: string[];
+  changeSetId: string | null;
+  audited: boolean;
+  receiptId: string;
+  principal: string;
+}
+
+/**
+ * Create export drafts (change set) for approved items. Separate operation
+ * from approval with its own idempotency lifecycle (catalog_exporter).
+ * Header Idempotency-Key is required for receipt replay; generated per logical operation.
+ */
+export async function createExportDrafts(
+  batchId: string,
+  itemIds: string[],
+  opts?: { idempotencyKey?: string },
+): Promise<CreateExportDraftsResponse> {
+  const key = opts?.idempotencyKey ?? generateIdempotencyKey();
+  return request<CreateExportDraftsResponse>(`/batches/${batchId}/create-export-drafts`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': key },
+    body: JSON.stringify({ itemIds }),
+  });
+}
+
+export function createIdempotencyKey(): string {
+  return generateIdempotencyKey();
 }
 
 // ─── Domain-level release ──────────────────────────────────────────────────────
@@ -180,4 +281,42 @@ export function subscribeBatchEvents(
   return () => sse.close();
 }
 
-export type { WorkStateCategory, WorkStateFilters };
+// ─── Review Queue Projection (Milestone 1 / P1-C) ──────────────────────────────
+
+/**
+ * Fetch a bounded, cursor-paginated review queue projection.
+ */
+export async function getBatchReviewQueue(
+  batchId: string,
+  filters?: ReviewQueueFilters & { cursor?: string; limit?: number },
+): Promise<ReviewQueuePage> {
+  const params = new URLSearchParams();
+  if (filters) {
+    if (filters.cursor) params.set('cursor', filters.cursor);
+    if (typeof filters.limit === 'number') params.set('limit', String(filters.limit));
+    if (filters.q) params.set('q', filters.q);
+    if (filters.brand) params.set('brand', filters.brand);
+    if (filters.familyCohortId) params.set('familyCohortId', filters.familyCohortId);
+    if (filters.sourceType && filters.sourceType !== 'all') params.set('sourceType', filters.sourceType);
+    if (filters.warningsOnly !== undefined) params.set('warningsOnly', String(filters.warningsOnly));
+    if (filters.reviewStates && filters.reviewStates.length > 0) {
+      params.set('reviewStates', filters.reviewStates.join(','));
+    }
+  }
+  const qs = params.toString();
+  return request<ReviewQueuePage>(`/batches/${batchId}/review-queue${qs ? `?${qs}` : ''}`);
+}
+
+export type {
+  WorkStateCategory,
+  WorkStateFilters,
+  WorkStateCountsResponse,
+  WorkStateItemsResponse,
+  WorkStateProjectionHealth,
+  ReviewQueuePage,
+  ReviewQueueRow,
+  ReviewQueueCounts,
+  ReviewGateStatus,
+  ReviewFamilySummary,
+  ProjectionHealth,
+};

@@ -203,7 +203,9 @@ export function extractVariantsFromShopify(html: string): VariantCandidate[] {
           candidates.push(mapShopifyVariant(v));
         }
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
   });
 
   if (candidates.length > 0) return candidates;
@@ -223,7 +225,9 @@ export function extractVariantsFromShopify(html: string): VariantCandidate[] {
             candidates.push(mapShopifyVariant(v));
           }
         }
-      } catch {}
+      } catch {
+        // ignore
+      }
     }
 
     const matchMeta = text.match(/var\s+meta\s*=\s*({[\s\S]+?});/);
@@ -235,7 +239,9 @@ export function extractVariantsFromShopify(html: string): VariantCandidate[] {
             candidates.push(mapShopifyVariant(v));
           }
         }
-      } catch {}
+      } catch {
+        // ignore
+      }
     }
   });
 
@@ -294,7 +300,9 @@ export function extractVariantsFromWooCommerce(html: string): VariantCandidate[]
           }
         }
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
   }
 
   return candidates;
@@ -495,7 +503,7 @@ export async function resolveVariantUrl(
   }
 
   // Fetch page HTML
-  let html = '';
+  let html: string;
   try {
     const response = await fetch(baseUrl, {
       headers: {
@@ -622,26 +630,8 @@ export const SIZE_ALIAS_TO_CANONICAL: Record<string, string> = (() => {
   return m;
 })();
 
-export function normalizeGtin(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const digits = String(raw).replace(/\D/g, '');
-  if (![8, 12, 13, 14].includes(digits.length)) return null;
-  // Checksum validation is non-blocking for synthetic fixtures; retain digits
-  // but expose helper isValidGtinChecksum for callers that need strict validation.
-  return digits;
-}
-function isValidGtinChecksum(digits: string): boolean {
-  // GS1 checksum: weighted sum from right, weights 3,1 alternating (excluding check digit)
-  const len = digits.length;
-  const check = parseInt(digits[len - 1], 10);
-  let sum = 0;
-  for (let i = len - 2, pos = 1; i >= 0; i--, pos++) {
-    const d = parseInt(digits[i], 10);
-    sum += pos % 2 === 1 ? d * 3 : d * 1;
-  }
-  const calc = (10 - (sum % 10)) % 10;
-  return calc === check;
-}
+import { normalizeGtin, validateGtin, canonicalGtinMatch } from '../shared/gtin';
+export { normalizeGtin, validateGtin, canonicalGtinMatch };
 export function normalizeSkuMpn(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const nfkc = String(raw).normalize('NFKC').trim();
@@ -769,7 +759,7 @@ export function parseJsonLdMatrix(html: string, parentUrl: string): VariantMatri
   const scripts: string[] = [];
   $('script[type="application/ld+json"]').each((_, el) => { scripts.push($(el).text() || ''); return; });
   const allCandidates: NormalizedVariantCandidate[] = [];
-  let warnings: string[] = [];
+  const warnings: string[] = [];
   let idxBase = 0;
   for (const script of scripts) {
     let data: any;
@@ -828,13 +818,13 @@ export function parseWooMatrix(html: string, parentUrl: string): VariantMatrix |
   const $ = cheerio.load(html);
   const form = $('form.variations_form[data-product_variations]');
   if (form.length === 0) return null;
-  let dataStr = form.attr('data-product_variations') ?? '';
+  const dataStr = form.attr('data-product_variations') ?? '';
   if (!dataStr) return null;
   // HTML entities decoded by cheerio attr
   let data: any;
   try { data = JSON.parse(dataStr); } catch { return null; }
   if (!Array.isArray(data) || data.length === 0) return null;
-  let warnings: string[] = [];
+  const warnings: string[] = [];
   const candidates: NormalizedVariantCandidate[] = data.map((v: any, idx: number) => {
     const attrs: Record<string,string> = v.attributes ?? {};
     const rawAttrCount = Object.keys(attrs).length;
@@ -876,7 +866,7 @@ export function parseBigCommerceMatrix(html: string, parentUrl: string): Variant
   let data: any;
   try { data = JSON.parse(bcMatch[1]); } catch { return null; }
   if (!Array.isArray(data) || data.length === 0) return null;
-  let bcWarnings: string[] = [];
+  const bcWarnings: string[] = [];
   for (let idx=0; idx<data.length; idx++) {
     const v = data[idx];
     const rawOpts: string[] = Array.isArray(v.options) ? v.options : [];
@@ -963,7 +953,7 @@ export function parseMagentoMatrix(html: string, parentUrl: string): VariantMatr
     });
     idx++;
   }
-  let magWarnings: string[] = [];
+  const magWarnings: string[] = [];
   // Check overflow per product options before truncation
   for (const opts of productOptions.values()) {
     if (opts.length > MAX_OPTIONS_PER_VARIANT) { magWarnings.push('candidate_options_overflow'); break; }

@@ -14,6 +14,29 @@ export const MetricDerivationEnum = z.enum(['exact', 'approximation', 'not_avail
 
 export type MetricDerivation = z.infer<typeof MetricDerivationEnum>;
 
+/** P1-A discovery proof classes. */
+export const DiscoveryProofClassEnum = z.enum([
+  'exact_structured_gtin',
+  'exact_variant_gtin',
+  'none',
+]);
+export type DiscoveryProofClass = z.infer<typeof DiscoveryProofClassEnum>;
+
+/** P1-A discovery outcome and rejection reasons (bounded set). */
+export const DiscoveryOutcomeReasonEnum = z.enum([
+  'auto_selected_structured_gtin',
+  'auto_selected_variant_gtin',
+  'denied_authority_gate',
+  'denied_invalid_checksum',
+  'denied_contradictory_gtins',
+  'denied_no_structured_gtin',
+  'denied_gtin_mismatch',
+  'denied_ambiguous_variant',
+  'denied_listing_or_blog_page',
+  'denied_kill_switch',
+]);
+export type DiscoveryOutcomeReason = z.infer<typeof DiscoveryOutcomeReasonEnum>;
+
 export const MetricBreakdownEntrySchema = z.object({
   key: z.string(),
   value: z.number(),
@@ -54,6 +77,33 @@ export const METRIC_KEYS = [
   'reviewEditRate',
   'approvalRate',
   'exportSuccessRate',
+  // M6 (P2) — strict proof-class / needs-input delta, queue/detail, work-state health, receipts, import provenance
+  'strictProofClassSelectionRate',
+  'needsInputDelta',
+  'reviewQueueRowRequests',
+  'reviewDetailRequests',
+  'reviewQueuePayloadSize',
+  'reviewQueueLoadLatencyMs',
+  'workStateP95Ms',
+  'workStateP99Ms',
+  'workStateStatements',
+  'workStateScannedRows',
+  'projectionDegradationCount',
+  'approvalAttempts',
+  'approvalSuccessCount',
+  'approvalRejectCount',
+  'approvalReplays',
+  'approvalConflicts',
+  'approvalInterruptedReceipts',
+  'exportDraftAttempts',
+  'exportSuccessCount',
+  'exportRejectCount',
+  'exportConflictCount',
+  'exportInterruptedCount',
+  'exportDraftReplays',
+  'exportInterruptedReceipts',
+  'importNormalizationCounts',
+  'lossyLegacyRows',
 ] as const;
 
 export type OnboardingMetricKey = (typeof METRIC_KEYS)[number];
@@ -79,6 +129,32 @@ export const OnboardingTelemetrySchema = z.object({
     reviewEditRate: TelemetryMetricSchema,
     approvalRate: TelemetryMetricSchema,
     exportSuccessRate: TelemetryMetricSchema,
+    strictProofClassSelectionRate: TelemetryMetricSchema,
+    needsInputDelta: TelemetryMetricSchema,
+    reviewQueueRowRequests: TelemetryMetricSchema,
+    reviewDetailRequests: TelemetryMetricSchema,
+    reviewQueuePayloadSize: TelemetryMetricSchema,
+    reviewQueueLoadLatencyMs: TelemetryMetricSchema,
+    workStateP95Ms: TelemetryMetricSchema,
+    workStateP99Ms: TelemetryMetricSchema,
+    workStateStatements: TelemetryMetricSchema,
+    workStateScannedRows: TelemetryMetricSchema,
+    projectionDegradationCount: TelemetryMetricSchema,
+    approvalAttempts: TelemetryMetricSchema,
+    approvalSuccessCount: TelemetryMetricSchema,
+    approvalRejectCount: TelemetryMetricSchema,
+    approvalReplays: TelemetryMetricSchema,
+    approvalConflicts: TelemetryMetricSchema,
+    approvalInterruptedReceipts: TelemetryMetricSchema,
+    exportDraftAttempts: TelemetryMetricSchema,
+    exportSuccessCount: TelemetryMetricSchema,
+    exportRejectCount: TelemetryMetricSchema,
+    exportConflictCount: TelemetryMetricSchema,
+    exportInterruptedCount: TelemetryMetricSchema,
+    exportDraftReplays: TelemetryMetricSchema,
+    exportInterruptedReceipts: TelemetryMetricSchema,
+    importNormalizationCounts: TelemetryMetricSchema,
+    lossyLegacyRows: TelemetryMetricSchema,
   }),
 });
 

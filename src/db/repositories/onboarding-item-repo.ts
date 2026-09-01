@@ -1,6 +1,7 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
 import { hashCanonicalJson } from '../../shared/stable-id';
+import { RawIdentityEnvelopeV1Schema, NormalizedIdentityEnvelopeV1Schema } from '../../onboarding/imported-identity';
 import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus, SourcingDecision, SourcingDecisionV2 } from '../../shared/schemas/onboarding';
 import { getAcceptedAttemptIdsForItem, isAcceptanceMigrationCompleted } from './onboarding-acceptance-repo';
 import { supersedeCurrentSourcingGeneration, getCurrentSourcingGeneration, getEvidenceAttemptsByItemAndGeneration } from './onboarding-evidence-repo';
@@ -50,6 +51,10 @@ export interface OnboardingItemRow {
   sourcing_decision_json: string | null;
   extraction_data_json: string | null;
   curation_data_json: string | null;
+  raw_identity_json: string | null;
+  normalized_identity_json: string | null;
+  identity_normalizer_version: number | null;
+  identity_provenance_hash: string | null;
   row_number: number;
   created_at: string;
   updated_at: string;
@@ -70,6 +75,10 @@ export interface InsertItemData {
   stageStatus?: StageStatus;
   isHeld?: boolean;
   heldReason?: string | null;
+  rawIdentityJson?: string | null;
+  normalizedIdentityJson?: string | null;
+  identityNormalizerVersion?: number | null;
+  identityProvenanceHash?: string | null;
 }
 
 const STAGE_ORDER: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
@@ -232,8 +241,40 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItemWithEntryPolicy {
     retryCount: row.retry_count,
     isDuplicate: row.is_duplicate === 1,
     existingSku: row.existing_sku,
-    extractionData: row.extraction_data_json ? JSON.parse(row.extraction_data_json) : null,
-    curationData: row.curation_data_json ? JSON.parse(row.curation_data_json) : null,
+    extractionData: (() => {
+      if (!row.extraction_data_json) return null;
+      try { return JSON.parse(row.extraction_data_json); } catch { return null; }
+    })(),
+    curationData: (() => {
+      if (!row.curation_data_json) return null;
+      try { return JSON.parse(row.curation_data_json); } catch { return null; }
+    })(),
+    ...(() => {
+      // Shared tuple validator (M5 round 3) — single source of truth, fail-closed
+      const raw = row.raw_identity_json ?? null;
+      const norm = row.normalized_identity_json ?? null;
+      const ver = row.identity_normalizer_version ?? null;
+      const hash = row.identity_provenance_hash ?? null;
+      try {
+        const { validateIdentityTuple } = require('../../onboarding/imported-identity');
+        const effectiveLossy = ver === 0 ? true : undefined;
+        const res = validateIdentityTuple({ rawJson: raw, normalizedJson: norm, version: ver, provenanceHash: hash, lossy: effectiveLossy });
+        if (!res.ok) {
+          return { rawIdentityJson: null, normalizedIdentityJson: null, identityNormalizerVersion: null, identityProvenanceHash: null, identityLossy: false };
+        }
+      } catch {
+        return { rawIdentityJson: null, normalizedIdentityJson: null, identityNormalizerVersion: null, identityProvenanceHash: null, identityLossy: false };
+      }
+      // Envelopes already validated via shared validator; still ensure canonical parse for return
+      const { canonicalJsonStringify } = require('../../shared/stable-id');
+      const { RawIdentityEnvelopeV1Schema, NormalizedIdentityEnvelopeV1Schema } = require('../../onboarding/imported-identity');
+      const rawOut = (() => { if (!raw) return null; try { const p = JSON.parse(raw); const r = RawIdentityEnvelopeV1Schema.safeParse(p); return r.success && canonicalJsonStringify(p) === raw ? raw : null; } catch { return null; } })();
+      const normOut = (() => { if (!norm) return null; try { const p = JSON.parse(norm); const r = NormalizedIdentityEnvelopeV1Schema.safeParse(p); return r.success && canonicalJsonStringify(p) === norm ? norm : null; } catch { return null; } })();
+      if ((raw !== null && rawOut === null) || (norm !== null && normOut === null)) {
+        return { rawIdentityJson: null, normalizedIdentityJson: null, identityNormalizerVersion: null, identityProvenanceHash: null, identityLossy: false };
+      }
+      return { rawIdentityJson: rawOut, normalizedIdentityJson: normOut, identityNormalizerVersion: ver, identityProvenanceHash: hash, identityLossy: rawOut === null && normOut !== null };
+    })(),
     rowNumber: row.row_number,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -280,8 +321,8 @@ export function insertItems(
     `INSERT INTO onboarding_items
       (id, batch_id, upc, name, price, quantity, brand_hint, department_hint, source_url, expected_name,
        status, stage, stage_status, is_held, held_reason, error_message, retry_count, is_duplicate, existing_sku,
-       extraction_data_json, curation_data_json, row_number, sourcing_entry_policy_version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', ?, ?, ?, ?, NULL, 0, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+       extraction_data_json, curation_data_json, raw_identity_json, normalized_identity_json, identity_normalizer_version, identity_provenance_hash, row_number, sourcing_entry_policy_version, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', ?, ?, ?, ?, NULL, 0, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   const inserted: OnboardingItemWithEntryPolicy[] = [];
@@ -312,6 +353,10 @@ export function insertItems(
         item.heldReason ?? null,
         isDuplicateNum,
         item.existingSku ?? null,
+        item.rawIdentityJson ?? null,
+        item.normalizedIdentityJson ?? null,
+        item.identityNormalizerVersion ?? null,
+        item.identityProvenanceHash ?? null,
         item.rowNumber,
         sourcingEntryPolicyVersion,
         now,
@@ -329,6 +374,11 @@ export function insertItems(
         sourceUrl: item.sourceUrl ?? null,
         expectedName: null,
         sourceType: 'official_page',
+        rawIdentityJson: item.rawIdentityJson ?? null,
+        normalizedIdentityJson: item.normalizedIdentityJson ?? null,
+        identityNormalizerVersion: item.identityNormalizerVersion ?? null,
+        identityProvenanceHash: item.identityProvenanceHash ?? null,
+        identityLossy: (item.rawIdentityJson ?? null) === null && (item.normalizedIdentityJson ?? null) !== null,
         sourcingEntryPolicyVersion,
         acceptedEvidenceAttemptIds: [],
         acceptedEvidenceAttemptId: null,
@@ -422,6 +472,30 @@ export function findExtractionDataByWorkspaceAndUpc(workspaceId: string, upc: st
   ).get(workspaceId, upc) as { extraction_data_json: string | null; brand_hint: string | null } | undefined;
   if (!row) return null;
   return { extractionDataJson: row.extraction_data_json, brandHint: row.brand_hint };
+}
+
+export function listItemsByBatchChunked(
+  batchId: string,
+  limit: number,
+  cursor?: { rowNumber: number; id: string } | null,
+): { items: OnboardingItem[]; lastCursor: { rowNumber: number; id: string } | null; hasMore: boolean } {
+  const db = getDb();
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+  let rows: OnboardingItemRow[];
+  if (!cursor) {
+    rows = db.query(
+      'SELECT * FROM onboarding_items WHERE batch_id = ? ORDER BY row_number, id LIMIT ?',
+    ).all(batchId, safeLimit + 1) as OnboardingItemRow[];
+  } else {
+    rows = db.query(
+      'SELECT * FROM onboarding_items WHERE batch_id = ? AND (row_number > ? OR (row_number = ? AND id > ?)) ORDER BY row_number, id LIMIT ?',
+    ).all(batchId, cursor.rowNumber, cursor.rowNumber, cursor.id, safeLimit + 1) as OnboardingItemRow[];
+  }
+  const hasMore = rows.length > safeLimit;
+  const pageRows = hasMore ? rows.slice(0, safeLimit) : rows;
+  const items = pageRows.map(mapRowToItem);
+  const lastCursor = pageRows.length > 0 ? { rowNumber: pageRows[pageRows.length - 1].row_number, id: pageRows[pageRows.length - 1].id } : null;
+  return { items, lastCursor, hasMore };
 }
 
 export function listItemsByBatch(

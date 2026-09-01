@@ -23,13 +23,17 @@ const VALID_RECORD: ScrapedProductEvidence = {
 
 describe('corpus schema', () => {
   describe('validateGtin', () => {
-    it('accepts valid GTIN-13 checksums', () => {
-      expect(validateGtin('0840243105625')).toBe(true); // Blue Buffalo UPC
-      expect(validateGtin('0070158005028')).toBe(true); // Zignature
+    it('accepts valid GTIN-8, GTIN-12, GTIN-13, and GTIN-14 checksums', () => {
+      expect(validateGtin('96385074')).toBe(true); // GTIN-8
+      expect(validateGtin('017800010009')).toBe(true); // GTIN-12 (UPC-A)
+      expect(validateGtin('0840243105625')).toBe(true); // GTIN-13 (Blue Buffalo UPC)
+      expect(validateGtin('0070158005028')).toBe(true); // GTIN-13 (Zignature)
+      expect(validateGtin('00017800010009')).toBe(true); // GTIN-14
     });
 
     it('rejects bad checksums and wrong lengths', () => {
       expect(validateGtin('0840243105626')).toBe(false);
+      expect(validateGtin('017800010005')).toBe(false);
       expect(validateGtin('12345')).toBe(false);
       expect(validateGtin('12345678901234567')).toBe(false);
       expect(validateGtin('abc')).toBe(false);
@@ -37,6 +41,7 @@ describe('corpus schema', () => {
 
     it('tolerates formatting noise', () => {
       expect(validateGtin('0 84024 31056 25')).toBe(true);
+      expect(validateGtin('0-17800-01000-9')).toBe(true);
     });
   });
 

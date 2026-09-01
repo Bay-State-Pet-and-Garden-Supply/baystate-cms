@@ -40,25 +40,8 @@ export function isSourcingConnectorType(value: unknown): value is SourcingConnec
 
 // ─── Identifier normalization ─────────────────────────────────────────────────
 
-/**
- * Normalize a UPC/GTIN to digits only, accepting 8–14 digit barcodes
- * (UPC-A/EAN-13, including EAN-8). Returns null for anything else.
- *
- * This is the shared project normalizer (the same 8–14 digit rule used by
- * packaging OCR transcription). Connectors must search by the normalized
- * identifier and report matches only on EXACT normalized equality.
- */
-export function normalizeGtin(raw: unknown): string | null {
-  if (typeof raw === 'string' && raw.trim()) {
-    const digits = raw.replace(/\D/g, '');
-    return digits.length >= 8 && digits.length <= 14 ? digits : null;
-  }
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    const digits = String(raw).replace(/\D/g, '');
-    return digits.length >= 8 && digits.length <= 14 ? digits : null;
-  }
-  return null;
-}
+import { normalizeGtin } from '../../shared/gtin';
+export { normalizeGtin };
 
 // ─── Lookup request ───────────────────────────────────────────────────────────
 

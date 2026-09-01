@@ -51,7 +51,7 @@ describe('Spreadsheet Parser', () => {
     expect(errors.length).toBe(0);
     expect(valid.length).toBe(2);
 
-    expect(valid[0]).toEqual({
+    expect(valid[0]).toMatchObject({
       upc: '123456789012',
       name: 'Test Widget A',
       price: '19.99',
@@ -61,6 +61,11 @@ describe('Spreadsheet Parser', () => {
       sourceUrl: 'https://widgetcorp.com/item',
       rowNumber: 2
     });
+    // M5 lossless identity fields
+    expect((valid[0] as any).rawIdentityJson).toBeTruthy();
+    expect((valid[0] as any).normalizedIdentityJson).toBeTruthy();
+    expect((valid[0] as any).identityNormalizerVersion).toBe(1);
+    expect((valid[0] as any).identityProvenanceHash).toBeTruthy();
 
     // Row 2 has an invalid URL so it should be mapped to null
     expect(valid[1].sourceUrl).toBeNull();

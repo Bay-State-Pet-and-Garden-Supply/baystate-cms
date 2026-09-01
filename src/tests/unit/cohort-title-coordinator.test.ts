@@ -513,6 +513,7 @@ async function freezeCohortFixture(extByUpc: Record<string, Record<string, any>>
   const cohort = getCohortById(finalized.cohortId)!;
   const members = getCohortMembers(cohort.id);
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
   return { workspaceId, workspacePath: wsPath, run: finalized, projection, cohort, members, frozenLineContext, items };
 }
 
@@ -555,6 +556,7 @@ async function freezeMixedCohortFixture(
   const cohort = getCohortById(finalized.cohortId)!;
   const members = getCohortMembers(cohort.id);
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
   return { workspaceId, workspacePath: wsPath, run: finalized, projection, cohort, members, frozenLineContext, items };
 }
 
@@ -1757,6 +1759,7 @@ async function supersedeAndRefreeze(fixture: FrozenCohortFixture): Promise<Froze
   const cohort = getCohortById(finalized.cohortId)!;
   const members = getCohortMembers(cohort.id);
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
   return { workspaceId: fixture.workspaceId, workspacePath: fixture.workspacePath, run: finalized, projection, cohort, members, frozenLineContext, items: fixture.items };
 }
 

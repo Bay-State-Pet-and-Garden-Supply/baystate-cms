@@ -1,3 +1,6 @@
+> [!NOTE] Superseded by Onboarding Hardening Plan M6 — see `docs/plans/onboarding-hardening-plan.md`.
+> **Decommissioned by ADR 0030:** Agent Lab (`src/product-intelligence/**`) has been decommissioned. This spec is preserved as historical record only — never use it to reintroduce Agent Lab, runtime LLM extraction, or agent orchestration. See ADR 0030 and `docs/plans/agent-lab-decommission-plan.md`.
+
 # Product Specification: Agent Lab — The Agent Training & Alignment Interface
 
 > **Status update (2026-08): SUPERSEDED by ADR-0030 (Agent Lab decommission) — content below references the deleted `src/product-intelligence/**` Agent Lab surface and is preserved as a historical record only.**

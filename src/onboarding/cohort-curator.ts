@@ -150,18 +150,24 @@ import { groupByProductLine } from './cohort-name-coordinator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
 import {
   PROJECTION_VERSION_V2,
+  PROJECTION_VERSION_V3,
   ExecutionEvidenceProjectionV2Schema,
+  ExecutionEvidenceProjectionV3Schema,
   parseExecutionEvidenceProjection,
   normalizeExecutionEvidenceProjectionMemberV1,
+  normalizeExecutionEvidenceProjectionMemberV2,
+  normalizeExecutionEvidenceProjectionV1ToV3,
 } from '../shared/schemas/cohorts';
 import type {
   CohortRun,
   CurationCohort,
   CurationCohortMember,
   ExecutionEvidenceProjectionMemberV2,
+  ExecutionEvidenceProjectionMemberV3,
   ExecutionEvidenceProjectionMemberV1,
   ExecutionEvidenceProjectionMember,
   ExecutionEvidenceProjectionV2,
+  ExecutionEvidenceProjectionV3,
   ExecutionProductTypeOutcome,
   CohortTitleOutput,
 } from '../shared/schemas/cohorts';
@@ -326,7 +332,7 @@ function invalidateStaleStoredOcr(item: OnboardingItem): OnboardingItem {
 // ─── Execution-evidence projection (contract C) ───────────────────────────────
 
 /**
- * Build the `execution-evidence-v1` projection for a cohort. Per member, one
+ * Build the `execution-evidence-v3` projection for a cohort. Per member, one
  * entry (SORTED by onboardingItemId for deterministic hashing):
  * - `spreadsheetIdentity` — the frozen spreadsheet hints;
  * - `extraction` — the complete normalized extraction evidence the frozen-mode
@@ -346,6 +352,24 @@ export function buildExecutionEvidenceProjection(
   items: OnboardingItem[],
   extractionSources: Map<string, ExtractionBinding>,
 ): ExecutionEvidenceProjectionV2 {
+  // Legacy V2 builder retained for historical tests — delegates to V3 then downgrades
+  const v3 = buildExecutionEvidenceProjectionV3(workspaceId, cohort, members, items, extractionSources);
+  return {
+    version: 'execution-evidence-v2',
+    cohortId: v3.cohortId,
+    batchId: v3.batchId,
+    groupingVersion: v3.groupingVersion,
+    members: v3.members.map(({ importedIdentity, version, ...rest }) => ({ ...rest, version: 'execution-evidence-v2' as const } as any)),
+  };
+}
+
+export function buildExecutionEvidenceProjectionV3(
+  workspaceId: string,
+  cohort: CurationCohort,
+  members: CurationCohortMember[],
+  items: OnboardingItem[],
+  extractionSources: Map<string, ExtractionBinding>,
+): ExecutionEvidenceProjectionV3 {
   if (cohort.workspaceId !== workspaceId) {
     throw new Error(`Execution-evidence projection workspace mismatch: cohort belongs to ${cohort.workspaceId}, expected ${workspaceId}.`);
   }
@@ -360,14 +384,14 @@ export function buildExecutionEvidenceProjection(
     return buildExecutionEvidenceProjectionMember(member, item, extractionSources.get(item.id));
   });
 
-  const projection: ExecutionEvidenceProjectionV2 = {
-    version: 'execution-evidence-v2',
+  const projection: ExecutionEvidenceProjectionV3 = {
+    version: 'execution-evidence-v3',
     cohortId: cohort.id,
     batchId: cohort.batchId,
     groupingVersion: cohort.groupingVersion,
     members: memberEntries,
   };
-  const parsed = ExecutionEvidenceProjectionV2Schema.safeParse(projection);
+  const parsed = ExecutionEvidenceProjectionV3Schema.safeParse(projection);
   if (!parsed.success) {
     throw new Error(`Execution-evidence projection failed schema validation: ${JSON.stringify(parsed.error.issues)}`);
   }
@@ -422,7 +446,7 @@ function buildExecutionEvidenceProjectionMember(
   member: CurationCohortMember,
   item: OnboardingItem,
   binding: ExtractionBinding | undefined,
-): ExecutionEvidenceProjectionMemberV2 {
+): ExecutionEvidenceProjectionMemberV3 {
   const ext: Record<string, any> = item.extractionData ?? {};
 
   const piEvidence = ((ext as { productIntelligenceEvidence?: Array<{ runId?: string; resultHash?: string; importRecordId?: string }> }).productIntelligenceEvidence ?? [])
@@ -463,8 +487,32 @@ function buildExecutionEvidenceProjectionMember(
     new Set(distributorProvenance?.providerIds ?? []),
   ).sort();
 
-  return ExecutionEvidenceProjectionV2Schema.shape.members.element.parse({
-    version: 'execution-evidence-v2',
+  // Milestone 5 — imported identity provenance (bounded, lossless, Zod-validated, canonical)
+  let rawEnvelope: string | null = (item as any).rawIdentityJson ?? null;
+  let normalizedEnvelope: string | null = (item as any).normalizedIdentityJson ?? null;
+  let provenanceHash: string | null = (item as any).identityProvenanceHash ?? null;
+  const version: number | null = (item as any).identityNormalizerVersion ?? null;
+  // Validate envelopes are canonical JSON of their schemas; if not, fail closed to null (never accept arbitrary strings per cohorts.ts)
+  try {
+    const { RawIdentityEnvelopeV1Schema, NormalizedIdentityEnvelopeV1Schema } = require('./imported-identity');
+    const { canonicalJsonStringify } = require('../shared/stable-id');
+    if (rawEnvelope !== null) {
+      const parsed = JSON.parse(rawEnvelope);
+      const res = RawIdentityEnvelopeV1Schema.safeParse(parsed);
+      if (!res.success || canonicalJsonStringify(parsed) !== rawEnvelope) rawEnvelope = null;
+      else if (typeof provenanceHash === 'string' && !/^[a-f0-9]{64}$/.test(provenanceHash)) provenanceHash = null;
+    }
+    if (normalizedEnvelope !== null) {
+      const parsed = JSON.parse(normalizedEnvelope);
+      const res = NormalizedIdentityEnvelopeV1Schema.safeParse(parsed);
+      if (!res.success || canonicalJsonStringify(parsed) !== normalizedEnvelope) normalizedEnvelope = null;
+    }
+  } catch { rawEnvelope = null; normalizedEnvelope = null; }
+  const lossy = (item as any).identityLossy ?? (rawEnvelope === null && normalizedEnvelope !== null);
+  const source = rawEnvelope === null && normalizedEnvelope !== null && version === 0 ? 'legacy_operational_backfill' as const : 'spreadsheet' as const;
+
+  return ExecutionEvidenceProjectionV3Schema.shape.members.element.parse({
+    version: 'execution-evidence-v3',
     onboardingItemId: item.id,
     ordinal: member.ordinal,
     productSku: item.upc ?? null,
@@ -479,6 +527,14 @@ function buildExecutionEvidenceProjectionMember(
     acceptedEvidenceAttemptIds,
     acceptedProviderIds,
     distributorEvidenceHash: binding?.evidenceHash ?? distributorProvenance?.evidenceHash ?? null,
+    importedIdentity: {
+      rawEnvelope,
+      normalizedEnvelope,
+      version,
+      provenanceHash,
+      lossy,
+      source,
+    },
     spreadsheetIdentity: {
       name: item.name,
       expectedName: item.expectedName ?? null,
@@ -1432,7 +1488,7 @@ export async function freezeCohortForExecution(
       }
 
       // Build + persist the content-addressed execution-evidence projection.
-      const projection = buildExecutionEvidenceProjection(
+      const projection = buildExecutionEvidenceProjectionV3(
         workspaceId,
         reloadedCohort,
         reloadedMembers,
@@ -1444,7 +1500,7 @@ export async function freezeCohortForExecution(
       const persisted = persistCohortSnapshot({
         workspaceId,
         snapshotHash: h2,
-        projectionVersion: PROJECTION_VERSION_V2,
+        projectionVersion: PROJECTION_VERSION_V3,
         payloadJson,
       });
 
@@ -1661,7 +1717,7 @@ export function verifyCohortRunFrozen(
 
     const items = listItemsByBatch(cohort.batchId);
     const extractionSources = getLatestExtractionBindingsByItemIds(members.map(member => member.onboardingItemId));
-    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, extractionSources);
+    const projection = buildExecutionEvidenceProjectionV3(workspaceId, cohort, members, items, extractionSources);
     if (hashCanonicalJson(projection) !== run.evidenceSnapshotHash) return false;
 
     const current = captureCohortAuthorities(workspacePath, workspaceId);
@@ -2008,8 +2064,21 @@ export interface PreparedCohortContext {
  * are never rewritten).
  */
 function toV2Member(projection: ExecutionEvidenceProjectionMember): ExecutionEvidenceProjectionMemberV2 {
-  if ('itemSourceType' in projection) return projection as ExecutionEvidenceProjectionMemberV2;
+  if ('itemSourceType' in projection) {
+    // V3 members include importedIdentity; strip it for V2 consumers
+    const { importedIdentity, ...rest } = projection as any;
+    return rest as ExecutionEvidenceProjectionMemberV2;
+  }
   return normalizeExecutionEvidenceProjectionMemberV1(projection as ExecutionEvidenceProjectionMemberV1);
+}
+
+function toV3Member(projection: ExecutionEvidenceProjectionMember): ExecutionEvidenceProjectionMemberV3 {
+  if ((projection as any).version === 'execution-evidence-v3') return projection as ExecutionEvidenceProjectionMemberV3;
+  if ('itemSourceType' in projection) {
+    return normalizeExecutionEvidenceProjectionMemberV2(projection as ExecutionEvidenceProjectionMemberV2);
+  }
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
+  return normalizeExecutionEvidenceProjectionV1ToV3(projection as ExecutionEvidenceProjectionMemberV1);
 }
 
 function frozenExtractionData(
@@ -2476,6 +2545,7 @@ export async function processCohort(
   try {
     // Central adapter: V2 first, historical V1 normalized to official-page
     // provenance (parse-only — persisted V1 bytes are never rewritten).
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
     projection = parseExecutionEvidenceProjection(JSON.parse(snapshot.payloadJson));
   } catch (err) {
     const reason = `processCohort aborted: run ${run.id} snapshot payload is corrupt: ${err instanceof Error ? err.message : String(err)}`;

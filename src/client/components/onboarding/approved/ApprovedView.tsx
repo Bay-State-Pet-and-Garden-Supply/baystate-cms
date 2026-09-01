@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OnboardingWorkState, ApproveItemsResponse } from '../../../../shared/schemas/onboarding-work-state';
-import { getBatchWorkState, approveItems, subscribeBatchEvents } from '../../../onboarding-work-api';
+import { getBatchWorkState, getBatchWorkStateCounts, approveItems, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { ExportActions } from './ExportActions';
 import { ApprovedQueue } from './ApprovedQueue';
 import {
@@ -37,6 +37,8 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
   const [result, setResult] = useState<ApproveItemsResponse | null>(null);
   const [showApproveAllConfirm, setShowApproveAllConfirm] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [isDegraded, setIsDegraded] = useState(false);
+  const idempotencyKeyRef = useRef<{ key: string; fingerprint: string } | null>(null);
 
   const loadEligible = useCallback(async () => {
     try {
@@ -56,6 +58,11 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
       }
       setEligible(collected);
       setSelection(prev => pruneSelection(prev, collected.map(it => it.itemId)));
+      // Health check for disable
+      try {
+        const healthRes = await getBatchWorkStateCounts(batchId);
+        setIsDegraded(healthRes.projectionHealth?.status === 'degraded');
+      } catch { setIsDegraded(false); }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -108,8 +115,26 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
       setBusy(true);
       setError(null);
       setNotice(null);
+      // Retain {key, fingerprint} per logical operation. Generate new key whenever requested ids fingerprint differs.
+      // Fingerprint is order-insensitive sorted join, so same logical payload reuses key (retry), different payload (selected vs all) gets new key — avoids 409 payload_mismatch.
+      const fingerprint = [...ids].sort().join(',');
+      const stored = idempotencyKeyRef.current;
+      if (!stored || stored.fingerprint !== fingerprint) {
+        let newKey: string;
+        try {
+          newKey = typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function'
+            ? (crypto as any).randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        } catch {
+          newKey = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        }
+        idempotencyKeyRef.current = { key: newKey, fingerprint };
+      }
+      const currentKey = idempotencyKeyRef.current!.key;
       try {
-        const res = await approveItems(batchId, ids);
+        const res = await approveItems(batchId, ids, { idempotencyKey: currentKey });
+        // Success or idempotent replay: clear key so next logical operation gets a new one
+        idempotencyKeyRef.current = null;
         setResult(res);
         const summary = summarizeOutcomes(res.results);
         if (summary.rejectedCount === 0) {
@@ -228,12 +253,12 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
           <ExportActions
             primaryLabel={`Approve selected (${selectedCount})`}
             secondaryLabel="Approve all reviewed"
-            primaryDisabled={selectedCount === 0}
-            secondaryDisabled={busy}
+            primaryDisabled={selectedCount === 0 || isDegraded}
+            secondaryDisabled={busy || isDegraded}
             busy={busy}
             onPrimary={() => executeApproval(selection.selectedIds)}
             onSecondary={() => setShowApproveAllConfirm(true)}
-            hint={hint}
+            hint={isDegraded ? 'Projection degraded — cannot approve' : hint}
           />
 
           <ApprovedQueue

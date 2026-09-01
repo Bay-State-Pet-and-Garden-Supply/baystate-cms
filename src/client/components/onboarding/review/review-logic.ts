@@ -7,6 +7,7 @@
  * only derives client presentation from the server's projection.
  */
 import type { OnboardingWorkState, ReviewState } from '../../../../shared/schemas/onboarding-work-state';
+import type { ReviewQueueRow } from '../../../../shared/schemas/onboarding-review-queue';
 import type { SourceType } from '../../../../shared/schemas/onboarding';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import { deriveReadiness } from './review-readiness';
@@ -26,7 +27,7 @@ export interface ReviewProgress {
 
 /** Derive progress from the loaded server projection + optional server totals. */
 export function reviewProgress(
-  items: OnboardingWorkState[],
+  items: Array<{ reviewState?: string | null }>,
   serverTotals?: { total: number; reviewedTotal: number },
 ): ReviewProgress {
   const total = serverTotals ? serverTotals.total : items.length;
@@ -52,16 +53,21 @@ const REVIEW_STATE_ORDER: Record<string, number> = { unreviewed: 0, reviewed: 1,
 
 /**
  * Unreviewed items first (the working queue), then reviewed, then the rest;
- * ties break by name (case-insensitive) for determinism.
+ * ties break by sortKey if present, then displayTitle/name (case-insensitive) for determinism.
  */
-export function sortForReview(items: OnboardingWorkState[]): OnboardingWorkState[] {
+export function sortForReview<T extends { reviewState?: string | null; sortKey?: string; displayTitle?: string; name?: string }>(
+  items: T[],
+): T[] {
   return [...items].sort((a, b) => {
     const ra = a.reviewState ?? 'unreviewed';
     const rb = b.reviewState ?? 'unreviewed';
     const da = REVIEW_STATE_ORDER[ra] ?? 3;
     const db = REVIEW_STATE_ORDER[rb] ?? 3;
     if (da !== db) return da - db;
-    return itemDisplayName(a).localeCompare(itemDisplayName(b));
+    if (a.sortKey && b.sortKey) return a.sortKey.localeCompare(b.sortKey);
+    const titleA = a.displayTitle || a.name || '';
+    const titleB = b.displayTitle || b.name || '';
+    return titleA.localeCompare(titleB);
   });
 }
 
@@ -74,15 +80,31 @@ export interface ReviewQueueFilters {
   warningsOnly?: boolean;
   /** Only items edited during this review session. */
   editedOnly?: boolean;
+  /** Gate status filter */
+  gateStatus?: 'ready' | 'blocked' | 'unknown';
   /** Restrict to a specific family (cohortId). */
   familyCohortId?: string;
   /** Restrict to a specific brand (workState.brand, case-insensitive). */
   brand?: string;
   sourceType?: SourceType | 'all';
+  q?: string;
 }
 
-export function applyQueueFilters(
-  items: OnboardingWorkState[],
+export function applyQueueFilters<
+  T extends {
+    itemId: string;
+    reviewState?: string | null;
+    hasWarnings?: boolean;
+    warningCodes?: string[];
+    family?: { cohortId: string } | null;
+    brand?: string | null;
+    sourceType?: SourceType | null;
+    upc?: string;
+    displayTitle?: string;
+    name?: string;
+  },
+>(
+  items: T[],
   filters: ReviewQueueFilters,
   ctx: {
     /** Item ids edited during the current review session. */
@@ -90,15 +112,21 @@ export function applyQueueFilters(
     /** Item ids known to carry warnings (from loaded detail enrichment). */
     warnedIds?: Set<string>;
   } = {},
-): OnboardingWorkState[] {
+): T[] {
   const editedIds = ctx.editedIds ?? new Set<string>();
   const warnedIds = ctx.warnedIds ?? new Set<string>();
   return items.filter(item => {
     if (filters.reviewStates && filters.reviewStates.length > 0) {
       const state = item.reviewState ?? 'unreviewed';
-      if (!filters.reviewStates.includes(state)) return false;
+      if (!filters.reviewStates.includes(state as any)) return false;
     }
-    if (filters.warningsOnly && !warnedIds.has(item.itemId)) return false;
+    if (filters.warningsOnly) {
+      const hasWarning =
+        item.hasWarnings ||
+        (item.warningCodes && item.warningCodes.length > 0) ||
+        warnedIds.has(item.itemId);
+      if (!hasWarning) return false;
+    }
     if (filters.editedOnly && !editedIds.has(item.itemId)) return false;
     if (filters.familyCohortId) {
       if (!item.family || item.family.cohortId !== filters.familyCohortId) return false;
@@ -110,6 +138,14 @@ export function applyQueueFilters(
     if (filters.sourceType && filters.sourceType !== 'all') {
       if ((item.sourceType ?? null) !== filters.sourceType) return false;
     }
+    if (filters.q) {
+      const q = filters.q.toLowerCase().trim();
+      const upc = (item.upc ?? '').toLowerCase();
+      const title = (item.displayTitle ?? item.name ?? '').toLowerCase();
+      const brand = (item.brand ?? '').toLowerCase();
+      const match = upc.includes(q) || title.includes(q) || brand.includes(q);
+      if (!match) return false;
+    }
     return true;
   });
 }
@@ -118,8 +154,7 @@ export function hasActiveQueueFilters(filters: ReviewQueueFilters): boolean {
   return countActiveQueueFilters(filters) > 0;
 }
 
-/** Number of independently active filter dimensions (impeccable polish: the
- *  collapsed filter trigger shows this as an active-count badge). */
+/** Number of independently active filter dimensions. */
 export function countActiveQueueFilters(filters: ReviewQueueFilters): number {
   let count = 0;
   if (filters.reviewStates && filters.reviewStates.length > 0) count += 1;
@@ -128,19 +163,18 @@ export function countActiveQueueFilters(filters: ReviewQueueFilters): number {
   if (filters.familyCohortId) count += 1;
   if (filters.brand) count += 1;
   if (filters.sourceType && filters.sourceType !== 'all') count += 1;
+  if (filters.q && filters.q.trim()) count += 1;
+  if (filters.gateStatus) count += 1;
   return count;
 }
 
 export interface QueueFilterChip {
   /** Stable key identifying which filter dimension the chip removes. */
-  key: 'reviewStates' | 'warningsOnly' | 'editedOnly' | 'familyCohortId' | 'brand' | 'sourceType';
+  key: 'reviewStates' | 'warningsOnly' | 'editedOnly' | 'familyCohortId' | 'brand' | 'sourceType' | 'q' | 'gateStatus';
   label: string;
 }
 
-/** Removable chips for the applied filters (impeccable polish: applied
- *  filters stay visible next to the collapsed filter trigger). Pure — the
- *  labels are display strings only; family/brand use raw values since the
- *  workspace owns facet labels. */
+/** Removable chips for the applied filters. */
 export function activeFilterChips(
   filters: ReviewQueueFilters,
   ctx: { familyLabel?: string } = {},
@@ -155,6 +189,8 @@ export function activeFilterChips(
   if (filters.brand) chips.push({ key: 'brand', label: filters.brand });
   if (filters.sourceType && filters.sourceType !== 'all')
     chips.push({ key: 'sourceType', label: filters.sourceType === 'distributor_record' ? 'Distributor record' : 'Official page' });
+  if (filters.gateStatus) chips.push({ key: 'gateStatus', label: `Gate: ${filters.gateStatus}` });
+  if (filters.q) chips.push({ key: 'q', label: `Search: ${filters.q}` });
   return chips;
 }
 
@@ -181,11 +217,11 @@ export function removeFilterChip(filters: ReviewQueueFilters, key: QueueFilterCh
  * to the start. Skips ids in `alreadyDoneIds` (e.g. items just marked reviewed
  * that have not yet been refreshed from the server).
  */
-export function findNextReviewTarget(
-  sorted: OnboardingWorkState[],
+export function findNextReviewTarget<T extends { itemId: string; reviewState?: string | null }>(
+  sorted: T[],
   currentId: string | null,
   alreadyDoneIds?: Set<string>,
-): OnboardingWorkState | null {
+): T | null {
   if (sorted.length === 0) return null;
   const done = alreadyDoneIds ?? new Set<string>();
   const start = currentId ? sorted.findIndex(i => i.itemId === currentId) : -1;
@@ -206,10 +242,10 @@ export function findNextReviewTarget(
 }
 
 /** Simple previous item in the sorted queue (any state), wrapping to the end. */
-export function findPreviousReviewTarget(
-  sorted: OnboardingWorkState[],
+export function findPreviousReviewTarget<T extends { itemId: string }>(
+  sorted: T[],
   currentId: string | null,
-): OnboardingWorkState | null {
+): T | null {
   if (sorted.length === 0) return null;
   const idx = currentId ? sorted.findIndex(i => i.itemId === currentId) : 0;
   const base = idx === -1 ? 0 : idx;
@@ -221,10 +257,10 @@ export function findPreviousReviewTarget(
  * `findNextReviewTarget` which only finds unreviewed items), wrapping to the
  * start. Used for Arrow-key navigation in the review queue.
  */
-export function findNextQueuedItem(
-  sorted: OnboardingWorkState[],
+export function findNextQueuedItem<T extends { itemId: string }>(
+  sorted: T[],
   currentId: string | null,
-): OnboardingWorkState | null {
+): T | null {
   if (sorted.length === 0) return null;
   const idx = currentId ? sorted.findIndex(i => i.itemId === currentId) : -1;
   const base = idx === -1 ? -1 : idx;
@@ -239,7 +275,7 @@ export interface FamilyFacet {
   memberCount: number;
 }
 
-export function distinctBrands(items: OnboardingWorkState[]): string[] {
+export function distinctBrands(items: Array<{ brand?: string | null }>): string[] {
   const brands = new Set<string>();
   for (const item of items) {
     const brand = (item.brand ?? '').trim();
@@ -248,7 +284,9 @@ export function distinctBrands(items: OnboardingWorkState[]): string[] {
   return [...brands].sort((a, b) => a.localeCompare(b));
 }
 
-export function distinctFamilies(items: OnboardingWorkState[]): FamilyFacet[] {
+export function distinctFamilies(
+  items: Array<{ family?: { cohortId: string; label?: string | null; memberCount: number } | null; displayTitle?: string; name?: string }>,
+): FamilyFacet[] {
   const byId = new Map<string, FamilyFacet>();
   for (const item of items) {
     if (!item.family) continue;
@@ -258,7 +296,7 @@ export function distinctFamilies(items: OnboardingWorkState[]): FamilyFacet[] {
     } else {
       byId.set(item.family.cohortId, {
         cohortId: item.family.cohortId,
-        label: item.family.label ?? item.name,
+        label: item.family.label ?? item.displayTitle ?? item.name ?? 'Family',
         memberCount: item.family.memberCount,
       });
     }
@@ -270,9 +308,9 @@ export function sourceTypeLabel(sourceType: SourceType | null | undefined): stri
   return sourceType === 'distributor_record' ? 'Distributor record' : sourceType === 'official_page' ? 'Official page' : 'Unknown source';
 }
 
-/** Variant/size hint: workState has no weight — derive from curated/imported name when no other data is available. */
-export function variantHint(item: OnboardingWorkState): string | null {
-  return item.name || null;
+/** Variant/size hint: derive from curated/imported name when no other data is available. */
+export function variantHint(item: { displayTitle?: string; name?: string }): string | null {
+  return item.displayTitle || item.name || null;
 }
 
 // ─── Warnings / blocking ───────────────────────────────────────────────────────
@@ -317,17 +355,18 @@ export function warningInfoFromDetail(detail: {
 // ─── Display helpers ───────────────────────────────────────────────────────────
 
 export function itemDisplayName(
-  workState: OnboardingWorkState,
+  row: { displayTitle?: string; name?: string; curatedTitle?: string | null },
   curatedTitle?: string | null,
 ): string {
-  const title = curatedTitle?.trim() || workState.curatedTitle?.trim();
-  return title ? title : workState.name;
+  const title = curatedTitle?.trim() || row.displayTitle?.trim() || row.curatedTitle?.trim();
+  return title ? title : row.name || '';
 }
 
-export function isReviewed(workState: OnboardingWorkState): boolean {
+export function isReviewed(workState: { reviewState?: string | null }): boolean {
   const state = workState.reviewState ?? 'unreviewed';
   return state === 'reviewed' || state === 'approved';
 }
+
 // ─── Bulk review selection (epic #46 follow-up, GPT plan phase 4) ─────────────
 
 /** Toggle one item in the bulk-review selection (order-stable). */
@@ -369,19 +408,18 @@ export function pruneQueueSelection(selectedIds: string[], validIds: string[]): 
 /** Count of selected items still eligible for bulk review (unreviewed). */
 export function countReviewableSelection(
   selectedIds: string[],
-  items: OnboardingWorkState[],
+  items: Array<{ itemId: string; reviewState?: string | null }>,
 ): number {
   return reviewableSelectionIds(selectedIds, items).length;
 }
 
 /**
  * The EXACT selected ids that are currently reviewable (unreviewed AND in
- * the visible/filtered set). The bulk-review modal count and the submitted
- * payload must refer to the same set (GPT review, MEDIUM).
+ * the visible/filtered set).
  */
 export function reviewableSelectionIds(
   selectedIds: string[],
-  items: OnboardingWorkState[],
+  items: Array<{ itemId: string; reviewState?: string | null }>,
 ): string[] {
   const byId = new Map(items.map(i => [i.itemId, i]));
   return selectedIds.filter(id => {
@@ -398,12 +436,7 @@ export interface DistributorApprovedImages {
 }
 
 /**
- * The review drawer's image source for distributor records: the
- * rights-attested `distributorImageApprovals` (Amendment B addendum 3 —
- * the operator's licensed distributor-channel opt-in) that the draft
- * promoter also gates commerce downloads on. The first approved URL is the
- * primary image; the rest are additional. Returns null when the extraction
- * payload carries no approvals.
+ * The review drawer's image source for distributor records.
  */
 export function distributorApprovedImages(
   extraction: { distributorImageApprovals?: Array<{ imageUrl?: string }> } | null | undefined,
@@ -420,18 +453,20 @@ export function distributorApprovedImages(
 
 // ─── Queue grouping by family (epic #46 follow-up) ────────────────────────────
 
-export interface QueueGroup {
+export interface QueueGroup<T = any> {
   key: string;
   type: 'family' | 'individual';
   title: string | null;
-  family: OnboardingWorkState['family'];
-  items: OnboardingWorkState[];
+  family: any;
+  items: T[];
 }
 
-export function groupQueueItems(items: OnboardingWorkState[]): QueueGroup[] {
-  const groups: QueueGroup[] = [];
-  const familyMap = new Map<string, QueueGroup>();
-  const individualGroup: QueueGroup = {
+export function groupQueueItems<T extends { family?: { cohortId: string; label?: string | null } | null }>(
+  items: T[],
+): QueueGroup<T>[] {
+  const groups: QueueGroup<T>[] = [];
+  const familyMap = new Map<string, QueueGroup<T>>();
+  const individualGroup: QueueGroup<T> = {
     key: 'individual',
     type: 'individual',
     title: 'Individual Products',
@@ -472,26 +507,65 @@ export function groupQueueItems(items: OnboardingWorkState[]): QueueGroup[] {
   return groups;
 }
 
-// ─── Bulk-review gate counting (e10s03) ──────────────────────────────────────
+// ─── Bulk-review gate counting (e10s03 & Milestone 1 / P1-C) ─────────────────
+
+/**
+ * Check if a single queue row / workState is gate blocked.
+ * Fail closed: reviewGateStatus === 'unknown' or 'blocked' is strictly blocked.
+ */
+export function isGateBlocked(
+  row: ReviewQueueRow | OnboardingWorkState,
+  detail?: ItemDetailResponse | null,
+): boolean {
+  // 1. Unknown or blocked queue status is strictly blocking
+  if ('reviewGateStatus' in row) {
+    if (row.reviewGateStatus === 'blocked' || row.reviewGateStatus === 'unknown') {
+      return true;
+    }
+  }
+  // 2. If detail is loaded, check authoritative blockers and warnings
+  if (detail) {
+    const readiness = deriveReadiness(detail, null);
+    if (readiness.blockers.length > 0) return true;
+    if (warningInfoFromDetail(detail).blocked) return true;
+  } else if (!('reviewGateStatus' in row)) {
+    // Legacy workState without detail: derive from workState
+    const readiness = deriveReadiness(null, row as OnboardingWorkState);
+    if (readiness.blockers.length > 0) return true;
+  }
+  return false;
+}
 
 /**
  * How many of the selected items are blocked by the completeness gate or a
- * blocking warning. Pure so the "cannot approve through any UI path"
- * acceptance criterion is unit-testable without rendering the workspace;
- * the server review-complete gate stays the final authority.
+ * blocking warning.
  */
 export function countGateBlockedItems(
   ids: string[],
-  getView: (
-    id: string,
-  ) => { detail: ItemDetailResponse | null; workState: OnboardingWorkState | null } | null | undefined,
+  rowsOrGetView:
+    | Array<ReviewQueueRow | OnboardingWorkState>
+    | ((id: string) => { detail: ItemDetailResponse | null; workState: any } | null | undefined),
+  detailsCache?: Map<string, ItemDetailResponse>,
 ): number {
   let count = 0;
+  if (typeof rowsOrGetView === 'function') {
+    for (const id of ids) {
+      const view = rowsOrGetView(id);
+      if (!view) continue;
+      if (deriveReadiness(view.detail, view.workState).blockers.length > 0) count++;
+      else if (warningInfoFromDetail(view.detail ?? ({} as ItemDetailResponse)).blocked) count++;
+    }
+    return count;
+  }
+
+  const rowMap = new Map((rowsOrGetView as Array<ReviewQueueRow | OnboardingWorkState>).map(r => [r.itemId, r]));
   for (const id of ids) {
-    const view = getView(id);
-    if (!view) continue;
-    if (deriveReadiness(view.detail, view.workState).blockers.length > 0) count++;
-    else if (warningInfoFromDetail(view.detail ?? ({} as ItemDetailResponse)).blocked) count++;
+    const row = rowMap.get(id);
+    if (!row) continue;
+    const detail = detailsCache?.get(id) ?? null;
+    if (isGateBlocked(row, detail)) {
+      count++;
+    }
   }
   return count;
 }
@@ -499,11 +573,7 @@ export function countGateBlockedItems(
 // ─── Flag-off save payload (blind review F3) ──────────────────────────────────
 
 /**
- * The flag-off (V1) listing save payload: the pre-epic legacy shape PLUS
- * `curatedWeight` write-back, because the V1 panel renders a Weight editor
- * whose value must persist. Documented deviation from byte-equivalence —
- * benign for instant rollback (`convertToLbs` is idempotent; the same
- * consequential-invalidation path fires server-side).
+ * The flag-off (V1) listing save payload.
  */
 export function buildLegacyListingUpdatePayload(draft: ReviewDraft): {
   curation_data: {

@@ -5,11 +5,12 @@
  * family context, and source identity.
  */
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+import type { ReviewQueueRow } from '../../../../shared/schemas/onboarding-review-queue';
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import { sourceTypeLabel } from './review-logic';
 
 export interface ReviewIdentityPanelProps {
-  workState: OnboardingWorkState;
+  workState: ReviewQueueRow | OnboardingWorkState;
   detail: ItemDetailResponse | null;
 }
 
@@ -40,8 +41,12 @@ export function ReviewIdentityPanel({ workState, detail }: ReviewIdentityPanelPr
 
           <div className="rv-field" style={{ marginBottom: 0 }}>
             <div className="rv-field-label">Register Name (Imported)</div>
-            <div className="rv-field-value" style={{ fontWeight: 500 }} title={workState.name}>
-              {workState.name || '—'}
+            <div
+              className="rv-field-value"
+              style={{ fontWeight: 500 }}
+              title={detail?.item.name ?? ('name' in workState ? (workState as any).name : workState.displayTitle)}
+            >
+              {(detail?.item.name ?? ('name' in workState ? (workState as any).name : workState.displayTitle)) || '—'}
             </div>
           </div>
 
@@ -49,7 +54,7 @@ export function ReviewIdentityPanel({ workState, detail }: ReviewIdentityPanelPr
             <div className="rv-field-label">Source</div>
             <div className="rv-field-value">
               {sourceTypeLabel(workState.sourceType)}
-              {workState.domain ? ` · ${workState.domain}` : ''}
+              {'domain' in workState && workState.domain ? ` · ${workState.domain}` : ''}
               {ext?.distributorProviderId ? ` · ${ext.distributorProviderId}` : ''}
             </div>
           </div>

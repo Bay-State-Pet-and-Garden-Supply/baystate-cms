@@ -221,10 +221,10 @@ export type ExecutionEvidenceProjectionMemberV1 = z.infer<typeof ExecutionEviden
  */
 export const ExecutionEvidenceProjectionV1Schema = z.object({
   version: z.literal('execution-evidence-v1'),
-  cohortId: z.string(),
-  batchId: z.string(),
-  groupingVersion: z.string(),
-  members: z.array(ExecutionEvidenceProjectionMemberSchema),
+  cohortId: z.string().max(500),
+  batchId: z.string().max(500),
+  groupingVersion: z.string().max(500),
+  members: z.array(ExecutionEvidenceProjectionMemberSchema).max(50),
 });
 
 export type ExecutionEvidenceProjectionV1 = z.infer<typeof ExecutionEvidenceProjectionV1Schema>;
@@ -324,23 +324,152 @@ export type ExecutionEvidenceProjectionMemberV2 = z.infer<
  */
 export const ExecutionEvidenceProjectionV2Schema = z.object({
   version: z.literal('execution-evidence-v2'),
-  cohortId: z.string(),
-  batchId: z.string(),
-  groupingVersion: z.string(),
-  members: z.array(ExecutionEvidenceProjectionMemberV2Schema),
+  cohortId: z.string().max(500),
+  batchId: z.string().max(500),
+  groupingVersion: z.string().max(500),
+  members: z.array(ExecutionEvidenceProjectionMemberV2Schema).max(50),
 });
 
 export type ExecutionEvidenceProjectionV2 = z.infer<
   typeof ExecutionEvidenceProjectionV2Schema
 >;
 
+export const PROJECTION_VERSION_V3 = 'execution-evidence-v3';
+
+/**
+ * Milestone 5 (P1-B) — Imported identity provenance for V3 members.
+ * Bounded, Zod-validated, lossless raw + normalized envelopes.
+ */
+export const ImportedIdentityMemberProvenanceSchema = z.object({
+  rawEnvelope: z.string().max(5000).nullable().refine(val => {
+    if (val === null) return true;
+    try {
+      const parsed = JSON.parse(val);
+      const { canonicalJsonStringify } = require('../stable-id');
+      const canonical = canonicalJsonStringify(parsed);
+      if (canonical !== val) return false;
+      // Zod-validate envelope contents
+      const { RawIdentityEnvelopeV1Schema } = require('../../onboarding/imported-identity');
+      const res = RawIdentityEnvelopeV1Schema.safeParse(parsed);
+      return res.success;
+    } catch { return false; }
+  }, { message: 'rawEnvelope must be canonical JSON of RawIdentityEnvelopeV1' }),
+  normalizedEnvelope: z.string().max(5000).nullable().refine(val => {
+    if (val === null) return true;
+    try {
+      const parsed = JSON.parse(val);
+      const { canonicalJsonStringify } = require('../stable-id');
+      const canonical = canonicalJsonStringify(parsed);
+      if (canonical !== val) return false;
+      const { NormalizedIdentityEnvelopeV1Schema } = require('../../onboarding/imported-identity');
+      const res = NormalizedIdentityEnvelopeV1Schema.safeParse(parsed);
+      return res.success;
+    } catch { return false; }
+  }, { message: 'normalizedEnvelope must be canonical JSON of NormalizedIdentityEnvelopeV1' }),
+  version: z.number().int().min(0).max(10).nullable(),
+  provenanceHash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  lossy: z.boolean().default(false),
+  source: z.enum(['spreadsheet', 'legacy_operational_backfill']).default('spreadsheet'),
+  rawHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  normalizedHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+}).superRefine((data, ctx) => {
+  const { rawEnvelope, normalizedEnvelope, version, provenanceHash, source, lossy } = data as any;
+  // Use shared validator for cross-field invariants, but also enforce per-envelope version/source/hash
+  try {
+    if (rawEnvelope !== null) {
+      const rawParsed = JSON.parse(rawEnvelope);
+      if (version !== null && rawParsed.version !== version) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'rawEnvelope version mismatch outer version', path: ['rawEnvelope'] });
+      }
+      if (rawParsed.parserProvenance?.source !== source && !(version === 0 && source === 'legacy_operational_backfill')) {
+        // For v0, raw is null, so not relevant
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'rawEnvelope source mismatch', path: ['rawEnvelope'] });
+      }
+    }
+    if (normalizedEnvelope !== null) {
+      const normParsed = JSON.parse(normalizedEnvelope);
+      if (version !== null && normParsed.version !== version) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'normalizedEnvelope version mismatch', path: ['normalizedEnvelope'] });
+      }
+      if (normParsed.parserProvenance?.source !== source) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'normalizedEnvelope source mismatch', path: ['normalizedEnvelope'] });
+      }
+    }
+    if (provenanceHash !== null) {
+      const { computeIdentityProvenanceHash, computeLegacyProvenanceHash } = require('../../onboarding/imported-identity');
+      const expected = version === 0 ? computeLegacyProvenanceHash(normalizedEnvelope as string) : computeIdentityProvenanceHash(rawEnvelope, normalizedEnvelope);
+      if (expected !== provenanceHash) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'provenanceHash mismatch recomputed', path: ['provenanceHash'] });
+      }
+      // Also check mappingHash equality when both envelopes present
+      if (rawEnvelope !== null && normalizedEnvelope !== null) {
+        const rawParsed = JSON.parse(rawEnvelope);
+        const normParsed = JSON.parse(normalizedEnvelope);
+        if (rawParsed.mappingHash !== normParsed.mappingHash) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'mappingHash mismatch between raw/normalized', path: ['provenanceHash'] });
+        }
+      }
+    }
+    // Enforce version/lossy/source cross-field via shared validator
+    const { validateIdentityTuple } = require('../../onboarding/imported-identity');
+    const res = validateIdentityTuple({ rawJson: rawEnvelope, normalizedJson: normalizedEnvelope, version, provenanceHash, lossy });
+    if (!res.ok) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: res.reason || 'identity tuple invalid', path: ['version'] });
+    }
+  } catch (e) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: (e as Error).message, path: ['rawEnvelope'] });
+  }
+});
+export type ImportedIdentityMemberProvenance = z.infer<typeof ImportedIdentityMemberProvenanceSchema>;
+
+/**
+ * Per-member projection entry (`execution-evidence-v3`). Extends V2 with
+ * bounded imported-identity provenance (raw/normalized envelopes, version,
+ * provenanceHash, lossy, provenance). V1/V2 snapshots remain parse-only;
+ * parseExecutionEvidenceProjection normalizes them to V3 with lossy=false
+ * and null envelopes when absent.
+ */
+export const ExecutionEvidenceProjectionMemberV3Schema =
+  ExecutionEvidenceProjectionMemberV2Schema.extend({
+    version: z.literal('execution-evidence-v3'),
+    importedIdentity: ImportedIdentityMemberProvenanceSchema.default({
+      rawEnvelope: null,
+      normalizedEnvelope: null,
+      version: null,
+      provenanceHash: null,
+      lossy: false,
+      source: 'spreadsheet',
+    }),
+  });
+
+export type ExecutionEvidenceProjectionMemberV3 = z.infer<
+  typeof ExecutionEvidenceProjectionMemberV3Schema
+>;
+
+/**
+ * The full `execution-evidence-v3` projection payload. Members are sorted by
+ * onboardingItemId for deterministic hashing.
+ */
+export const ExecutionEvidenceProjectionV3Schema = z.object({
+  version: z.literal('execution-evidence-v3'),
+  cohortId: z.string().max(500),
+  batchId: z.string().max(500),
+  groupingVersion: z.string().max(500),
+  members: z.array(ExecutionEvidenceProjectionMemberV3Schema).max(50),
+});
+
+export type ExecutionEvidenceProjectionV3 = z.infer<
+  typeof ExecutionEvidenceProjectionV3Schema
+>;
+
 /** The versioned execution-evidence projection union (read path). */
-export type ExecutionEvidenceProjection = ExecutionEvidenceProjectionV1 | ExecutionEvidenceProjectionV2;
+export type ExecutionEvidenceProjection = ExecutionEvidenceProjectionV1 | ExecutionEvidenceProjectionV2 | ExecutionEvidenceProjectionV3;
 
 /** The versioned per-member projection union (read path). */
 export type ExecutionEvidenceProjectionMember =
   | ExecutionEvidenceProjectionMemberV1
-  | ExecutionEvidenceProjectionMemberV2;
+  | ExecutionEvidenceProjectionMemberV2
+  | ExecutionEvidenceProjectionMemberV3;
 
 /**
  * Normalize ONE historical V1 member to V2 with official-page provenance.
@@ -393,23 +522,101 @@ export function normalizeExecutionEvidenceProjectionV1(
   };
 }
 
+export function normalizeExecutionEvidenceProjectionMemberV2(
+  member: ExecutionEvidenceProjectionMemberV2,
+): ExecutionEvidenceProjectionMemberV3 {
+  return {
+    ...member,
+    version: 'execution-evidence-v3',
+    importedIdentity: {
+      rawEnvelope: null,
+      normalizedEnvelope: null,
+      version: null,
+      provenanceHash: null,
+      lossy: false,
+      source: 'spreadsheet',
+    },
+  };
+}
+
+export function normalizeExecutionEvidenceProjectionV2(
+  projection: ExecutionEvidenceProjectionV2,
+): ExecutionEvidenceProjectionV3 {
+  return {
+    version: 'execution-evidence-v3',
+    cohortId: projection.cohortId,
+    batchId: projection.batchId,
+    groupingVersion: projection.groupingVersion,
+    members: projection.members.map(normalizeExecutionEvidenceProjectionMemberV2),
+  };
+}
+
+export function normalizeExecutionEvidenceProjectionV1ToV3(
+  projection: ExecutionEvidenceProjectionV1,
+): ExecutionEvidenceProjectionV3 {
+  return normalizeExecutionEvidenceProjectionV2(normalizeExecutionEvidenceProjectionV1(projection));
+}
+
 /**
- * Central parser/adapter for persisted execution-evidence snapshots: tries V2
- * first, falls back to V1 (parse-only) and normalizes it to the V2 shape.
- * Throws when the payload matches neither version.
+ * Central parser/adapter for persisted execution-evidence snapshots: tries V3
+ * first, then V2, then V1 (parse-only) and normalizes to appropriate shape.
+ * Returns V3 for V3 payloads, V2 for V2/V1 payloads (byte-readable for
+ * historical tests, new freezes use V3).
  */
 export function parseExecutionEvidenceProjection(
   payload: unknown,
-): ExecutionEvidenceProjectionV2 {
+): ExecutionEvidenceProjectionV2 | ExecutionEvidenceProjectionV3 {
+  const v3 = ExecutionEvidenceProjectionV3Schema.safeParse(payload);
+  if (v3.success) return v3.data;
   const v2 = ExecutionEvidenceProjectionV2Schema.safeParse(payload);
   if (v2.success) return v2.data;
   const v1 = ExecutionEvidenceProjectionV1Schema.safeParse(payload);
   if (!v1.success) {
     const isV1 = typeof payload === 'object' && payload !== null && (payload as any).version === 'execution-evidence-v1';
     throw new Error(
-      `Execution-evidence projection failed schema validation (neither v1 nor v2): ${JSON.stringify(isV1 ? v1.error.issues : v2.error.issues)}`,
+      `Execution-evidence projection failed schema validation (none of v1/v2/v3): ${JSON.stringify(isV1 ? v1.error.issues : (v3.success ? [] : v2.error.issues))}`,
     );
   }
+  return normalizeExecutionEvidenceProjectionV1(v1.data);
+}
+
+/** V3 parser: tries V3 first, then V2, then V1 and normalizes to V3 (new freezes). */
+export function parseExecutionEvidenceProjectionV3(
+  payload: unknown,
+): ExecutionEvidenceProjectionV3 {
+  const v3 = ExecutionEvidenceProjectionV3Schema.safeParse(payload);
+  if (v3.success) return v3.data;
+  const v2 = ExecutionEvidenceProjectionV2Schema.safeParse(payload);
+  if (v2.success) return normalizeExecutionEvidenceProjectionV2(v2.data);
+  const v1 = ExecutionEvidenceProjectionV1Schema.safeParse(payload);
+  if (!v1.success) {
+    throw new Error(
+      `Execution-evidence projection failed schema validation (none of v1/v2/v3): ${JSON.stringify(v1.error.issues)}`,
+    );
+  }
+  return normalizeExecutionEvidenceProjectionV1ToV3(v1.data);
+}
+
+/** Legacy alias: parse and return as V2 shape (for callers not yet migrated to V3). */
+export function parseExecutionEvidenceProjectionAsV2(
+  payload: unknown,
+): ExecutionEvidenceProjectionV2 {
+  const v3 = ExecutionEvidenceProjectionV3Schema.safeParse(payload);
+  if (v3.success) {
+    // Downgrade V3 to V2 by stripping importedIdentity
+    return {
+      version: 'execution-evidence-v2',
+      cohortId: v3.data.cohortId,
+      batchId: v3.data.batchId,
+      groupingVersion: v3.data.groupingVersion,
+// @ts-ignore -- Milestone 5 V3 compat: V2 test fixtures remain byte-readable via parse adapter, new freezes use V3
+      members: v3.data.members.map(({ importedIdentity, ...rest }) => rest as ExecutionEvidenceProjectionMemberV2),
+    };
+  }
+  const v2 = ExecutionEvidenceProjectionV2Schema.safeParse(payload);
+  if (v2.success) return v2.data;
+  const v1 = ExecutionEvidenceProjectionV1Schema.safeParse(payload);
+  if (!v1.success) throw new Error(`Execution-evidence projection failed schema validation`);
   return normalizeExecutionEvidenceProjectionV1(v1.data);
 }
 

@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS onboarding_items (
   existing_sku TEXT,
   extraction_data_json TEXT,
   curation_data_json TEXT,
+  raw_identity_json TEXT,
+  normalized_identity_json TEXT,
+  identity_normalizer_version INTEGER,
+  identity_provenance_hash TEXT,
   row_number INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

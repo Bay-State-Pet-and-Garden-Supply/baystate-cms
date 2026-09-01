@@ -1,3 +1,6 @@
+> [!NOTE] Superseded by Onboarding Hardening Plan M6 — see `docs/plans/onboarding-hardening-plan.md`.
+> **Supersession:** Implemented portions (queue bounded loading, work-state health) are now owned by the hardening plan’s read-model performance/health milestones (P1-C, P1-E). One-click semantic-conflict mutation remains out of scope unless separately designed — do not extend this plan to add it.
+
 # Handoff Specification: Onboarding UI Clarity & Real-Time Pipeline Observability
 
 **Status**: Proposed / Ready for Implementation  

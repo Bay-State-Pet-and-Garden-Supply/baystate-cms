@@ -65,7 +65,7 @@ import {
 } from '../../db/repositories/classification-cohort-run-repo';
 import { updateCohortStatus } from '../../db/repositories/curation-cohort-repo';
 import { freezeCohortForExecution } from '../../onboarding/cohort-curator';
-import { parseExecutionEvidenceProjection } from '../../shared/schemas/cohorts';
+import { parseExecutionEvidenceProjection, PROJECTION_VERSION_V3, ExecutionEvidenceProjectionV3Schema } from '../../shared/schemas/cohorts';
 import { hashCanonicalJson } from '../../shared/stable-id';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
 import { setTaxonomyFreezeForTests } from '../../classification/taxonomy-freeze';
@@ -867,10 +867,16 @@ describe('Default-On Sourcing full-chain E2E (MF)', () => {
 
     const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
     expect(snap).not.toBeNull();
-    const frozen = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
-    expect(frozen.version).toBe('execution-evidence-v2');
-    expect(hashCanonicalJson(frozen)).toBe(finalized.evidenceSnapshotHash!);
-    const member = frozen.members[0];
+    const frozenV3 = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson)) as any;
+    expect(frozenV3.version).toBe(PROJECTION_VERSION_V3);
+    expect(ExecutionEvidenceProjectionV3Schema.safeParse(frozenV3).success).toBe(true);
+    expect(hashCanonicalJson(frozenV3)).toBe(finalized.evidenceSnapshotHash!);
+    const member = frozenV3.members[0];
+    expect(member.importedIdentity).toBeDefined();
+    if (member.importedIdentity.provenanceHash !== null) {
+      expect(member.importedIdentity.provenanceHash).toMatch(/^[a-f0-9]{64}$/);
+    }
+    expect([null, 0, 1].includes(member.importedIdentity.version as any)).toBe(true);
     expect(member.onboardingItemId).toBe(item.id);
     expect(member.itemSourceType).toBe('distributor_record');
     expect(member.extractionSourceType).toBe('distributor_record');

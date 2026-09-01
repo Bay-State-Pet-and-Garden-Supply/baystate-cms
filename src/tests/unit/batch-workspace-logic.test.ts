@@ -31,13 +31,14 @@ const ZERO_COUNTS: WorkStateCounts = {
 };
 
 describe('WORKSPACE_TABS', () => {
-  it('orders Needs Attention first, then Processing, Waiting on Family, Review, Approved', () => {
+  it('orders Needs Attention first, then Processing, Waiting on Family, Review, Approved, Ready to Export', () => {
     expect(WORKSPACE_TABS.map(t => t.id)).toEqual([
       'needs_attention',
       'processing',
       'waiting_on_family',
       'review',
       'approved',
+      'ready_to_export',
     ]);
   });
 
@@ -51,7 +52,7 @@ describe('WORKSPACE_TABS', () => {
     expect(() => getWorkspaceTab('bogus' as never)).toThrow(/unknown workspace tab/i);
   });
 
-  it('counts approved tab badge across approved + ready_to_export + completed', () => {
+  it('counts approved tab badge from approved only (M4 split)', () => {
     const approvedTab = WORKSPACE_TABS.find(t => t.id === 'approved')!;
     const counts: WorkStateCounts = {
       ...ZERO_COUNTS,
@@ -59,7 +60,18 @@ describe('WORKSPACE_TABS', () => {
       ready_to_export: 4,
       completed: 2,
     };
-    expect(getTabCount(approvedTab, counts)).toBe(16);
+    expect(getTabCount(approvedTab, counts)).toBe(10);
+  });
+
+  it('counts ready_to_export tab badge across ready_to_export + completed', () => {
+    const readyTab = WORKSPACE_TABS.find(t => t.id === 'ready_to_export')!;
+    const counts: WorkStateCounts = {
+      ...ZERO_COUNTS,
+      approved: 10,
+      ready_to_export: 4,
+      completed: 2,
+    };
+    expect(getTabCount(readyTab, counts)).toBe(6);
   });
 
   it('counts review tab badge from ready_for_review only', () => {
@@ -158,8 +170,8 @@ describe('workspaceTabForCategory', () => {
     expect(workspaceTabForCategory('waiting_on_family')).toBe('waiting_on_family');
     expect(workspaceTabForCategory('ready_for_review')).toBe('review');
     expect(workspaceTabForCategory('approved')).toBe('approved');
-    expect(workspaceTabForCategory('ready_to_export')).toBe('approved');
-    expect(workspaceTabForCategory('completed')).toBe('approved');
+    expect(workspaceTabForCategory('ready_to_export')).toBe('ready_to_export');
+    expect(workspaceTabForCategory('completed')).toBe('ready_to_export');
     expect(workspaceTabForCategory('skipped')).toBe('approved');
   });
 });

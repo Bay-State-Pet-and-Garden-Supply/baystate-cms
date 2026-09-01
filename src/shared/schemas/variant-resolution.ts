@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { sha256 } from '../hash';
 
 export const VariantPlatformSchema = z.enum([
   'shopify',
@@ -176,5 +176,5 @@ export function computeIdentityMatrixHash(matrix: VariantMatrix): string {
       .sort((a, b) => a.variantKey.localeCompare(b.variantKey)),
   };
   const json = stableStringify(identityPart);
-  return createHash('sha256').update(json, 'utf8').digest('hex');
+  return sha256(json);
 }

@@ -78,7 +78,9 @@ function strongVerification(candidate: InsertSourceData, domainOfficial = true):
     candidate,
     verificationScore: 0.9,
     signals: { ...STRONG_SIGNALS, domainOfficial },
+    proofClass: 'exact_structured_gtin',
     hasStrongProof: true,
+    extractedGtins: [],
     decisionReason: 'UPC match + title overlap',
   };
 }
@@ -277,5 +279,61 @@ describe('brand authority gate (ADR 0017)', () => {
     expect(third).toBeNull();
     expect(findBrandSites('petbrand')).toHaveLength(1);
     expect(findBrandSites('petbrand')[0].domain).toBe('petbrand.example.com');
+  });
+
+  test('relaxed official-domain candidate with token overlap but no strong GTIN proof is NOT auto-selected (P1-A fix)', async () => {
+    upsertBrandSite('BrandX', 'brand.example.com');
+    const item = insertDiscoveryItem({ upc: 'UPC-E', name: 'Official Weak Match', brandHint: 'BrandX' });
+    discoverImpl = makeDiscover([OFFICIAL_CANDIDATE]);
+    // Candidate is on official domain with 30% title overlap, but has no strong proof (e.g. wrong variant/missing GTIN)
+    verifyImpl = async (candidates: InsertSourceData[]) => [
+      {
+        candidate: candidates[0],
+        verificationScore: 0.35,
+        signals: {
+          ...STRONG_SIGNALS,
+          domainOfficial: true,
+          upcInPage: false,
+          titleSimilarity: 0.3,
+          titleNameOverlap: 0.3,
+        },
+        proofClass: 'none',
+        hasStrongProof: false,
+        extractedGtins: [],
+        decisionReason: '[needs_review] proof=none | no_structured_gtin_found',
+      },
+    ];
+
+    await runWorkerOnce();
+
+    const run = getLatestDiscoveryRunForItem(item.id);
+    expect(run).not.toBeNull();
+    expect(run!.outcome).toBe('needs_input_candidates');
+    expect(run!.outcome_message).toContain('No candidate passed verification');
+
+    const after = findItemById(item.id)!;
+    expect(after.sourceUrl).toBeNull();
+  });
+
+  test('operational kill switch (BAYSTATE_CMS_OFFICIAL_AUTO_SELECT_DISABLED=1) disables auto-selection', async () => {
+    process.env.BAYSTATE_CMS_OFFICIAL_AUTO_SELECT_DISABLED = '1';
+    try {
+      upsertBrandSite('BrandX', 'brand.example.com');
+      const item = insertDiscoveryItem({ upc: 'UPC-F', name: 'Kill Switch Match', brandHint: 'BrandX' });
+      discoverImpl = makeDiscover([OFFICIAL_CANDIDATE]);
+      verifyImpl = async (candidates: InsertSourceData[]) => candidates.map(c => strongVerification(c, true));
+
+      await runWorkerOnce();
+
+      const run = getLatestDiscoveryRunForItem(item.id);
+      expect(run).not.toBeNull();
+      expect(run!.outcome).toBe('needs_input_candidates');
+      expect(run!.outcome_message).toContain('kill_switch');
+
+      const after = findItemById(item.id)!;
+      expect(after.sourceUrl).toBeNull();
+    } finally {
+      delete process.env.BAYSTATE_CMS_OFFICIAL_AUTO_SELECT_DISABLED;
+    }
   });
 });

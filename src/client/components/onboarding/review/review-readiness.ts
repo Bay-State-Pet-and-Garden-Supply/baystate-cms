@@ -15,6 +15,7 @@
  */
 import type { ItemDetailResponse } from '../../../onboarding-api';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+import type { ReviewQueueRow } from '../../../../shared/schemas/onboarding-review-queue';
 import {
   REVIEW_COMPLETENESS_BLOCKER_CODES,
   REVIEW_COMPLETENESS_WARNING_CODES,
@@ -96,7 +97,7 @@ function resolvePrimaryImage(detail: ItemDetailResponse | null): string | null {
  */
 export function deriveReadiness(
   detail: ItemDetailResponse | null,
-  workState?: OnboardingWorkState | null,
+  workState?: ReviewQueueRow | OnboardingWorkState | null,
 ): ReviewReadiness {
   // Authoritative path: the e10s01 detail projection.
   const server = (detail as { completeness?: ReviewReadiness } | null)?.completeness;
@@ -344,7 +345,7 @@ export interface EffectiveGateValues {
 
 export function effectiveGateValues(
   detail: ItemDetailResponse | null,
-  workState?: OnboardingWorkState | null,
+  workState?: ReviewQueueRow | OnboardingWorkState | null,
 ): EffectiveGateValues {
   const curation = detail?.item.curationData ?? null;
   const acceptedPageProposals = (curation?.classificationProposals ?? []).filter(

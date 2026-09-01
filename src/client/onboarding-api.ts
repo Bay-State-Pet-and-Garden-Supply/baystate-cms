@@ -516,8 +516,8 @@ export interface SourcingGenerationView {
   createdAt: string;
 }
 
-export async function getItemDetail(itemId: string): Promise<ItemDetailResponse> {
-  return request<ItemDetailResponse>(`/items/${itemId}`);
+export async function getItemDetail(itemId: string, options?: RequestInit): Promise<ItemDetailResponse> {
+  return request<ItemDetailResponse>(`/items/${itemId}`, options);
 }
 
 /**
