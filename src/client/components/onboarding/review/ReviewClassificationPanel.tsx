@@ -220,6 +220,22 @@ export function ReviewClassificationPanel({
         {primary && (
           <div className="rv-field">
             <div className="rv-field-label">Primary Product Type</div>
+            {proposals.some(p => p.derivation?.kind === 'product_type_invariant' && (p.contradictingEvidenceIds?.length ?? 0) > 0) && (
+              <div
+                className="rv-conflict-banner"
+                style={{
+                  background: '#fef2f2',
+                  border: '1px solid #fecaca',
+                  color: '#991b1b',
+                  padding: '0.375rem 0.5rem',
+                  borderRadius: '4px',
+                  fontSize: '0.75rem',
+                  marginBottom: '0.5rem',
+                }}
+              >
+                ⚠ Type conflict in derived attributes: One or more type invariants conflict with product evidence. Verify whether this Product Type is accurate.
+              </div>
+            )}
             <ReviewProposalRow proposal={primary} onDecision={handleDecision} busy={busyDecisionId} />
           </div>
         )}
@@ -426,7 +442,16 @@ function ReviewProposalRow({
 
       <div className="rv-proposal-value">
         {text}
-        {typeof proposal.confidence === 'number' && isPending && tier && (
+        {proposal.derivation?.kind === 'product_type_invariant' && (
+          <span
+            className="rv-conf-chip"
+            style={{ background: '#e0e7ff', color: '#3730a3', border: '1px solid #c7d2fe' }}
+            title={`Type Invariant derived from Product Type: ${proposal.derivation.productTypeId} (source: ${proposal.derivation.productTypeSource})`}
+          >
+            Type Invariant
+          </span>
+        )}
+        {typeof proposal.confidence === 'number' && isPending && tier && proposal.derivation?.kind !== 'product_type_invariant' && (
           <span
             className={`rv-conf-chip ${tier.cls}`}
             role="status"
@@ -437,6 +462,23 @@ function ReviewProposalRow({
           </span>
         )}
       </div>
+
+      {(proposal.contradictingEvidenceIds?.length ?? 0) > 0 && (
+        <div
+          className="rv-conflict-banner"
+          style={{
+            background: '#fef2f2',
+            border: '1px solid #fecaca',
+            color: '#991b1b',
+            padding: '0.375rem 0.5rem',
+            borderRadius: '4px',
+            fontSize: '0.75rem',
+            marginTop: '0.375rem',
+          }}
+        >
+          <strong>⚠ Type conflict:</strong> Product Type implies this value, but extracted product evidence contains conflicting information.
+        </div>
+      )}
 
       {matchedWords.length > 0 && (
         <div className="rv-matched-words">

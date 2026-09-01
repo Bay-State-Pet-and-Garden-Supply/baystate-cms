@@ -51,6 +51,7 @@ export default defineConfig({
       'src/tests/unit/taxonomy-freeze.test.ts',
       'src/tests/unit/taxonomy-release-validation.test.ts',
       'src/tests/unit/taxonomy-release-v4.test.ts',
+      'src/tests/unit/taxonomy-release-v5.test.ts',
       'src/tests/unit/classification-model-call-repo.test.ts',
       'src/tests/unit/classification-run-routes.test.ts',
       'src/tests/unit/profile-generation-repo.test.ts',

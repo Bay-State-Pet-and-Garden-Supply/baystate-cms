@@ -293,6 +293,35 @@ describe('classification runtime snapshot', () => {
       frozen.a[0].b = 2;
     }).toThrow();
   });
+
+  it('freezes invariantAttributes on product types and affects snapshotHash', () => {
+    const baseInput = buildInput({ productSku: 'INVARIANT-SKU' });
+    const snap1 = buildRuntimeSnapshot(baseInput);
+
+    const configWithInvariants = {
+      ...baseInput.config,
+      productTypes: [
+        {
+          id: 'dry-dog-food',
+          name: 'Dry Dog Food',
+          description: null,
+          attributeProfileId: 'dry-dog-food-profile',
+          oldIdAliases: [],
+          invariantAttributes: {
+            species: 'Dog',
+          },
+        },
+      ],
+    };
+    const snap2 = buildRuntimeSnapshot(buildInput({
+      productSku: 'INVARIANT-SKU',
+      config: configWithInvariants as any,
+    }));
+
+    expect(snap2.productTypes[0].invariantAttributes).toEqual({ species: 'Dog' });
+    expect(Object.isFrozen(snap2.productTypes[0].invariantAttributes)).toBe(true);
+    expect(snap1.snapshotHash).not.toBe(snap2.snapshotHash);
+  });
 });
 
 setTaxonomyFreezeForTests(true);

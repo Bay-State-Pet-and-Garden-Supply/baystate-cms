@@ -2479,4 +2479,19 @@ describe('classification_stage_results packaging_ocr CHECK expansion (P2-T6 + po
       ),
     ).toThrow();
   });
+
+  it('verifies derivation_json exists in fresh schema.sql and after runMigrations', () => {
+    const db = getDb();
+    const cols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string }>;
+    expect(cols.some(c => c.name === 'derivation_json')).toBe(true);
+
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'proposal_derivation_schema_version'").get() as { value: string };
+    expect(version).toBeDefined();
+    expect(version.value).toBe('1');
+  });
+
+  it('fresh schema.sql directly creates derivation_json column', () => {
+    const schemaSql = fs.readFileSync(path.join(__dirname, '../../db/schema.sql'), 'utf-8');
+    expect(schemaSql).toContain('derivation_json TEXT');
+  });
 });

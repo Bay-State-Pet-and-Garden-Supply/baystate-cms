@@ -516,22 +516,82 @@ export function validateClassificationConfigBundle(
   const profiles = new Map(config.attributeProfiles.map((entry, index) => [entry.id, { entry, index }]));
 
   config.productTypes.forEach((type, index) => {
+    let profileEntry = type.attributeProfileId ? profiles.get(type.attributeProfileId) : undefined;
     if (type.attributeProfileId) {
-      const profile = profiles.get(type.attributeProfileId);
-      if (!profile) {
+      if (!profileEntry) {
         findings.push({
           severity: 'error',
           code: 'dangling_profile',
           path: `$.productTypes[${index}].attributeProfileId`,
           message: `Unknown Attribute Profile "${type.attributeProfileId}".`,
         });
-      } else if (profile.entry.productTypeId !== type.id) {
+      } else if (profileEntry.entry.productTypeId !== type.id) {
         findings.push({
           severity: 'error',
           code: 'profile_type_mismatch',
           path: `$.productTypes[${index}].attributeProfileId`,
-          message: `Profile "${profile.entry.id}" belongs to Product Type "${profile.entry.productTypeId}".`,
+          message: `Profile "${profileEntry.entry.id}" belongs to Product Type "${profileEntry.entry.productTypeId}".`,
         });
+      }
+    }
+
+    if (type.invariantAttributes) {
+      const invariantEntries = Object.entries(type.invariantAttributes);
+      for (const [attrId, rawVal] of invariantEntries) {
+        const attrRecord = attributes.get(attrId);
+        if (!attrRecord) {
+          findings.push({
+            severity: 'error',
+            code: 'unknown_invariant_attribute',
+            path: `$.productTypes[${index}].invariantAttributes.${attrId}`,
+            message: `Product Type "${type.id}" defines invariant for unknown attribute "${attrId}".`,
+          });
+          continue;
+        }
+
+        const attr = attrRecord.entry;
+        const isUniversal = (attr as { isUniversal?: boolean }).isUniversal === true;
+        const profileAttr = profileEntry?.entry.attributes.find(a => a.attributeId === attrId);
+
+        if (!isUniversal && !profileAttr) {
+          findings.push({
+            severity: 'error',
+            code: 'invariant_attribute_not_applicable',
+            path: `$.productTypes[${index}].invariantAttributes.${attrId}`,
+            message: `Attribute "${attrId}" is an invariant for Product Type "${type.id}" but is not in its Attribute Profile or universal.`,
+          });
+        }
+
+        const cardinality = profileAttr?.cardinality ?? 'single';
+        if (cardinality === 'single' && Array.isArray(rawVal)) {
+          findings.push({
+            severity: 'error',
+            code: 'invariant_cardinality_mismatch',
+            path: `$.productTypes[${index}].invariantAttributes.${attrId}`,
+            message: `Single-cardinality attribute "${attrId}" cannot have an array invariant value.`,
+          });
+        } else if (cardinality === 'multiple' && !Array.isArray(rawVal)) {
+          findings.push({
+            severity: 'error',
+            code: 'invariant_cardinality_mismatch',
+            path: `$.productTypes[${index}].invariantAttributes.${attrId}`,
+            message: `Multiple-cardinality attribute "${attrId}" requires a non-empty array invariant value.`,
+          });
+        }
+
+        if (attr.valueMode === 'controlled') {
+          const valuesToCheck = Array.isArray(rawVal) ? rawVal : [rawVal];
+          for (const val of valuesToCheck) {
+            if (!attr.allowedValues.includes(String(val))) {
+              findings.push({
+                severity: 'error',
+                code: 'invalid_invariant_controlled_value',
+                path: `$.productTypes[${index}].invariantAttributes.${attrId}`,
+                message: `Invariant value "${val}" is not in allowedValues for controlled attribute "${attrId}".`,
+              });
+            }
+          }
+        }
       }
     }
   });

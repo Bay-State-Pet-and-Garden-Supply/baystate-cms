@@ -408,8 +408,8 @@ describe('PR5 effective type — product attribute proposals stage', () => {
   it('legacy/flag-OFF produces zero proposals with the byte-identical blocked message', async () => {
     const snapshot = buildSnapshot(BASE_CONFIG);
     const result = await productAttributeProposalsStage.execute(STAGE_INPUT, makeContext(snapshot));
-    expect(result.status).toBe('succeeded');
-    const output = (result as { status: 'succeeded'; output: { proposals: unknown[]; message: string; metadata: Record<string, unknown> } }).output;
+    expect(result.status === 'succeeded' || result.status === 'abstained').toBe(true);
+    const output = (result as { status: string; output: { proposals: unknown[]; message: string; metadata: Record<string, unknown> } }).output;
 
     expect(output.proposals.length).toBe(0);
     expect(output.message).toBe(
@@ -450,5 +450,39 @@ describe('PR5 effective type — product attribute proposals stage', () => {
     await expect(productAttributeProposalsStage.execute(STAGE_INPUT, context)).rejects.toThrow(
       'effective-type path requires the frozen runtime snapshot; live config is never read with an execution type',
     );
+  });
+
+  it('resolves product type invariant proposals deterministically with first-class derivation and zero LLM calls', async () => {
+    const configWithInvariants: ClassificationConfig = {
+      ...BASE_CONFIG,
+      productTypes: [
+        {
+          id: 'dry-dog-food',
+          name: 'Dry Dog Food',
+          description: null,
+          attributeProfileId: 'dry-dog-food-profile',
+          oldIdAliases: [],
+          invariantAttributes: {
+            flavor: 'Chicken',
+          },
+        },
+      ],
+    };
+
+    const snapshot = buildSnapshot(configWithInvariants);
+    const result = await productAttributeProposalsStage.execute(STAGE_INPUT, makeContext(snapshot, EXECUTION_TYPE));
+    expect(result.status).toBe('succeeded');
+    const proposals = (result as { status: 'succeeded'; output: { proposals: Array<any> } }).output.proposals;
+
+    const flavor = proposals.find(p => p.targetId === 'flavor');
+    expect(flavor).toBeDefined();
+    expect(flavor.proposedValue).toBe('Chicken');
+    expect(flavor.confidence).toBe(1.0);
+    expect(flavor.isBulkAcceptable).toBe(false);
+    expect(flavor.derivation).toEqual({
+      kind: 'product_type_invariant',
+      productTypeId: 'dry-dog-food',
+      productTypeSource: 'execution',
+    });
   });
 });

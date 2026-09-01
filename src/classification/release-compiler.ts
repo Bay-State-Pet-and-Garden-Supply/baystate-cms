@@ -17,10 +17,11 @@ import {
 } from '../shared/schemas/classification';
 import { computeClassificationBundleHash } from './config-validation';
 import { DEFAULT_LOCAL_VISION_MODEL } from '../shared/vision-model-defaults';
-import type { PageAssignmentPolicyV2, TaxonomyReleaseBundleV4 } from './release-validation';
+import type { PageAssignmentPolicyV2, TaxonomyReleaseBundleV4, TaxonomyReleaseBundleV5, V4HierarchyNode, V5HierarchyNode } from './release-validation';
 
-/** The only revision that engages the release-compiler runtime path today. */
+/** The revisions that engage the release-compiler runtime path. */
 export const V4_TAXONOMY_REVISION = 'bay-state-v4';
+export const V5_TAXONOMY_REVISION = 'bay-state-v5';
 
 /** Compiled projection attributes are computed, never human-curated. */
 const COMPILED_PROJECTION_ATTRIBUTE_IDS = new Set(['canonical-category-id', 'canonical-breadcrumb']);
@@ -58,16 +59,14 @@ function compareCatalogFields(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/**
- * Compile a validated V4 release bundle into the runtime config authority
- * shape. Throws when any constructed element would violate the strict v2
- * bundle schema (fail closed before anything reaches the runtime).
- */
-export function compileTaxonomyReleaseV4(bundle: TaxonomyReleaseBundleV4): CompiledReleaseBundle {
+function compileReleaseInternal(
+  bundle: TaxonomyReleaseBundleV4 | TaxonomyReleaseBundleV5,
+  extractInvariants: (node: V4HierarchyNode | V5HierarchyNode) => Record<string, string | string[]>,
+): CompiledReleaseBundle {
   const facetProfileById = new Map(bundle.facetProfiles.map(profile => [profile.id, profile]));
 
   // ── Classifiable nodes → Product Types (+ per-node Attribute Profiles) ──
-  const classifiableNodes = bundle.hierarchy
+  const classifiableNodes = (bundle.hierarchy as Array<V4HierarchyNode | V5HierarchyNode>)
     .filter(node => node.classifiable)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
@@ -78,6 +77,7 @@ export function compileTaxonomyReleaseV4(bundle: TaxonomyReleaseBundleV4): Compi
     attributeProfileId: `profile-${node.id}`,
     oldIdAliases: [...node.legacyTypeIds],
     departmentId: node.departmentId,
+    invariantAttributes: extractInvariants(node),
   }));
 
   const attributeProfiles: AttributeProfileConfigV2[] = classifiableNodes.map(node => {
@@ -242,6 +242,34 @@ export function compileTaxonomyReleaseV4(bundle: TaxonomyReleaseBundleV4): Compi
   }) as CompiledReleaseBundle;
 }
 
+/**
+ * Compile a validated V4 release bundle into the runtime config authority shape.
+ * V4 sets invariantAttributes to {} for all product types.
+ */
+export function compileTaxonomyReleaseV4(bundle: TaxonomyReleaseBundleV4): CompiledReleaseBundle {
+  return compileReleaseInternal(bundle, () => ({}));
+}
+
+/**
+ * Compile a validated V5 release bundle into the runtime config authority shape.
+ * V5 extracts invariantAttributes defined on hierarchy nodes.
+ */
+export function compileTaxonomyReleaseV5(bundle: TaxonomyReleaseBundleV5): CompiledReleaseBundle {
+  return compileReleaseInternal(bundle, node => ({ ...((node as V5HierarchyNode).invariantAttributes ?? {}) }));
+}
+
+/**
+ * Dispatch compilation for V4 or V5 taxonomy release bundle.
+ */
+export function compileTaxonomyRelease(
+  bundle: TaxonomyReleaseBundleV4 | TaxonomyReleaseBundleV5,
+): CompiledReleaseBundle {
+  if (bundle.manifest.revision === V5_TAXONOMY_REVISION || 'invariantAttributes' in (bundle.hierarchy[0] ?? {})) {
+    return compileTaxonomyReleaseV5(bundle as TaxonomyReleaseBundleV5);
+  }
+  return compileTaxonomyReleaseV4(bundle as TaxonomyReleaseBundleV4);
+}
+
 /** Shallow structural copy that preserves the exact v2 attribute shape. */
 function structuredCopyAttribute(attribute: ProductAttributeConfigV2): ProductAttributeConfigV2 {
   return {
@@ -275,7 +303,7 @@ export interface CanonicalPageProjection {
  * proposal seam will call.
  */
 export function resolveCanonicalPageProjections(
-  bundle: TaxonomyReleaseBundleV4,
+  bundle: TaxonomyReleaseBundleV4 | TaxonomyReleaseBundleV5,
   verifiedPageName: string,
 ): CanonicalPageProjection | null {
   const projection = bundle.pageProjections.find(page => page.pageName === verifiedPageName);

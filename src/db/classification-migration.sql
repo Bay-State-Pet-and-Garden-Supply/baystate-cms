@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS classification_proposals (
   supporting_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
   contradicting_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
   model_call_ids_json TEXT,
+  derivation_json TEXT,
   created_at TEXT NOT NULL
 );
 

@@ -1,0 +1,32 @@
+{
+  "releaseId": "bay-state-v5",
+  "revision": "bay-state-v5",
+  "createdAt": "2026-09-01T12:00:00.000Z",
+  "schemaVersion": 3,
+  "compatibilityVersion": 3,
+  "lifecycle": "release",
+  "sourceBaseline": "bay-state-v4",
+  "fileVersions": {
+    "attributes.json": "0caa989d5486c9fcc2937589930bd395796ef402013f03360ee920ac9e17fba0",
+    "facet-profiles.json": "087fdc83a9fd489ecca8373bcca631cc0230858b7c631e611e1f2fa10cb09f84",
+    "hierarchy.json": "adb2560b8a368d749c46d09b6145a32e16b3bf8a3db046662b27e38ff691692f",
+    "export-mappings.json": "f380cfeb70cdf3ae52c14948953028ca083b92c7309423d955609df64612e25f",
+    "legacy-mappings.json": "5c56e58e88b5bdfe6bef8a1709c6a85b2d3160d12af2d11cd666bb2704046497",
+    "guidance.json": "8e027f58f810bb5571ae952798ec4f47c75331fe7921ad5828ef60c63f54be70",
+    "page-assignment-policy.json": "64eafc38fcf9a9ba074f18a33c7026396642f3458a503419552686ba2285c7db",
+    "shopsite-projection.json": "763b9335edcba76565bcc54a4fd5325ca300abe1c717a63d8f8a8947b388ce7a"
+  },
+  "counts": {
+    "nodes": 91,
+    "departments": 10,
+    "types": 74,
+    "nativeLeaves": 1,
+    "attributes": 27,
+    "facetProfiles": 9,
+    "pages": 153,
+    "mappings": 19
+  },
+  "notes": [
+    "bay-state-v5 adds controlled species validation, domain-specific invariant attributes for pet, livestock, equine, and heating product types, and refined facet profiles."
+  ]
+}

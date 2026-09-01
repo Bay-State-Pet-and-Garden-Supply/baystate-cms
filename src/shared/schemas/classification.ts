@@ -50,6 +50,9 @@ export const ProductTypeConfigSchema = z.object({
   description: z.string().nullable().default(null),
   attributeProfileId: ClassificationSlugSchema.nullable().default(null),
   oldIdAliases: z.array(z.string()).default(() => []),
+  invariantAttributes: z
+    .record(ClassificationSlugSchema, z.union([z.string(), z.array(z.string()).nonempty()]))
+    .optional(),
 });
 
 export type ProductTypeConfig = z.infer<typeof ProductTypeConfigSchema>;
@@ -435,6 +438,10 @@ export const ProductTypeConfigV2Schema = z.object({
   oldIdAliases: z.array(ClassificationSlugSchema),
   /** Department grouping (bay-state-v3 release). Optional for v2 workspace bundles. */
   departmentId: ClassificationSlugSchema.optional(),
+  /** Invariant attribute values deterministically implied by this Product Type. */
+  invariantAttributes: z
+    .record(ClassificationSlugSchema, z.union([z.string(), z.array(z.string()).nonempty()]))
+    .optional(),
 }).strict();
 export type ProductTypeConfigV2 = z.infer<typeof ProductTypeConfigV2Schema>;
 
@@ -825,6 +832,27 @@ export const ClassificationEvidenceSchema = z.object({
 export type ClassificationEvidence = z.infer<typeof ClassificationEvidenceSchema>;
 
 /**
+ * First-class provenance explaining how a proposal was derived.
+ */
+export const ProposalDerivationSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('product_type_invariant'),
+    productTypeId: ClassificationSlugSchema,
+    productTypeSource: z.enum(['reviewed', 'execution', 'none']),
+  }).strict(),
+  z.object({
+    kind: z.literal('evidence_match'),
+  }).strict(),
+  z.object({
+    kind: z.literal('deterministic_enrichment'),
+  }).strict(),
+  z.object({
+    kind: z.literal('llm'),
+  }).strict(),
+]);
+export type ProposalDerivation = z.infer<typeof ProposalDerivationSchema>;
+
+/**
  * A reviewable suggestion produced by a classification run.
  */
 export const ClassificationProposalSchema = z.object({
@@ -845,6 +873,8 @@ export const ClassificationProposalSchema = z.object({
    */
   supportingEvidenceIds: z.array(z.string()).optional(),
   contradictingEvidenceIds: z.array(z.string()).optional(),
+  /** First-class proposal derivation provenance (e.g. type invariant vs evidence match vs LLM). */
+  derivation: ProposalDerivationSchema.optional(),
   status: ProposalStatusEnum.default('pending'),
   isBulkAcceptable: z.boolean().default(false),
   isStale: z.boolean().default(false),

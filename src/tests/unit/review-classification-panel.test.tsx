@@ -205,4 +205,47 @@ describe('ReviewClassificationPanel clarity', () => {
     expect(r.buttons()).toEqual(['Accept', 'Reject', 'Accept', 'Reject']);
     r.unmount();
   });
+
+  it('renders Type Invariant chip for product type invariants', async () => {
+    const invariantProp = proposal({
+      targetId: 'species',
+      proposedValue: 'Dog',
+      confidence: 1.0,
+      derivation: {
+        kind: 'product_type_invariant',
+        productTypeId: 'dog-food-dry',
+        productTypeSource: 'reviewed',
+      },
+    });
+    const r = await renderWith([invariantProp]);
+    const text = r.text();
+    expect(text).toContain('Type Invariant');
+    expect(text).toContain('Dog');
+    r.unmount();
+  });
+
+  it('renders dual Type Conflict alerts on Primary Product Type and the conflicting attribute row', async () => {
+    const ppt = proposal({
+      proposalType: 'primary_product_type',
+      targetId: 'dog-food-dry',
+      proposedValue: { productTypeId: 'dog-food-dry', matchedWords: [] },
+      confidence: 0.9,
+    });
+    const conflictingInvariant = proposal({
+      targetId: 'species',
+      proposedValue: 'Dog',
+      confidence: 1.0,
+      contradictingEvidenceIds: ['ev-cat-1'],
+      derivation: {
+        kind: 'product_type_invariant',
+        productTypeId: 'dog-food-dry',
+        productTypeSource: 'execution',
+      },
+    });
+    const r = await renderWith([ppt, conflictingInvariant]);
+    const text = r.text();
+    expect(text).toContain('⚠ Type conflict in derived attributes');
+    expect(text).toContain('⚠ Type conflict: Product Type implies this value, but extracted product evidence contains conflicting information.');
+    r.unmount();
+  });
 });
