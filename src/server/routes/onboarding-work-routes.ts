@@ -195,7 +195,7 @@ route.get('/onboarding/batches/:id/work-state/items', async (c) => {
   const filters = parseWorkStateFilters(c);
   try {
     const page = getBatchWorkStateItems(batchId, filters);
-    return c.json({ batchId, items: page.items, nextCursor: page.nextCursor, total: page.total, projectionHealth: page.projectionHealth, counts: page.counts, scannedRows: (page as any).scannedRows ?? 0, queryCount: (page as any).queryCount ?? 0 });
+    return c.json({ batchId, items: page.items, nextCursor: page.nextCursor, projectionHealth: page.projectionHealth, scannedRows: (page as any).scannedRows ?? 0, queryCount: (page as any).queryCount ?? 0 });
   } catch (err) {
     if (err instanceof WorkStateCursorError) {
       return c.json({ error: err.message, code: err.code }, 400);
@@ -383,6 +383,9 @@ route.post('/onboarding/batches/:id/approve', async (c) => {
     if (existing) {
       if (existing.requestHash !== incomingHash) {
         return c.json({ error: 'payload_mismatch', code: 'payload_mismatch', receiptId: existing.id }, 409);
+      }
+      if (existing.status === 'started' && !existing.detailsJson) {
+        return c.json({ error: 'operation_in_progress', code: 'operation_in_progress', receiptId: existing.id }, 409);
       }
       if (existing.detailsJson) {
         try {

@@ -91,10 +91,13 @@ describe('onboarding work-state routes — bounded read model (P1-E)', () => {
     expect(status).toBe(200);
     expect(body.batchId).toBe(batchId);
     expect(body.items).toHaveLength(10);
-    expect(body.total).toBe(23);
     expect(body.nextCursor).toBeTruthy();
     expect(body.projectionHealth.status).toBe('healthy');
-    expect(body.counts).toBeDefined();
+    expect(body.scannedRows).toBeLessThanOrEqual(50);
+    // total/counts come from /counts, not /items (bounded)
+    const countsRes = await getJson(`/api/onboarding/batches/${batchId}/work-state/counts`);
+    expect(countsRes.body.total).toBe(23);
+    expect(countsRes.body.counts).toBeDefined();
   });
 
   it('GET /work-state/items cursor pagination traverses all items without overlap', async () => {
@@ -180,7 +183,7 @@ describe('onboarding work-state routes — bounded read model (P1-E)', () => {
     const itemsRes = await getJson(`/api/onboarding/batches/${batch.id}/work-state/items?category=needs_attention&limit=10`);
     expect(itemsRes.status).toBe(200);
     expect(itemsRes.body.items).toHaveLength(2);
-    expect(itemsRes.body.total).toBe(2);
+    expect(itemsRes.body.scannedRows).toBeLessThanOrEqual(50);
     for (const item of itemsRes.body.items) {
       expect(item.category).toBe('needs_attention');
     }
@@ -233,11 +236,11 @@ describe('onboarding work-state routes — bounded read model (P1-E)', () => {
   it('GET /items respects limit max 500 and default 100', async () => {
     const batchId = createBatchWithItems(501);
     const { status, body } = await getJson(`/api/onboarding/batches/${batchId}/work-state/items?limit=9999`);
-    // Server clamps limit to 500 but bounded scanning returns one 50-row chunk per request
+    // Server clamps limit to 500 but bounded scanning returns one 50-row chunk per request (not 500)
     expect(status).toBe(200);
     expect(body.items).toHaveLength(50);
-    expect(body.total).toBe(501);
     expect(body.nextCursor).toBeTruthy();
+    expect(body.scannedRows).toBeLessThanOrEqual(50);
     // Paginate through remaining via cursor (50 per page, 11 pages for 501)
     let cursor: string | null = body.nextCursor;
     let collected = body.items.length;
@@ -256,5 +259,6 @@ describe('onboarding work-state routes — bounded read model (P1-E)', () => {
     const d = await getJson(`/api/onboarding/batches/${small}/work-state/items?limit=1`);
     expect(d.status).toBe(200);
     expect(d.body.items).toHaveLength(1);
+    expect(d.body.scannedRows).toBeLessThanOrEqual(50);
   });
 });

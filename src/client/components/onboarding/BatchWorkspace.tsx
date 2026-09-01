@@ -476,7 +476,6 @@ function FilteredResultsList({
   onOpenItem: (itemId: string) => void;
 }) {
   const [items, setItems] = useState<OnboardingWorkState[]>([]);
-  const [total, setTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [projectionHealth, setProjectionHealth] = useState<WorkStateProjectionHealth | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -492,7 +491,6 @@ function FilteredResultsList({
           cursor: cursor ?? undefined,
         });
         setItems(prev => (cursor ? [...prev, ...res.items] : res.items));
-        setTotal(res.total);
         setNextCursor(res.nextCursor);
         setProjectionHealth(res.projectionHealth);
         setError(null);
@@ -540,7 +538,8 @@ function FilteredResultsList({
         </div>
       )}
       <p className="bws-muted" style={{ margin: '0 0 8px 0', fontSize: '0.8125rem' }}>
-        {formatCount(total)} matching {total === 1 ? 'product' : 'products'}
+        {formatCount(items.length)} matching {items.length === 1 ? 'product' : 'products'}
+        {nextCursor ? ' — more available' : ''}
       </p>
       <table className="bws-results-table">
         <thead>
@@ -577,7 +576,7 @@ function FilteredResultsList({
             minHeight: 36,
           }}
         >
-          {loading ? 'Loading…' : `Load more (${formatCount(total - items.length)} remaining)`}
+          {loading ? 'Loading…' : "Load more"}
         </button>
       )}
     </div>

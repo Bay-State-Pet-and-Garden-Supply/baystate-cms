@@ -296,8 +296,9 @@ export const WorkStateItemsResponseSchema = z
     batchId: z.string(),
     items: z.array(OnboardingWorkStateSchema),
     nextCursor: z.string().nullable(),
-    total: z.number().int().nonnegative(),
     projectionHealth: WorkStateProjectionHealthSchema,
+    scannedRows: z.number().int().nonnegative().optional(),
+    queryCount: z.number().int().nonnegative().optional(),
   })
   .strict();
 

@@ -1002,7 +1002,7 @@ export function getBatchWorkStateCountsWithHealth(batchId: string, filters: Omit
  *   scanned rows and query count bounded (see query-plan tests).
  * - Category-critical bulk failures throw WorkStateProjectionError → 503 + degraded health.
  */
-export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilters = {}): { items: OnboardingWorkState[]; nextCursor: string | null; total: number; projectionHealth: WorkStateProjectionHealth; counts: WorkStateCounts; scannedRows?: number; queryCount?: number } {
+export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilters = {}): { items: OnboardingWorkState[]; nextCursor: string | null; projectionHealth: WorkStateProjectionHealth; scannedRows?: number; queryCount?: number } {
   const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 500) : 100;
   const CHUNK_SIZE = 50;
   let dbCursor: { rowNumber: number; id: string } | null = null;
@@ -1027,20 +1027,6 @@ export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilter
     }
   }
 
-  // For health, we need batch-wide cohort context once (one query, constant). Counts endpoint is the one allowed to scan full batch for exact total.
-  // For items, we compute total via a separate lightweight full-scan counts query (allowed) to keep items response total exact for test compatibility,
-  // while items data fetching remains bounded. This is two queries but items data itself is bounded.
-  const totalInfo = (() => {
-    try {
-      const { counts, filtered, health } = deriveAllStatesWithHealth(batchId, filters);
-      return { total: filtered.length, health, counts };
-    } catch (e) {
-      const maybeErr = e as any;
-      if (maybeErr?.health) throw e;
-      throw e;
-    }
-  })();
-
   const collected: OnboardingWorkState[] = [];
   let scannedRows = 0;
   let queryCount = 0;
@@ -1049,8 +1035,7 @@ export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilter
   let chunk: { items: any[]; lastCursor: any; hasMore: boolean } | null = null;
   let hasMoreDb = true;
   let healthIssues: WorkStateProjectionHealthIssue[] = [];
-  let projectionHealth: WorkStateProjectionHealth = totalInfo.health;
-  const counts = totalInfo.counts;
+  let projectionHealth: WorkStateProjectionHealth = buildProjectionHealth([]);
   // Bounded: fetch exactly ONE chunk (50 rows) per request, project/filter only that chunk.
   {
     chunk = listItemsByBatchChunked(batchId, CHUNK_SIZE, lastScannedCursor);
@@ -1147,9 +1132,7 @@ export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilter
       filterHash: computeWorkStateFilterHash(filters),
     });
   }
-  // For test compatibility, total is exact from totalInfo (full scan) — counts endpoint remains the canonical exact total.
-  // For bounded assertions, we expose scannedRows/queryCount.
-  return { items: paged, nextCursor, total: totalInfo.total, projectionHealth, counts, scannedRows, queryCount };
+  return { items: paged, nextCursor, projectionHealth, scannedRows, queryCount };
 }
 
 /** Project a batch's items using an ALREADY-LOADED item list (items route). */

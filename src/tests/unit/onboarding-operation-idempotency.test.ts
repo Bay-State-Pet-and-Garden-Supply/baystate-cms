@@ -359,6 +359,27 @@ describe('approval idempotency and server-derived principal', () => {
     expect(third.json).toEqual(firstSuccess.json);
   });
 
+  it('approval fault-injection started without details returns 409 fail-closed', async () => {
+    const { batchId, itemIds } = makeReviewBatch(2);
+    const key = 'approve-started-' + randomUUID();
+    const hash = computeRequestHash(itemIds.slice(0,2));
+    const now = new Date().toISOString();
+    const fakeReceiptId = randomUUID();
+    getDb().run(
+      `INSERT INTO onboarding_operation_receipts (id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, request_hash, details_json, status, started_at, completed_at) VALUES (?, ?, ?, 'approve', ?, ?, ?, ?, ?, NULL, 'started', ?, NULL)`,
+      [fakeReceiptId, workspaceId, batchId, 'system', 'catalog_approver', now, key, hash, now],
+    );
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const res = await postApprove(batchId, itemIds.slice(0,2), headers);
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('operation_in_progress');
+    expect(res.json.receiptId).toBe(fakeReceiptId);
+    // Second retry still 409 (still started)
+    const res2 = await postApprove(batchId, itemIds.slice(0,2), headers);
+    expect(res2.status).toBe(409);
+    expect(res2.json.code).toBe('operation_in_progress');
+  });
+
   it('export-draft fault-injection started without details returns 409 fail-closed', async () => {
     process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
     const { batchId, itemIds } = makeExportBatch(2);
