@@ -282,7 +282,6 @@ export default defineConfig({
       'src/tests/unit/page-extractor-profile-generation.test.ts',
       'src/tests/unit/page-extractor-variant-inference.test.ts',
       'src/tests/unit/brand-hub-routes.test.ts',
-      'src/tests/unit/onboarding-variant-selection-route.test.ts',
       // Variant resolution migration — bun:sqlite, run under bun test via test:db (not vitest)
       'src/tests/unit/onboarding-variant-resolution-migration.test.ts',
       'src/tests/unit/onboarding-variant-resolution-repo.test.ts',
