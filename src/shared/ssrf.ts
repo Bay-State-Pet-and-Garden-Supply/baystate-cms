@@ -69,7 +69,7 @@ export function classifyIp(address: string): 'private' | 'link_local' | 'public'
   if (address.includes(':')) {
     const lower = address.toLowerCase();
     if (lower === '::1' || lower === '::' || lower.startsWith('0:0:0:0:0:0:0:1')) return 'link_local';
-    if (lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd')) return 'private';
+    if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb') || lower.startsWith('fc') || lower.startsWith('fd')) return 'private';
     if (lower.startsWith('::ffff:')) {
       const rest = lower.slice(7);
       if (rest.includes(':')) {
