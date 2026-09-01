@@ -11,7 +11,7 @@
  * - createdAt: now
  */
 import { randomUUID } from 'node:crypto';
-import type { ClassificationProposal } from '../shared/schemas/classification';
+import type { ClassificationProposal, ProposalDerivation } from '../shared/schemas/classification';
 
 const now = () => new Date().toISOString();
 
@@ -78,6 +78,8 @@ export interface FieldAssignmentProposalParams {
   supportingEvidenceIds?: string[];
   /** Target-specific contradicting evidence ids (issue #17 H). */
   contradictingEvidenceIds?: string[];
+  /** First-class proposal derivation provenance (e.g. type invariant vs evidence match vs LLM). */
+  derivation?: ProposalDerivation;
   /** Single value or array depending on selectionMode */
   isMultiple: boolean;
   /** Explicit override for bulk acceptance (Issue #10) */
@@ -114,6 +116,7 @@ export function buildFieldAssignmentProposal(params: FieldAssignmentProposalPara
     ...(params.contradictingEvidenceIds?.length
       ? { contradictingEvidenceIds: params.contradictingEvidenceIds }
       : {}),
+    ...(params.derivation ? { derivation: params.derivation } : {}),
     status: 'pending',
     isBulkAcceptable: params.isBulkAcceptable ?? false,
     isStale: false,

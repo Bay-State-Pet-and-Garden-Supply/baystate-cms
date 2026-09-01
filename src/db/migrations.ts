@@ -5375,6 +5375,25 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Proposal Derivation Provenance Column (Curation Refinement) ───────────────
+  try {
+    const derivationVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('proposal_derivation_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!derivationVersion) {
+      console.log('[Migrations] Running proposal derivation schema migration...');
+      const proposalCols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string }>;
+      if (!proposalCols.some(c => c.name === 'derivation_json')) {
+        db.exec('ALTER TABLE classification_proposals ADD COLUMN derivation_json TEXT;');
+      }
+      db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('proposal_derivation_schema_version', '1');");
+      console.log('[Migrations] Proposal derivation schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Proposal derivation schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

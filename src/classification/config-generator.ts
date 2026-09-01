@@ -299,6 +299,7 @@ export function generateCandidate(seed: BayStateSeed, evidence: CatalogEvidence)
       description: type.description,
       attributeProfileId: hasProfile ? `${type.id}-profile` : null,
       oldIdAliases: type.oldIdAliases ?? [],
+      invariantAttributes: (type as any).invariantAttributes ?? {},
     };
   });
 

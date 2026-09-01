@@ -35,8 +35,9 @@ import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-t
 import { processProductFieldTarget } from '../curation-target-processor';
 import { getEffectiveCurationProductType, resolveEffectiveTypeProfile } from '../effective-curation-type';
 import { getUniversalTierFlags } from '../flags';
-import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
+import { getCachedAttributeProfiles, getCachedProductTypes } from '../../db/repositories/classification-config-repo';
 import { evaluateAttributeApplicability } from './attribute-applicability';
+import { resolveProductTypeInvariants } from '../product-type-invariants';
 
 export const productAttributeProposalsStage: StageDefinition = {
   name: 'product_attribute_proposals',
@@ -149,11 +150,28 @@ export const productAttributeProposalsStage: StageDefinition = {
       };
     }
 
-    // Process each applicable target through the shared engine
-    const allProposals: ClassificationProposal[] = [];
+    // Invariant attributes from the Effective Product Type resolve deterministically
+    // first (zero LLM calls) and are removed from the variable target loop.
+    const productTypes = context.snapshot
+      ? context.snapshot.productTypes
+      : getCachedProductTypes(context.workspaceId);
+
+    const { invariantProposals, remainingGatedTargets } = resolveProductTypeInvariants({
+      effectiveTypeId,
+      effectiveTypeSource: source,
+      gatedTargets: gated,
+      productTypes: productTypes as any,
+      evidence: input.evidence ?? [],
+      runId: context.runId,
+      sku: input.sku,
+      snapshotHash: context.snapshot?.snapshotHash,
+    });
+
+    const allProposals: ClassificationProposal[] = [...invariantProposals];
     const messages: string[] = [];
 
-    for (const { target, cardinality } of gated) {
+    // Process remaining variable targets through the shared engine
+    for (const { target, cardinality } of remainingGatedTargets) {
       const result = await processProductFieldTarget(target, input, context, { cardinality });
       allProposals.push(...result.proposals);
       if (result.message) messages.push(result.message);

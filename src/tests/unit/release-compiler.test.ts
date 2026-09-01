@@ -22,10 +22,14 @@ import {
 } from '../../shared/schemas/classification';
 import {
   loadTaxonomyReleaseV4,
+  type TaxonomyReleaseBundleV5,
 } from '../../classification/release-validation';
 import {
   V4_TAXONOMY_REVISION,
+  V5_TAXONOMY_REVISION,
   compileTaxonomyReleaseV4,
+  compileTaxonomyReleaseV5,
+  compileTaxonomyRelease,
   resolveCanonicalPageProjections,
 } from '../../classification/release-compiler';
 import {
@@ -186,6 +190,55 @@ describe('bay-state-v4 release compiler', () => {
       }
     });
   });
+
+  describe('bay-state-v5 release compiler & invariants', () => {
+    it('compiles V5 hierarchy nodes with invariant attributes', () => {
+      const v4Bundle = loadTaxonomyReleaseV4('bay-state-v4');
+      const v5Bundle: TaxonomyReleaseBundleV5 = {
+        ...v4Bundle,
+        manifest: {
+          ...v4Bundle.manifest,
+          revision: 'bay-state-v5',
+        },
+        hierarchy: v4Bundle.hierarchy.map(n => ({
+          ...n,
+          invariantAttributes: (n.id === 'dog-food-dry' ? { species: 'Dog', 'life-stage': 'Adult' } : {}) as Record<string, string | string[]>,
+        })),
+      };
+
+      const compiled = compileTaxonomyReleaseV5(v5Bundle);
+      expect(compiled.manifest.activeRevision).toBe('bay-state-v5');
+      const dogDry = compiled.productTypes.find(t => t.id === 'dog-food-dry');
+      expect(dogDry).toBeDefined();
+      expect(dogDry!.invariantAttributes).toEqual({ species: 'Dog', 'life-stage': 'Adult' });
+
+      // V4 compilation of same bundle strips/ignores invariantAttributes
+      const compiledV4 = compileTaxonomyReleaseV4(v4Bundle);
+      const dogDryV4 = compiledV4.productTypes.find(t => t.id === 'dog-food-dry');
+      expect(dogDryV4!.invariantAttributes).toEqual({});
+    });
+
+    it('generalized compileTaxonomyRelease dispatches V4 vs V5 by revision and hierarchy shape', () => {
+      const v4Bundle = loadTaxonomyReleaseV4('bay-state-v4');
+      const compiled4 = compileTaxonomyRelease(v4Bundle);
+      expect(compiled4.taxonomyRevision).toBe(V4_TAXONOMY_REVISION);
+
+      const v5Bundle: TaxonomyReleaseBundleV5 = {
+        ...v4Bundle,
+        manifest: {
+          ...v4Bundle.manifest,
+          revision: V5_TAXONOMY_REVISION,
+        },
+        hierarchy: v4Bundle.hierarchy.map(n => ({
+          ...n,
+          invariantAttributes: { species: 'Dog' },
+        })),
+      };
+      const compiled5 = compileTaxonomyRelease(v5Bundle);
+      expect(compiled5.taxonomyRevision).toBe(V5_TAXONOMY_REVISION);
+      expect(compiled5.productTypes[0].invariantAttributes).toEqual({ species: 'Dog' });
+    });
+  });
 });
 
 describe('loader pin selection (plan B.P4.1 acceptance criteria 1–2 + unknown-pin fail-closed)', () => {
@@ -243,5 +296,21 @@ describe('loader pin selection (plan B.P4.1 acceptance criteria 1–2 + unknown-
     const dogFood = bundle!.productTypes.find(t => t.id === 'dog-food-dry');
     expect(dogFood).toBeDefined();
     expect(dogFood!.oldIdAliases.length >= 0).toBe(true);
+  });
+
+  it('pin=bay-state-v5 serves the V5-compiled v2 authority with invariant attributes', () => {
+    const root = seededWorkspace();
+    writeWorkspaceState(root, { activeTaxonomyRevision: V5_TAXONOMY_REVISION, updatedAt: '2026-09-01T12:00:00.000Z' });
+    const authority = loadRuntimeConfigAuthority(root);
+    expect(authority.kind).toBe('v2');
+    const bundle = authority.kind === 'v2' ? authority.bundle : null;
+    expect(bundle).not.toBeNull();
+    expect(bundle!.manifest.activeRevision).toBe(V5_TAXONOMY_REVISION);
+    const dogFood = bundle!.productTypes.find(t => t.id === 'dog-food-dry');
+    expect(dogFood).toBeDefined();
+    expect(dogFood!.invariantAttributes).toEqual({
+      species: 'Dog',
+      'food-form': 'Dry Food',
+    });
   });
 });

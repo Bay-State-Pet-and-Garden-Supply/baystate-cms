@@ -928,4 +928,139 @@ describe('classification v2 structural and semantic validation', () => {
       expect(report.summary.length).toBe(3);
     });
   });
+
+  describe('Product Type Invariant Attributes Validation', () => {
+    const makeSpeciesAttrV2 = (bundle: any, isUniversal = true) => {
+      const attr = structuredClone(bundle.attributes[0]);
+      attr.id = 'species';
+      attr.name = 'Species';
+      attr.valueMode = 'controlled';
+      attr.allowedValues = ['Dog', 'Cat'];
+      attr.valueAliases = [];
+      attr.isUniversal = isUniversal;
+      return attr;
+    };
+
+    it('passes valid invariant attributes on product types', () => {
+      const bundle = migrated().bundle;
+      bundle.attributes = [makeSpeciesAttrV2(bundle, true)];
+      bundle.attributeMappings[0].attributeId = 'species';
+      bundle.curationTargets = [
+        bundle.curationTargets.find(t => t.id === 'primary-product-type')!,
+      ];
+      bundle.productTypes = [{
+        id: 'dog-food-dry',
+        name: 'Dry Dog Food',
+        description: null,
+        attributeProfileId: null,
+        oldIdAliases: [],
+        invariantAttributes: {
+          species: 'Dog',
+        },
+      }];
+
+      const findings = validateClassificationConfigBundle(bundle).findings;
+      const errors = findings.filter(f => f.severity === 'error');
+      expect(errors).toEqual([]);
+    });
+
+    it('rejects invariant for unknown attribute', () => {
+      const bundle = migrated().bundle;
+      bundle.attributes = [makeSpeciesAttrV2(bundle, true)];
+      bundle.productTypes = [{
+        id: 'dog-food-dry',
+        name: 'Dry Dog Food',
+        description: null,
+        attributeProfileId: null,
+        oldIdAliases: [],
+        invariantAttributes: {
+          'non-existent-attr': 'Value',
+        },
+      }];
+
+      const findings = validateClassificationConfigBundle(bundle).findings;
+      expect(findings).toContainEqual(
+        expect.objectContaining({
+          code: 'unknown_invariant_attribute',
+          severity: 'error',
+        }),
+      );
+    });
+
+    it('rejects invariant attribute not in profile and not universal', () => {
+      const bundle = migrated().bundle;
+      bundle.attributes = [makeSpeciesAttrV2(bundle, false)];
+      bundle.productTypes = [{
+        id: 'dog-food-dry',
+        name: 'Dry Dog Food',
+        description: null,
+        attributeProfileId: 'empty-profile',
+        oldIdAliases: [],
+        invariantAttributes: {
+          species: 'Dog',
+        },
+      }];
+      bundle.attributeProfiles = [{
+        id: 'empty-profile',
+        productTypeId: 'dog-food-dry',
+        name: 'Empty Profile',
+        attributes: [],
+        oldIdAliases: [],
+      }];
+
+      const findings = validateClassificationConfigBundle(bundle).findings;
+      expect(findings).toContainEqual(
+        expect.objectContaining({
+          code: 'invariant_attribute_not_applicable',
+          severity: 'error',
+        }),
+      );
+    });
+
+    it('rejects invalid controlled value for invariant', () => {
+      const bundle = migrated().bundle;
+      bundle.attributes = [makeSpeciesAttrV2(bundle, true)];
+      bundle.productTypes = [{
+        id: 'dog-food-dry',
+        name: 'Dry Dog Food',
+        description: null,
+        attributeProfileId: null,
+        oldIdAliases: [],
+        invariantAttributes: {
+          species: 'Dragon', // Invalid controlled value
+        },
+      }];
+
+      const findings = validateClassificationConfigBundle(bundle).findings;
+      expect(findings).toContainEqual(
+        expect.objectContaining({
+          code: 'invalid_invariant_controlled_value',
+          severity: 'error',
+        }),
+      );
+    });
+
+    it('rejects single-cardinality attribute with array invariant', () => {
+      const bundle = migrated().bundle;
+      bundle.attributes = [makeSpeciesAttrV2(bundle, true)];
+      bundle.productTypes = [{
+        id: 'dog-food-dry',
+        name: 'Dry Dog Food',
+        description: null,
+        attributeProfileId: null,
+        oldIdAliases: [],
+        invariantAttributes: {
+          species: ['Dog'] as any, // Array for single cardinality
+        },
+      }];
+
+      const findings = validateClassificationConfigBundle(bundle).findings;
+      expect(findings).toContainEqual(
+        expect.objectContaining({
+          code: 'invariant_cardinality_mismatch',
+          severity: 'error',
+        }),
+      );
+    });
+  });
 });

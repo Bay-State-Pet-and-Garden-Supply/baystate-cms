@@ -1006,4 +1006,29 @@ describe('proposal-review-service (catalog product)', () => {
     expect(accepted.map((p: any) => p.id)).toEqual(['prop-accepted-live']);
     expect(accepted[0].proposedValue).toBe('Chicken');
   });
+
+  it('persists and roundtrips proposal derivation provenance (e.g. product_type_invariant)', () => {
+    const run = createRun(workspaceId, 'SKU-INVARIANT', null, null, { sourceKind: 'catalog_product' });
+
+    const now = new Date().toISOString();
+    const derivation = {
+      kind: 'product_type_invariant' as const,
+      productTypeId: 'dog-food-dry',
+      productTypeSource: 'reviewed' as const,
+    };
+
+    getDb().run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, derivation_json, status, created_at)
+       VALUES (?, ?, 'SKU-INVARIANT', 'field_assignment', 'species', '"Dog"', 1.0, ?, 'pending', ?)`,
+      ['prop-invariant-1', run.id, JSON.stringify(derivation), now],
+    );
+
+    const proposals = getProposalsByRun(run.id);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].id).toBe('prop-invariant-1');
+    expect(proposals[0].targetId).toBe('species');
+    expect(proposals[0].proposedValue).toBe('Dog');
+    expect(proposals[0].confidence).toBe(1.0);
+    expect(proposals[0].derivation).toEqual(derivation);
+  });
 });

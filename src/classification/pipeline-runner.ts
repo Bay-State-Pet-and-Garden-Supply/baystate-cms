@@ -25,8 +25,8 @@ function persistEvidence(runId: string, sku: string, evidence: ClassificationEvi
 function persistProposals(runId: string, sku: string, proposals: ClassificationProposal[], configSnapshotHash?: string): void {
   if (proposals.length === 0) return;
   const db = getDb();
-  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, supporting_evidence_ids_json, contradicting_evidence_ids_json, model_call_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, JSON.stringify(p.evidenceIds ?? []), JSON.stringify(p.supportingEvidenceIds ?? []), JSON.stringify(p.contradictingEvidenceIds ?? []), JSON.stringify(p.modelCallIds ?? []), now());
+  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, supporting_evidence_ids_json, contradicting_evidence_ids_json, model_call_ids_json, derivation_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, JSON.stringify(p.evidenceIds ?? []), JSON.stringify(p.supportingEvidenceIds ?? []), JSON.stringify(p.contradictingEvidenceIds ?? []), JSON.stringify(p.modelCallIds ?? []), p.derivation ? JSON.stringify(p.derivation) : null, now());
 }
 
 /**

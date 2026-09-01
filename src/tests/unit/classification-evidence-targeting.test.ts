@@ -248,6 +248,30 @@ describe('evidence-targeting (issue #17 H)', () => {
     expect(resolveCanonicalAssertion('Chicken', [{ alias: 'chix', mapsTo: 'Chicken' }])).toBe('Chicken');
   });
 
+  it('reconciles controlled species aliases (Dog, dogs, canine, Cat, cats, feline, Horse, horses, equine, Poultry, chicken)', () => {
+    const speciesAliases = [
+      { alias: 'canine', mapsTo: 'Dog' },
+      { alias: 'dogs', mapsTo: 'Dog' },
+      { alias: 'dog', mapsTo: 'Dog' },
+      { alias: 'feline', mapsTo: 'Cat' },
+      { alias: 'cats', mapsTo: 'Cat' },
+      { alias: 'cat', mapsTo: 'Cat' },
+      { alias: 'equine', mapsTo: 'Horse' },
+      { alias: 'horses', mapsTo: 'Horse' },
+      { alias: 'horse', mapsTo: 'Horse' },
+      { alias: 'chicken', mapsTo: 'Poultry' },
+      { alias: 'chickens', mapsTo: 'Poultry' },
+    ];
+
+    expect(resolveCanonicalAssertion('canine', speciesAliases)).toBe('Dog');
+    expect(resolveCanonicalAssertion('dogs', speciesAliases)).toBe('Dog');
+    expect(resolveCanonicalAssertion('feline', speciesAliases)).toBe('Cat');
+    expect(resolveCanonicalAssertion('cats', speciesAliases)).toBe('Cat');
+    expect(resolveCanonicalAssertion('equine', speciesAliases)).toBe('Horse');
+    expect(resolveCanonicalAssertion('chickens', speciesAliases)).toBe('Poultry');
+    expect(resolveCanonicalAssertion('Dog', speciesAliases)).toBe('Dog');
+  });
+
   it('flags cross-species evidence as a contradiction in the page packet', () => {
     const evidence = [
       ev({ id: 'spec-dog', sourceField: 'species', value: 'Dog' }),

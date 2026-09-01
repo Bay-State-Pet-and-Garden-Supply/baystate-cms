@@ -670,6 +670,9 @@ function mapProposal(row: Record<string, any>): ClassificationProposal {
     evidenceIds: row.evidence_ids_json ? JSON.parse(String(row.evidence_ids_json)) : [],
     ...(supportingEvidenceIds.length ? { supportingEvidenceIds } : {}),
     ...(contradictingEvidenceIds.length ? { contradictingEvidenceIds } : {}),
+    ...(row.derivation_json
+      ? { derivation: JSON.parse(String(row.derivation_json)) }
+      : {}),
     ...(row.model_call_ids_json
       ? { modelCallIds: JSON.parse(String(row.model_call_ids_json)) as string[] }
       : {}),

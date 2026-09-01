@@ -36,9 +36,11 @@ import { assertTaxonomyMutable } from './taxonomy-freeze';
 import { readWorkspaceState, DEFAULT_TAXONOMY_REVISION } from './workspace-state';
 import {
   V4_TAXONOMY_REVISION,
+  V5_TAXONOMY_REVISION,
   compileTaxonomyReleaseV4,
+  compileTaxonomyReleaseV5,
 } from './release-compiler';
-import { loadTaxonomyReleaseV4 } from './release-validation';
+import { loadTaxonomyReleaseV4, loadTaxonomyReleaseV5 } from './release-validation';
 import {
   buildV4ShadowDiffSummary,
   isTaxonomyV4ShadowEnabled,
@@ -617,10 +619,13 @@ function readActiveRevisionPin(workspacePath: string): string | null {
   return readWorkspaceState(workspacePath)?.activeTaxonomyRevision ?? null;
 }
 
-/** Compile the pinned bay-state-v4 release into the runtime authority. Fail closed on validation failure. Brands overlay after hashing so bundleHash stays pure-taxonomy. */
-function loadV4PinnedAuthority(workspacePath: string, pinnedRevision: string): RuntimeConfigAuthority {
-  const bundle = loadTaxonomyReleaseV4('bay-state-v4'); // resolves inside src/classification/releases
-  const compiled = compileTaxonomyReleaseV4(bundle);
+/** Compile the pinned release (bay-state-v4 or bay-state-v5) into the runtime authority. Fail closed on validation failure. Brands overlay after hashing so bundleHash stays pure-taxonomy. */
+function loadPinnedReleaseAuthority(workspacePath: string, pinnedRevision: string): RuntimeConfigAuthority {
+  const compiled =
+    pinnedRevision === V5_TAXONOMY_REVISION
+      ? compileTaxonomyReleaseV5(loadTaxonomyReleaseV5('bay-state-v5'))
+      : compileTaxonomyReleaseV4(loadTaxonomyReleaseV4('bay-state-v4'));
+
   if (compiled.taxonomyRevision !== pinnedRevision) {
     throw new ClassificationConfigLoadError(
       'unsupported_version',
@@ -646,7 +651,7 @@ function observeV4ShadowIfEnabled(
   pinnedRevision: string | null,
   authority: RuntimeConfigAuthority,
 ): void {
-  if (!isTaxonomyV4ShadowEnabled() || pinnedRevision === V4_TAXONOMY_REVISION) return;
+  if (!isTaxonomyV4ShadowEnabled() || pinnedRevision === V4_TAXONOMY_REVISION || pinnedRevision === V5_TAXONOMY_REVISION) return;
   try {
     const fields = authority.kind === 'v2' ? authority.bundle : authority.config;
     const active = {
@@ -675,22 +680,27 @@ export type RuntimeConfigAuthority =
   | { kind: 'v2'; bundle: ClassificationConfigBundleV2 };
 
 /**
- * Load the authoritative runtime configuration. Pin == v4 → compiled release; else legacy bundle. Shadow observes when enabled.
+ * Load the authoritative runtime configuration. Pin == v4/v5 → compiled release; else legacy bundle. Shadow observes when enabled.
  */
 export function loadRuntimeConfigAuthority(
   workspacePath: string,
   activationContext?: VerifiedActivationContext,
 ): RuntimeConfigAuthority {
   const pinnedRevision = readActiveRevisionPin(workspacePath);
-  if (pinnedRevision !== null && pinnedRevision !== DEFAULT_TAXONOMY_REVISION && pinnedRevision !== V4_TAXONOMY_REVISION) {
+  if (
+    pinnedRevision !== null &&
+    pinnedRevision !== DEFAULT_TAXONOMY_REVISION &&
+    pinnedRevision !== V4_TAXONOMY_REVISION &&
+    pinnedRevision !== V5_TAXONOMY_REVISION
+  ) {
     throw new ClassificationConfigLoadError(
       'unsupported_version',
-      `Workspace classification state pins unknown taxonomy revision "${pinnedRevision}". Supported: ${DEFAULT_TAXONOMY_REVISION}, ${V4_TAXONOMY_REVISION} (or no pin).`,
+      `Workspace classification state pins unknown taxonomy revision "${pinnedRevision}". Supported: ${DEFAULT_TAXONOMY_REVISION}, ${V4_TAXONOMY_REVISION}, ${V5_TAXONOMY_REVISION} (or no pin).`,
       path.join(classificationDir(workspacePath), 'state.json'),
     );
   }
-  if (pinnedRevision === V4_TAXONOMY_REVISION) {
-    const authority = loadV4PinnedAuthority(workspacePath, pinnedRevision);
+  if (pinnedRevision === V4_TAXONOMY_REVISION || pinnedRevision === V5_TAXONOMY_REVISION) {
+    const authority = loadPinnedReleaseAuthority(workspacePath, pinnedRevision);
     return authority;
   }
   const authority = loadLegacyRuntimeAuthority(workspacePath, activationContext);
