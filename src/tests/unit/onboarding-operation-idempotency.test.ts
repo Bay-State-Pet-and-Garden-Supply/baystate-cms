@@ -231,4 +231,158 @@ describe('approval idempotency and server-derived principal', () => {
     const row = db.query('SELECT stage FROM onboarding_items WHERE id = ?').get(eligible.id) as { stage: string };
     expect(row.stage).toBe('promotion');
   });
+
+  // ── Export-draft receipt lifecycle (Item 5) ──────────────────────────────
+
+  async function postExportDrafts(batchId: string, itemIds: string[], headers: Record<string, string> = {}) {
+    const body = { itemIds };
+    const req = new Request(`http://localhost/api/onboarding/batches/${batchId}/create-export-drafts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+    const res = await app.fetch(req);
+    const json = await res.json().catch(() => ({}));
+    return { status: res.status, json };
+  }
+
+  function makeExportBatch(itemCount = 2): { batchId: string; itemIds: string[] } {
+    const batch = createBatch({ workspaceId, name: `Export-${randomUUID().slice(0,4)}`, fileName: 'e.csv', totalItems: 0 });
+    const rows = Array.from({ length: itemCount }, (_, i) => ({
+      upc: `EXP-${randomUUID().slice(0,6)}-${i}`,
+      name: `Product ${i}`,
+      brandHint: 'Blue Buffalo',
+      sourceUrl: null,
+      rowNumber: i + 1,
+      stage: 'promotion' as const,
+      stageStatus: 'pending' as const,
+    }));
+    const inserted = insertItems(batch.id, rows, 'promotion' as any, 1);
+    const ids = inserted.map(r => r.id);
+    // Make them durably approved (promotion items require approved review)
+    const db = getDb();
+    const now = new Date().toISOString();
+    for (const id of ids) {
+      db.run(
+        `INSERT INTO onboarding_review_state (item_id, batch_id, reviewed_at, reviewed_by, review_invalidated_at, review_invalidation_reason, approved_at, approved_by, approval_origin, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, 'test', ?, ?)`,
+        [id, batch.id, now, 'tester', now, 'tester', now, now],
+      );
+    }
+    return { batchId: batch.id, itemIds: ids };
+  }
+
+  it('export-draft concurrent double-send creates drafts exactly once', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const { batchId, itemIds } = makeExportBatch(2);
+    const key = 'export-idem-' + randomUUID();
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+
+    // Fire two concurrent requests with same key+payload
+    const [a, b] = await Promise.all([
+      postExportDrafts(batchId, itemIds, headers),
+      postExportDrafts(batchId, itemIds, headers),
+    ]);
+
+    // One should be 200 completed, the other either 200 replay or 409 in_progress depending on timing.
+    // In single-threaded sqlite, one wins and the other replays. Both should not 500.
+    expect([a.status, b.status].every(s => s === 200 || s === 409)).toBe(true);
+    const successes = [a, b].filter(r => r.status === 200);
+    expect(successes.length).toBeGreaterThanOrEqual(1);
+    // If both 200, they must share same receiptId and same created list (no double create)
+    if (a.status === 200 && b.status === 200) {
+      expect(a.json.receiptId).toBe(b.json.receiptId);
+      expect(a.json.created).toEqual(b.json.created);
+      expect(a.json.createdCount).toBe(2);
+    }
+    // Ensure drafts created exactly once (count change_sets)
+    const db = getDb();
+    const csCount = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+    expect(csCount.c).toBe(1);
+    const itemCount = db.query('SELECT COUNT(*) as c FROM change_set_items WHERE change_set_id IN (SELECT id FROM change_sets WHERE workspace_id = ?)').get(workspaceId) as { c: number };
+    expect(itemCount.c).toBe(2);
+
+    // Subsequent replay must be identical
+    const third = await postExportDrafts(batchId, itemIds, headers);
+    expect(third.status).toBe(200);
+    const firstSuccess = successes[0];
+    expect(third.json.receiptId).toBe(firstSuccess.json.receiptId);
+    expect(third.json).toEqual(firstSuccess.json);
+  });
+
+  it('export-draft fault-injection started without details returns 409 fail-closed', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    const { batchId, itemIds } = makeExportBatch(2);
+    const key = 'fault-' + randomUUID();
+    const db = getDb();
+    const now = new Date().toISOString();
+    const fakeReceiptId = randomUUID();
+    const hash = computeRequestHash(itemIds);
+    // Manually claim receipt as started without completing (simulates crash after claim before mutation)
+    db.run(
+      `INSERT INTO onboarding_operation_receipts (id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, request_hash, details_json, status, started_at, completed_at) VALUES (?, ?, ?, 'export', ?, ?, ?, ?, ?, NULL, 'started', ?, NULL)`,
+      [fakeReceiptId, workspaceId, batchId, 'system', 'catalog_exporter', now, key, hash, now],
+    );
+    const headers = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': key };
+    const beforeCs = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+    const res = await postExportDrafts(batchId, itemIds, headers);
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('operation_in_progress');
+    expect(res.json.receiptId).toBe(fakeReceiptId);
+    // No drafts should have been created (count unchanged)
+    const csCount = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+    expect(csCount.c).toBe(beforeCs.c);
+    // Second retry still 409 (still started)
+    const res2 = await postExportDrafts(batchId, itemIds, headers);
+    expect(res2.status).toBe(409);
+    expect(res2.json.receiptId).toBe(fakeReceiptId);
+    const csCount2 = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+    expect(csCount2.c).toBe(beforeCs.c);
+  });
+
+  it('approval never creates change set and export never auto-approves, export revalidates durable approval', async () => {
+    process.env.BAYSTATE_CMS_API_TOKEN = 'test-token-123';
+    // Approval path
+    const { batchId: approveBatch, itemIds: approveIds } = makeReviewBatch(1);
+    const approveKey = 'idem-approve-' + randomUUID();
+    const approveHeaders = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': approveKey };
+    let db = getDb();
+    const csBeforeApprove = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+    const approveRes = await postApprove(approveBatch, approveIds, approveHeaders);
+    expect(approveRes.status).toBe(200);
+    // Approval should not create change_set (count unchanged)
+    let csAfterApprove = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+    expect(csAfterApprove.c).toBe(csBeforeApprove.c);
+
+    // Now create an export batch with one approved and one not approved
+    const batch = createBatch({ workspaceId, name: `ExportReval-${randomUUID().slice(0,4)}`, fileName: 'r.csv', totalItems: 0 });
+    const approvedItem = insertItems(batch.id, [{ upc: `REVAL-A-${randomUUID().slice(0,4)}`, name: 'Approved', brandHint: 'Blue', sourceUrl: null, rowNumber: 1, stage: 'promotion' as const, stageStatus: 'pending' as const }], 'promotion' as any, 1)[0];
+    const unapprovedItem = insertItems(batch.id, [{ upc: `REVAL-B-${randomUUID().slice(0,4)}`, name: 'Unapproved', brandHint: 'Blue', sourceUrl: null, rowNumber: 2, stage: 'promotion' as const, stageStatus: 'pending' as const }], 'promotion' as any, 1)[0];
+    const now2 = new Date().toISOString();
+    db.run(
+      `INSERT INTO onboarding_review_state (item_id, batch_id, reviewed_at, reviewed_by, review_invalidated_at, review_invalidation_reason, approved_at, approved_by, approval_origin, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, 'test', ?, ?)`,
+      [approvedItem.id, batch.id, now2, 'tester', now2, 'tester', now2, now2],
+    );
+    // unapprovedItem has no review row -> not_approved
+
+    const exportKey = 'export-reval-' + randomUUID();
+    const exportHeaders = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': exportKey };
+    const exportRes = await postExportDrafts(batch.id, [approvedItem.id, unapprovedItem.id], exportHeaders);
+    expect(exportRes.status).toBe(200);
+    expect(exportRes.json.createdCount).toBe(1);
+    expect(exportRes.json.rejectedCount).toBe(1);
+    expect(exportRes.json.created).toContain(approvedItem.id);
+    expect(exportRes.json.rejected.some((r:any)=>r.itemId===unapprovedItem.id)).toBe(true);
+    // Only approved item got draft, not auto-approved
+    const reviewU = db.query('SELECT approved_at FROM onboarding_review_state WHERE item_id = ?').get(unapprovedItem.id) as { approved_at: string | null } | undefined;
+    expect(reviewU?.approved_at ?? null).toBeNull();
+    // Batch audit parity for export
+    const audit = db.query("SELECT message, details_json FROM audit_log WHERE entity_id = ? AND action = 'create_export_drafts' ORDER BY created_at DESC LIMIT 1").get(batch.id) as { message: string; details_json: string } | undefined;
+    expect(audit).toBeTruthy();
+    const details = JSON.parse(audit!.details_json);
+    expect(details.createdCount).toBe(exportRes.json.createdCount);
+    expect(details.rejectedCount).toBe(exportRes.json.rejectedCount);
+    // Approval batch audit still correct
+    const approveAudit = db.query("SELECT details_json FROM audit_log WHERE entity_id = ? AND action = 'bulk_approve' ORDER BY created_at DESC LIMIT 1").get(approveBatch) as { details_json: string } | undefined;
+    expect(approveAudit).toBeTruthy();
+  });
 });
