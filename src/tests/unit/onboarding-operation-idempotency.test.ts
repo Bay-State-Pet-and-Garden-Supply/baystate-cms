@@ -10,7 +10,7 @@ import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { markReviewed } from '../../db/repositories/onboarding-review-repo';
-import { findByIdempotencyKey, findByScopedIdempotencyKey, computeRequestHash } from '../../db/repositories/onboarding-operation-receipt-repo';
+import { findByScopedIdempotencyKey, computeRequestHash } from '../../db/repositories/onboarding-operation-receipt-repo';
 import onboardingWorkRoutes from '../../server/routes/onboarding-work-routes';
 
 let workspaceId: string;
@@ -395,12 +395,12 @@ describe('approval idempotency and server-derived principal', () => {
     const { batchId: approveBatch, itemIds: approveIds } = makeReviewBatch(1);
     const approveKey = 'idem-approve-' + randomUUID();
     const approveHeaders = { Authorization: 'Bearer test-token-123', 'Idempotency-Key': approveKey };
-    let db = getDb();
+    const db = getDb();
     const csBeforeApprove = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
     const approveRes = await postApprove(approveBatch, approveIds, approveHeaders);
     expect(approveRes.status).toBe(200);
     // Approval should not create change_set (count unchanged)
-    let csAfterApprove = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
+    const csAfterApprove = db.query('SELECT COUNT(*) as c FROM change_sets WHERE workspace_id = ?').get(workspaceId) as { c: number };
     expect(csAfterApprove.c).toBe(csBeforeApprove.c);
 
     // Now create an export batch with one approved and one not approved
