@@ -1046,13 +1046,14 @@ export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilter
   let queryCount = 0;
   let lastScannedCursor: { rowNumber: number; id: string } | null = dbCursor;
   let lastCollectedCursor: { rowNumber: number; id: string } | null = null;
+  let chunk: { items: any[]; lastCursor: any; hasMore: boolean } | null = null;
   let hasMoreDb = true;
   let healthIssues: WorkStateProjectionHealthIssue[] = [];
   let projectionHealth: WorkStateProjectionHealth = totalInfo.health;
   const counts = totalInfo.counts;
   // Bounded: fetch exactly ONE chunk (50 rows) per request, project/filter only that chunk.
   {
-    const chunk = listItemsByBatchChunked(batchId, CHUNK_SIZE, lastScannedCursor);
+    chunk = listItemsByBatchChunked(batchId, CHUNK_SIZE, lastScannedCursor);
     scannedRows += chunk.items.length;
     queryCount++;
     hasMoreDb = chunk.hasMore;
@@ -1128,7 +1129,7 @@ export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilter
   }
   const paged = collected.slice(0, limit);
   let nextCursor: string | null = null;
-  if (paged.length === limit) {
+  if (paged.length === limit && paged.length > 0) {
     const cursorSrc = lastCollectedCursor ?? lastScannedCursor;
     if (cursorSrc) {
       nextCursor = encodeWorkStateDbCursor({
@@ -1145,8 +1146,6 @@ export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilter
       id: lastScannedCursor.id,
       filterHash: computeWorkStateFilterHash(filters),
     });
-  } else {
-    nextCursor = null;
   }
   // For test compatibility, total is exact from totalInfo (full scan) — counts endpoint remains the canonical exact total.
   // For bounded assertions, we expose scannedRows/queryCount.

@@ -242,40 +242,24 @@ describe('onboarding work-state query plan — bounded bulk reads', () => {
     expect(result.counts.processing + result.counts.needs_attention + result.counts.waiting_on_family + result.counts.ready_for_review + result.counts.approved + result.counts.ready_to_export + result.counts.completed + result.counts.skipped).toBe(10);
   });
 
-  it('category-critical DB failure does not silently become healthy empty — returns degraded 503, not false zero', async () => {
+  it('category-critical DB failure does not silently become healthy empty — returns degraded 503, not false zero', () => {
     const batch = makeBatchWithItems(5);
-    const conn = await import('../../db/connection');
-    const originalGetDb = conn.getDb;
-    const makeFailingDb = () => {
-      const db = originalGetDb();
-      const origQuery = db.query.bind(db);
-      return {
-        ...db,
-        query: (sql: string) => {
-          if (sql.includes('FROM onboarding_sources')) throw new Error('injected candidate_count failure');
-          return origQuery(sql);
-        },
-        run: db.run.bind(db),
-        exec: db.exec.bind(db),
-        transaction: db.transaction.bind(db),
-      } as any;
-    };
-    let threw = false;
-    Object.defineProperty(conn, 'getDb', { value: makeFailingDb as any, writable: true, configurable: true });
+    const db = getDb();
+    // Simulate category-critical DB failure by temporarily renaming the critical table
+    db.exec('ALTER TABLE onboarding_sources RENAME TO onboarding_sources_tmp');
     try {
-      const { bulkCountDiscoveryCandidatesWithHealth } = await import('../../db/repositories/onboarding-work-state-repo');
+      const { bulkCountDiscoveryCandidatesWithHealth } = require('../../db/repositories/onboarding-work-state-repo');
       const res = bulkCountDiscoveryCandidatesWithHealth(['id1', 'id2']);
       expect(res.issue).not.toBeNull();
       expect(res.issue!.code).toBe('candidate_count_failed');
       expect(res.issue!.source).toBe('onboarding_sources');
       expect(res.issue!.affectedCount).toBe(2);
       expect(res.data.size).toBe(2);
-      threw = true;
     } finally {
-      Object.defineProperty(conn, 'getDb', { value: originalGetDb, writable: true, configurable: true });
+      db.exec('ALTER TABLE onboarding_sources_tmp RENAME TO onboarding_sources');
     }
-    expect(threw).toBe(true);
-    Object.defineProperty(conn, 'getDb', { value: makeFailingDb as any, writable: true, configurable: true });
+    // Now test full context propagation via same table-drop trick
+    db.exec('ALTER TABLE onboarding_sources RENAME TO onboarding_sources_tmp');
     try {
       const ctx = buildBatchWorkStateContext(batch, listItemsByBatch(batch));
       expect((ctx.healthIssues as any)._hasCritical).toBe(true);
@@ -289,7 +273,7 @@ describe('onboarding work-state query plan — bounded bulk reads', () => {
       }
       expect(threw503).toBe(true);
     } finally {
-      Object.defineProperty(conn, 'getDb', { value: originalGetDb, writable: true, configurable: true });
+      db.exec('ALTER TABLE onboarding_sources_tmp RENAME TO onboarding_sources');
     }
   });
 

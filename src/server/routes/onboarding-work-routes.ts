@@ -195,7 +195,7 @@ route.get('/onboarding/batches/:id/work-state/items', async (c) => {
   const filters = parseWorkStateFilters(c);
   try {
     const page = getBatchWorkStateItems(batchId, filters);
-    return c.json({ batchId, items: page.items, nextCursor: page.nextCursor, total: page.total, projectionHealth: page.projectionHealth, counts: page.counts });
+    return c.json({ batchId, items: page.items, nextCursor: page.nextCursor, total: page.total, projectionHealth: page.projectionHealth, counts: page.counts, scannedRows: (page as any).scannedRows ?? 0, queryCount: (page as any).queryCount ?? 0 });
   } catch (err) {
     if (err instanceof WorkStateCursorError) {
       return c.json({ error: err.message, code: err.code }, 400);

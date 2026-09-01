@@ -53,7 +53,7 @@ describe('onboarding operation receipt migration', () => {
   it('enforces composite unique (workspace_id, batch_id, operation, idempotency_key) and request_hash column', () => {
     const batch = createBatch({ workspaceId, name: 'B', fileName: 'f.csv', totalItems: 0 });
     const key = 'idem-' + randomUUID();
-    const hash = 'abc123';
+    const hash = computeRequestHash(['a', 'b']);
     createReceipt({ workspaceId, batchId: batch.id, operation: 'approve', principal: 'catalog_approver:abc', role: 'catalog_approver', idempotencyKey: key, requestHash: hash, detailsJson: JSON.stringify({ approved: [] }) });
     // Same composite should throw
     expect(() => {

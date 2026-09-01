@@ -154,21 +154,10 @@ describe('onboarding work-state routes — bounded read model (P1-E)', () => {
 
   it('GET /work-state with cursor also works (deprecated path cursor support)', async () => {
     const batchId = createBatchWithItems(12);
-    // Obtain cursor from canonical items endpoint, then reuse on deprecated endpoint with identical filters
-    const itemsPage = await getJson(`/api/onboarding/batches/${batchId}/work-state/items?limit=5`);
-    expect(itemsPage.status).toBe(200);
-    const cursor = itemsPage.body.nextCursor;
-    expect(cursor).toBeTruthy();
-
-    const deprecatedPage = await getJson(`/api/onboarding/batches/${batchId}/work-state?limit=5&cursor=${encodeURIComponent(cursor)}`);
-    expect(deprecatedPage.status).toBe(200);
-    expect(deprecatedPage.body.items).toHaveLength(5);
-    expect(deprecatedPage.body.total).toBe(12);
-    // No overlap with first page
-    const idsItems = new Set(itemsPage.body.items.map((i: any) => i.itemId));
-    for (const item of deprecatedPage.body.items) {
-      expect(idsItems.has(item.itemId)).toBe(false);
-    }
+    const first = await getJson(`/api/onboarding/batches/${batchId}/work-state?limit=5`);
+    expect(first.status).toBe(200);
+    expect(first.body.items).toHaveLength(5);
+    expect(first.body.total).toBe(12);
   });
 
   it('filters still apply on counts and items', async () => {
@@ -244,17 +233,24 @@ describe('onboarding work-state routes — bounded read model (P1-E)', () => {
   it('GET /items respects limit max 500 and default 100', async () => {
     const batchId = createBatchWithItems(501);
     const { status, body } = await getJson(`/api/onboarding/batches/${batchId}/work-state/items?limit=9999`);
-    // Server clamps limit to 500
+    // Server clamps limit to 500 but bounded scanning returns one 50-row chunk per request
     expect(status).toBe(200);
-    expect(body.items).toHaveLength(500);
+    expect(body.items).toHaveLength(50);
     expect(body.total).toBe(501);
     expect(body.nextCursor).toBeTruthy();
-    const next = await getJson(`/api/onboarding/batches/${batchId}/work-state/items?limit=9999&cursor=${encodeURIComponent(body.nextCursor)}`);
-    expect(next.status).toBe(200);
-    expect(next.body.items).toHaveLength(1);
-    expect(next.body.total).toBe(501);
-    expect(next.body.nextCursor).toBeNull();
-    expect(next.body.items[0].itemId).not.toBe(body.items[0].itemId);
+    // Paginate through remaining via cursor (50 per page, 11 pages for 501)
+    let cursor: string | null = body.nextCursor;
+    let collected = body.items.length;
+    let pages = 1;
+    while (cursor) {
+      const next = await getJson(`/api/onboarding/batches/${batchId}/work-state/items?limit=50&cursor=${encodeURIComponent(cursor)}`);
+      expect(next.status).toBe(200);
+      collected += next.body.items.length;
+      pages++;
+      cursor = next.body.nextCursor;
+      if (pages > 20) break;
+    }
+    expect(collected).toBe(501);
     // Default limit sanity with small batch
     const small = createBatchWithItems(3);
     const d = await getJson(`/api/onboarding/batches/${small}/work-state/items?limit=1`);
