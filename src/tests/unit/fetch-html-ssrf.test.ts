@@ -53,4 +53,28 @@ describe('fetch-html SSRF & Local File Disclosure protection', () => {
     expect(json.ok).toBe(false);
     expect(json.error).toBe('URL points to a private network address');
   });
+
+  it('rejects alternate IPv4 encodings and cloud metadata addresses', async () => {
+    const targets = [
+      'http://0177.0.0.1/octal',
+      'http://0x7f000001/hex',
+      'http://2130706433/integer',
+      'http://169.254.169.254/latest/meta-data/',
+      'http://[::1]/ipv6-loopback',
+      'http://[::ffff:127.0.0.1]/ipv6-mapped',
+    ];
+
+    for (const url of targets) {
+      const res = await app.request('/api/onboarding/settings/profile-tooling/fetch-html', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+
+      expect(res.status).toBe(400);
+      const json = await res.json() as { ok: boolean; error: string };
+      expect(json.ok).toBe(false);
+      expect(json.error).toBe('URL points to a private network address');
+    }
+  });
 });

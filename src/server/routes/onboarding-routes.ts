@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { isPrivateOrLinkLocal } from '../../shared/ssrf';
 import { getLocalRuntimeStatus } from '../../ai/local-runtime-coordinator';
 import { OLLAMA_VLM_SERVICE_NAME, DEFAULT_LOCAL_VISION_MODEL } from '../../ai/vision-model-defaults';
 import { streamSSE } from 'hono/streaming';
@@ -3406,16 +3407,8 @@ route.post('/onboarding/settings/profile-tooling/fetch-html', async (c) => {
     if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
       return c.json({ ok: false, error: 'Only http and https protocols are allowed' }, 400);
     }
-    const hostname = parsedUrl.hostname;
-    if (
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname === '0.0.0.0' ||
-      hostname.startsWith('10.') ||
-      hostname.startsWith('192.168.') ||
-      hostname.startsWith('172.') ||
-      hostname === '[::1]'
-    ) {
+    const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, '');
+    if (hostname === 'localhost' || isPrivateOrLinkLocal(hostname)) {
       return c.json({ ok: false, error: 'URL points to a private network address' }, 400);
     }
   } catch {
@@ -3423,15 +3416,48 @@ route.post('/onboarding/settings/profile-tooling/fetch-html', async (c) => {
   }
 
   try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept':
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-      },
-      signal: AbortSignal.timeout(15_000),
-    });
+    let currentUrl = url;
+    let response: Response | null = null;
+    for (let redirectCount = 0; redirectCount < 5; redirectCount++) {
+      // Per-hop SSRF validation: re-validate each redirect target
+      try {
+        const parsedCurrent = new URL(currentUrl);
+        if (parsedCurrent.protocol !== 'http:' && parsedCurrent.protocol !== 'https:') {
+          return c.json({ ok: false, error: 'Only http and https protocols are allowed' }, 400);
+        }
+        const curHostname = parsedCurrent.hostname.replace(/^\[|\]$/g, '');
+        if (curHostname === 'localhost' || isPrivateOrLinkLocal(curHostname)) {
+          return c.json({ ok: false, error: 'URL points to a private network address' }, 400);
+        }
+      } catch {
+        return c.json({ ok: false, error: 'Invalid URL' }, 400);
+      }
+      response = await fetch(currentUrl, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        },
+        signal: AbortSignal.timeout(15_000),
+        redirect: 'manual',
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        if (location) {
+          try {
+            currentUrl = new URL(location, currentUrl).toString();
+            continue;
+          } catch {
+            return c.json({ ok: false, error: 'Invalid URL' }, 400);
+          }
+        }
+      }
+      break;
+    }
+    if (!response) {
+      return c.json({ ok: false, error: 'Failed to fetch URL' }, 500);
+    }
     if (!response.ok) {
       return c.json({ ok: false, error: `HTTP ${response.status}` });
     }

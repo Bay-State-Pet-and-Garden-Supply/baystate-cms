@@ -69,8 +69,22 @@ export function classifyIp(address: string): 'private' | 'link_local' | 'public'
   if (address.includes(':')) {
     const lower = address.toLowerCase();
     if (lower === '::1' || lower === '::' || lower.startsWith('0:0:0:0:0:0:0:1')) return 'link_local';
-    if (lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd')) return 'private';
-    if (lower.startsWith('::ffff:')) return classifyIp(lower.slice(7));
+    if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb') || lower.startsWith('fc') || lower.startsWith('fd')) return 'private';
+    if (lower.startsWith('::ffff:')) {
+      const rest = lower.slice(7);
+      if (rest.includes(':')) {
+        const parts = rest.split(':');
+        if (parts.length === 2) {
+          const w1 = parseInt(parts[0], 16);
+          const w2 = parseInt(parts[1], 16);
+          if (Number.isInteger(w1) && Number.isInteger(w2) && w1 >= 0 && w1 <= 0xffff && w2 >= 0 && w2 <= 0xffff) {
+            const ipv4 = `${(w1 >> 8) & 0xff}.${w1 & 0xff}.${(w2 >> 8) & 0xff}.${w2 & 0xff}`;
+            return classifyIp(ipv4);
+          }
+        }
+      }
+      return classifyIp(rest);
+    }
     return 'public';
   }
   for (const range of PRIVATE_IPV4) {
