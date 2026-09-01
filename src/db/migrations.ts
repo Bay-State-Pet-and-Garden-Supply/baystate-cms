@@ -5410,8 +5410,11 @@ export function runMigrations(): void {
           role TEXT NOT NULL,
           created_at TEXT NOT NULL,
           idempotency_key TEXT,
-          request_hash TEXT NOT NULL DEFAULT '',
+          request_hash TEXT NOT NULL CHECK(request_hash GLOB '[0-9a-f]*' AND length(request_hash) = 64),
           details_json TEXT,
+          status TEXT NOT NULL CHECK(status IN ('started','completed','failed')) DEFAULT 'completed',
+          started_at TEXT,
+          completed_at TEXT,
           UNIQUE(workspace_id, batch_id, operation, idempotency_key)
         );
       `);
@@ -5434,14 +5437,16 @@ export function runMigrations(): void {
             role TEXT NOT NULL,
             created_at TEXT NOT NULL,
             idempotency_key TEXT,
-            request_hash TEXT NOT NULL DEFAULT '',
+            request_hash TEXT NOT NULL CHECK(request_hash GLOB '[0-9a-f]*' AND length(request_hash) = 64),
             details_json TEXT,
             UNIQUE(workspace_id, batch_id, operation, idempotency_key)
           );
         `);
+        // Legacy v1 rows had empty request_hash; backfill with canonical hash of empty array (64 hex) to satisfy new CHECK
+        const emptyHash = require('node:crypto').createHash('sha256').update(JSON.stringify([]), 'utf8').digest('hex');
         db.exec(`
           INSERT OR IGNORE INTO onboarding_operation_receipts_new (id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, request_hash, details_json)
-          SELECT id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, '' , details_json FROM onboarding_operation_receipts;
+          SELECT id, workspace_id, batch_id, operation, principal, role, created_at, idempotency_key, CASE WHEN request_hash = '' OR request_hash IS NULL THEN '${emptyHash}' ELSE request_hash END, details_json FROM onboarding_operation_receipts;
         `);
         db.exec('DROP TABLE onboarding_operation_receipts;');
         db.exec('ALTER TABLE onboarding_operation_receipts_new RENAME TO onboarding_operation_receipts;');
@@ -5450,6 +5455,44 @@ export function runMigrations(): void {
       }
       db.exec("UPDATE app_meta SET value = '2' WHERE key = 'onboarding_operation_receipt_schema_version';");
       console.log('[Migrations] Operation receipts migrated to v2.');
+    }
+    // v2 -> v3: add lifecycle status columns (started, completed, failed) + timestamps
+    const receiptV2b = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('onboarding_operation_receipt_schema_version') as { value: string } | undefined;
+    if (receiptV2b && receiptV2b.value === '2') {
+      console.log('[Migrations] Migrating operation receipts v2 -> v3 (status lifecycle)...');
+      const rCols = db.query('PRAGMA table_info(onboarding_operation_receipts)').all() as Array<{ name: string }>;
+      if (!rCols.some(c => c.name === 'status')) {
+        db.exec("ALTER TABLE onboarding_operation_receipts ADD COLUMN status TEXT NOT NULL CHECK(status IN ('started','completed','failed')) DEFAULT 'completed';");
+      }
+      if (!rCols.some(c => c.name === 'started_at')) {
+        db.exec('ALTER TABLE onboarding_operation_receipts ADD COLUMN started_at TEXT;');
+      }
+      if (!rCols.some(c => c.name === 'completed_at')) {
+        db.exec('ALTER TABLE onboarding_operation_receipts ADD COLUMN completed_at TEXT;');
+      }
+      // Backfill existing rows to completed if details_json present, else started
+      try { db.exec("UPDATE onboarding_operation_receipts SET status = 'completed', completed_at = COALESCE(completed_at, created_at) WHERE details_json IS NOT NULL AND status = 'completed';"); } catch {}
+      try { db.exec("UPDATE onboarding_operation_receipts SET status = 'started', started_at = COALESCE(started_at, created_at) WHERE details_json IS NULL;"); } catch {}
+      db.exec("UPDATE app_meta SET value = '3' WHERE key = 'onboarding_operation_receipt_schema_version';");
+      console.log('[Migrations] Operation receipts migrated to v3.');
+    }
+    // v3 -> v4: enforce 64-hex request_hash (remove empty default, add CHECK)
+    const receiptV3b = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('onboarding_operation_receipt_schema_version') as { value: string } | undefined;
+    if (receiptV3b && receiptV3b.value === '3') {
+      console.log('[Migrations] Migrating operation receipts v3 -> v4 (64-hex request_hash)...');
+      try {
+        const emptyHash = require('node:crypto').createHash('sha256').update(JSON.stringify([]), 'utf8').digest('hex');
+        db.exec(`UPDATE onboarding_operation_receipts SET request_hash = '${emptyHash}' WHERE request_hash = '' OR length(request_hash) != 64 OR request_hash GLOB '*[^0-9a-f]*'`);
+      } catch (e) {
+        console.warn('[Migrations] Failed to backfill empty request_hash (non-fatal):', e);
+      }
+      // SQLite cannot ADD CHECK via ALTER; fresh DBs already have CHECK from v2 creation. For existing DBs, rely on repository Zod validation (64-hex) as the boundary.
+      db.exec("UPDATE app_meta SET value = '4' WHERE key = 'onboarding_operation_receipt_schema_version';");
+      console.log('[Migrations] Operation receipts migrated to v4 (64-hex).');
     }
   } catch (e) {
     console.error('[Migrations] Failed to create operation receipts table:', e);

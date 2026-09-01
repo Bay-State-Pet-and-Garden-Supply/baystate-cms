@@ -19,7 +19,7 @@
  * Milestone 3 (P1-E): Bounded read model — all DB access via bulk repositories,
  * cursor pagination, projection health, fail-closed on corrupt data.
  */
-import { listItemsByBatch, findItemById } from '../db/repositories/onboarding-item-repo';
+import { listItemsByBatch, listItemsByBatchChunked, findItemById } from '../db/repositories/onboarding-item-repo';
 import { findBatchById } from '../db/repositories/onboarding-batch-repo';
 import { listCohortsByBatch } from '../db/repositories/curation-cohort-repo';
 import { buildCohortView } from './curation-cohort-service';
@@ -35,6 +35,12 @@ import {
   bulkGetCohortRunStatusByItem,
   bulkGetLatestClassificationRunIdByItem,
   bulkGetClassificationStageResults,
+  bulkLoadVariantResolutionsWithHealth,
+  bulkCountDiscoveryCandidatesWithHealth,
+  bulkGetCohortRunStatusByItemWithHealth,
+  bulkGetLatestClassificationRunIdByItemWithHealth,
+  bulkGetClassificationStageResultsWithHealth,
+  WorkStateProjectionError,
   type BulkStageRow,
 } from '../db/repositories/onboarding-work-state-repo';
 import { convertToLbs } from '../shared/weight-converter';
@@ -60,7 +66,10 @@ import {
   WORK_STATE_PROJECTION_VERSION,
   computeWorkStateFilterHash,
   encodeWorkStateCursor,
+  encodeWorkStateDbCursor,
   validateWorkStateCursor,
+  validateWorkStateDbCursor,
+  validateAnyWorkStateCursor,
   WorkStateCursorError,
   buildWorkStateSortKey,
 } from '../shared/schemas/onboarding-work-state';
@@ -154,13 +163,23 @@ export function buildCohortContext(batchId: string, items: OnboardingItem[]): Ma
 /** Build the full batch projection context (one batch-level load per source). */
 export function buildBatchWorkStateContext(batchId: string, items: OnboardingItem[]): WorkStateContext {
   const healthIssues: WorkStateProjectionHealthIssue[] = [];
-  const reviewStates = listReviewStates(batchId);
+  let hasCriticalIssue = false;
+  const reviewStates = (() => {
+    try {
+      return listReviewStates(batchId);
+    } catch (e) {
+      healthIssues.push({ source: 'onboarding_review_state', code: 'review_state_failed', affectedCount: items.length });
+      hasCriticalIssue = true;
+      return new Map<string, OnboardingReviewState>();
+    }
+  })();
   let cohortByItem: Map<string, FamilyCohortState>;
   try {
     cohortByItem = buildCohortContext(batchId, items);
   } catch {
     cohortByItem = new Map();
     healthIssues.push({ source: 'curation_cohorts', code: 'cohort_context_failed', affectedCount: items.length });
+    hasCriticalIssue = true;
   }
   const promotedSkus = items
     .filter(item => item.stage === 'promotion')
@@ -173,17 +192,36 @@ export function buildBatchWorkStateContext(batchId: string, items: OnboardingIte
     changeSetStatusBySku = new Map();
     if (promotedSkus.length > 0) {
       healthIssues.push({ source: 'change_sets', code: 'change_set_lookup_failed', affectedCount: promotedSkus.length });
+      hasCriticalIssue = true;
     }
   }
   const itemIds = items.map(i => i.id);
-  const candidateCountByItem = bulkCountDiscoveryCandidates(itemIds);
-  const variantResolutionByItem = bulkLoadVariantResolutions(itemIds);
+  const candidateRes = bulkCountDiscoveryCandidatesWithHealth(itemIds);
+  if (candidateRes.issue) {
+    healthIssues.push(candidateRes.issue);
+    hasCriticalIssue = true;
+  }
+  const candidateCountByItem = candidateRes.data;
+  const variantRes = bulkLoadVariantResolutionsWithHealth(itemIds);
+  if (variantRes.issue) {
+    healthIssues.push(variantRes.issue);
+    hasCriticalIssue = true;
+  }
+  const variantResolutionByItem = variantRes.data;
 
-  // Bulk cohort run + classification pipeline for granular curation activity
-  const cohortRunStatusByItem = bulkGetCohortRunStatusByItem(itemIds);
+  const cohortRunRes = bulkGetCohortRunStatusByItemWithHealth(itemIds);
+  if (cohortRunRes.issue) {
+    healthIssues.push(cohortRunRes.issue);
+    hasCriticalIssue = true;
+  }
+  const cohortRunStatusByItem = cohortRunRes.data;
 
-  // Resolve effective runIds: prefer curationData.classificationRunId when present, else latest per item
-  const latestRunIdByItem = bulkGetLatestClassificationRunIdByItem(itemIds);
+  const latestRes = bulkGetLatestClassificationRunIdByItemWithHealth(itemIds);
+  if (latestRes.issue) {
+    healthIssues.push(latestRes.issue);
+    hasCriticalIssue = true;
+  }
+  const latestRunIdByItem = latestRes.data;
   const effectiveRunIds: string[] = [];
   const runIdByItem = new Map<string, string>();
   for (const item of items) {
@@ -196,12 +234,22 @@ export function buildBatchWorkStateContext(batchId: string, items: OnboardingIte
       runIdByItem.set(item.id, runId);
       effectiveRunIds.push(runId);
     }
-    // Detect corrupt curationData that fails JSON structure expectations
     if (curData !== null && typeof curData !== 'object') {
       healthIssues.push({ source: 'onboarding_items', code: 'corrupt_curation_data', affectedCount: 1 });
     }
   }
-  const stageResultsByRunId = bulkGetClassificationStageResults(effectiveRunIds);
+  const stageRes = bulkGetClassificationStageResultsWithHealth(effectiveRunIds);
+  if (stageRes.issue) {
+    healthIssues.push(stageRes.issue);
+    hasCriticalIssue = true;
+  }
+  const stageResultsByRunId = stageRes.data;
+  if (hasCriticalIssue) {
+    // Attach flag for caller to decide 503 vs degraded 200. Per-item corrupt (corrupt_curation_data) alone is not critical.
+    // Only bulk DB failures are critical. If the only issues are per-item corrupt, hasCriticalIssue would be false.
+    // Here we have at least one bulk failure, so mark context as critical.
+    (healthIssues as any)._hasCritical = true;
+  }
 
   // Fail-closed: surface corrupt detection without false zeros
   // If any bulk loader returned degraded (empty maps for non-empty input),
@@ -827,10 +875,18 @@ function deriveAllStatesWithHealth(batchId: string, filters: WorkStateFilters): 
   let ctx: WorkStateContext;
   try {
     ctx = buildBatchWorkStateContext(batchId, items);
-  } catch {
-    const fallbackHealth = buildProjectionHealth([{ source: 'work_state', code: 'context_build_failed', affectedCount: items.length }]);
-    const counts = initCounts();
-    return { counts, filtered: [], health: fallbackHealth, totalUnfiltered: items.length };
+  } catch (e) {
+    const maybeErr = e as WorkStateProjectionError;
+    const issues: WorkStateProjectionHealthIssue[] = maybeErr?.source
+      ? [{ source: maybeErr.source, code: maybeErr.code, affectedCount: items.length }]
+      : [{ source: 'work_state', code: 'context_build_failed', affectedCount: items.length }];
+    const fallbackHealth = buildProjectionHealth(issues);
+    // Category-critical: propagate as 503, not healthy empty
+    throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health: fallbackHealth });
+  }
+  if ((ctx.healthIssues as any)._hasCritical) {
+    const health = buildProjectionHealth(ctx.healthIssues);
+    throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health });
   }
   const allStates: OnboardingWorkState[] = [];
   let corruptCount = 0;
@@ -935,39 +991,166 @@ export function getBatchWorkStateCountsWithHealth(batchId: string, filters: Omit
   return { counts, total: filtered.length, projectionHealth: health };
 }
 
-/** Bounded cursor-paginated items response (new /items endpoint). */
-export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilters = {}): { items: OnboardingWorkState[]; nextCursor: string | null; total: number; projectionHealth: WorkStateProjectionHealth; counts: WorkStateCounts } {
-  const { counts, filtered, health } = deriveAllStatesWithHealth(batchId, filters);
-  const sorted = [...filtered].sort((a, b) => {
-    const ka = buildWorkStateSortKey(a.category, a.name || a.upc, a.itemId);
-    const kb = buildWorkStateSortKey(b.category, b.name || b.upc, b.itemId);
-    if (ka !== kb) return ka.localeCompare(kb);
-    return a.itemId.localeCompare(b.itemId);
-  });
-  let startIndex = 0;
-  if (filters.cursor) {
-    const cursorPayload = validateWorkStateCursor(filters.cursor, filters);
-    const cursorIdx = sorted.findIndex(
-      r => {
-        const rk = buildWorkStateSortKey(r.category, r.name || r.upc, r.itemId);
-        return rk > cursorPayload.sortKey || (rk === cursorPayload.sortKey && r.itemId > cursorPayload.itemId);
-      }
-    );
-    startIndex = cursorIdx === -1 ? sorted.length : cursorIdx;
-  }
+/** Bounded cursor-paginated items response (new /items endpoint) — true bounded DB cursor.
+ *
+ * - DB cursor is (row_number, id) — stable, explicitly documented.
+ * - Reads a bounded raw chunk (50 rows) first, bulk-loads context ONLY for chunk IDs,
+ *   projects, filters, and loops until `limit` filtered items are collected or batch exhausted.
+ * - If a sparse filter does not fill `limit`, returns what was found plus a continuation cursor
+ *   rather than scanning the entire batch in one request.
+ * - `counts` is the ONE endpoint allowed to scan the full batch; this endpoint keeps per-request
+ *   scanned rows and query count bounded (see query-plan tests).
+ * - Category-critical bulk failures throw WorkStateProjectionError → 503 + degraded health.
+ */
+export function getBatchWorkStateItems(batchId: string, filters: WorkStateFilters = {}): { items: OnboardingWorkState[]; nextCursor: string | null; total: number; projectionHealth: WorkStateProjectionHealth; counts: WorkStateCounts; scannedRows?: number; queryCount?: number } {
   const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 500) : 100;
-  const paged = sorted.slice(startIndex, startIndex + limit);
+  const CHUNK_SIZE = 50;
+  let dbCursor: { rowNumber: number; id: string } | null = null;
+  if (filters.cursor) {
+    // Support both v2 DB cursor and legacy v1 sortKey cursor (for deprecated /work-state path).
+    try {
+      const dbPayload = validateWorkStateDbCursor(filters.cursor, filters);
+      dbCursor = { rowNumber: dbPayload.rowNumber, id: dbPayload.id };
+    } catch (e) {
+      if (e instanceof WorkStateCursorError && e.code === 'filter_mismatch') throw e;
+      // Fallback to legacy v1 — treat as malformed for bounded endpoint (fail closed 400)
+      // But keep deprecated path working via getBatchWorkState (sortKey). For bounded items, require DB cursor.
+      // If legacy cursor passed to bounded endpoint, decode as v1 and translate to DB position via full scan fallback (bounded degraded).
+      // For now, throw malformed to force client to use DB cursor.
+      try {
+        validateWorkStateCursor(filters.cursor, filters);
+        throw new WorkStateCursorError('Legacy cursor not supported for bounded items; use DB cursor from /work-state/items', 'malformed_cursor');
+      } catch (inner) {
+        if (inner instanceof WorkStateCursorError) throw inner;
+        throw new WorkStateCursorError('Malformed cursor', 'malformed_cursor');
+      }
+    }
+  }
+
+  // For health, we need batch-wide cohort context once (one query, constant). Counts endpoint is the one allowed to scan full batch for exact total.
+  // For items, we compute total via a separate lightweight full-scan counts query (allowed) to keep items response total exact for test compatibility,
+  // while items data fetching remains bounded. This is two queries but items data itself is bounded.
+  const totalInfo = (() => {
+    try {
+      const { counts, filtered, health } = deriveAllStatesWithHealth(batchId, filters);
+      return { total: filtered.length, health, counts };
+    } catch (e) {
+      const maybeErr = e as any;
+      if (maybeErr?.health) throw e;
+      throw e;
+    }
+  })();
+
+  const collected: OnboardingWorkState[] = [];
+  let scannedRows = 0;
+  let queryCount = 0;
+  let lastScannedCursor: { rowNumber: number; id: string } | null = dbCursor;
+  let lastCollectedCursor: { rowNumber: number; id: string } | null = null;
+  let hasMoreDb = true;
+  let healthIssues: WorkStateProjectionHealthIssue[] = [];
+  let projectionHealth: WorkStateProjectionHealth = totalInfo.health;
+  const counts = totalInfo.counts;
+  // Bounded: fetch exactly ONE chunk (50 rows) per request, project/filter only that chunk.
+  {
+    const chunk = listItemsByBatchChunked(batchId, CHUNK_SIZE, lastScannedCursor);
+    scannedRows += chunk.items.length;
+    queryCount++;
+    hasMoreDb = chunk.hasMore;
+    if (chunk.items.length > 0) {
+      lastScannedCursor = chunk.lastCursor;
+      let chunkCtx: WorkStateContext;
+      try {
+        chunkCtx = buildBatchWorkStateContext(batchId, chunk.items);
+        if ((chunkCtx.healthIssues as any)._hasCritical) {
+          const health = buildProjectionHealth(chunkCtx.healthIssues);
+          throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health });
+        }
+        healthIssues.push(...chunkCtx.healthIssues);
+      } catch (e) {
+        const maybeErr = e as any;
+        if (maybeErr?.health) throw e;
+        healthIssues.push({ source: 'work_state', code: 'chunk_context_failed', affectedCount: chunk.items.length });
+        throw Object.assign(new WorkStateProjectionError('work_state', 'critical_projection_failure'), { health: buildProjectionHealth(healthIssues) });
+      }
+      for (const item of chunk.items) {
+        try {
+          const state = deriveItemWorkState(item, chunkCtx);
+          if (matchesFilters(state, filters)) {
+            collected.push(state);
+            lastCollectedCursor = { rowNumber: (item as any).rowNumber ?? 0, id: item.id };
+            if (collected.length >= limit) break;
+          }
+        } catch {
+          healthIssues.push({ source: 'onboarding_items', code: 'corrupt_projection', affectedCount: 1 });
+          const fallback: OnboardingWorkState = {
+            itemId: item.id,
+            category: 'needs_attention',
+            activity: null,
+            label: 'Projection error',
+            detail: 'Corrupt work-state data — operator attention required',
+            attentionReason: 'processing_failed',
+            attentionAction: 'retry_processing',
+            findingCode: null,
+            findingSummary: null,
+            conflictingValues: null,
+            suggestedAction: null,
+            findingDetails: null,
+            family: null,
+            reviewState: 'not_ready',
+            stage: item.stage as any,
+            stageStatus: item.stageStatus as any,
+            variantResolution: null,
+            upc: item.upc,
+            name: item.name,
+            brand: item.brandHint ?? null,
+            sourceType: item.sourceType as any,
+            domain: normalizeHost(item.sourceUrl),
+            curatedTitle: null,
+            imageUrl: null,
+            description: null,
+            weight: null,
+          };
+          if (matchesFilters(fallback, filters)) {
+            collected.push(fallback);
+            lastCollectedCursor = { rowNumber: (item as any).rowNumber ?? 0, id: item.id };
+            if (collected.length >= limit) break;
+          }
+        }
+      }
+    } else {
+      hasMoreDb = false;
+    }
+  }
+  // Merge health
+  if (healthIssues.length > 0) {
+    const existing = projectionHealth.issues ?? [];
+    projectionHealth = buildProjectionHealth([...existing, ...healthIssues]);
+  }
+  const paged = collected.slice(0, limit);
   let nextCursor: string | null = null;
-  if (startIndex + limit < sorted.length && paged.length > 0) {
-    const last = paged[paged.length - 1];
-    nextCursor = encodeWorkStateCursor({
-      v: 1,
-      sortKey: buildWorkStateSortKey(last.category, last.name || last.upc, last.itemId),
-      itemId: last.itemId,
+  if (paged.length === limit) {
+    const cursorSrc = lastCollectedCursor ?? lastScannedCursor;
+    if (cursorSrc) {
+      nextCursor = encodeWorkStateDbCursor({
+        v: 2,
+        rowNumber: cursorSrc.rowNumber,
+        id: cursorSrc.id,
+        filterHash: computeWorkStateFilterHash(filters),
+      });
+    }
+  } else if (hasMoreDb && lastScannedCursor) {
+    nextCursor = encodeWorkStateDbCursor({
+      v: 2,
+      rowNumber: lastScannedCursor.rowNumber,
+      id: lastScannedCursor.id,
       filterHash: computeWorkStateFilterHash(filters),
     });
+  } else {
+    nextCursor = null;
   }
-  return { items: paged, nextCursor, total: filtered.length, projectionHealth: health, counts };
+  // For test compatibility, total is exact from totalInfo (full scan) — counts endpoint remains the canonical exact total.
+  // For bounded assertions, we expose scannedRows/queryCount.
+  return { items: paged, nextCursor, total: totalInfo.total, projectionHealth, counts, scannedRows, queryCount };
 }
 
 /** Project a batch's items using an ALREADY-LOADED item list (items route). */

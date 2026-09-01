@@ -474,6 +474,30 @@ export function findExtractionDataByWorkspaceAndUpc(workspaceId: string, upc: st
   return { extractionDataJson: row.extraction_data_json, brandHint: row.brand_hint };
 }
 
+export function listItemsByBatchChunked(
+  batchId: string,
+  limit: number,
+  cursor?: { rowNumber: number; id: string } | null,
+): { items: OnboardingItem[]; lastCursor: { rowNumber: number; id: string } | null; hasMore: boolean } {
+  const db = getDb();
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+  let rows: OnboardingItemRow[];
+  if (!cursor) {
+    rows = db.query(
+      'SELECT * FROM onboarding_items WHERE batch_id = ? ORDER BY row_number, id LIMIT ?',
+    ).all(batchId, safeLimit + 1) as OnboardingItemRow[];
+  } else {
+    rows = db.query(
+      'SELECT * FROM onboarding_items WHERE batch_id = ? AND (row_number > ? OR (row_number = ? AND id > ?)) ORDER BY row_number, id LIMIT ?',
+    ).all(batchId, cursor.rowNumber, cursor.rowNumber, cursor.id, safeLimit + 1) as OnboardingItemRow[];
+  }
+  const hasMore = rows.length > safeLimit;
+  const pageRows = hasMore ? rows.slice(0, safeLimit) : rows;
+  const items = pageRows.map(mapRowToItem);
+  const lastCursor = pageRows.length > 0 ? { rowNumber: pageRows[pageRows.length - 1].row_number, id: pageRows[pageRows.length - 1].id } : null;
+  return { items, lastCursor, hasMore };
+}
+
 export function listItemsByBatch(
   batchId: string,
   statusFilter?: ItemStatus | ItemStatus[],

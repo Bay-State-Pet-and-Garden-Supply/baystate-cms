@@ -16,13 +16,15 @@ import type { CohortListResponse } from '../../shared/schemas/cohorts';
 
 vi.mock('../../client/onboarding-work-api', () => ({
   getBatchWorkState: vi.fn(),
+  getBatchWorkStateCounts: vi.fn(),
+  getBatchWorkStateItems: vi.fn(),
   subscribeBatchEvents: vi.fn(() => () => {}),
 }));
 vi.mock('../../client/onboarding-api', () => ({
   getBatchCohorts: vi.fn(),
 }));
 
-import { getBatchWorkState, subscribeBatchEvents } from '../../client/onboarding-work-api';
+import { getBatchWorkState, subscribeBatchEvents, getBatchWorkStateCounts, getBatchWorkStateItems } from '../../client/onboarding-work-api';
 import { getBatchCohorts } from '../../client/onboarding-api';
 import { ProcessingView } from '../../client/components/onboarding/processing/ProcessingView';
 import { FamilyWaitingView } from '../../client/components/onboarding/families/FamilyWaitingView';

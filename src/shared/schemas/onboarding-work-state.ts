@@ -356,6 +356,22 @@ export const WorkStateCursorPayloadSchema = z
   })
   .strict();
 
+export interface WorkStateDbCursorPayload {
+  v: 2;
+  rowNumber: number;
+  id: string;
+  filterHash: string;
+}
+
+export const WorkStateDbCursorPayloadSchema = z
+  .object({
+    v: z.literal(2),
+    rowNumber: z.number().int().nonnegative(),
+    id: z.string(),
+    filterHash: z.string().regex(/^[a-f0-9]{16,64}$/),
+  })
+  .strict();
+
 export class WorkStateCursorError extends Error {
   constructor(
     message: string,
@@ -415,6 +431,65 @@ export function validateWorkStateCursor(
     );
   }
   return payload;
+}
+
+export function encodeWorkStateDbCursor(payload: WorkStateDbCursorPayload): string {
+  const json = JSON.stringify(payload);
+  return Buffer.from(json, 'utf8').toString('base64url');
+}
+
+export function decodeWorkStateDbCursor(cursor: string): WorkStateDbCursorPayload {
+  try {
+    const json = Buffer.from(cursor, 'base64url').toString('utf8');
+    const parsed = JSON.parse(json);
+    const result = WorkStateDbCursorPayloadSchema.safeParse(parsed);
+    if (!result.success) {
+      throw new WorkStateCursorError('Invalid cursor schema', 'malformed_cursor');
+    }
+    return result.data;
+  } catch (err) {
+    if (err instanceof WorkStateCursorError) throw err;
+    throw new WorkStateCursorError(
+      `Malformed work-state cursor: ${err instanceof Error ? err.message : String(err)}`,
+      'malformed_cursor',
+    );
+  }
+}
+
+export function validateWorkStateDbCursor(
+  cursor: string,
+  currentFilters: WorkStateFilters,
+): WorkStateDbCursorPayload {
+  const payload = decodeWorkStateDbCursor(cursor);
+  const expectedHash = computeWorkStateFilterHash(currentFilters);
+  if (payload.filterHash !== expectedHash) {
+    throw new WorkStateCursorError(
+      'Cursor filter hash does not match current query filters',
+      'filter_mismatch',
+    );
+  }
+  return payload;
+}
+
+/** Try DB cursor first, then legacy sortKey cursor; throws WorkStateCursorError on failure. */
+export function decodeAnyWorkStateCursor(cursor: string): WorkStateCursorPayload | WorkStateDbCursorPayload {
+  try {
+    return decodeWorkStateDbCursor(cursor);
+  } catch {
+    return decodeWorkStateCursor(cursor);
+  }
+}
+
+export function validateAnyWorkStateCursor(
+  cursor: string,
+  currentFilters: WorkStateFilters,
+): WorkStateCursorPayload | WorkStateDbCursorPayload {
+  try {
+    return validateWorkStateDbCursor(cursor, currentFilters);
+  } catch (e) {
+    if (e instanceof WorkStateCursorError && e.code === 'filter_mismatch') throw e;
+    return validateWorkStateCursor(cursor, currentFilters);
+  }
 }
 
 const WORK_STATE_CATEGORY_ORDER: Record<string, number> = {

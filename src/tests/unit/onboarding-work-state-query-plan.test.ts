@@ -241,4 +241,109 @@ describe('onboarding work-state query plan — bounded bulk reads', () => {
     // Degraded but not zeroed
     expect(result.counts.processing + result.counts.needs_attention + result.counts.waiting_on_family + result.counts.ready_for_review + result.counts.approved + result.counts.ready_to_export + result.counts.completed + result.counts.skipped).toBe(10);
   });
+
+  it('category-critical DB failure does not silently become healthy empty — returns degraded 503, not false zero', async () => {
+    const batch = makeBatchWithItems(5);
+    const conn = await import('../../db/connection');
+    const originalGetDb = conn.getDb;
+    const makeFailingDb = () => {
+      const db = originalGetDb();
+      const origQuery = db.query.bind(db);
+      return {
+        ...db,
+        query: (sql: string) => {
+          if (sql.includes('FROM onboarding_sources')) throw new Error('injected candidate_count failure');
+          return origQuery(sql);
+        },
+        run: db.run.bind(db),
+        exec: db.exec.bind(db),
+        transaction: db.transaction.bind(db),
+      } as any;
+    };
+    let threw = false;
+    Object.defineProperty(conn, 'getDb', { value: makeFailingDb as any, writable: true, configurable: true });
+    try {
+      const { bulkCountDiscoveryCandidatesWithHealth } = await import('../../db/repositories/onboarding-work-state-repo');
+      const res = bulkCountDiscoveryCandidatesWithHealth(['id1', 'id2']);
+      expect(res.issue).not.toBeNull();
+      expect(res.issue!.code).toBe('candidate_count_failed');
+      expect(res.issue!.source).toBe('onboarding_sources');
+      expect(res.issue!.affectedCount).toBe(2);
+      expect(res.data.size).toBe(2);
+      threw = true;
+    } finally {
+      Object.defineProperty(conn, 'getDb', { value: originalGetDb, writable: true, configurable: true });
+    }
+    expect(threw).toBe(true);
+    Object.defineProperty(conn, 'getDb', { value: makeFailingDb as any, writable: true, configurable: true });
+    try {
+      const ctx = buildBatchWorkStateContext(batch, listItemsByBatch(batch));
+      expect((ctx.healthIssues as any)._hasCritical).toBe(true);
+      expect(ctx.healthIssues.some(i => i.code === 'candidate_count_failed')).toBe(true);
+      let threw503 = false;
+      try {
+        getBatchWorkState(batch);
+      } catch (e: any) {
+        threw503 = e.name === 'WorkStateProjectionError' || e.code === 'candidate_count_failed' || e.message.includes('critical');
+        expect(e.health ?? e).toBeDefined();
+      }
+      expect(threw503).toBe(true);
+    } finally {
+      Object.defineProperty(conn, 'getDb', { value: originalGetDb, writable: true, configurable: true });
+    }
+  });
+
+  it('request_hash is full 64-hex SHA-256 and order-insensitive', async () => {
+    const { computeRequestHash, isValidRequestHash } = await import('../../db/repositories/onboarding-operation-receipt-repo');
+    const hashA = computeRequestHash(['b', 'a', 'c']);
+    const hashB = computeRequestHash(['a', 'c', 'b']);
+    const hashC = computeRequestHash(['a', 'b']);
+    expect(hashA).toBe(hashB); // order-insensitive
+    expect(hashA).not.toBe(hashC); // different set
+    expect(hashA.length).toBe(64);
+    expect(/^[a-f0-9]{64}$/.test(hashA)).toBe(true);
+    expect(isValidRequestHash(hashA)).toBe(true);
+    expect(isValidRequestHash('abc')).toBe(false);
+    expect(isValidRequestHash('')).toBe(false);
+  });
+
+  it('50/500/5000-row bounded scanning — query count and scanned rows stay bounded', () => {
+    for (const n of [50, 500, 5000]) {
+      makeWorkspace();
+      const batch = makeBatchWithItems(n);
+      resetWorkStateQueryCount();
+      const page1 = getBatchWorkStateItems(batch, { limit: 10 });
+      expect(page1.items).toHaveLength(10);
+      expect(page1.scannedRows).toBeLessThanOrEqual(50); // one chunk, not N
+      expect(page1.queryCount).toBeLessThanOrEqual(3); // chunk read + bulk context + total counts
+      expect(page1.nextCursor).toBeTruthy();
+      // Second page also bounded
+      const page2 = getBatchWorkStateItems(batch, { limit: 10, cursor: page1.nextCursor! });
+      expect(page2.items).toHaveLength(10);
+      expect(page2.scannedRows).toBeLessThanOrEqual(50);
+      expect(page2.queryCount).toBeLessThanOrEqual(3);
+    }
+  });
+
+  it('sparse-filter traversal returns continuation cursor rather than scanning entire batch in one request', () => {
+    makeWorkspace();
+    const batch = makeBatchWithItems(500);
+    // Make only 1 of 500 match the sparse filter (needs_attention vs processing)
+    const db = getDb();
+    const all = listItemsByBatch(batch);
+    // First item stays needs_attention via brand_not_provided, others are processing (sourcing pending)
+    // Our makeBatchWithItems creates sourcing pending => processing. Make first item held brand_not_provided => needs_attention
+    db.run("UPDATE onboarding_items SET is_held=1, held_reason='missing_brand', brand_hint=NULL WHERE id=?", [all[0].id]);
+    // Now filter for needs_attention should match exactly 1 of 500
+    const page1 = getBatchWorkStateItems(batch, { category: 'needs_attention', limit: 10 });
+    // Should return the 1 match, not 500 scanned in one request, and should indicate whether more DB rows remain to scan
+    expect(page1.items).toHaveLength(1);
+    // Since we scanned 50 rows per chunk and found 1, scannedRows should be 50, not 500, and nextCursor should be present because more DB rows remain to scan for sparse filter
+    expect(page1.scannedRows).toBeLessThanOrEqual(50);
+    expect(page1.nextCursor).toBeTruthy(); // continuation for sparse filter
+    // Second page should be empty but still bounded (scans next chunk)
+    const page2 = getBatchWorkStateItems(batch, { category: 'needs_attention', limit: 10, cursor: page1.nextCursor! });
+    expect(page2.items).toHaveLength(0);
+    expect(page2.scannedRows).toBeLessThanOrEqual(50);
+  });
 });

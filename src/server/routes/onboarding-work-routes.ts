@@ -26,14 +26,16 @@ import {
   type WorkStateFilters,
 } from '../../onboarding/onboarding-work-state';
 import { WorkStateCursorError } from '../../shared/schemas/onboarding-work-state';
+import { WorkStateProjectionError } from '../../db/repositories/onboarding-work-state-repo';
+import { buildProjectionHealth } from '../../onboarding/onboarding-work-state';
 import { getBatchReviewQueue } from '../../onboarding/onboarding-review-queue';
 import {
   ReviewQueueCursorError,
   ReviewQueueFiltersSchema,
 } from '../../shared/schemas/onboarding-review-queue';
-import { getReviewState, approveAndAdvanceItems } from '../../db/repositories/onboarding-review-repo';
+import { getReviewState, approveAndAdvanceItems, createExportDraftsWithReceipt } from '../../db/repositories/onboarding-review-repo';
 import { findByScopedIdempotencyKey, computeRequestHash } from '../../db/repositories/onboarding-operation-receipt-repo';
-import { derivePrincipal } from '../authenticated-principal';
+import { derivePrincipal, derivePrincipalForOperation } from '../authenticated-principal';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
@@ -134,6 +136,10 @@ route.get('/onboarding/batches/:id/work-state', async (c) => {
     if (err instanceof WorkStateCursorError) {
       return c.json({ error: err.message, code: err.code }, 400);
     }
+    if (err instanceof WorkStateProjectionError) {
+      const health = (err as any).health ?? buildProjectionHealth([{ source: (err as WorkStateProjectionError).source, code: (err as WorkStateProjectionError).code, affectedCount: 1 }]);
+      return c.json({ error: 'projection_failed', code: (err as WorkStateProjectionError).code, projectionHealth: health }, 503);
+    }
     throw err;
   }
 });
@@ -153,16 +159,23 @@ route.get('/onboarding/batches/:id/work-state/counts', async (c) => {
     return c.json({ error: 'Batch not found' }, 404);
   }
   const filters = parseWorkStateFilters(c);
-  // Counts ignores cursor/limit/offset — but we validate filter enums
-  const countsPayload = getBatchWorkStateCountsWithHealth(batchId, {
-    category: filters.category,
-    q: filters.q,
-    domain: filters.domain,
-    sourceType: filters.sourceType,
-    cohortId: filters.cohortId,
-    reviewState: filters.reviewState,
-  });
-  return c.json({ batchId, ...countsPayload });
+  try {
+    const countsPayload = getBatchWorkStateCountsWithHealth(batchId, {
+      category: filters.category,
+      q: filters.q,
+      domain: filters.domain,
+      sourceType: filters.sourceType,
+      cohortId: filters.cohortId,
+      reviewState: filters.reviewState,
+    });
+    return c.json({ batchId, ...countsPayload });
+  } catch (err) {
+    if (err instanceof WorkStateProjectionError) {
+      const health = (err as any).health ?? buildProjectionHealth([{ source: (err as WorkStateProjectionError).source, code: (err as WorkStateProjectionError).code, affectedCount: 1 }]);
+      return c.json({ error: 'projection_failed', code: (err as WorkStateProjectionError).code, projectionHealth: health }, 503);
+    }
+    throw err;
+  }
 });
 
 /**
@@ -186,6 +199,10 @@ route.get('/onboarding/batches/:id/work-state/items', async (c) => {
   } catch (err) {
     if (err instanceof WorkStateCursorError) {
       return c.json({ error: err.message, code: err.code }, 400);
+    }
+    if (err instanceof WorkStateProjectionError) {
+      const health = (err as any).health ?? buildProjectionHealth([{ source: (err as WorkStateProjectionError).source, code: (err as WorkStateProjectionError).code, affectedCount: 1 }]);
+      return c.json({ error: 'projection_failed', code: (err as WorkStateProjectionError).code, projectionHealth: health }, 503);
     }
     console.error('[WorkState] Unexpected error in getBatchWorkStateItems:', err);
     return c.json({ error: 'Failed to generate work-state projection' }, 500);
@@ -501,7 +518,86 @@ route.post('/onboarding/batches/:id/approve', async (c) => {
   const approvedCount = advancedIds.length;
   const rejectedCount = rejected.length;
 
+  // Batch audit already done inside transaction with finalRejected; also ensure idempotency replay handled
   return c.json({ results, approvedCount, rejectedCount, rejected, audited: true, receiptId, principal: principal.actor });
+});
+
+/**
+ * POST /api/onboarding/batches/:id/create-export-drafts
+ * Separate export-draft operation with its own idempotency lifecycle (P1-D item 5).
+ * Requires catalog_exporter, revalidates durable approval immediately before draft mutation, never auto-approves.
+ */
+route.post('/onboarding/batches/:id/create-export-drafts', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) return c.json({ error: 'No active workspace loaded' }, 400);
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) return c.json({ error: 'Batch not found' }, 404);
+  if (batch.workspaceId !== workspace.id) return c.json({ error: 'Batch not found' }, 404);
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body.' }, 400); }
+  const parsed = ApproveItemsRequestSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'Invalid export draft payload.', issues: parsed.error.issues }, 400);
+  const principal = derivePrincipalForOperation(c, 'export');
+  if (!principal) return c.json({ error: 'Unauthorized', code: 'unauthorized' }, 401);
+  if (principal.role !== 'catalog_exporter' && principal.role !== 'system') return c.json({ error: 'Forbidden', code: 'forbidden' }, 403);
+  const idempotencyKey = c.req.header('Idempotency-Key') ?? c.req.header('idempotency-key') ?? null;
+  const originalHash = computeRequestHash(parsed.data.itemIds);
+  if (idempotencyKey) {
+    const existing = findByScopedIdempotencyKey(workspace.id, batchId, 'export', idempotencyKey);
+    if (existing) {
+      if (existing.requestHash !== originalHash) return c.json({ error: 'payload_mismatch', code: 'payload_mismatch', receiptId: existing.id }, 409);
+      if (existing.status === 'started' && !existing.detailsJson) return c.json({ error: 'operation_in_progress', code: 'operation_in_progress', receiptId: existing.id }, 409);
+      if (existing.detailsJson) {
+        try { const stored = JSON.parse(existing.detailsJson); if (stored.receiptId && Array.isArray(stored.results)) return c.json(stored); } catch {}
+        // Fallback: return stored details
+        try { const stored = JSON.parse(existing.detailsJson); return c.json({ ...stored, receiptId: existing.id }); } catch {}
+      }
+    }
+  }
+  // Pre-validation (fail-closed reasons, no mutation yet)
+  const preRejected: Array<{ itemId: string; reason: string }> = [];
+  const validIds: string[] = [];
+  for (const id of parsed.data.itemIds) {
+    const item = findItemById(id);
+    if (!item) { preRejected.push({ itemId: id, reason: 'item_not_found' }); continue; }
+    if (item.batchId !== batchId) { preRejected.push({ itemId: id, reason: 'item_not_in_batch' }); continue; }
+    validIds.push(id);
+  }
+  try {
+    const res = createExportDraftsWithReceipt({
+      itemIds: validIds,
+      batchId,
+      requestedBy: principal.actor,
+      principal: principal.actor,
+      role: principal.role,
+      idempotencyKey,
+      workspaceId: workspace.id,
+      requestHash: originalHash,
+      preRejected,
+    });
+    // Build response envelope matching approve shape but with export lifecycle fields
+    const finalRejected = [...preRejected, ...res.rejected];
+    const results = [
+      ...res.created.map(itemId => ({ itemId, status: 'created' as const, reason: null })),
+      ...finalRejected.map(r => ({ itemId: r.itemId, status: 'rejected' as const, reason: r.reason })),
+    ];
+    return c.json({
+      results,
+      createdCount: res.created.length,
+      rejectedCount: finalRejected.length,
+      rejected: finalRejected,
+      created: res.created,
+      changeSetId: res.changeSetId,
+      audited: true,
+      receiptId: res.receiptId,
+      principal: principal.actor,
+    });
+  } catch (e: any) {
+    if (e?.code === 'payload_mismatch') return c.json({ error: 'payload_mismatch', code: 'payload_mismatch', receiptId: e.existingReceiptId }, 409);
+    if (e?.code === 'operation_in_progress') return c.json({ error: 'operation_in_progress', code: 'operation_in_progress', receiptId: e.existingReceiptId }, 409);
+    throw e;
+  }
 });
 
 /**

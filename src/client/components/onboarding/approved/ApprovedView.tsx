@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OnboardingWorkState, ApproveItemsResponse } from '../../../../shared/schemas/onboarding-work-state';
-import { getBatchWorkState, approveItems, subscribeBatchEvents } from '../../../onboarding-work-api';
+import { getBatchWorkState, getBatchWorkStateCounts, approveItems, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { ExportActions } from './ExportActions';
 import { ApprovedQueue } from './ApprovedQueue';
 import {
@@ -37,6 +37,7 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
   const [result, setResult] = useState<ApproveItemsResponse | null>(null);
   const [showApproveAllConfirm, setShowApproveAllConfirm] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [isDegraded, setIsDegraded] = useState(false);
 
   const loadEligible = useCallback(async () => {
     try {
@@ -56,6 +57,11 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
       }
       setEligible(collected);
       setSelection(prev => pruneSelection(prev, collected.map(it => it.itemId)));
+      // Health check for disable
+      try {
+        const healthRes = await getBatchWorkStateCounts(batchId);
+        setIsDegraded(healthRes.projectionHealth?.status === 'degraded');
+      } catch { setIsDegraded(false); }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -228,12 +234,12 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
           <ExportActions
             primaryLabel={`Approve selected (${selectedCount})`}
             secondaryLabel="Approve all reviewed"
-            primaryDisabled={selectedCount === 0}
-            secondaryDisabled={busy}
+            primaryDisabled={selectedCount === 0 || isDegraded}
+            secondaryDisabled={busy || isDegraded}
             busy={busy}
             onPrimary={() => executeApproval(selection.selectedIds)}
             onSecondary={() => setShowApproveAllConfirm(true)}
-            hint={hint}
+            hint={isDegraded ? 'Projection degraded — cannot approve' : hint}
           />
 
           <ApprovedQueue

@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
-import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-work-api';
+import { getBatchWorkState, getBatchWorkStateCounts, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { promoteBatchItems } from '../../../onboarding-api';
 import { ExportActions } from './ExportActions';
 import { exportStatusPresentation } from './approved-logic';
@@ -35,6 +35,7 @@ export function ReadyToExportView({ batchId }: ReadyToExportViewProps) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [draftResult, setDraftResult] = useState<{ count: number; changeSetId: string | null } | null>(null);
+  const [isDegraded, setIsDegraded] = useState(false);
 
   const loadSections = useCallback(async () => {
     try {
@@ -57,6 +58,10 @@ export function ReadyToExportView({ batchId }: ReadyToExportViewProps) {
       setBySection(next);
       const validIds = new Set([...next.approved].map(it => it.itemId));
       setSelectedIds(prev => prev.filter(id => validIds.has(id)));
+      try {
+        const healthRes = await getBatchWorkStateCounts(batchId);
+        setIsDegraded(healthRes.projectionHealth?.status === 'degraded');
+      } catch { setIsDegraded(false); }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -203,13 +208,13 @@ export function ReadyToExportView({ batchId }: ReadyToExportViewProps) {
             {section === 'approved' && (
               <ExportActions
                 primaryLabel={`Create export drafts (${selectedIds.length})`}
-                primaryDisabled={selectedIds.length === 0}
+                primaryDisabled={selectedIds.length === 0 || isDegraded}
                 secondaryLabel={allApprovedSelected ? 'Deselect all' : `Select all (${items.length})`}
-                secondaryDisabled={items.length === 0}
+                secondaryDisabled={items.length === 0 || isDegraded}
                 busy={busy}
                 onPrimary={createDrafts}
                 onSecondary={toggleAllApproved}
-                hint={selectedIds.length === 0 ? 'Select approved products to create export drafts.' : undefined}
+                hint={isDegraded ? 'Projection degraded — cannot create drafts' : selectedIds.length === 0 ? 'Select approved products to create export drafts.' : undefined}
               />
             )}
 

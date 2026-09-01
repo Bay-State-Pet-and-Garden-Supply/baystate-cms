@@ -288,6 +288,23 @@ export default defineConfig({
       'src/tests/unit/profile-engineer-workflow-repo.test.ts',
       'src/tests/unit/official-page-identity-benchmark.test.ts',
       'src/tests/unit/review-queue-routes-adversarial.test.ts',
+      // Milestone 3 bounded work-state (bun:sqlite/bun:test — run under bun test via test:db)
+      'src/tests/unit/onboarding-work-state-query-plan.test.ts',
+      'src/tests/unit/onboarding-work-routes.test.ts',
+      // Milestone 4 operation receipts (bun:sqlite/bun:test — run under bun test)
+      'src/tests/unit/onboarding-operation-receipt-migration.test.ts',
+      'src/tests/unit/onboarding-operation-idempotency.test.ts',
+      'src/tests/unit/onboarding-approval-export-ui.test.tsx',
+      // Milestone 5 lossless identity (bun:sqlite — run under bun test)
+      'src/tests/unit/onboarding-imported-identity-migration.test.ts',
+      // Milestone 6 hash stability & page verifier (bun:sqlite/bun:test)
+      'src/tests/unit/hash-stability-characterization.test.ts',
+      'src/tests/unit/m2-challenger-stress.test.ts',
+      'src/tests/unit/page-verifier.test.ts',
+      'src/tests/unit/review-queue-adversarial.test.ts',
+      'src/tests/unit/review-queue-schema.test.ts',
+      'src/tests/unit/review-workspace-challenger-stress.test.tsx',
+      'src/tests/unit/review-workspace-loading.test.tsx',
     ],
   },
 });

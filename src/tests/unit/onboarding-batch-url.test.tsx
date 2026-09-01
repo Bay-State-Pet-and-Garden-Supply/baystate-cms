@@ -19,6 +19,8 @@ vi.mock('../../client/onboarding-api', () => ({
 
 vi.mock('../../client/onboarding-work-api', () => ({
   getBatchWorkState: vi.fn(),
+  getBatchWorkStateCounts: vi.fn(),
+  getBatchWorkStateItems: vi.fn(),
   subscribeBatchEvents: vi.fn(() => () => {}),
   getItemWorkState: vi.fn(),
   getNeedsAttentionItems: vi.fn(),
@@ -35,7 +37,7 @@ import {
   getBrandSites,
   getOnboardingCapabilities,
 } from '../../client/onboarding-api';
-import { getBatchWorkState } from '../../client/onboarding-work-api';
+import { getBatchWorkState, getBatchWorkStateCounts, getBatchWorkStateItems } from '../../client/onboarding-work-api';
 
 describe('Onboarding Batch URL Persistence', () => {
   let container: HTMLDivElement;
@@ -149,7 +151,40 @@ describe('Onboarding Batch URL Persistence', () => {
       },
       items: [],
       total: 10,
-    });
+      projectionHealth: { status: 'healthy', version: '1.0.0', computedAt: new Date().toISOString(), issues: [] },
+    } as any);
+    vi.mocked(getBatchWorkStateCounts).mockResolvedValue({
+      batchId: 'batch-1',
+      counts: {
+        needs_attention: 1,
+        processing: 2,
+        waiting_on_family: 0,
+        ready_for_review: 3,
+        approved: 4,
+        ready_to_export: 0,
+        completed: 0,
+        skipped: 0,
+      },
+      total: 10,
+      projectionHealth: { status: 'healthy', version: '1.0.0', computedAt: new Date().toISOString(), issues: [] },
+    } as any);
+    vi.mocked(getBatchWorkStateItems).mockResolvedValue({
+      batchId: 'batch-1',
+      items: [],
+      nextCursor: null,
+      total: 10,
+      projectionHealth: { status: 'healthy', version: '1.0.0', computedAt: new Date().toISOString(), issues: [] },
+      counts: {
+        needs_attention: 1,
+        processing: 2,
+        waiting_on_family: 0,
+        ready_for_review: 3,
+        approved: 4,
+        ready_to_export: 0,
+        completed: 0,
+        skipped: 0,
+      },
+    } as any);
   });
 
   afterEach(() => {
