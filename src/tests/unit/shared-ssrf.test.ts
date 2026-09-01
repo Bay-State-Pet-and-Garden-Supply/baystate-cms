@@ -40,6 +40,24 @@ describe('shared ssrf classifier', () => {
     expect(classifyIp('::ffff:8.8.8.8')).toBe('public');
   });
 
+  it('handles alternate IPv6 encodings (zero-padded, unique-local, site-local)', () => {
+    // Zero-padded loopback & unspecified
+    expect(classifyIp('0000:0000:0000:0000:0000:0000:0000:0001')).toBe('link_local');
+    expect(classifyIp('0:0:0:0:0:0:0:1')).toBe('link_local');
+    expect(classifyIp('0000:0000:0000:0000:0000:0000:0000:0000')).toBe('link_local');
+
+    // Full-length IPv4-mapped IPv6
+    expect(classifyIp('0:0:0:0:0:ffff:127.0.0.1')).toBe('private');
+    expect(classifyIp('0000:0000:0000:0000:0000:ffff:192.168.1.1')).toBe('private');
+    expect(classifyIp('0:0:0:0:0:ffff:8.8.8.8')).toBe('public');
+
+    // Unique-local fc00::/7 & link/site-local
+    expect(classifyIp('fc00::1')).toBe('private');
+    expect(classifyIp('fd00::1')).toBe('private');
+    expect(classifyIp('fe80:0:0:0:0:0:0:1')).toBe('private');
+    expect(classifyIp('fec0::1')).toBe('private');
+  });
+
   it('classifies public addresses', () => {
     expect(classifyIp('8.8.8.8')).toBe('public');
     expect(classifyIp('2606:4700::1111')).toBe('public');
