@@ -883,7 +883,7 @@ The test itself should own cleanup; the explicit `rm` is limited to this known `
 # Historical env commands are non-executable — use Vitest -t targeting real test names:
 bunx vitest run src/tests/unit/source-discovery-variant-resolution.test.ts -t "mode off is byte-compatible"
 bunx vitest run src/tests/unit/source-discovery-variant-resolution.test.ts -t "observe records diagnostics"
-bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t "8-step cohort"
+bun test src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t "8-step cohort"
 bunx vitest run src/tests/unit/variant-interaction.test.ts
 # To simulate off/observe in tests, use overrideVariantFlags({mode:'off'}) within test file, not shell
 ```
