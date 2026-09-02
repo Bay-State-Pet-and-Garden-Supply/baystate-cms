@@ -344,8 +344,17 @@ function tokenizeName(name: string, domainBaseName?: string | null): string[] {
  * Performance optimization:
  * Fast string slicing avoids constructing a WHATWG `URL` object (~4x faster execution
  * and zero heap allocations for object parsing).
+ *
+ * Contract: sitemap `<loc>` candidates are absolute URLs (sitemaps.org spec;
+ * `sitemap-fetcher` guarantees this). The fast path is only valid for
+ * absolute `http(s)://` URLs. This intentionally differs from
+ * `new URL(...)` for relative URLs, protocol-relative URLs (`//cdn/...`),
+ * dot segments (`/a/./b/../c`), and malformed inputs — those inputs
+ * never occur in the sitemap pipeline and are handled via a raw-string
+ * fallback for robustness. See `sitemap-matcher.test.ts` regression
+ * coverage for the parity cases.
  */
-function extractSlug(url: string): string {
+export function extractSlug(url: string): string {
   if (!url) return '';
   let path = url;
   const protoIdx = path.indexOf('://');

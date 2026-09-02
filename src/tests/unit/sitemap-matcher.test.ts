@@ -23,7 +23,7 @@ import {
   upsertLlmTaskConfig,
 } from '../../db/repositories/llm-task-config-repo';
 import { buildModelPolicyView } from '../../classification/model-policy-gateway';
-import { matchSitemapUrls } from '../../onboarding/sitemap-matcher';
+import { matchSitemapUrls, extractSlug } from '../../onboarding/sitemap-matcher';
 import * as llmClient from '../../onboarding/llm-client';
 
 describe('Sitemap Matcher', () => {
@@ -561,5 +561,90 @@ describe('Sitemap Matcher', () => {
     expect(calls.length).toBe(0);
     expect(result.every(r => r.matchType === 'token_overlap')).toBe(true);
     expect(result[0].url).toBe('https://mywoof.com/products/poomergency');
+  });
+
+  // ── extractSlug regression: fast string slicing vs WHATWG URL ─────────
+  // Contract: sitemap <loc> candidates are absolute URLs (sitemaps.org spec).
+  // The optimized `extractSlug` uses manual string slicing for speed and is
+  // only guaranteed for absolute http(s):// URLs. For relative /
+  // protocol-relative / malformed inputs the behavior intentionally diverges
+  // from `new URL(...)` — those inputs never occur in the sitemap pipeline.
+  describe('extractSlug — absolute-URL contract and edge cases', () => {
+    test('absolute URL: extracts last segment and strips known extensions', () => {
+      expect(extractSlug('https://example.com/products/poomergency.html')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency.htm')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency.php')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency.aspx')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency.HTML')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency')).toBe('poomergency');
+    });
+
+    test('trailing slash, query, and hash are stripped before segment extraction', () => {
+      expect(extractSlug('https://example.com/products/poomergency/')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency///')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency.html?foo=1')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency.html#section')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency?x=1#y')).toBe('poomergency');
+      expect(extractSlug('https://example.com/products/poomergency/?x=1')).toBe('poomergency');
+    });
+
+    test('domain-only or root path falls back to "/"', () => {
+      expect(extractSlug('https://example.com')).toBe('/');
+      expect(extractSlug('https://example.com/')).toBe('/');
+      expect(extractSlug('https://example.com/?q=1')).toBe('/');
+      expect(extractSlug('https://example.com#hash')).toBe('/');
+    });
+
+    test('absolute URLs with auth, port, IPv6 preserve slug extraction', () => {
+      expect(extractSlug('https://user:pass@example.com:8080/products/foo.html')).toBe('foo');
+      expect(extractSlug('https://[::1]/products/foo.html')).toBe('foo');
+      expect(extractSlug('http://192.168.1.10:3000/p/bar.php')).toBe('bar');
+    });
+
+    test('empty input returns empty string (vs WHATWG throw -> raw)', () => {
+      expect(extractSlug('')).toBe('');
+      expect(extractSlug('   ')).toBe('   ');
+    });
+
+    test('relative URL: fast path differs from new URL but is intentionally tolerated', () => {
+      // new URL('/products/foo.html?x=1') throws without base and would return the raw string.
+      // The fast path treats it as a path and correctly extracts the slug — acceptable because
+      // sitemap <loc> values are never relative.
+      expect(extractSlug('/products/foo.html')).toBe('foo');
+      expect(extractSlug('/products/foo.html?x=1#h')).toBe('foo');
+      expect(extractSlug('products/foo.html')).toBe('foo');
+    });
+
+    test('protocol-relative URL: manual slicing extracts slug while new URL would throw', () => {
+      expect(extractSlug('//cdn.example.com/products/foo.html')).toBe('foo');
+      expect(extractSlug('//cdn.example.com/products/foo.html?x=1')).toBe('foo');
+    });
+
+    test('dot segments: fast path preserves raw segment, WHATWG would normalize', () => {
+      // Fast path does NOT normalize dot segments; WHATWG pathname would resolve /a/./b/../c to /a/c.
+      // Both yield the same last segment for simple cases, but the distinction is documented here.
+      expect(extractSlug('https://example.com/a/./b/../c/foo.html')).toBe('foo');
+      // Trailing "/./" — both implementations return "." because "." is the last non-empty segment.
+      expect(extractSlug('https://example.com/a/b/./')).toBe('.');
+    });
+
+    test('malformed input falls back to raw string handling', () => {
+      expect(extractSlug('not a url')).toBe('not a url');
+      expect(extractSlug('https://')).toBe('/');
+    });
+
+    test('unknown extensions are preserved (only html/php/aspx stripped)', () => {
+      expect(extractSlug('https://example.com/products/foo.json')).toBe('foo.json');
+      expect(extractSlug('https://example.com/products/foo.xml')).toBe('foo.xml');
+      expect(extractSlug('https://example.com/products/foo.tar.gz')).toBe('foo.tar.gz');
+    });
+
+    test('findUpcExactHit fast path does not change semantics: stripped includes still hits', async () => {
+      const upc = '850067859598';
+      // UPC with dashes should match stripped digits via includes fast path
+      const urls = ['https://mywoof.com/p/850067859598.html', 'https://mywoof.com/products/other'];
+      const result = await matchSitemapUrls(urls, 'Other Product', null, '850-0678-59598', 'mywoof.com');
+      expect(result.some(r => r.url === urls[0])).toBe(true);
+    });
   });
 });
