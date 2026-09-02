@@ -30,8 +30,13 @@ export function materializeSelectedVariant(options: MaterializeOptions): Extract
     const isOptionOnly =
       optionSet.has(normTitle) ||
       (titleTokens.length > 0 && titleTokens.every((t) => optionTokens.has(t)));
-    if (baseTitle && isOptionOnly && !baseTitle.toLowerCase().includes(normTitle)) {
-      out.title = `${baseTitle} - ${variantTitle}`;
+    if (baseTitle && isOptionOnly) {
+      // Preserve product identity for option-only labels; append only if missing
+      if (!baseTitle.toLowerCase().includes(normTitle)) {
+        out.title = `${baseTitle} - ${variantTitle}`;
+      } else {
+        out.title = baseTitle;
+      }
     } else {
       out.title = variantTitle;
     }

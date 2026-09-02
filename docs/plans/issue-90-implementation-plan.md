@@ -204,22 +204,9 @@ Indexes: item/latest, `(onboarding_item_id, identity_matrix_hash)`, and current 
 
 Repository boundaries always parse JSON with the shared schemas. Never persist raw HTML, complete third-party scripts, request headers, or credentials.
 
-### 5.6 Feature flags and rollback
+### 5.6 Feature flags and rollback — deprecated/ignored (always-on follow-up)
 
-Create `src/onboarding/variant-flags.ts` with strict, re-read-per-call parsing and test override support:
-
-- `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=off|observe|active`; absent, empty, whitespace, or malformed => `off`.
-  - `off`: legacy behavior; no extra `.js` request, no durable resolution writes, no variant gate/UI.
-  - `observe`: parse/match and record non-secret metrics/diagnostics only; do not change selected source URL, stage, extraction fields, or operator state. Network use is allowed only through the same guarded, injected transport and fixed fetch budget.
-  - `active`: deep links, selected-variant gate/materialization, durable resolution, and Choose Variant become authoritative.
-- `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false|true`; absent/malformed => false. This is an independent kill switch for Playwright select/click behavior.
-
-Rollback order:
-
-1. Set interaction false (structured resolution continues).
-2. Set resolution mode `observe` (stop mutations, retain diagnostics and table rows).
-3. Set mode `off` (legacy behavior, no new network); do not delete evidence/decisions.
-4. Code rollback is additive: old binaries ignore the new table/optional JSON fields. Do not down-migrate or destroy rows during incident rollback.
+`src/onboarding/variant-flags.ts` now always returns `active` (interaction default-off unless test override) — env `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE` and `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED` are ignored; test overrides retain `off|observe` for isolated unit tests. Real rollback is revert commit `f53fcdc`/`7163062`, not env. Old binaries ignore the new table/optional JSON fields. Do not down-migrate or destroy rows during incident rollback.
 
 ---
 

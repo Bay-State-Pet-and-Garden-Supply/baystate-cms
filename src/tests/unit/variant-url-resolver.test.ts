@@ -278,6 +278,35 @@ describe('resolveVariantsForCandidates integration', () => {
     expect(second.candidates[0].url).toBe('https://honestchew.com/products/antler');
   });
 
+  it('concurrent same-domain 429 throttles to 1 fetch, independent domain still fetches', async () => {
+    __resetVariantDomainRateStateForTests();
+    let callCount = 0;
+    const fetchSpy = vi.fn(async (url: string) => {
+      callCount++;
+      const u = String(url);
+      if (u.includes('honestchew.com')) return new Response('Too Many Requests', { status: 429, headers: { 'retry-after': '60' } }) as any;
+      return new Response(SHOPIFY_HTML_VARIANTS, { status: 200, headers: { 'content-type': 'text/html' } }) as any;
+    });
+    const candidates: InsertSourceData[] = [
+      { url: 'https://honestchew.com/products/a', title: null, domain: 'honestchew.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const },
+      { url: 'https://honestchew.com/products/b', title: null, domain: 'honestchew.com', confidence: 0.89, sourceMethod: 'sitemap_name' as const },
+      { url: 'https://otherbrand.com/products/x', title: null, domain: 'otherbrand.com', confidence: 0.87, sourceMethod: 'sitemap_name' as const },
+    ];
+    const { candidates: result } = await resolveVariantsForCandidates({
+      candidates,
+      upc: '111111111111',
+      rawName: 'HonestChew Antler',
+      expectedName: 'HonestChew Antler',
+      brandHint: 'HonestChew',
+      brandDomains: ['honestchew.com', 'otherbrand.com'],
+      fetchFn: fetchSpy as any,
+    });
+    // First honestchew fetch is 429, same-domain concurrent sibling should be throttled, otherbrand still fetches (cap 3, so 2 honestchew + 1 otherbrand = all 3 eligible, but throttling reduces honestchew to 1)
+    expect(fetchSpy.mock.calls.some((c: any) => String(c[0]).includes('otherbrand.com'))).toBe(true);
+    expect(callCount).toBe(2);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('aborts streaming body without Content-Length when exceeds 5MB', async () => {
     __resetVariantDomainRateStateForTests();
     // Create a stream that yields 6MB without Content-Length

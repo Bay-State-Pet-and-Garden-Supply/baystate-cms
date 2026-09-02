@@ -1,8 +1,8 @@
 # Variant Resolution Rollout Runbook (Issue #90)
 
-## Flags
-- `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=off|observe|active` — default `off`.
-- `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false|true` — default `false`.
+## Flags — deprecated/ignored (always-on since #90 follow-up)
+- `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE` and `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED` are ignored — resolution is always `active` with interaction default-off unless test override.
+- Real rollback is revert commit, not env.
 
 ## Preflight
 1. Stop writer / queue.
@@ -24,10 +24,9 @@
 - Verify 3 distinct BetterBone deep links and payload receipts.
 - Require zero wrong auto-selection in reviewed sample before broadening.
 
-## Rollback
-1. `interaction=false` (structured continues)
-2. `mode=observe` (stop mutations)
-3. `mode=off` (legacy; rows kept, no delete)
+## Rollback — env flags deprecated
+1. Revert commit `f53fcdc`/`7163062` (structured resolution removed; variant rows kept)
+2. No env-based `observe`/`off` — always-on.
 
 ## Smoke checklist
 - `bunx vitest run src/tests/unit/product-url-identity.test.ts src/tests/unit/variant-flags.test.ts src/tests/unit/variant-resolution-schema.test.ts`
