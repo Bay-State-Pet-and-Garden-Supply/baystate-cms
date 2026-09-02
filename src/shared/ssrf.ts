@@ -175,7 +175,7 @@ export function isPrivateOrLinkLocal(address: string): boolean {
  * Shared destination assertion for variant/discovery network boundary.
  * Reused by job-queue and variant-url-resolver to prevent drift.
  * Validates protocol, credentials, port, official-domain, literal IP, and DNS-resolved IPs.
- * Must be called before *every* actual request/redirect hop.
+ * Must be called before *every* actual request/redirect hop. DNS failure/empty strictly fails-closed.
  */
 export async function assertSafeVariantDestination(
   urlStr: string,
@@ -216,32 +216,15 @@ export async function assertSafeVariantDestination(
     return hostLower === nd || hostLower.endsWith('.' + nd);
   });
   if (!allowOk) throw new Error(`SSRF block: host not in official allowlist: ${hostLower}`);
-  // DNS resolution — reject if any resolved address is private/link_local/unknown
-  // Also reject if lookup returns empty (unknown host)
+  // DNS resolution — reject if any resolved address is private/link_local/unknown, strictly fail-closed
   const doLookup = opts.lookup ?? dnsLookup;
   let addrs: Array<{ address: string }>;
   try {
     addrs = (await doLookup(hostLower, { all: true } as any)) as any;
   } catch (e) {
-    // In unit tests (honestchew.com etc. not resolvable), allow allowlisted hosts to proceed when not literal private
-    // Production allowlisted hosts (thebetterbone.com etc.) will resolve; DNS failure there is still fail-closed unless test mode
-    const isTest = process.env.NODE_ENV === 'test' || !!process.env.VITEST;
-    const isAllowlistedForTest = officialDomains.some((d) => {
-      const nd = d.toLowerCase().replace(/^www\./, '').trim();
-      return hostLower === nd || hostLower.endsWith('.' + nd);
-    });
-    if (isTest && isAllowlistedForTest) return;
     throw new Error(`SSRF block: DNS lookup failed for ${hostLower}: ${(e as Error).message}`);
   }
-  if (!addrs || addrs.length === 0) {
-    const isTestEmpty = process.env.NODE_ENV === 'test' || !!process.env.VITEST;
-    const isAllowlistedEmpty = officialDomains.some((d) => {
-      const nd = d.toLowerCase().replace(/^www\./, '').trim();
-      return hostLower === nd || hostLower.endsWith('.' + nd);
-    });
-    if (isTestEmpty && isAllowlistedEmpty) return;
-    throw new Error(`SSRF block: DNS empty for ${hostLower}`);
-  }
+  if (!addrs || addrs.length === 0) throw new Error(`SSRF block: DNS empty for ${hostLower}`);
   for (const a of addrs) {
     const k = classifyIp(a.address);
     if (k !== 'public') throw new Error(`SSRF block: DNS private for ${hostLower} -> ${a.address} (${k})`);
