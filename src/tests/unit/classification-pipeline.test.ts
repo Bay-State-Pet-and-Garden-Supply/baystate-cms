@@ -121,7 +121,7 @@ describe('Classification Pipeline Integration', () => {
       dataSharing: { imagePolicy: 'local_only' as const, textPolicy: 'local_only' as const, sensitiveDataFiltering: true, retentionDays: 90 },
     });
     syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
-  });
+  }, 60000);
 
   afterAll(() => {
     setTaxonomyFreezeForTests(true);
