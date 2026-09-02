@@ -80,6 +80,7 @@ describe('LLM Task Config Repository', () => {
     expect(new Set(LLM_TASKS)).toEqual(
       new Set([
         'product_name_consolidation',
+        'discovery_candidate_selection',
         'profile_generation',
         'profile_revision',
         'product_curation',
