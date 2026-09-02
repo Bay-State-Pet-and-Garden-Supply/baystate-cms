@@ -22,6 +22,7 @@ import { chromium } from 'playwright';
 import { SnapshotRequestSchema, SnapshotResponseSchema } from '../../shared/schemas/extraction-worker';
 import type { SnapshotResponse, InteractionAction } from '../../shared/schemas/extraction-worker';
 import type { NetworkCaptureArtifact } from '../../shared/schemas/extraction-worker';
+import { isPrivateOrLinkLocal } from '../../shared/ssrf';
 import { sha256Hex } from '../../shared/stable-id';
 import { resolveArtifactDir, writeArtifact, generateJobId, extractDomainFromUrl } from '../artifacts';
 
@@ -737,7 +738,7 @@ async function performInteraction(
  * non-http(s) destinations for navigation redirects and captured network
  * responses. Kept self-contained so the worker never imports the gateway.
  */
-function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
+export function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -746,27 +747,10 @@ function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
   const hostname = parsed.hostname.toLowerCase();
-  if (hostname === 'localhost' || hostname === '::1') return true;
+  if (hostname === 'localhost') return true;
   if (hostname.endsWith('.local')) return true;
-  if (!isIpLiteralHostname(hostname)) return false;
-  if (hostname.includes(':')) {
-    return (
-      hostname === '::' ||
-      hostname.startsWith('0:0:0:0:0:0:0:1') ||
-      hostname.startsWith('fe80') ||
-      hostname.startsWith('fc') ||
-      hostname.startsWith('fd')
-    );
-  }
-  const [a, b] = hostname.split('.').map(Number);
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 0) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  return false;
+  const ip = hostname.replace(/^\[|\]$/g, '');
+  return isPrivateOrLinkLocal(ip);
 }
 
 /** True when the hostname is a literal IP (v4 dotted or v6). */
