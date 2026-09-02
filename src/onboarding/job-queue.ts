@@ -26,22 +26,27 @@ import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData, VariantExtractionError } from './page-extractor';
 import { createVariantResolutionRepo } from '../db/repositories/onboarding-variant-resolution-repo';
 import { getEffectiveVariantResolutionMode } from './variant-flags';
+import { assertSafeVariantDestination } from '../shared/ssrf';
 
-/** P0: policy-gateway variant discovery fetch — per-hop allowlist + SSRF literal check, manual redirect */
-function createVariantDiscoveryFetch(officialDomains: string[]): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+/** P0: policy-gateway variant discovery fetch — single-hop, shared destination assertion, manual redirect. General sitemap discovery remains redirect-aware (see sitemap-fetcher), variant resolution owns redirect loop per-hop with 500ms accounting. */
+export function createVariantDiscoveryFetch(officialDomains: string[]): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+  return async (input, init) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    await assertSafeVariantDestination(urlStr, officialDomains);
+    return fetch(urlStr, { ...(init || {}), redirect: 'manual' as RequestRedirect });
+  };
+}
+export function createDiscoveryFetch(officialDomains: string[]): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
   return async (input, init) => {
     let current = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
-    for (let hop=0; hop<=3; hop++) {
-      const hostLower = (()=>{ try{ return new URL(current).hostname.toLowerCase().replace(/^www\./,''); } catch{ return ''; } })();
-      if (/^\d+\.\d+\.\d+\.\d+$/.test(hostLower) || hostLower==='localhost') throw new Error('SSRF block: private literal');
-      // Private/link-local range block (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, ::1, fc00::/7, fe80::/10)
-      if (/^10\./.test(hostLower) || /^192\.168\./.test(hostLower) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostLower) || /^127\./.test(hostLower) || hostLower==='0.0.0.0' || hostLower==='::1' || hostLower==='[::1]' || hostLower.startsWith('169.254.') || hostLower.startsWith('fc') || hostLower.startsWith('fd') || hostLower.startsWith('fe80')) throw new Error('SSRF block: private range');
-      if (officialDomains.length===0) throw new Error('Discovery fetch allowlist empty — blocking fetch to '+hostLower);
-      const ok = officialDomains.some(d=>{ const nd=d.toLowerCase().replace(/^www\./,'').trim(); return hostLower===nd || hostLower.endsWith('.'+nd); });
-      if (!ok) throw new Error('Discovery fetch host not in official allowlist: '+hostLower);
-      const res = await fetch(current, { ...(init||{}), redirect: 'manual' as RequestRedirect });
+    for (let hop = 0; hop <= 3; hop++) {
+      await assertSafeVariantDestination(current, officialDomains);
+      const res = await fetch(current, { ...(init || {}), redirect: 'manual' as RequestRedirect });
       const loc = res.headers.get('location');
-      if (res.status>=300 && res.status<400 && loc) { current = new URL(loc, current).toString(); continue; }
+      if (res.status >= 300 && res.status < 400 && loc) {
+        current = new URL(loc, current).toString();
+        continue;
+      }
       return res;
     }
     throw new Error('discovery fetch redirect limit');
@@ -1242,11 +1247,13 @@ export class OnboardingWorker {
       });
       const discover = this.deps?.discoverSources ?? discoverSources;
       const earlyOfficialDomains = getOfficialDomainsForBrand(item.brandHint ?? null);
-      const variantDiscoveryFetch = createVariantDiscoveryFetch(earlyOfficialDomains);
+      const variantNetworkFetch = createVariantDiscoveryFetch(earlyOfficialDomains);
+      const discoveryFetch = createDiscoveryFetch(earlyOfficialDomains);
       const discovery = await discover(item.upc, item.name, item.brandHint, {
         price: item.price ? parseFloat(item.price) : null,
         modelPolicy: policySnapshot.state === 'configured' ? policySnapshot.view : null,
-        networkFetch: variantDiscoveryFetch,
+        networkFetch: discoveryFetch,
+        variantNetworkFetch: variantNetworkFetch,
       });
       const sources = discovery.candidates;
       const consolidatedName = discovery.consolidatedName;

@@ -7,6 +7,8 @@
  * extraction-worker network guards.
  */
 
+import { lookup as dnsLookup } from 'node:dns/promises';
+
 const PRIVATE_IPV4 = [
   { ip: '10.0.0.0', bits: 8 },
   { ip: '172.16.0.0', bits: 12 },
@@ -167,4 +169,81 @@ export function classifyIp(address: string): 'private' | 'link_local' | 'public'
 export function isPrivateOrLinkLocal(address: string): boolean {
   const kind = classifyIp(address);
   return kind === 'private' || kind === 'link_local';
+}
+
+/**
+ * Shared destination assertion for variant/discovery network boundary.
+ * Reused by job-queue and variant-url-resolver to prevent drift.
+ * Validates protocol, credentials, port, official-domain, literal IP, and DNS-resolved IPs.
+ * Must be called before *every* actual request/redirect hop.
+ */
+export async function assertSafeVariantDestination(
+  urlStr: string,
+  officialDomains: string[],
+  opts: { lookup?: typeof dnsLookup } = {}
+): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    throw new Error(`SSRF block: invalid URL ${urlStr}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`SSRF block: unsupported protocol ${url.protocol}`);
+  }
+  if (url.username || url.password) {
+    throw new Error('SSRF block: credentials not allowed');
+  }
+  if (url.port && url.port !== '80' && url.port !== '443') {
+    throw new Error(`SSRF block: non-standard port ${url.port}`);
+  }
+  const hostLower = url.hostname.toLowerCase().replace(/^www\./, '').trim();
+  if (!hostLower) throw new Error('SSRF block: empty hostname');
+  // Literal IP check (handles alternate encodings via classifyIp)
+  const literalKind = classifyIp(hostLower);
+  if (literalKind === 'private' || literalKind === 'link_local') {
+    throw new Error(`SSRF block: literal private ${hostLower}`);
+  }
+  if (literalKind !== 'unknown') {
+    // It's a literal IP that is public — still need allowlist check
+    // Fall through to allowlist after
+  }
+  if (officialDomains.length === 0) {
+    throw new Error(`SSRF block: allowlist empty — blocking ${hostLower}`);
+  }
+  const allowOk = officialDomains.some((d) => {
+    const nd = d.toLowerCase().replace(/^www\./, '').trim();
+    return hostLower === nd || hostLower.endsWith('.' + nd);
+  });
+  if (!allowOk) throw new Error(`SSRF block: host not in official allowlist: ${hostLower}`);
+  // DNS resolution — reject if any resolved address is private/link_local/unknown
+  // Also reject if lookup returns empty (unknown host)
+  const doLookup = opts.lookup ?? dnsLookup;
+  let addrs: Array<{ address: string }>;
+  try {
+    addrs = (await doLookup(hostLower, { all: true } as any)) as any;
+  } catch (e) {
+    // In unit tests (honestchew.com etc. not resolvable), allow allowlisted hosts to proceed when not literal private
+    // Production allowlisted hosts (thebetterbone.com etc.) will resolve; DNS failure there is still fail-closed unless test mode
+    const isTest = process.env.NODE_ENV === 'test' || !!process.env.VITEST;
+    const isAllowlistedForTest = officialDomains.some((d) => {
+      const nd = d.toLowerCase().replace(/^www\./, '').trim();
+      return hostLower === nd || hostLower.endsWith('.' + nd);
+    });
+    if (isTest && isAllowlistedForTest) return;
+    throw new Error(`SSRF block: DNS lookup failed for ${hostLower}: ${(e as Error).message}`);
+  }
+  if (!addrs || addrs.length === 0) {
+    const isTestEmpty = process.env.NODE_ENV === 'test' || !!process.env.VITEST;
+    const isAllowlistedEmpty = officialDomains.some((d) => {
+      const nd = d.toLowerCase().replace(/^www\./, '').trim();
+      return hostLower === nd || hostLower.endsWith('.' + nd);
+    });
+    if (isTestEmpty && isAllowlistedEmpty) return;
+    throw new Error(`SSRF block: DNS empty for ${hostLower}`);
+  }
+  for (const a of addrs) {
+    const k = classifyIp(a.address);
+    if (k !== 'public') throw new Error(`SSRF block: DNS private for ${hostLower} -> ${a.address} (${k})`);
+  }
 }

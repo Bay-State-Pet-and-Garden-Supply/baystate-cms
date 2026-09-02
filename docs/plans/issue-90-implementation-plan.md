@@ -531,7 +531,7 @@ Modify `src/onboarding/job-queue.ts:1500-1640` and use repository/service transa
 
 #### 5.1 Disable unsafe implicit interaction first
 
-Add failing worker tests showing that, with `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED` absent/false, the current block at `src/extraction-worker/routes/extract.ts:1009-1089` does not click/select even when a profile strategy exists. Structured resolution remains active.
+Add failing worker tests showing that, with test override `interactionEnabled:false` (env now always `active` default-off), the current block at `src/extraction-worker/routes/extract.ts:1009-1089` does not click/select even when a profile strategy exists. Structured resolution remains active.
 
 Then gate/remove the current full-name substring implementation. No behavior that clicks a merchant page may be default-on.
 
@@ -877,10 +877,11 @@ The test itself should own cleanup; the explicit `rm` is limited to this known `
 ### 9.4 Flag/round-trip smoke matrix
 
 ```bash
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=off BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'mode off'
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=observe BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'observe'
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=active BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'three distinct variants'
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=active BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=true bunx vitest run src/tests/unit/variant-interaction.test.ts
+# Flags are always-on (env ignored); use test overrides for mode simulation — historical env commands below are non-executable
+# overrideVariantFlags({mode:'off'}) bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'mode off (override)'
+# overrideVariantFlags({mode:'observe'}) bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'observe (override)'
+bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'three distinct variants'
+overrideVariantFlags({interactionEnabled:true}) bunx vitest run src/tests/unit/variant-interaction.test.ts
 ```
 
 ### 9.5 Worktree/staging verification
@@ -946,7 +947,7 @@ Do **not**:
 | Operator selection becomes stale after matrix drift. | Identity hash/parser version optimistic concurrency and server-derived payload; stale response reloads current matrix. |
 | Browser interactions cause merchant side effects or wrong option. | Default-off separate flag, worker-only exact action plan, no cart actions, bounded controls/time, post-action verification. Residual: interactive support remains canary-only. |
 | 250-variant cap excludes legitimate huge catalogs. | Fail closed with operator/setup status; later adapter-specific pagination is separate work. Never silently truncate and resolve. |
-| Old binaries ignore new unresolved rows during rollback. | Mode off restores legacy behavior and rows are additive. Operational rollback must understand that legacy extraction may again be less safe; pause workers if wrong-default risk prompted rollback. |
+| Old binaries ignore new unresolved rows during rollback. | Always-on (revert commit `f53fcdc`/`7163062` to restore legacy); rows are additive. Operational rollback must understand that legacy extraction may again be less safe; pause workers if wrong-default risk prompted rollback. |
 
 ---
 

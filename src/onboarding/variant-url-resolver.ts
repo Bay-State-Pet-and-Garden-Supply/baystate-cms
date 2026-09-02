@@ -3,6 +3,7 @@ import { diffRegisterVsExpected, tokenSet, parseVariantMatrix, matchVariantMatri
 import { productUrlIdentityKey, parentProductKey, buildVariantDeepLink, hasVariantParam } from './product-url-identity';
 import { getEffectiveVariantResolutionMode } from './variant-flags';
 import { computeIdentityMatrixHash } from '../shared/schemas/variant-resolution';
+import { assertSafeVariantDestination, classifyIp } from '../shared/ssrf';
 import type { InsertSourceData } from '../db/repositories/onboarding-source-repo';
 import type { VariantUrlInput } from '../db/repositories/brand-url-index-repo';
 
@@ -437,8 +438,9 @@ export async function resolveVariantsForCandidates(options: {
             await sleep(DOMAIN_MIN_INTERVAL_MS - (hopNow - hopState.lastFetch));
           }
           domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: hopState?.retryUntil ?? 0 });
+          // Authoritative shared destination assertion (protocol/creds/port/allowlist/literal IP + DNS private) — DNS lookup is authoritative, cheap literal check is defense-in-depth via classifyIp
+          try { await assertSafeVariantDestination(currentUrl, brandDomains); } catch { return; }
           const hostLower = (() => { try { return new URL(currentUrl).hostname.toLowerCase().replace(/^www\./,''); } catch { return ''; } })();
-          if (/^\d+\.\d+\.\d+\.\d+$/.test(hostLower) || hostLower === 'localhost' || /^10\./.test(hostLower) || /^192\.168\./.test(hostLower) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostLower) || /^127\./.test(hostLower) || hostLower==='0.0.0.0' || hostLower==='::1' || hostLower==='[::1]' || hostLower.startsWith('169.254.') ) return;
           const origHost = (() => { try { return new URL(cand.url).hostname.toLowerCase().replace(/^www\./,''); } catch { return ''; } })();
           if (hostLower !== origHost && !hostLower.endsWith('.'+origHost) && !origHost.endsWith('.'+hostLower)) return;
           const attempt = await fetcher(currentUrl, {
