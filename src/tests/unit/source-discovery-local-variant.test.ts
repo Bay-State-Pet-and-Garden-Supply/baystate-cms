@@ -47,7 +47,7 @@ describe('source-discovery local short-circuit variantResolution', () => {
   afterEach(() => { globalThis.fetch = origFetch; resetVariantFlagsOverride(); vi.restoreAllMocks(); });
 
   it('local high-confidence short-circuit still reports variantResolution', async () => {
-    const res = await discoverSources('810001234501', 'BetterBone Hard Beef Small', 'BetterBone', { price: 12.99 });
+    const res = await discoverSources('810001234501', 'BetterBone Hard Beef Small', 'BetterBone', { price: 12.99, networkFetch: globalThis.fetch as any });
     expect(res.candidates.length).toBeGreaterThan(0);
     // Must include variantResolution even on local short-circuit
     expect(res.variantResolution).toBeDefined();

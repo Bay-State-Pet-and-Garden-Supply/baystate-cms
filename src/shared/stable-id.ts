@@ -186,8 +186,7 @@ function canonicalJsonUtf8(value: unknown): Uint8Array {
 }
 
 export function sha256Hex(input: string | Uint8Array): string {
-  const str = typeof input === 'string' ? input : new TextDecoder().decode(input);
-  return sha256(str);
+  return sha256(input);
 }
 
 export function hashCanonicalJson(value: unknown): string {

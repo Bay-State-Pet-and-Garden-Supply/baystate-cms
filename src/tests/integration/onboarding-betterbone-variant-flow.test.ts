@@ -212,7 +212,7 @@ describe('BetterBone variant flow — full cohort integration (8 steps, real DB)
     // After selection, item should be extraction-queued again
     const after = db.query("SELECT stage, stage_status FROM onboarding_items WHERE id=?").get(dupItemId) as any;
     expect(after.stage).toBe('extraction');
-    expect(['queued','pending','needs_input']).toContain(after.stage_status);
+    expect(after.stage_status).toBe('pending');
   });
 
   it('sitemap streaming without Content-Length aborts >5MB (no header)', async () => {

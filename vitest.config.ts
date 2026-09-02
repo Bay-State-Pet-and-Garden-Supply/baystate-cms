@@ -303,8 +303,6 @@ export default defineConfig({
       'src/tests/unit/page-verifier.test.ts',
       'src/tests/unit/review-queue-adversarial.test.ts',
       'src/tests/unit/review-queue-schema.test.ts',
-      'src/tests/unit/review-workspace-challenger-stress.test.tsx',
-      'src/tests/unit/review-workspace-loading.test.tsx',
     ],
   },
 });

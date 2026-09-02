@@ -26,6 +26,32 @@ import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData, VariantExtractionError } from './page-extractor';
 import { createVariantResolutionRepo } from '../db/repositories/onboarding-variant-resolution-repo';
 import { getEffectiveVariantResolutionMode } from './variant-flags';
+import { assertSafeVariantDestination } from '../shared/ssrf';
+
+/** P0: policy-gateway variant discovery fetch — single-hop, shared destination assertion, manual redirect. General sitemap discovery remains redirect-aware (see sitemap-fetcher), variant resolution owns redirect loop per-hop with 500ms accounting. */
+export function createVariantDiscoveryFetch(officialDomains: string[]): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+  return async (input, init) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    await assertSafeVariantDestination(urlStr, officialDomains);
+    return fetch(urlStr, { ...(init || {}), redirect: 'manual' as RequestRedirect });
+  };
+}
+export function createDiscoveryFetch(officialDomains: string[]): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+  return async (input, init) => {
+    let current = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    for (let hop = 0; hop <= 3; hop++) {
+      await assertSafeVariantDestination(current, officialDomains);
+      const res = await fetch(current, { ...(init || {}), redirect: 'manual' as RequestRedirect });
+      const loc = res.headers.get('location');
+      if (res.status >= 300 && res.status < 400 && loc) {
+        current = new URL(loc, current).toString();
+        continue;
+      }
+      return res;
+    }
+    throw new Error('discovery fetch redirect limit');
+  };
+}
 import { enrichUrlMetadata } from '../db/repositories/brand-url-index-repo';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItemWithPipeline } from './product-curator';
@@ -1220,9 +1246,14 @@ export class OnboardingWorker {
         brandHint: item.brandHint ?? null,
       });
       const discover = this.deps?.discoverSources ?? discoverSources;
+      const earlyOfficialDomains = getOfficialDomainsForBrand(item.brandHint ?? null);
+      const variantNetworkFetch = createVariantDiscoveryFetch(earlyOfficialDomains);
+      const discoveryFetch = createDiscoveryFetch(earlyOfficialDomains);
       const discovery = await discover(item.upc, item.name, item.brandHint, {
         price: item.price ? parseFloat(item.price) : null,
         modelPolicy: policySnapshot.state === 'configured' ? policySnapshot.view : null,
+        networkFetch: discoveryFetch,
+        variantNetworkFetch: variantNetworkFetch,
       });
       const sources = discovery.candidates;
       const consolidatedName = discovery.consolidatedName;

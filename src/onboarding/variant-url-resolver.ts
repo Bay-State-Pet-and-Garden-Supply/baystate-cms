@@ -3,16 +3,26 @@ import { diffRegisterVsExpected, tokenSet, parseVariantMatrix, matchVariantMatri
 import { productUrlIdentityKey, parentProductKey, buildVariantDeepLink, hasVariantParam } from './product-url-identity';
 import { getEffectiveVariantResolutionMode } from './variant-flags';
 import { computeIdentityMatrixHash } from '../shared/schemas/variant-resolution';
+import { assertSafeVariantDestination, classifyIp } from '../shared/ssrf';
 import type { InsertSourceData } from '../db/repositories/onboarding-source-repo';
 import type { VariantUrlInput } from '../db/repositories/brand-url-index-repo';
 
 export const MAX_VARIANT_PARENT_FETCHES = 3;
 const FETCH_TIMEOUT_MS = 15000;
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
+export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const DOMAIN_MIN_INTERVAL_MS = 500; // 2 req/s per domain
 const DOMAIN_RETRY_DEFAULT_MS = 5000;
 const DOMAIN_RETRY_MAX_MS = 60000;
 const domainRateState = new Map<string, { lastFetch: number; retryUntil: number }>();
+const domainLocks = new Map<string, Promise<void>>();
+async function withDomainLock<T>(domainKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = domainLocks.get(domainKey) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>(r => { release = r; });
+  domainLocks.set(domainKey, prev.then(() => next));
+  await prev;
+  try { return await fn(); } finally { release(); }
+}
 
 function getDomainKey(url: string): string {
   try { return new URL(url).hostname.toLowerCase().replace(/^www\./, '').trim(); } catch { return url.toLowerCase(); }
@@ -95,6 +105,7 @@ function buildVariantUrl(baseUrl: string, variantId: string): string {
 }
 
 /**
+ * @deprecated P2 legacy — use parseVariantMatrix/matchVariantMatrix from variant-resolver.ts (canonical). Kept for backwards compat, no prod callers (only tests).
  * Score a Shopify variant candidate deterministically against product metadata.
  */
 // fallow-ignore-next-line unused-export — used by tests
@@ -169,6 +180,7 @@ export function scoreShopifyVariant(
 }
 
 /**
+ * @deprecated P2 legacy — use parseVariantMatrix + matchVariantMatrix (canonical, 5 adapters). Shim kept so existing unit tests stay green.
  * Resolve Shopify variants from raw HTML.
  */
 // fallow-ignore-next-line unused-export — used by tests
@@ -398,9 +410,9 @@ export async function resolveVariantsForCandidates(options: {
     throw new Error('resolveVariantsForCandidates: fetchFn is required when variant resolution mode is not off');
   }
   await Promise.all(
-    boundedList.map(async (cand) => {
+    boundedList.map(cand => withDomainLock(getDomainKey(cand.url), async () => {
       try {
-        // Per-domain active sweep protection: min interval + Retry-After
+        // Per-domain active sweep protection: serialized, re-reads retryUntil after lock
         const domainKey = getDomainKey(cand.url);
         const state = domainRateState.get(domainKey);
         const now = Date.now();
@@ -414,21 +426,50 @@ export async function resolveVariantsForCandidates(options: {
         }
         domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: state?.retryUntil ?? 0 });
         const fetcher = fetchFn!;
-        const res = await fetcher(cand.url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-          },
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        });
-        // Update lastFetch after network
+        // Per-hop manual redirect with allowlist + SSRF literal check before each fetch
+        let currentUrl = cand.url;
+        let res: Response | null = null;
+        for (let hop = 0; hop <= 3; hop++) {
+          // Per-hop throttling: re-read state after wait, preserve latest retryUntil
+          const hopState = domainRateState.get(domainKey);
+          const hopNow = Date.now();
+          if (hopState && hopState.retryUntil > hopNow) return;
+          if (hopState && hopNow - hopState.lastFetch < DOMAIN_MIN_INTERVAL_MS) {
+            await sleep(DOMAIN_MIN_INTERVAL_MS - (hopNow - hopState.lastFetch));
+          }
+          domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: hopState?.retryUntil ?? 0 });
+          // Authoritative shared destination assertion (protocol/creds/port/allowlist/literal IP + DNS private) — DNS lookup is authoritative, cheap literal check is defense-in-depth via classifyIp
+          try { await assertSafeVariantDestination(currentUrl, brandDomains); } catch { return; }
+          const hostLower = (() => { try { return new URL(currentUrl).hostname.toLowerCase().replace(/^www\./,''); } catch { return ''; } })();
+          const origHost = (() => { try { return new URL(cand.url).hostname.toLowerCase().replace(/^www\./,''); } catch { return ''; } })();
+          if (hostLower !== origHost && !hostLower.endsWith('.'+origHost) && !origHost.endsWith('.'+hostLower)) return;
+          const attempt = await fetcher(currentUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+            redirect: 'manual' as RequestRedirect,
+          });
+          const loc = attempt.headers.get('location');
+          if (attempt.status >= 300 && attempt.status < 400 && loc) {
+            currentUrl = new URL(loc, currentUrl).toString();
+            continue;
+          }
+          res = attempt;
+          break;
+        }
+        if (!res) return;
+        // Update lastFetch after network (preserve latest retryUntil)
         domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: domainRateState.get(domainKey)?.retryUntil ?? 0 });
         if (res.status === 429) {
           const retryAfter = res.headers.get('retry-after') ?? res.headers.get('Retry-After');
           const delayMs = parseRetryAfter(retryAfter);
           const until = Date.now() + delayMs;
-          domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: until });
+          const cur = domainRateState.get(domainKey);
+          const maxUntil = Math.max(cur?.retryUntil ?? 0, until);
+          domainRateState.set(domainKey, { lastFetch: Date.now(), retryUntil: maxUntil });
           console.warn(`[variant-url-resolver] 429 for ${cand.url} retry-after ${delayMs}ms`);
           return;
         }
@@ -439,13 +480,6 @@ export async function resolveVariantsForCandidates(options: {
           const len = parseInt(contentLength, 10);
           if (!isNaN(len) && len > MAX_BODY_BYTES) return;
         }
-        // Redirect domain policy: validate final URL BEFORE consuming body
-        try {
-          const finalUrl = res.url || cand.url;
-          const finalHost = new URL(finalUrl).hostname.toLowerCase().replace(/^www\./,'');
-          const origHost = new URL(cand.url).hostname.toLowerCase().replace(/^www\./,'');
-          if (finalHost !== origHost && !finalHost.endsWith('.'+origHost) && !origHost.endsWith('.'+finalHost)) return;
-        } catch { /* ignore */ }
         // Stream with limit to avoid buffering >5MB before check
         let buf: Uint8Array;
         if (res.body && typeof (res.body as any).getReader === 'function') {
@@ -476,7 +510,7 @@ export async function resolveVariantsForCandidates(options: {
       } catch (err) {
         console.warn(`[variant-url-resolver] Error resolving variants for ${cand.url}:`, err);
       }
-    })
+    }))
   );
   // Observe mode: diagnostics only, no URL mutation but still produce structured resolution
   if (mode === 'observe') {

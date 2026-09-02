@@ -125,8 +125,8 @@ export function selectVariantService(
       created_at: now,
       updated_at: now,
     });
-    // update item source_url via direct sql (keep within same transaction)
-    db.prepare('UPDATE onboarding_items SET source_url = ?, updated_at = ? WHERE id = ?').run(chosen.deepLink, now, input.itemId);
+    // update item source_url and requeue to extraction/pending (park→select→resume) within same transaction
+    db.prepare('UPDATE onboarding_items SET source_url = ?, stage = ?, stage_status = ?, updated_at = ? WHERE id = ?').run(chosen.deepLink, 'extraction', 'pending', now, input.itemId);
     // ensure a source row exists/selected
     const existing = db.prepare('SELECT id FROM onboarding_sources WHERE item_id = ? AND url = ?').get(input.itemId, chosen.deepLink) as any;
     if (existing) {

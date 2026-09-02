@@ -59,12 +59,13 @@ export async function discoverSources(
   options?: {
     price?: number | null;
     /**
-     * P0-1 (round 3): injected transport so Product Intelligence can bind
-     * every HTTP call in the discovery chain (sitemap, variant-page
-     * fetches) to the policy gateway. The onboarding pipeline keeps the
-     * default global fetch.
+     * P0-1 (round 3): injected transports so Product Intelligence can bind
+     * every HTTP call in the discovery chain to the policy gateway.
+     * networkFetch is redirect-aware for sitemap; variantNetworkFetch is single-hop manual for variant pages (resolver owns redirect loop per-hop with 500ms).
+     * variantNetworkFetch defaults to networkFetch for backwards compat in tests.
      */
     networkFetch?: NetworkFetch;
+    variantNetworkFetch?: NetworkFetch;
     /**
      * Frozen classification model-policy view (issue #17 item A). Protected
      * LLM page-selection calls route through it.
@@ -141,7 +142,11 @@ export async function discoverSources(
     console.log(`[SourceDiscovery] \u2713 High-confidence local sitemap match for UPC ${upc} on ${brandDomain} (${topLocal.url}, confidence: ${topLocal.confidence.toFixed(2)}). Validating URL...`);
 
     let isValid = true;
-    const fetchFn = options?.networkFetch || fetch;
+    const fetchFn = options?.networkFetch;
+    if (!fetchFn) {
+      // No policy-gateway transport for local short-circuit validation — fail closed without global fetch
+      isValid = topLocal.matchType === 'upc_exact';
+    } else {
     try {
       const checkRes = await fetchFn(topLocal.url, {
         method: 'HEAD',
@@ -157,8 +162,9 @@ export async function discoverSources(
         if (!getRes.ok) isValid = false;
       }
     } catch {
-      if (topLocal.matchType !== 'upc_exact') {
-        isValid = false;
+        if (topLocal.matchType !== 'upc_exact') {
+          isValid = false;
+        }
       }
     }
 
@@ -209,7 +215,7 @@ export async function discoverSources(
         brandHint: activeBrandHint ?? null,
         brandDomains: activeBrandDomains,
         price: options?.price,
-        fetchFn: options?.networkFetch ?? fetch,
+        fetchFn: options?.variantNetworkFetch ?? options?.networkFetch,
         variantTokens: variantTokensForLocal.length > 0 ? variantTokensForLocal : undefined,
       });
       // In observe mode resolver does not mutate URLs; in active it may synthesize deep links.
@@ -302,7 +308,7 @@ export async function discoverSources(
     brandHint: activeBrandHint ?? null,
     brandDomains: activeBrandDomains,
     price: options?.price,
-    fetchFn: options?.networkFetch ?? fetch,
+    fetchFn: options?.variantNetworkFetch ?? options?.networkFetch,
     variantTokens: variantTokensForDiscovery.length > 0 ? variantTokensForDiscovery : undefined,
   });
   const variantResolved = variantResult.candidates;
@@ -423,12 +429,12 @@ async function fetchSitemapForDiscovery(
     // Cache miss — fetch (and best-effort cache) the sitemap.
     const profile = findProfileByDomain(domain);
     const productUrlPattern = profile?.sitemapProductUrlPattern ?? null;
-    // P0-1 (round 3): thread the injected transport into the sitemap fetcher
-    // (it already accepts fetchFn); default = global fetch for onboarding.
-    // When injected, disable Camoufox rendered fallback so policy gateway
-    // is not bypassed — injected callers must fail closed on block.
-    const result = await fetchAndParseSitemap(domain, productUrlPattern, networkFetch ?? fetch, {
-      allowRenderedFallback: !networkFetch,
+    if (!networkFetch) {
+      console.warn(`[SourceDiscovery] No networkFetch (policy gateway) for ${domain} — skipping sitemap fetch (fail closed)`);
+      return { urls: [], productUrlPattern, sourceUrl: '' };
+    }
+    const result = await fetchAndParseSitemap(domain, productUrlPattern, networkFetch, {
+      allowRenderedFallback: false,
     });
     if (result.urls.length > 0) {
       try {

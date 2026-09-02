@@ -204,22 +204,9 @@ Indexes: item/latest, `(onboarding_item_id, identity_matrix_hash)`, and current 
 
 Repository boundaries always parse JSON with the shared schemas. Never persist raw HTML, complete third-party scripts, request headers, or credentials.
 
-### 5.6 Feature flags and rollback
+### 5.6 Feature flags and rollback — deprecated/ignored (always-on follow-up)
 
-Create `src/onboarding/variant-flags.ts` with strict, re-read-per-call parsing and test override support:
-
-- `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=off|observe|active`; absent, empty, whitespace, or malformed => `off`.
-  - `off`: legacy behavior; no extra `.js` request, no durable resolution writes, no variant gate/UI.
-  - `observe`: parse/match and record non-secret metrics/diagnostics only; do not change selected source URL, stage, extraction fields, or operator state. Network use is allowed only through the same guarded, injected transport and fixed fetch budget.
-  - `active`: deep links, selected-variant gate/materialization, durable resolution, and Choose Variant become authoritative.
-- `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false|true`; absent/malformed => false. This is an independent kill switch for Playwright select/click behavior.
-
-Rollback order:
-
-1. Set interaction false (structured resolution continues).
-2. Set resolution mode `observe` (stop mutations, retain diagnostics and table rows).
-3. Set mode `off` (legacy behavior, no new network); do not delete evidence/decisions.
-4. Code rollback is additive: old binaries ignore the new table/optional JSON fields. Do not down-migrate or destroy rows during incident rollback.
+`src/onboarding/variant-flags.ts` now always returns `active` (interaction default-off unless test override) — env `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE` and `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED` are ignored; test overrides retain `off|observe` for isolated unit tests. Real rollback is revert commit `f53fcdc`/`7163062`, not env. Old binaries ignore the new table/optional JSON fields. Do not down-migrate or destroy rows during incident rollback.
 
 ---
 
@@ -544,7 +531,7 @@ Modify `src/onboarding/job-queue.ts:1500-1640` and use repository/service transa
 
 #### 5.1 Disable unsafe implicit interaction first
 
-Add failing worker tests showing that, with `BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED` absent/false, the current block at `src/extraction-worker/routes/extract.ts:1009-1089` does not click/select even when a profile strategy exists. Structured resolution remains active.
+Add failing worker tests showing that, with test override `interactionEnabled:false` (env now always `active` default-off), the current block at `src/extraction-worker/routes/extract.ts:1009-1089` does not click/select even when a profile strategy exists. Structured resolution remains active.
 
 Then gate/remove the current full-name substring implementation. No behavior that clicks a merchant page may be default-on.
 
@@ -713,14 +700,16 @@ With a disposable local DB and fixture transport:
 
 Capture redacted request/response shape only; no credentials or raw third-party payload.
 
-#### 7.3 Rollout sequence
+#### 7.3 Rollout sequence — **Historical (pre-always-on, env flags deprecated)**
 
-1. **Code deployed, mode off:** migrations/contracts present, zero behavior/network change.
-2. **Observe on fixture/internal workspace:** compare parser decisions to manually labeled BetterBone/JSON-LD/Woo corpus. Interaction remains false.
-3. **Observe production read path only after verified DB backup:** monitor parse success, ambiguity, duplicate identifier, fetch count/latency, and disagreement; no source/stage/extraction mutations.
-4. **Active allowlisted workspace/domain cohort:** structured parsing/deep links/materialization/operator fallback. Require zero wrong-auto-selection in reviewed sample and bounded latency/error rates.
-5. **Broaden active:** only after acceptance report/reviewer sign-off.
-6. **Optional interaction canary:** separate approval and flag; never coupled to structured activation.
+> Flags are now always-on (`src/onboarding/variant-flags.ts`); `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE`/`BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED` are ignored. Below is the historical env-based rollout for reference; current procedure is revert-based (revert commit), not mode progression.
+
+1. **Code deployed, mode off (historical):** migrations/contracts present, zero behavior/network change.
+2. **Observe on fixture/internal workspace (historical):** compare parser decisions to manually labeled BetterBone/JSON-LD/Woo corpus. Interaction remains false.
+3. **Observe production read path only after verified DB backup (historical):** monitor parse success, ambiguity, duplicate identifier, fetch count/latency, and disagreement; no source/stage/extraction mutations.
+4. **Active allowlisted workspace/domain cohort (historical):** structured parsing/deep links/materialization/operator fallback. Require zero wrong-auto-selection in reviewed sample and bounded latency/error rates.
+5. **Broaden active (historical):** only after acceptance report/reviewer sign-off.
+6. **Optional interaction canary (historical):** separate approval and flag; never coupled to structured activation.
 
 Telemetry must use stable reason/platform/count/latency fields and hashed/non-secret IDs. Do not log full product JSON, query secrets, GTINs if existing logging policy treats them as sensitive, or credentials.
 
@@ -890,10 +879,13 @@ The test itself should own cleanup; the explicit `rm` is limited to this known `
 ### 9.4 Flag/round-trip smoke matrix
 
 ```bash
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=off BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'mode off'
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=observe BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'observe'
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=active BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=false bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'three distinct variants'
-BAYSTATE_CMS_VARIANT_RESOLUTION_MODE=active BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED=true bunx vitest run src/tests/unit/variant-interaction.test.ts
+# Flags are always-on (env ignored); use test overrides for mode simulation
+# Historical env commands are non-executable — use Vitest -t targeting real test names:
+bunx vitest run src/tests/unit/source-discovery-variant-resolution.test.ts -t "mode off is byte-compatible"
+bunx vitest run src/tests/unit/source-discovery-variant-resolution.test.ts -t "observe records diagnostics"
+bun test src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t "8-step cohort"
+bunx vitest run src/tests/unit/variant-interaction.test.ts
+# To simulate off/observe in tests, use overrideVariantFlags({mode:'off'}) within test file, not shell
 ```
 
 ### 9.5 Worktree/staging verification
@@ -959,7 +951,7 @@ Do **not**:
 | Operator selection becomes stale after matrix drift. | Identity hash/parser version optimistic concurrency and server-derived payload; stale response reloads current matrix. |
 | Browser interactions cause merchant side effects or wrong option. | Default-off separate flag, worker-only exact action plan, no cart actions, bounded controls/time, post-action verification. Residual: interactive support remains canary-only. |
 | 250-variant cap excludes legitimate huge catalogs. | Fail closed with operator/setup status; later adapter-specific pagination is separate work. Never silently truncate and resolve. |
-| Old binaries ignore new unresolved rows during rollback. | Mode off restores legacy behavior and rows are additive. Operational rollback must understand that legacy extraction may again be less safe; pause workers if wrong-default risk prompted rollback. |
+| Old binaries ignore new unresolved rows during rollback. | Always-on (revert commit `f53fcdc`/`7163062` to restore legacy); rows are additive. Operational rollback must understand that legacy extraction may again be less safe; pause workers if wrong-default risk prompted rollback. |
 
 ---
 

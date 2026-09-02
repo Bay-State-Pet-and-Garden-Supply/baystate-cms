@@ -9,6 +9,21 @@ import {
 import { overrideVariantFlags, resetVariantFlagsOverride } from '../../onboarding/variant-flags';
 import type { InsertSourceData } from '../../db/repositories/onboarding-source-repo';
 
+// DNS for variant discovery — strictly fail-closed via shared assertSafeVariantDestination.
+// Mock node:dns/promises lookup to return public for test allowlisted hosts, private for adversarial hosts.
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (host: string) => {
+    const h = String(host).toLowerCase();
+    if (h.includes('private') || h === '127.0.0.1' || h === '10.0.0.1' || h === '192.168.1.1' || h.includes('169.254') || h.includes('::1') || h.includes('fc00') || h.includes('fd00')) {
+      return [{ address: '10.0.0.1', family: 4 } as any];
+    }
+    if (h.includes('honestchew.com') || h.includes('betterbone.com') || h.includes('example.com')) {
+      return [{ address: '8.8.8.8', family: 4 } as any];
+    }
+    return [{ address: '8.8.8.8', family: 4 } as any];
+  }),
+}));
+
 let originalFetch: typeof fetch;
 
 beforeEach(() => {
@@ -278,6 +293,35 @@ describe('resolveVariantsForCandidates integration', () => {
     expect(second.candidates[0].url).toBe('https://honestchew.com/products/antler');
   });
 
+  it('concurrent same-domain 429 throttles to 1 fetch, independent domain still fetches', async () => {
+    __resetVariantDomainRateStateForTests();
+    let callCount = 0;
+    const fetchSpy = vi.fn(async (url: string) => {
+      callCount++;
+      const u = String(url);
+      if (u.includes('honestchew.com')) return new Response('Too Many Requests', { status: 429, headers: { 'retry-after': '60' } }) as any;
+      return new Response(SHOPIFY_HTML_VARIANTS, { status: 200, headers: { 'content-type': 'text/html' } }) as any;
+    });
+    const candidates: InsertSourceData[] = [
+      { url: 'https://honestchew.com/products/a', title: null, domain: 'honestchew.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const },
+      { url: 'https://honestchew.com/products/b', title: null, domain: 'honestchew.com', confidence: 0.89, sourceMethod: 'sitemap_name' as const },
+      { url: 'https://otherbrand.com/products/x', title: null, domain: 'otherbrand.com', confidence: 0.87, sourceMethod: 'sitemap_name' as const },
+    ];
+    const { candidates: result } = await resolveVariantsForCandidates({
+      candidates,
+      upc: '111111111111',
+      rawName: 'HonestChew Antler',
+      expectedName: 'HonestChew Antler',
+      brandHint: 'HonestChew',
+      brandDomains: ['honestchew.com', 'otherbrand.com'],
+      fetchFn: fetchSpy as any,
+    });
+    // First honestchew fetch is 429, same-domain concurrent sibling should be throttled, otherbrand still fetches (cap 3, so 2 honestchew + 1 otherbrand = all 3 eligible, but throttling reduces honestchew to 1)
+    expect(fetchSpy.mock.calls.some((c: any) => String(c[0]).includes('otherbrand.com'))).toBe(true);
+    expect(callCount).toBe(2);
+    expect(result.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('aborts streaming body without Content-Length when exceeds 5MB', async () => {
     __resetVariantDomainRateStateForTests();
     // Create a stream that yields 6MB without Content-Length
@@ -307,5 +351,78 @@ describe('resolveVariantsForCandidates integration', () => {
     expect(result.length).toBe(1);
     expect(result[0].url).toBe('https://honestchew.com/products/antler');
     expect(resolution.status === 'no_variants' || resolution.status === 'skipped_no_fetch').toBeTruthy();
+  });
+
+  it('rejects allowlisted hostname resolving private via DNS (fail-closed)', async () => {
+    __resetVariantDomainRateStateForTests();
+    const fetchSpy = vi.fn(async () => new Response(SHOPIFY_HTML_VARIANTS, { status: 200, headers: { 'content-type': 'text/html' } })) as any;
+    const candidates: InsertSourceData[] = [
+      { url: 'https://private-betterbone.com/products/antler', title: null, domain: 'private-betterbone.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const },
+    ];
+    const { candidates: result } = await resolveVariantsForCandidates({
+      candidates,
+      upc: '111111111111',
+      rawName: 'BetterBone Antler',
+      expectedName: 'BetterBone Antler',
+      brandHint: 'BetterBone',
+      brandDomains: ['private-betterbone.com'],
+      fetchFn: fetchSpy,
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result[0].url).toBe('https://private-betterbone.com/products/antler');
+  });
+
+  it('per-hop DNS private on redirect is blocked (hostname allowed but resolves private)', async () => {
+    __resetVariantDomainRateStateForTests();
+    const fetchSpy = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u === 'https://honestchew.com/products/antler') {
+        return new Response('', { status: 302, headers: { location: 'https://private-honestchew.com/products/antler2' } }) as any;
+      }
+      return new Response(SHOPIFY_HTML_VARIANTS, { status: 200, headers: { 'content-type': 'text/html' } }) as any;
+    }) as any;
+    const candidates: InsertSourceData[] = [
+      { url: 'https://honestchew.com/products/antler', title: null, domain: 'honestchew.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const },
+    ];
+    const { candidates: result } = await resolveVariantsForCandidates({
+      candidates,
+      upc: '111111111111',
+      rawName: 'HonestChew Antler',
+      expectedName: 'HonestChew Antler',
+      brandHint: 'HonestChew',
+      brandDomains: ['honestchew.com', 'private-honestchew.com'],
+      fetchFn: fetchSpy,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result[0].url).toBe('https://honestchew.com/products/antler');
+  });
+
+  it('two-hop redirect observes both hops separately for rate limit', async () => {
+    __resetVariantDomainRateStateForTests();
+    const calls: string[] = [];
+    const fetchSpy = vi.fn(async (url: string) => {
+      calls.push(String(url));
+      const u = String(url);
+      if (u === 'https://honestchew.com/products/antler') {
+        return new Response('', { status: 302, headers: { location: 'https://honestchew.com/products/antler2' } }) as any;
+      }
+      return new Response(SHOPIFY_HTML_VARIANTS, { status: 200, headers: { 'content-type': 'text/html' } }) as any;
+    }) as any;
+    const candidates: InsertSourceData[] = [
+      { url: 'https://honestchew.com/products/antler', title: null, domain: 'honestchew.com', confidence: 0.9, sourceMethod: 'sitemap_name' as const },
+    ];
+    const start = Date.now();
+    await resolveVariantsForCandidates({
+      candidates,
+      upc: '111111111111',
+      rawName: 'HonestChew Antler',
+      expectedName: 'HonestChew Antler',
+      brandHint: 'HonestChew',
+      brandDomains: ['honestchew.com'],
+      fetchFn: fetchSpy,
+    });
+    const elapsed = Date.now() - start;
+    expect(calls).toEqual(['https://honestchew.com/products/antler', 'https://honestchew.com/products/antler2']);
+    expect(elapsed).toBeGreaterThanOrEqual(400);
   });
 });
