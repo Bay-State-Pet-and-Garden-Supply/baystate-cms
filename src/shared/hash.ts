@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
  * A lightweight, synchronous pure JS SHA-256 implementation for environment-agnostic hashing
  * (works in Node.js, Bun, and browser environments where node:crypto is externalized).
  */
-function pureSha256(str: string): string {
+function pureSha256(data: string | Uint8Array): string {
   const K = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -20,9 +20,8 @@ function pureSha256(str: string): string {
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
   ];
 
-  // Encode string as UTF-8 bytes
-  const encoder = new TextEncoder();
-  const bytes = encoder.encode(str);
+  // Encode string as UTF-8 bytes or use Uint8Array directly
+  const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
   const len = bytes.length;
   const bitLen = len * 8;
 
@@ -34,7 +33,7 @@ function pureSha256(str: string): string {
   padded[len] = 0x80;
 
   // Append bit length as 64-bit big-endian integer
-  const view = new DataView(padded.buffer);
+  const view = new DataView(padded.buffer, padded.byteOffset, padded.byteLength);
   const highBits = Math.floor(bitLen / 0x100000000);
   const lowBits = bitLen % 0x100000000;
   view.setUint32(padded.length - 8, highBits, false);
@@ -108,9 +107,12 @@ function pureSha256(str: string): string {
  * Compute SHA-256 hash string (hex encoded).
  * Uses node:crypto when available, falling back to pure SHA-256 in browser environments.
  */
-export function sha256(data: string): string {
+export function sha256(data: string | Uint8Array): string {
   if (crypto && typeof crypto.createHash === 'function') {
-    return crypto.createHash('sha256').update(data, 'utf8').digest('hex');
+    if (typeof data === 'string') {
+      return crypto.createHash('sha256').update(data, 'utf8').digest('hex');
+    }
+    return crypto.createHash('sha256').update(data).digest('hex');
   }
   return pureSha256(data);
 }

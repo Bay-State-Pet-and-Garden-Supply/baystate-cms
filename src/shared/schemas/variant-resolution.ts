@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { sha256 } from '../hash';
 
+export const VARIANT_PARSER_VERSION = 1;
+export const MAX_NORMALIZED_VARIANTS = 250;
+
 export const VariantPlatformSchema = z.enum([
   'shopify',
   'jsonld',
@@ -63,7 +66,7 @@ export const VariantMatrixSchema = z.object({
   canonicalParentUrl: z.string().min(1).max(2048),
   sourceFinalUrl: z.string().min(1).max(2048).nullable(),
   sourceContentHash: z.string().max(128).nullable(),
-  candidates: z.array(NormalizedVariantCandidateSchema).max(250),
+  candidates: z.array(NormalizedVariantCandidateSchema).max(MAX_NORMALIZED_VARIANTS),
   warnings: z.array(z.string().max(512)),
   createdAt: z.string().min(1),
 });
@@ -149,8 +152,6 @@ export const VariantSelectionRequestSchema = z.object({
   variantKey: z.string().min(1).max(256),
 });
 export type VariantSelectionRequest = z.infer<typeof VariantSelectionRequestSchema>;
-
-export const VARIANT_PARSER_VERSION = 1;
 
 export function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);

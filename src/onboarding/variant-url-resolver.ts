@@ -8,7 +8,7 @@ import type { VariantUrlInput } from '../db/repositories/brand-url-index-repo';
 
 export const MAX_VARIANT_PARENT_FETCHES = 3;
 const FETCH_TIMEOUT_MS = 15000;
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
+export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const DOMAIN_MIN_INTERVAL_MS = 500; // 2 req/s per domain
 const DOMAIN_RETRY_DEFAULT_MS = 5000;
 const DOMAIN_RETRY_MAX_MS = 60000;
@@ -104,6 +104,7 @@ function buildVariantUrl(baseUrl: string, variantId: string): string {
 }
 
 /**
+ * @deprecated P2 legacy — use parseVariantMatrix/matchVariantMatrix from variant-resolver.ts (canonical). Kept for backwards compat, no prod callers (only tests).
  * Score a Shopify variant candidate deterministically against product metadata.
  */
 // fallow-ignore-next-line unused-export — used by tests
@@ -178,6 +179,7 @@ export function scoreShopifyVariant(
 }
 
 /**
+ * @deprecated P2 legacy — use parseVariantMatrix + matchVariantMatrix (canonical, 5 adapters). Shim kept so existing unit tests stay green.
  * Resolve Shopify variants from raw HTML.
  */
 // fallow-ignore-next-line unused-export — used by tests
