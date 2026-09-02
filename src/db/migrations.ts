@@ -849,6 +849,7 @@ export function runMigrations(): void {
   // Task-specific LLM routing. Provider credentials (api_keys) hold the
   // secrets; this table only stores which provider/model each AI task
   // should use. Tasks include `product_name_consolidation`,
+  // `discovery_candidate_selection` (product URL selection),
   // `profile_generation`, `profile_revision`, `product_curation`, and
   // `category_classification`. Profile tasks require an explicit row
   // (fail-closed) so a missing config never silently falls back to a

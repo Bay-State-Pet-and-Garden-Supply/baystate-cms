@@ -248,13 +248,16 @@ export async function findLocalBrandCandidates(
         const candidatesForPrompt = topCandidates.slice(0, 5).map((c, i) => `${i + 1}. ${c.url}${c.title ? ` (Title: ${c.title})` : ''}`).join('\n');
         const prompt = `Given the product name "${searchName}" (Brand: ${target.brandHint || 'Unknown'}, UPC: ${target.upc || 'N/A'}), select the single best matching product URL from this candidate list:\n${candidatesForPrompt}\n\nRespond ONLY with the exact URL of the best match, or "NONE" if none match.`;
 
-        const llmConfig = getLlmConfigForTask('product_name_consolidation');
+        const llmConfig = getLlmConfigForTask('discovery_candidate_selection', {
+          allowFallback: true,
+          modelPolicy: options?.modelPolicy ?? undefined,
+        });
         if (llmConfig) {
           const response = await callLlmForTask(
-            'product_name_consolidation',
+            'discovery_candidate_selection',
             prompt,
             undefined,
-            { modelPolicy: options?.modelPolicy ?? undefined },
+            { modelPolicy: options?.modelPolicy ?? undefined, temperature: 0 },
           );
           if (response && response.trim() !== 'NONE') {
             const picked = topCandidates.find((c) => response.includes(c.url));

@@ -7,7 +7,8 @@
  *    `ollama`): hold the actual API key and base URL.
  *
  * 2. **Task routing** in `llm_task_configs`: maps each AI task
- *    (`profile_generation`, `product_name_consolidation`, etc.) to a
+ *    (`profile_generation`, `product_name_consolidation`,
+ *    `discovery_candidate_selection`, etc.) to a
  *    provider and model. Provider credentials are looked up from
  *    `api_keys` after the task config resolves the provider.
  *
@@ -302,6 +303,8 @@ export function defaultProtectedOperationForTask(task: LlmTask): ProtectedOperat
       return 'page_assignment';
     case 'product_name_consolidation':
       return 'discovery_name_consolidation';
+    case 'discovery_candidate_selection':
+      return 'sitemap_selection';
     // Policy-governed task names: both are governed by the workspace
     // classification model policy. Mapping them here means omitting
     // `modelPolicy` fails closed (policy_absent) instead of falling through

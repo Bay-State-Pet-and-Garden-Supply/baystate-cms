@@ -387,10 +387,10 @@ function computeTokenOverlap(
  * the LLM is unconfigured / the call fails / the response is unparseable
  * / the LLM explicitly says "null" (no good match).
  *
- * Uses the `product_name_consolidation` task config (which is a
- * non-profile task and therefore permits fallback to the generic
- * LLM config). Falls back silently to the top token-overlap candidate
- * upstream so a missing LLM should never throw.
+ * Uses the `discovery_candidate_selection` task (→ `sitemap_selection`
+ * operation, alias `product_url_selection`) governed by the workspace
+ * classification model policy. Falls back silently to the top token-overlap
+ * candidate upstream so a missing LLM/policy denial never throws.
  *
  * @param candidates  The candidate URLs (up to 10).
  * @param productName The consolidated (or fallback) product name.
@@ -415,10 +415,9 @@ async function selectWithLlm(
   // log "no LLM configured" downstream.
   let config: ReturnType<typeof getLlmConfigForTask>;
   try {
-    config = getLlmConfigForTask('product_name_consolidation', {
+    config = getLlmConfigForTask('discovery_candidate_selection', {
       allowFallback: true,
       modelPolicy,
-      protectedOperation: 'sitemap_selection',
     });
   } catch (err) {
     console.warn(
@@ -490,11 +489,10 @@ async function selectWithLlm(
 
   let raw: string | null;
   try {
-    raw = await callLlmForTask('product_name_consolidation', prompt, systemPrompt, {
+    raw = await callLlmForTask('discovery_candidate_selection', prompt, systemPrompt, {
       allowFallback: true,
       temperature: 0,
       modelPolicy,
-      protectedOperation: 'sitemap_selection',
     });
   } catch (err) {
     console.warn(

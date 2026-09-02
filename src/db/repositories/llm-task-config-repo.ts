@@ -24,6 +24,7 @@ const LLM_PROVIDERS: ReadonlyArray<LlmProvider> = [
  */
 export type LlmTask =
   | 'product_name_consolidation'
+  | 'discovery_candidate_selection'
   | 'profile_generation'
   | 'profile_revision'
   | 'product_curation'
@@ -37,6 +38,7 @@ export type LlmTask =
 
 export const LLM_TASKS: ReadonlyArray<LlmTask> = [
   'product_name_consolidation',
+  'discovery_candidate_selection',
   'profile_generation',
   'profile_revision',
   'product_curation',

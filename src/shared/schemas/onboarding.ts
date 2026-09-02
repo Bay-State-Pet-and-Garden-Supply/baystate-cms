@@ -1234,6 +1234,7 @@ export type OnboardingSource = z.infer<typeof OnboardingSourceSchema>;
 /** LLM tasks that can be routed through `llm_task_configs`. */
 export const LlmTaskEnum = z.enum([
   'product_name_consolidation',
+  'discovery_candidate_selection',
   'profile_generation',
   'profile_revision',
   'product_curation',

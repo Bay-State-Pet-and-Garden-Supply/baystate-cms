@@ -35,6 +35,7 @@ const REQUIRED_TASKS: ReadonlyArray<LlmTask> = ['profile_generation', 'profile_r
 
 const TASK_LABELS: Record<LlmTask, string> = {
   product_name_consolidation: 'Product name consolidation',
+  discovery_candidate_selection: 'Discovery candidate selection',
   profile_generation: 'Profile generation (AI selector proposal)',
   profile_revision: 'Profile revision (AI selector revision)',
   product_curation: 'Product curation',
@@ -48,7 +49,8 @@ const TASK_LABELS: Record<LlmTask, string> = {
 };
 
 const TASK_HINTS: Record<LlmTask, string> = {
-  product_name_consolidation: 'Used by the sitemap matcher to select the correct indexed product page. May fall back to token overlap when not configured.',
+  product_name_consolidation: 'Consolidates a canonical product name from search-result titles/snippets. Governed by the workspace classification model policy (operation discovery_name_consolidation); deterministic LCS fallback when disabled.',
+  discovery_candidate_selection: 'Selects the correct product page URL from candidate lists (sitemap + local brand index → sitemap_selection, alias product_url_selection). Governed by the workspace classification model policy; deterministic token-overlap fallback when policy denies or LLM abstains.',
   profile_generation: 'Generates a fresh selector profile from the minimized DOM. Fails closed when not configured.',
   profile_revision: 'Revises a selector profile from structured store-manager feedback. Fails closed when not configured.',
   product_curation: 'Curates product metadata (titles, packaging alignment). Governed by the workspace classification model policy (Settings → Classification); deterministic fallback when disabled.',
@@ -66,6 +68,7 @@ const TASK_GROUPS: Array<{ label: string; tasks: LlmTask[] }> = [
     label: 'Onboarding & Curation',
     tasks: [
       'product_name_consolidation',
+      'discovery_candidate_selection',
       'product_curation',
       'category_page_assignment',
       'category_classification',
@@ -224,6 +227,7 @@ import { getModelCapabilities, getModelProfile } from '../../ai/model-registry';
 
 const RECOMMENDED_MODELS: Record<string, { provider: LlmProvider; model: string; label: string }> = {
   product_name_consolidation: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
+  discovery_candidate_selection: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
   product_field_refactor: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
   store_manager_assistant: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
 };
