@@ -11,7 +11,7 @@
  * (vitest does not discover files outside src/tests/, so no exclude needed.)
  */
 import { describe, it, expect } from 'bun:test';
-import { fulfillPinnedSubrequest } from './snapshot';
+import { fulfillPinnedSubrequest, isPrivateOrLinkLocalUrl } from './snapshot';
 
 function fakeResponse(init: { status?: number; headers?: Record<string, string>; body?: string }): Response {
   const body = init.body ?? '';
@@ -192,5 +192,29 @@ describe('fulfillPinnedSubrequest', () => {
       ),
     ).rejects.toThrow(/subrequest body exceeds 500 bytes/);
     expect(fetched).toBe(false);
+  });
+});
+
+describe('isPrivateOrLinkLocalUrl', () => {
+  it('correctly blocks bracketed IPv6 loopback, link-local, unique-local, and mapped IPv4', () => {
+    expect(isPrivateOrLinkLocalUrl('http://[::1]/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://[fe80::1]/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://[fd00::1]/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://[::ffff:127.0.0.1]/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://[::ffff:7f00:1]/')).toBe(true);
+  });
+
+  it('correctly blocks alternate IPv4 encodings and private IPv4', () => {
+    expect(isPrivateOrLinkLocalUrl('http://127.0.0.1/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://0177.0.0.1/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://2130706433/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://10.0.0.1/')).toBe(true);
+    expect(isPrivateOrLinkLocalUrl('http://169.254.169.254/')).toBe(true);
+  });
+
+  it('allows valid public destinations', () => {
+    expect(isPrivateOrLinkLocalUrl('http://example.com/')).toBe(false);
+    expect(isPrivateOrLinkLocalUrl('http://8.8.8.8/')).toBe(false);
+    expect(isPrivateOrLinkLocalUrl('http://[2606:4700::1111]/')).toBe(false);
   });
 });
