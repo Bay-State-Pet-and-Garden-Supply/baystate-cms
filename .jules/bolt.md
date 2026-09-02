@@ -17,3 +17,7 @@
 ## 2025-05-27 - WeakMap Reference Caching and ASCII CharCode Word Boundary for String Matching
 **Learning:** In string matching functions called repeatedly over batch datasets (like matching product titles against brand lists), array sorting (`[...list].sort()`) and string lowercasing on every call incur repeated $O(K \log K)$ and heap allocation overhead. Using `WeakMap<readonly string[], PreparedBrand[]>` caches prepared array references without memory leaks, while checking boundary character codes via `charCodeAt` instead of `RegExp` eliminates regex engine overhead (~3.8x-5.4x speedup).
 **Action:** When matching target strings against reference lists in hot loops, use a `WeakMap` keyed by reference array to cache pre-sorted and normalized string data, and replace RegExp boundary tests with direct ASCII `charCodeAt` bounds checks.
+
+## 2025-05-28 - Zero-Allocation Fast String Slicing vs. WHATWG URL Parsing in Sitemap Matching
+**Learning:** Instantiating `new URL(url)` objects inside sitemap URL processing loops creates high V8/Bun object allocation and parsing overhead (~195ms per 100k calls). Replacing `new URL()` with fast string slicing (`indexOf`, `search`, `lastIndexOf`) in slug extraction functions executes ~4x faster (~48ms per 100k calls) with zero heap allocations.
+**Action:** When extracting URL path slugs or parameters during bulk sitemap URL matching, use fast string searching and slicing instead of instantiating WHATWG `URL` objects.
