@@ -585,12 +585,14 @@ export function createSqliteBackup(
     // before the manifest's no-clobber link.
     testHooks?.__afterSnapshot?.();
 
-    const sizeBytes = fs.statSync(resolvedBackup).size;
-    const sha256 = sha256FileSync(resolvedBackup);
-
     const snapshotDb = new Database(resolvedBackup, { readonly: true });
     const manifestSourceDb = new Database(sourceDbPath, { readonly: true });
-    let manifest: BackupManifest;
+    let snapshotContentIdentity: string;
+    let schemaVersion: number;
+    let userVersion: number;
+    let sourceSchemaVersion: number;
+    let sourceUserVersion: number;
+    let counts: Record<string, number>;
     try {
       // Bind the PUBLISHED snapshot's content to the recorded source content:
       // the pre/post checks above proved no source commit occurred during the
@@ -598,27 +600,63 @@ export function createSqliteBackup(
       // source's content identity. A foreign same-schema/same-count snapshot
       // swapped in after publication hashes differently and aborts creation
       // with every artifact this operation created removed.
-      const snapshotContentIdentity = computeContentIdentityHash(snapshotDb);
+      snapshotContentIdentity = computeContentIdentityHash(snapshotDb);
       if (snapshotContentIdentity !== sourceContentIdentity) {
         throw new Error(
           'Backup snapshot content does not match the recorded source content; aborting.',
         );
       }
-      manifest = buildBackupManifest(
-        sourceDbPath,
-        resolvedBackup,
-        snapshotDb,
-        manifestSourceDb,
-        sourceIdentityHash,
-        sourceIdentityHashAfter,
-        snapshotContentIdentity,
-        sha256,
-        sizeBytes,
-      );
+      schemaVersion = (snapshotDb.query('PRAGMA schema_version').get() as { schema_version: number }).schema_version;
+      userVersion = (snapshotDb.query('PRAGMA user_version').get() as { user_version: number }).user_version;
+      sourceSchemaVersion = (manifestSourceDb.query('PRAGMA schema_version').get() as { schema_version: number }).schema_version;
+      sourceUserVersion = (manifestSourceDb.query('PRAGMA user_version').get() as { user_version: number }).user_version;
+      counts = readCriticalCounts(snapshotDb);
     } finally {
       snapshotDb.close();
       manifestSourceDb.close();
     }
+
+    {
+      let finalDb: Database | null = null;
+      try {
+        finalDb = new Database(resolvedBackup, { readonly: true });
+        const finalContent = computeContentIdentityHash(finalDb);
+        if (finalContent !== snapshotContentIdentity) {
+          throw new Error('Backup content changed after publication; aborting.');
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Backup content changed')) {
+          throw err;
+        }
+        throw new Error(
+          'Backup content changed after publication (published artifact could not be verified); aborting.',
+          { cause: err },
+        );
+      } finally {
+        finalDb?.close();
+      }
+    }
+
+    const sizeBytes = fs.statSync(resolvedBackup).size;
+    const sha256 = sha256FileSync(resolvedBackup);
+
+    const manifest: BackupManifest = {
+      format: BACKUP_MANIFEST_FORMAT,
+      version: BACKUP_MANIFEST_VERSION,
+      sourceDbPath: path.resolve(sourceDbPath),
+      backupPath: path.resolve(backupPath),
+      sha256,
+      sizeBytes,
+      schemaVersion,
+      userVersion,
+      sourceSchemaVersion,
+      sourceUserVersion,
+      counts,
+      sourceIdentityHash,
+      sourceIdentityHashAfter,
+      snapshotContentIdentity,
+      createdAt: new Date().toISOString(),
+    };
 
     // Emit the manifest by writing a unique private temp file and publishing
     // it with the same atomic no-clobber link. A file raced in at the
@@ -699,27 +737,8 @@ export function createSqliteBackup(
     ) {
       throw new Error('Manifest content changed after publication; aborting.');
     }
-    {
-      let finalDb: Database | null = null;
-      try {
-        finalDb = new Database(resolvedBackup, { readonly: true });
-        const finalContent = computeContentIdentityHash(finalDb);
-        if (finalContent !== manifest.snapshotContentIdentity) {
-          throw new Error('Backup content changed after publication; aborting.');
-        }
-      } catch (err) {
-        if (err instanceof Error && err.message.startsWith('Backup content changed')) {
-          throw err;
-        }
-        // A foreign replacement may not even be a SQLite database; fail closed
-        // with a descriptive error either way.
-        throw new Error(
-          'Backup content changed after publication (published artifact could not be verified); aborting.',
-          { cause: err },
-        );
-      } finally {
-        finalDb?.close();
-      }
+    if (sha256FileSync(resolvedBackup) !== manifest.sha256) {
+      throw new Error('Backup content changed after publication; aborting.');
     }
 
     // Success: the owned temp inodes are no longer needed (the published
