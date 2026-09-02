@@ -700,14 +700,16 @@ With a disposable local DB and fixture transport:
 
 Capture redacted request/response shape only; no credentials or raw third-party payload.
 
-#### 7.3 Rollout sequence
+#### 7.3 Rollout sequence — **Historical (pre-always-on, env flags deprecated)**
 
-1. **Code deployed, mode off:** migrations/contracts present, zero behavior/network change.
-2. **Observe on fixture/internal workspace:** compare parser decisions to manually labeled BetterBone/JSON-LD/Woo corpus. Interaction remains false.
-3. **Observe production read path only after verified DB backup:** monitor parse success, ambiguity, duplicate identifier, fetch count/latency, and disagreement; no source/stage/extraction mutations.
-4. **Active allowlisted workspace/domain cohort:** structured parsing/deep links/materialization/operator fallback. Require zero wrong-auto-selection in reviewed sample and bounded latency/error rates.
-5. **Broaden active:** only after acceptance report/reviewer sign-off.
-6. **Optional interaction canary:** separate approval and flag; never coupled to structured activation.
+> Flags are now always-on (`src/onboarding/variant-flags.ts`); `BAYSTATE_CMS_VARIANT_RESOLUTION_MODE`/`BAYSTATE_CMS_VARIANT_INTERACTION_ENABLED` are ignored. Below is the historical env-based rollout for reference; current procedure is revert-based (revert commit), not mode progression.
+
+1. **Code deployed, mode off (historical):** migrations/contracts present, zero behavior/network change.
+2. **Observe on fixture/internal workspace (historical):** compare parser decisions to manually labeled BetterBone/JSON-LD/Woo corpus. Interaction remains false.
+3. **Observe production read path only after verified DB backup (historical):** monitor parse success, ambiguity, duplicate identifier, fetch count/latency, and disagreement; no source/stage/extraction mutations.
+4. **Active allowlisted workspace/domain cohort (historical):** structured parsing/deep links/materialization/operator fallback. Require zero wrong-auto-selection in reviewed sample and bounded latency/error rates.
+5. **Broaden active (historical):** only after acceptance report/reviewer sign-off.
+6. **Optional interaction canary (historical):** separate approval and flag; never coupled to structured activation.
 
 Telemetry must use stable reason/platform/count/latency fields and hashed/non-secret IDs. Do not log full product JSON, query secrets, GTINs if existing logging policy treats them as sensitive, or credentials.
 
@@ -877,11 +879,13 @@ The test itself should own cleanup; the explicit `rm` is limited to this known `
 ### 9.4 Flag/round-trip smoke matrix
 
 ```bash
-# Flags are always-on (env ignored); use test overrides for mode simulation — historical env commands below are non-executable
-# overrideVariantFlags({mode:'off'}) bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'mode off (override)'
-# overrideVariantFlags({mode:'observe'}) bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'observe (override)'
-bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t 'three distinct variants'
-overrideVariantFlags({interactionEnabled:true}) bunx vitest run src/tests/unit/variant-interaction.test.ts
+# Flags are always-on (env ignored); use test overrides for mode simulation
+# Historical env commands are non-executable — use Vitest -t targeting real test names:
+bunx vitest run src/tests/unit/source-discovery-variant-resolution.test.ts -t "mode off is byte-compatible"
+bunx vitest run src/tests/unit/source-discovery-variant-resolution.test.ts -t "observe records diagnostics"
+bunx vitest run src/tests/integration/onboarding-betterbone-variant-flow.test.ts -t "8-step cohort"
+bunx vitest run src/tests/unit/variant-interaction.test.ts
+# To simulate off/observe in tests, use overrideVariantFlags({mode:'off'}) within test file, not shell
 ```
 
 ### 9.5 Worktree/staging verification
